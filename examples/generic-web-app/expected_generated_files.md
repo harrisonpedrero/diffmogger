@@ -15,8 +15,14 @@ docs/HUMAN_RESPONSES_ARCHIVE.md
 docs/HUMAN_BRIDGE_SETUP.md
 docs/AUTONOMY_EXPERIMENT_LOG.md
 docs/DAILY_AUTOMATION_REVIEW.md
+scripts/acquire_codex_lock.sh
+scripts/release_codex_lock.sh
+scripts/run_codex_automation.sh
+scripts/spawn_worker_agent.sh
+scripts/summarize_worker_outputs.py
+scripts/compact_agent_state.py
 ```
 
 The bootstrap prompt should ask Codex to create a local-first web app with seed data, a weekly board, task completion, daily summary, and verification commands.
 
-The recurring automation prompt should keep improving the planning workflow beyond the first demo, record a Codex CLI worker decision each run, and handle freeform human inbox requests through the notifier when available.
+The recurring automation prompt should keep improving the planning workflow beyond the first demo, record a Codex CLI worker decision each run, use target-local automation scripts, and handle file-only human inbox requests without SMS/notifier language.

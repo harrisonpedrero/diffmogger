@@ -14,6 +14,7 @@ required_files=(
   "docs/CONCEPTS.md"
   "docs/OPERATING_MODEL.md"
   "docs/CODEX_SETUP.md"
+  "docs/FRESH_PROJECT_SETUP.md"
   "docs/HUMAN_BRIDGE.md"
   "docs/WORKER_AGENTS.md"
   "docs/SCHEDULES.md"
@@ -42,6 +43,12 @@ required_files=(
   "templates/docs/HUMAN_RESPONSES_ARCHIVE.md"
   "templates/docs/HUMAN_BRIDGE_SETUP.md"
   "templates/docs/DEVELOPMENT.md"
+  "templates/scripts/acquire_codex_lock.sh"
+  "templates/scripts/release_codex_lock.sh"
+  "templates/scripts/run_codex_automation.sh"
+  "templates/scripts/spawn_worker_agent.sh"
+  "templates/scripts/summarize_worker_outputs.py"
+  "templates/scripts/compact_agent_state.py"
   "examples/generic-web-app/project_intake.md"
   "examples/generic-web-app/expected_generated_files.md"
   "examples/trendlab-signal-intelligence/project_intake.md"
@@ -199,10 +206,9 @@ if missing:
     raise SystemExit(1)
 
 human_setup = Path("templates/docs/HUMAN_BRIDGE_SETUP.md").read_text(encoding="utf-8")
-for marker in ["Style A: Local-File-Only Mode", "Style B: Local Diffmogger Notifier Mode", "POST http://127.0.0.1:8765/api/notify"]:
-    if marker not in human_setup:
-        print(f"Human bridge setup missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
+if "{{HUMAN_BRIDGE_SETUP_CONTENT}}" not in human_setup:
+    print("Human bridge setup template missing mode-aware placeholder", file=sys.stderr)
+    raise SystemExit(1)
 
 for path in [
     Path("templates/docs/HUMAN_INBOX.md"),
@@ -215,24 +221,19 @@ for path in [
         raise SystemExit(1)
 
 for marker in [
-    "POST http://127.0.0.1:8765/api/notify",
-    "docs/HUMAN_INBOX.md",
-    "remove handled",
-    "docs/HUMAN_RESPONSES_ARCHIVE.md",
-    "docs/HUMAN_OUTBOX.md",
-    "NOTIFIER_UNREACHABLE",
+    "CODEX_LOCK_ALREADY_ACQUIRED=true",
+    "scripts/run_codex_automation.sh",
     "scripts/acquire_codex_lock.sh",
     "scripts/release_codex_lock.sh",
     "scripts/spawn_worker_agent.sh",
     "scripts/summarize_worker_outputs.py",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
     "command -v codex",
-    "message_body",
-    "send me",
-    "text me",
+    "codex exec --ephemeral",
+    "{{HUMAN_PROTOCOL}}",
 ]:
     if marker not in automation:
-        print(f"Automation prompt missing notifier/inbox marker: {marker}", file=sys.stderr)
+        print(f"Automation prompt missing required marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
 notifier_readme = Path("services/agentic-notifier/README.md").read_text(encoding="utf-8")
@@ -263,6 +264,7 @@ for marker in [
     "## What Diffmogger Creates",
     "## Quickstart",
     "## Validation",
+    "docs/FRESH_PROJECT_SETUP.md",
     "## Worker Agents",
     "## Human Bridge",
     "## Notifier Setup",
@@ -332,8 +334,54 @@ rm -rf "$lock_smoke_dir"
 
 tmp_dir="$(mktemp -d)"
 python3 scripts/scaffold_project_docs.py --intake examples/generic-web-app/project_intake.md --target "$tmp_dir" >/tmp/Diffmogger-scaffold.log
-python3 scripts/check_required_files.py "$tmp_dir" >/tmp/Diffmogger-check.log
+python3 scripts/check_required_files.py --human-bridge-mode file_only "$tmp_dir" >/tmp/Diffmogger-check.log
+if grep -R "POST http://127.0.0.1:8765/api/notify\\|NOTIFIER_UNREACHABLE\\|message_body" "$tmp_dir/.agentic" "$tmp_dir/docs" >/tmp/Diffmogger-file-only-grep.log 2>&1; then
+    echo "File-only scaffold unexpectedly contains notifier-only markers" >&2
+    cat /tmp/Diffmogger-file-only-grep.log >&2
+    rm -rf "$tmp_dir"
+    exit 1
+fi
 rm -rf "$tmp_dir"
+
+tmp_dir="$(mktemp -d)"
+tmp_intake="$(mktemp /tmp/Diffmogger-local-notifier.XXXXXX.json)"
+cat >"$tmp_intake" <<'JSON'
+{
+  "project_name": "Notifier Smoke",
+  "product_goal": "Build a notifier-mode scaffold smoke target.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "Generated docs only.",
+  "human_bridge_enabled": true,
+  "human_bridge_mode": "local_notifier",
+  "verification_commands": ["npm test"]
+}
+JSON
+python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-notifier.log
+python3 scripts/check_required_files.py --human-bridge-mode local_notifier "$tmp_dir" >/tmp/Diffmogger-check-notifier.log
+rm -rf "$tmp_dir" "$tmp_intake"
+
+tmp_dir="$(mktemp -d)"
+tmp_intake="$(mktemp /tmp/Diffmogger-disabled.XXXXXX.json)"
+cat >"$tmp_intake" <<'JSON'
+{
+  "project_name": "Disabled Bridge Smoke",
+  "product_goal": "Build a disabled-bridge scaffold smoke target.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "Generated docs only.",
+  "human_bridge_enabled": false,
+  "human_bridge_mode": "disabled",
+  "verification_commands": ["npm test"]
+}
+JSON
+python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-disabled.log
+python3 scripts/check_required_files.py --human-bridge-mode disabled "$tmp_dir" >/tmp/Diffmogger-check-disabled.log
+if find "$tmp_dir/docs" -maxdepth 1 -name 'HUMAN*' | grep . >/tmp/Diffmogger-disabled-human-files.log; then
+    echo "Disabled human bridge scaffold unexpectedly generated human bridge files" >&2
+    cat /tmp/Diffmogger-disabled-human-files.log >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+rm -rf "$tmp_dir" "$tmp_intake"
 
 notifier_python="python3"
 if [[ -x "services/agentic-notifier/.venv/bin/python" ]]; then

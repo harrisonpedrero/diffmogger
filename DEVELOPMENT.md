@@ -243,7 +243,7 @@ The automation writes requests. The human manually replies in `HUMAN_INBOX.md`. 
 
 Use this mode first. It has no credentials and no webhook.
 
-Freeform inbox commands still matter in file-only mode. If the human writes `send me a summary`, `text me the blockers`, `status update`, or similar, the automation should send a notifier response if Mode B is configured. If no notifier is available, it should record the intended outbound message in `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`.
+Freeform inbox commands still matter in file-only mode. If the human writes `send me a summary`, `status update`, or similar, the automation should answer locally in Markdown or an app artifact. It should not send SMS/WhatsApp or record `NOTIFIER_UNREACHABLE` unless Mode B is configured.
 
 ## Human Bridge Mode B: Bundled Notifier
 

@@ -12,7 +12,7 @@ Rewrite `docs/CODEX_AUTOMATION_TASKS.md` around one best next milestone. Tighten
 
 Require an integrated deliverable each run: code, tests, report, demo command, fixture, screenshot, UX improvement, or verification result.
 
-If the human asked to be texted or sent a status update, writing a local Markdown summary is also insufficient. The automation should call `POST http://127.0.0.1:8765/api/notify` when the notifier is available.
+In file-only human bridge mode, summary/status requests should be satisfied locally in Markdown or app artifacts. In local-notifier mode, if the human asked to be texted or sent a status update, writing a local Markdown summary is insufficient; the automation should call `POST http://127.0.0.1:8765/api/notify` when the notifier is available.
 
 ## Automation Keeps Asking The Human
 
@@ -42,6 +42,20 @@ Reason: <one sentence>
 ```
 
 Check availability with `command -v codex`. If Codex CLI is unavailable, continue without blocking the sprint and record `UNAVAILABLE`.
+
+## Nested Codex Worker Cannot Write Sessions
+
+If a worker report says `~/.codex/sessions` is not writable, the parent automation sandbox likely blocked persistent child session files. Retry nested workers with:
+
+```bash
+codex exec --ephemeral \
+  --sandbox workspace-write \
+  --ask-for-approval never \
+  -c sandbox_workspace_write.network_access=false \
+  "<worker prompt>"
+```
+
+Generated `scripts/spawn_worker_agent.sh` uses `--ephemeral` by default.
 
 ## Notifier Outbound Works But Inbound Does Not
 
@@ -74,7 +88,7 @@ The target automation owns inbox cleanup. It must remove handled entries from `d
 
 ## Human Asked For A Text But Got Only A File
 
-Treat this as an automation-process bug. Update `.agentic/automation_prompt.md` so freeform inbox requests such as `send me a summary`, `text me the blocker`, `status update`, or `what have you done so far?` are handled through the notifier. If still relevant, send the concise outbound response and archive the handled inbox entry.
+In file-only mode, this is expected: the automation should answer locally. In local-notifier mode, treat it as an automation-process bug. Update `.agentic/automation_prompt.md` so freeform inbox requests such as `send me a summary`, `text me the blocker`, `status update`, or `what have you done so far?` are handled through the notifier. If still relevant, send the concise outbound response and archive the handled inbox entry.
 
 ## Codex Cannot Read Or Write Expected Files
 
@@ -102,3 +116,5 @@ Then run without `--dry-run` only after confirming unresolved human requests rem
 ## Lock Will Not Release
 
 `scripts/release_codex_lock.sh` prefers a matching `CODEX_RUN_ID`. If release fails, inspect `target/codex_automation.lock` and confirm you are not removing another active run. Use `CODEX_LOCK_FORCE_RELEASE=true` only after review.
+
+If a scheduled run already exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, the Codex prompt should not acquire or release another lock. The target repo's `scripts/run_codex_automation.sh` owns lock release for scheduled runs.

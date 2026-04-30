@@ -38,7 +38,7 @@ A scheduled run should be large enough to matter and small enough to verify. It 
 
 Human input is asynchronous. The automation should request only meaningful unlocks, keep working around pending input, and consume replies on later runs.
 
-If a human inbox message asks to be texted, messaged, or sent a status update, the automation should send a concise outbound response through the local notifier when available. It should archive the handled entry and keep `docs/HUMAN_INBOX.md` as an active queue, not a permanent log.
+In file-only mode, summary or status requests are answered locally in Markdown or app artifacts. In local-notifier mode, requests to be texted or messaged should send a concise outbound response through the local notifier when available. Either way, the automation should archive handled entries and keep `docs/HUMAN_INBOX.md` as an active queue, not a permanent log.
 
 ## Worker Agents
 
@@ -46,7 +46,7 @@ Workers are helpers, not owners. They inspect, review, or prototype bounded area
 
 Every recurring run should record whether Codex CLI workers were used, skipped, or unavailable.
 
-Diffmogger includes optional helper scripts for read-only worker reports, but the main agent remains the integrator.
+Generated target repos include helper scripts for read-only worker reports, but the main agent remains the integrator.
 
 ## Lock Files
 

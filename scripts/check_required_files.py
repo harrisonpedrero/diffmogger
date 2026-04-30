@@ -11,6 +11,12 @@ from pathlib import Path
 BASE_REQUIRED = [
     "AGENTS.md",
     ".agentic/automation_prompt.md",
+    "scripts/acquire_codex_lock.sh",
+    "scripts/release_codex_lock.sh",
+    "scripts/run_codex_automation.sh",
+    "scripts/spawn_worker_agent.sh",
+    "scripts/summarize_worker_outputs.py",
+    "scripts/compact_agent_state.py",
     "docs/INITIAL_BOOTSTRAP_PROMPT.md",
     "docs/CODEX_AUTOMATION_TASKS.md",
     "docs/CODEX_AUTOMATION_GUARDRAILS.md",
@@ -42,23 +48,39 @@ TASK_REQUIRED_STRINGS = [
 ]
 
 AUTOMATION_REQUIRED_STRINGS = [
-    "POST http://127.0.0.1:8765/api/notify",
-    "docs/HUMAN_INBOX.md",
-    "remove handled",
-    "docs/HUMAN_RESPONSES_ARCHIVE.md",
-    "docs/HUMAN_OUTBOX.md",
-    "NOTIFIER_UNREACHABLE",
+    "CODEX_LOCK_ALREADY_ACQUIRED=true",
+    "scripts/run_codex_automation.sh",
     "scripts/acquire_codex_lock.sh",
     "scripts/release_codex_lock.sh",
     "scripts/spawn_worker_agent.sh",
     "scripts/summarize_worker_outputs.py",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
     "command -v codex",
+    "codex exec --ephemeral",
+    "ACTIVE_WITH_PENDING_USER_INPUT",
+    "BLOCKED_ON_USER",
+]
+
+FILE_ONLY_AUTOMATION_REQUIRED_STRINGS = [
+    "Human bridge mode: `file_only`",
+    "docs/HUMAN_INBOX.md",
+    "Remove handled",
+    "docs/HUMAN_RESPONSES_ARCHIVE.md",
+    "docs/HUMAN_REQUESTS.md",
+    "Do not attempt to send a text message",
+]
+
+LOCAL_NOTIFIER_AUTOMATION_REQUIRED_STRINGS = [
+    "Human bridge mode: `local_notifier`",
+    "POST http://127.0.0.1:8765/api/notify",
+    "docs/HUMAN_INBOX.md",
+    "Remove handled",
+    "docs/HUMAN_RESPONSES_ARCHIVE.md",
+    "docs/HUMAN_OUTBOX.md",
+    "NOTIFIER_UNREACHABLE",
     "message_body",
     "send me",
     "text me",
-    "ACTIVE_WITH_PENDING_USER_INPUT",
-    "BLOCKED_ON_USER",
 ]
 
 
@@ -80,11 +102,18 @@ def main() -> int:
         action="store_true",
         help="Do not require HUMAN_* bridge files",
     )
+    parser.add_argument(
+        "--human-bridge-mode",
+        choices=["file_only", "local_notifier", "disabled"],
+        default=None,
+        help="Validate mode-specific human bridge markers.",
+    )
     args = parser.parse_args()
 
     root = Path(args.target).resolve()
+    mode = args.human_bridge_mode or ("disabled" if args.no_human_bridge else "file_only")
     required = list(BASE_REQUIRED)
-    if not args.no_human_bridge:
+    if mode != "disabled":
         required.extend(HUMAN_REQUIRED)
 
     problems: list[str] = []
@@ -103,7 +132,12 @@ def main() -> int:
     automation_path = root / ".agentic/automation_prompt.md"
     if automation_path.exists() and automation_path.is_file():
         automation_text = automation_path.read_text(encoding="utf-8")
-        for marker in AUTOMATION_REQUIRED_STRINGS:
+        mode_markers: list[str] = []
+        if mode == "file_only":
+            mode_markers = FILE_ONLY_AUTOMATION_REQUIRED_STRINGS
+        elif mode == "local_notifier":
+            mode_markers = LOCAL_NOTIFIER_AUTOMATION_REQUIRED_STRINGS
+        for marker in AUTOMATION_REQUIRED_STRINGS + mode_markers:
             if marker not in automation_text:
                 problems.append(f".agentic/automation_prompt.md: missing marker {marker!r}")
 

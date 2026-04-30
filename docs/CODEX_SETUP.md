@@ -49,18 +49,20 @@ command -v codex
 export CODEX_RUN_ID="${CODEX_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "target/agent_runs/$CODEX_RUN_ID"
 
-codex exec \
+codex exec --ephemeral \
   --sandbox workspace-write \
   --ask-for-approval never \
   -c sandbox_workspace_write.network_access=false \
   "You are a read-only worker for this project. Read the repo and write a concise report to target/agent_runs/$CODEX_RUN_ID/worker_review.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
 ```
 
-Diffmogger also includes optional helper scripts:
+Use `--ephemeral` for nested workers launched from inside a scheduled automation run so child workers do not need to write session files under `~/.codex/sessions`.
+
+Generated target repos include local helper scripts:
 
 ```bash
-bash /path/to/Diffmogger/scripts/spawn_worker_agent.sh --target . --run-id "$CODEX_RUN_ID" --role review --prompt "Write a concise read-only review report."
-python3 /path/to/Diffmogger/scripts/summarize_worker_outputs.py . --run-id "$CODEX_RUN_ID"
+bash scripts/spawn_worker_agent.sh --target . --run-id "$CODEX_RUN_ID" --role review --prompt "Write a concise read-only review report."
+python3 scripts/summarize_worker_outputs.py . --run-id "$CODEX_RUN_ID"
 ```
 
 If `command -v codex` fails, record `Codex CLI worker decision: UNAVAILABLE` in the task file and continue without blocking the sprint.
@@ -71,16 +73,13 @@ Codex Automations run recurring tasks on a schedule. Good automation instruction
 
 This kit recommends keeping the automation task prompt stable and putting changing project state in `docs/CODEX_AUTOMATION_TASKS.md`.
 
-For scheduled runs, wrap mutation with the lock helpers:
+For scheduled runs, use the generated target-local wrapper:
 
 ```bash
-export CODEX_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-bash /path/to/Diffmogger/scripts/acquire_codex_lock.sh "scheduled sprint"
-codex exec --full-auto "$(cat .agentic/automation_prompt.md)"
-bash /path/to/Diffmogger/scripts/release_codex_lock.sh
+bash scripts/run_codex_automation.sh
 ```
 
-If the scheduler does not run from the target repo, set `CODEX_LOCK_PATH=/absolute/path/to/target/target/codex_automation.lock`.
+If the scheduler does not run from the target repo, call the wrapper by absolute path or set `TARGET=/absolute/path/to/target-project`. The wrapper exports `CODEX_LOCK_ALREADY_ACQUIRED=true` so the prompt knows not to acquire a second lock.
 
 ## Subagents
 

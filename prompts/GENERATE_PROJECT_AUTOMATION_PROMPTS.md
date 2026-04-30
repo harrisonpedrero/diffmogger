@@ -23,6 +23,12 @@ docs/HUMAN_RESPONSES_ARCHIVE.md
 docs/HUMAN_BRIDGE_SETUP.md
 docs/AUTONOMY_EXPERIMENT_LOG.md
 docs/DAILY_AUTOMATION_REVIEW.md
+scripts/acquire_codex_lock.sh
+scripts/release_codex_lock.sh
+scripts/run_codex_automation.sh
+scripts/spawn_worker_agent.sh
+scripts/summarize_worker_outputs.py
+scripts/compact_agent_state.py
 ```
 
 ## Requirements
@@ -80,16 +86,19 @@ The guardrails file must stay lean and include:
 - status policy
 - context-bloat policy
 
-The human bridge docs and automation prompt must support both:
+The human bridge docs and automation prompt must support three modes:
 
-1. local-file-only mode
-2. Diffmogger local notifier service mode: `POST http://127.0.0.1:8765/api/notify`
+1. disabled
+2. local-file-only mode
+3. Diffmogger local notifier service mode: `POST http://127.0.0.1:8765/api/notify`
 
-The generated automation prompt must say that if the notifier is unavailable, Codex should fall back to `docs/HUMAN_REQUESTS.md`, continue useful work, and use `ACTIVE_WITH_PENDING_USER_INPUT` unless no useful work remains.
+For `file_only`, the generated docs must say the human manually reads `docs/HUMAN_REQUESTS.md`, replies in `docs/HUMAN_INBOX.md`, and summary/status requests are satisfied locally in Markdown or app artifacts. It must not tell Codex to send SMS, WhatsApp, or notifier messages in file-only mode.
+
+For `local_notifier`, the generated automation prompt must say that if the notifier is unavailable, Codex should fall back to `docs/HUMAN_REQUESTS.md`, continue useful work, and use `ACTIVE_WITH_PENDING_USER_INPUT` unless no useful work remains.
 
 The generated automation prompt must read `docs/HUMAN_INBOX.md` at the start of each run, remove handled inbox messages, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
 
-The generated automation prompt must classify freeform human inbox commands. If the human asks to `send me`, `text me`, `message me`, `reply with`, provide a `status update`, explain `what have you done so far?`, or `summarize progress`, the automation must send a concise SMS/WhatsApp response through the local notifier when available. It must not satisfy that request only by writing Markdown. If the notifier is unavailable, it must record the intended outbound message in `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and continue useful work.
+The generated automation prompt must classify freeform human inbox commands. In `local_notifier` mode, if the human asks to `send me`, `text me`, `message me`, `reply with`, provide a `status update`, explain `what have you done so far?`, or `summarize progress`, the automation must send a concise SMS/WhatsApp response through the local notifier when available. It must not satisfy that request only by writing Markdown. If the notifier is unavailable, it must record the intended outbound message in `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and continue useful work.
 
 For direct human-requested outbound responses, include this payload option if the notifier supports it:
 
@@ -124,9 +133,9 @@ Codex CLI worker decision: USE / SKIP / UNAVAILABLE
 Reason: <one sentence>
 ```
 
-It must check availability with `command -v codex` before using Codex CLI workers, record `UNAVAILABLE` if the command is missing, and continue the sprint. For broad or multi-module runs, Codex CLI worker usage should be expected unless skipped with a clear reason. Include Diffmogger's optional `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helper pattern and a read-only `codex exec --sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=false` fallback pattern.
+It must check availability with `command -v codex` before using Codex CLI workers, record `UNAVAILABLE` if the command is missing, and continue the sprint. For broad or multi-module runs, Codex CLI worker usage should be expected unless skipped with a clear reason. Include the target repo's local `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helper pattern and a read-only `codex exec --ephemeral --sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=false` fallback pattern.
 
-Lock-file instructions should reference Diffmogger's `scripts/acquire_codex_lock.sh` and `scripts/release_codex_lock.sh` helpers, the default `target/codex_automation.lock` path, `CODEX_LOCK_PATH` overrides, stale-lock detection, and `CODEX_RUN_ID` identity for safe release.
+Lock-file instructions should reference the target repo's local `scripts/run_codex_automation.sh`, `scripts/acquire_codex_lock.sh`, and `scripts/release_codex_lock.sh` helpers, the default `target/codex_automation.lock` path, `CODEX_LOCK_PATH` overrides, stale-lock detection, `CODEX_RUN_ID` identity for safe release, and `CODEX_LOCK_ALREADY_ACQUIRED=true` for wrapper-owned scheduled runs.
 
 State-compaction instructions should reference `scripts/compact_agent_state.py --dry-run <target-project>`, preserve unresolved human requests, and archive concise rollups rather than silently deleting active state.
 

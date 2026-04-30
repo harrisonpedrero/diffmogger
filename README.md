@@ -88,6 +88,7 @@ These are design choices, not claims of magic:
 - validation scripts
 - scaffold script
 - lock scripts: `scripts/acquire_codex_lock.sh`, `scripts/release_codex_lock.sh`
+- scheduled-run wrapper template: `scripts/run_codex_automation.sh`
 - worker helper scripts: `scripts/spawn_worker_agent.sh`, `scripts/summarize_worker_outputs.py`
 - state compaction script: `scripts/compact_agent_state.py`
 - bundled local notifier service in `services/agentic-notifier/`
@@ -124,7 +125,11 @@ python3 scripts/scaffold_project_docs.py \
 python3 scripts/check_required_files.py ../my-project
 ```
 
-Then open `../my-project/docs/INITIAL_BOOTSTRAP_PROMPT.md` and use it for the first manual Codex bootstrap run. After the target repo has a runnable baseline, schedule `.agentic/automation_prompt.md` as the recurring Codex automation.
+The scaffold includes target-local runtime scripts under `../my-project/scripts/`. Scheduled target-project runs should use those local scripts rather than depending on the Diffmogger checkout.
+
+Then open `../my-project/docs/INITIAL_BOOTSTRAP_PROMPT.md` and use it for the first manual Codex bootstrap run. After the target repo has a runnable baseline, schedule `../my-project/scripts/run_codex_automation.sh` as the recurring Codex automation.
+
+For a fuller first-project checklist, see `docs/FRESH_PROJECT_SETUP.md`.
 
 ## Validation
 
@@ -188,7 +193,7 @@ bash scripts/spawn_worker_agent.sh \
 python3 scripts/summarize_worker_outputs.py ../my-project --run-id "$CODEX_RUN_ID"
 ```
 
-The helpers use `codex exec` when available, avoid network, tell workers not to spawn more workers, and fail gracefully if the Codex CLI is unavailable. They are optional convenience scripts, not mandatory magic.
+The helpers use `codex exec --ephemeral` when available, avoid network, tell workers not to spawn more workers, and fail gracefully if the Codex CLI is unavailable. They are optional convenience scripts, not mandatory magic.
 
 Codex CLI must be available for `codex exec` helpers:
 
@@ -207,6 +212,8 @@ Mode A: manual file-only bridge.
 - The next automation run consumes handled replies, removes them from the inbox, and archives concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
 
 This mode needs no SMS, no webhook, and no credentials. It is a valid long-term mode.
+
+In file-only mode, status or summary requests are satisfied locally in Markdown or app artifacts. The automation should not try to send SMS/WhatsApp unless the project is explicitly switched to notifier mode.
 
 Mode B: local notifier API.
 
@@ -258,15 +265,10 @@ Practical SMS notes:
 
 ## Lock Files And State Compaction
 
-Short cadences need lock behavior. Diffmogger includes:
+Short cadences need lock behavior. Generated target repos include `scripts/run_codex_automation.sh`, which wraps lock acquire/release around `codex exec`:
 
 ```bash
-export CODEX_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-bash scripts/acquire_codex_lock.sh "scheduled sprint"
-
-# run the automation
-
-bash scripts/release_codex_lock.sh
+bash scripts/run_codex_automation.sh
 ```
 
 Default path:
@@ -275,7 +277,7 @@ Default path:
 target/codex_automation.lock
 ```
 
-Set `CODEX_LOCK_PATH` when running from outside the target repo. The lock includes PID, timestamp, run id, host, stale threshold, and context. Stale detection defaults to 4 hours and can be tuned with `CODEX_LOCK_STALE_SECONDS`.
+The wrapper sets `CODEX_LOCK_ALREADY_ACQUIRED=true` so the automation prompt does not acquire a second lock. Set `TARGET=/absolute/path/to/target-project` when running from outside the target repo. The lock includes PID, timestamp, run id, host, stale threshold, and context. Stale detection defaults to 4 hours and can be tuned with `CODEX_LOCK_STALE_SECONDS`.
 
 Lock scripts reduce overlapping-run risk. They do not remove the need to review diffs.
 

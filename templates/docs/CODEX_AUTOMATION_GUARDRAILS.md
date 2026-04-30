@@ -38,14 +38,16 @@ Do not build unrelated apps or large unrelated systems.
 - Prefer read-only worker reports.
 - Main agent owns integration.
 - Record worker outputs under `target/agent_runs/<run_id>/`.
-- Use Diffmogger's optional `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helpers when available; otherwise use equivalent bounded `codex exec` commands.
+- Use local `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helpers when available; otherwise use equivalent bounded `codex exec --ephemeral` commands.
 - Do not create unbounded recursive agent loops.
 - Workers must not send SMS/WhatsApp messages, touch `.env`, handle credentials, spawn additional workers, or use network unless explicitly approved for that run.
 
 ## Lock-File Policy
 
 - Acquire `target/codex_automation.lock` before mutating code in scheduled runs.
-- Prefer Diffmogger's `scripts/acquire_codex_lock.sh` and `scripts/release_codex_lock.sh` helpers when available.
+- Scheduled runs should use local `scripts/run_codex_automation.sh`, which owns lock acquire/release.
+- If `CODEX_LOCK_ALREADY_ACQUIRED=true`, do not acquire, overwrite, manually create, or release the lock inside the Codex run.
+- Manual runs should use local `scripts/acquire_codex_lock.sh` and `scripts/release_codex_lock.sh`.
 - Set `CODEX_RUN_ID` before acquire/release so the lock can identify the current run.
 - If an active lock exists, do not mutate code.
 - If a stale lock is removed, record that decision in `docs/CODEX_AUTOMATION_TASKS.md`.
@@ -55,11 +57,7 @@ Do not build unrelated apps or large unrelated systems.
 - Ask the human only for meaningful unlocks.
 - For reversible choices, choose a safe default and document it.
 - Use `ACTIVE_WITH_PENDING_USER_INPUT` when work can continue around a pending request.
-- If a local notifier is available, use `POST http://127.0.0.1:8765/api/notify`; otherwise fall back to `docs/HUMAN_REQUESTS.md`.
-- The notifier owns messaging credentials. This repo must not import notifier code or read notifier `.env` files.
-- If the human asks to be texted, messaged, or sent a summary/status update, send a concise SMS/WhatsApp response through the notifier rather than only writing Markdown.
-- If the notifier is unreachable, do not claim a text was sent. Record `NOTIFIER_UNREACHABLE` in `docs/HUMAN_OUTBOX.md` and continue useful work.
-- Remove handled entries from `docs/HUMAN_INBOX.md` only after the requested action is complete or intentionally deferred, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
+{{HUMAN_GUARDRAILS_POLICY}}
 
 ## Status Policy
 
@@ -81,6 +79,6 @@ Use `CRITICAL_STOP` only when continuing autonomously is unsafe.
 - Remove handled messages from `docs/HUMAN_INBOX.md`.
 - Archive concise handled responses in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
 - Prune stale tasks from `docs/CODEX_AUTOMATION_TASKS.md`.
-- Use Diffmogger's `scripts/compact_agent_state.py --dry-run .` before compacting long-running Markdown state.
+- Use local `scripts/compact_agent_state.py --dry-run .` before compacting long-running Markdown state.
 - Never silently delete active or unresolved human requests.
 - Keep this guardrails file lean.
