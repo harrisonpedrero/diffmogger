@@ -4,8 +4,8 @@ This repository is Diffmogger: a starter kit for high-agency Codex automations. 
 
 ## Work Expectations
 
-- Keep `signalforge/` and `agentic-notifier/` as read-only references when working from the parent lab workspace.
-- Keep this kit generic. Do not introduce SignalForge-specific product assumptions except inside `examples/signalforge-inspired/`.
+- Keep this kit generic and target-project agnostic. Do not introduce product-specific assumptions into core docs, prompts, scripts, schemas, or services.
+- Keep examples self-contained, fictional, and clearly reusable.
 - Keep `services/agentic-notifier/` reusable and target-project agnostic. Target projects should call its API or read/write handoff files; they should not import notifier code.
 - Prefer concise docs, concrete templates, and runnable validation.
 - Keep prompt behavior durable and project-agnostic. Put changing project state in task-file templates, not in the automation prompt.

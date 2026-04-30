@@ -44,8 +44,8 @@ required_files=(
   "templates/docs/DEVELOPMENT.md"
   "examples/generic-web-app/project_intake.md"
   "examples/generic-web-app/expected_generated_files.md"
-  "examples/signalforge-inspired/project_intake.md"
-  "examples/signalforge-inspired/expected_generated_files.md"
+  "examples/trendlab-signal-intelligence/project_intake.md"
+  "examples/trendlab-signal-intelligence/expected_generated_files.md"
   "schemas/project_intake.schema.json"
   "schemas/human_request.schema.json"
   "schemas/human_response.schema.json"
@@ -103,6 +103,32 @@ for path in sorted(Path("schemas").glob("*.json")):
     except Exception as exc:
         print(f"Invalid JSON schema {path}: {exc}", file=sys.stderr)
         raise SystemExit(1)
+
+stale_terms = [
+    "Signal" + "Forge",
+    "signal" + "forge",
+    "agentic-kit-" + "lab",
+    "/User" + "s/",
+    "parent lab work" + "space",
+]
+stale_hits = []
+for path in sorted(Path(".").rglob("*")):
+    if not path.is_file():
+        continue
+    if ".git" in path.parts or ".venv" in path.parts or "__pycache__" in path.parts:
+        continue
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
+    for term in stale_terms:
+        if term in text:
+            stale_hits.append((path, term))
+
+if stale_hits:
+    for path, term in stale_hits:
+        print(f"Stale workspace/product reference in {path}: {term}", file=sys.stderr)
+    raise SystemExit(1)
 
 required_phrase = "Treat each run as a substantial engineering sprint."
 for path in [
@@ -245,7 +271,7 @@ for marker in [
     "## What It Is Not",
     "## Known Limitations",
     "## Roadmap",
-    "## Case Study",
+    "## Example Validation",
     "## Schemas And Runtime",
     "## License",
     "Markdown-first state",

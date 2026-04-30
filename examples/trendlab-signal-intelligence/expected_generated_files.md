@@ -23,4 +23,4 @@ The recurring automation prompt should continue through product horizons: local 
 
 It should also make explicit Codex CLI worker decisions and distinguish human-requested outbound status texts from local Markdown artifact requests.
 
-This example adapts the successful reference workflow without copying SignalForge-specific market or crypto language.
+This example exercises a more involved automation workflow without copying assumptions from a real product.

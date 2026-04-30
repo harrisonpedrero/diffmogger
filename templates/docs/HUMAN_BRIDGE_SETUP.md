@@ -64,7 +64,7 @@ Human-unlock request:
   "priority": "unlocking",
   "summary": "Add read-only API key for Service X",
   "context": "This unlocks a safe optional integration while local fixtures remain available.",
-  "agent_recommendation": "Use read-only/data-only access. Do not add trading or write permissions.",
+  "agent_recommendation": "Use read-only/data-only access. Do not grant write, billing, admin, or production permissions.",
   "minimum_user_action": "Add SERVICE_X_API_KEY to your local secret store and reply HR-001 DONE.",
   "reply_format": "HR-001 DONE or HR-001 SKIP",
   "unblocked_work_remaining": ["Continue fixture-based product work"],

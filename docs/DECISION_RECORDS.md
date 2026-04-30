@@ -4,7 +4,7 @@
 
 Decision: keep recurring behavior in `.agentic/automation_prompt.md` and changing state in `docs/CODEX_AUTOMATION_TASKS.md`.
 
-Why: the playbook and SignalForge reference both showed that recurring agents need stable behavior plus fresh handoff state. Combining them makes prompts stale and bloated.
+Why: earlier automation trials showed that recurring agents need stable behavior plus fresh handoff state. Combining them makes prompts stale and bloated.
 
 ## DR-002: Prefer File-Only Human Bridge First
 
@@ -65,8 +65,8 @@ Why: schema generation can become a project of its own. A small drift test gives
 Local playbook PDF:
 Recurring automations should act as substantial engineering sprints, read stable guardrails and dynamic task state, verify work, use lock files for short cadence, ask humans asynchronously for unlocks, and use bounded worker agents without giving up main-agent ownership.
 
-SignalForge reference:
-A real project benefits from `.agentic/automation_prompt.md`, `CODEX_AUTOMATION_TASKS.md`, lean guardrails, human bridge docs, daily review, autonomy log, and end-of-run updates. The project-specific content was not copied into the kit except as a generic example pattern.
+Product automation trial:
+A real project benefits from `.agentic/automation_prompt.md`, `CODEX_AUTOMATION_TASKS.md`, lean guardrails, human bridge docs, daily review, autonomy log, and end-of-run updates. Product-specific content should stay outside the core kit or inside clearly fictional examples.
 
 Agentic Notifier reference:
 A separate local service can own Twilio credentials, expose `POST /api/notify`, receive Twilio inbound webhooks, dedupe messages, and write human replies into project markdown files. Diffmogger adapts the generic pieces into `services/agentic-notifier/` and replaces product-specific path names with target-project configuration.

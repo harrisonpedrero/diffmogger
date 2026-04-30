@@ -11,4 +11,4 @@ Before opening a PR:
 - Keep examples local-first, dry-run friendly, and mockable.
 - Open issues and PRs with clear reproduction steps, rationale, or the workflow gap being addressed.
 
-Avoid adding product-specific assumptions outside `examples/signalforge-inspired/`.
+Avoid adding product-specific assumptions to core docs, prompts, scripts, schemas, or services. Keep product-flavored material inside self-contained examples.

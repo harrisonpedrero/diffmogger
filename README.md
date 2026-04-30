@@ -341,11 +341,11 @@ The script preserves unresolved human requests, keeps recent useful state, and a
 - local dashboard for automation state
 - more notifier channels such as Slack, email, and Discord
 
-## Case Study
+## Example Validation
 
-Diffmogger is being dogfooded on SignalForge, a separate sentiment-intelligence web app. SignalForge is used to test whether recurring agent sprints can keep compounding across product work, tests, reports, and human-in-the-loop requests.
+Diffmogger includes fictional example intakes that exercise the generated automation workflow without binding the kit to one product domain.
 
-Diffmogger itself stays generic. SignalForge-specific assumptions belong only in `examples/signalforge-inspired/`.
+Use `examples/generic-web-app/` for a straightforward product brief and `examples/trendlab-signal-intelligence/` for a more involved signal-intelligence brief with fixture data, scoring, reports, and human-in-the-loop requests.
 
 ## Schemas And Runtime
 
