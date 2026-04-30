@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/Diffmogger/project_intake.schema.json",
+  "title": "Project Intake",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "project_name",
+    "product_goal",
+    "target_user",
+    "desired_first_demo"
+  ],
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "product_goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target_user": {
+      "type": "string",
+      "minLength": 1
+    },
+    "desired_first_demo": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tech_preferences": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "hard_constraints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "safety_constraints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "external_services": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "verification_commands": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "desired_cadence": {
+      "type": "string",
+      "default": "hourly"
+    },
+    "human_bridge_enabled": {
+      "type": "boolean",
+      "default": false
+    },
+    "human_bridge_mode": {
+      "type": "string",
+      "enum": ["disabled", "file_only", "local_notifier"],
+      "default": "file_only"
+    },
+    "human_requested_text_responses": {
+      "type": "boolean",
+      "default": true
+    },
+    "worker_agents_allowed": {
+      "type": "boolean",
+      "default": true
+    },
+    "codex_cli_workers_expected_on_broad_runs": {
+      "type": "boolean",
+      "default": true
+    },
+    "meaningful_deliverable": {
+      "type": "string",
+      "default": "A runnable, verified change that improves the product or developer workflow."
+    },
+    "beyond_mvp": {
+      "type": "string",
+      "default": "Continue improving core value, demo quality, integrations, and automation reliability."
+    },
+    "assumptions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    }
+  }
+}

@@ -1,0 +1,59 @@
+# Human Bridge Setup Prompt
+
+Use this when wiring a target project to Diffmogger's bundled `services/agentic-notifier` local service.
+
+---
+
+You are setting up a local human-intervention bridge for a Codex automation project.
+
+Goal: keep messaging credentials outside the product repo while letting Codex request meaningful human input.
+
+Implement or document two modes:
+
+## Mode A: File Queue
+
+The target project contains:
+
+```text
+docs/HUMAN_REQUESTS.md
+docs/HUMAN_INBOX.md
+docs/HUMAN_OUTBOX.md
+docs/HUMAN_RESPONSES_ARCHIVE.md
+```
+
+Codex writes requests. The human replies manually in `HUMAN_INBOX.md`. Codex consumes and archives handled entries on the next run.
+
+If a freeform inbox message asks the automation to `send me`, `text me`, `message me`, `reply with`, provide a `status update`, answer `what have you done so far?`, or `summarize progress`, treat it as a request for outbound SMS/WhatsApp when the notifier is available. Do not satisfy those commands only by writing Markdown.
+
+## Mode B: Local API Notifier
+
+The target project may call:
+
+```text
+POST http://127.0.0.1:8765/api/notify
+```
+
+Diffmogger's notifier service owns:
+
+- Twilio credentials
+- SMS/WhatsApp send logic
+- inbound webhook receiver
+- ngrok or public tunnel
+- Twilio signature validation
+- dedupe state
+- dry-run mode
+- optional JSONL queues
+
+The notifier writes inbound replies to:
+
+```text
+docs/HUMAN_INBOX.md
+```
+
+The target project must not read notifier `.env` files or handle Twilio credentials.
+
+The target automation must fall back to writing `docs/HUMAN_REQUESTS.md` if the notifier is unavailable, use `ACTIVE_WITH_PENDING_USER_INPUT` when useful work remains, and use `BLOCKED_ON_USER` only when no useful work remains.
+
+For human-unlock requests, document the structured request payload. For direct human-requested status/update responses, document the optional `message_body` and `expects_reply: false` payload. If the notifier is unavailable, require the automation to write the intended outbound message to `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and not claim delivery.
+
+Create setup docs, sample payloads, dry-run instructions, inbox cleanup rules, freeform command handling, and troubleshooting. If implementing code, use tests that do not send real SMS and do not require ngrok.

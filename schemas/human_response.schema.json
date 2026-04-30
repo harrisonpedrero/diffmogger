@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/Diffmogger/human_response.schema.json",
+  "title": "Human Response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "inbox_id",
+    "received_at",
+    "channel",
+    "request_id",
+    "parsed_intent",
+    "body",
+    "status"
+  ],
+  "properties": {
+    "inbox_id": { "type": "string", "minLength": 1 },
+    "received_at": { "type": "string", "format": "date-time" },
+    "channel": {
+      "type": "string",
+      "enum": ["manual", "sms", "whatsapp", "email", "slack", "other"]
+    },
+    "from": { "type": "string" },
+    "request_id": { "type": "string", "minLength": 1 },
+    "parsed_intent": {
+      "type": "string",
+      "enum": ["done", "approve", "reject", "skip", "info", "unknown"]
+    },
+    "message_sid": { "type": "string" },
+    "body": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["unhandled", "handled", "archived"]
+    }
+  }
+}

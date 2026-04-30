@@ -1,0 +1,36 @@
+name: validate
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      AGENTIC_NOTIFIER_SKIP_DOTENV: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install notifier dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r services/agentic-notifier/requirements.txt
+
+      - name: Validate starter kit
+        run: bash scripts/validate_starter_kit.sh
+
+      - name: Run notifier tests
+        working-directory: services/agentic-notifier
+        run: python -m pytest
+
+      - name: Scaffold smoke test
+        run: |
+          tmp="$(mktemp -d)"
+          python3 scripts/scaffold_project_docs.py --intake examples/generic-web-app/project_intake.md --target "$tmp"
+          python3 scripts/check_required_files.py "$tmp"
+          rm -rf "$tmp"
