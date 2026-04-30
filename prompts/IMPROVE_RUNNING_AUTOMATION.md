@@ -30,6 +30,9 @@ Diagnose which failure mode is happening:
 - context files are bloated
 - human inbox commands asking to be texted are handled only by local Markdown
 - notifier failures are not recorded as `NOTIFIER_UNREACHABLE`
+- file-only human bridge prompts still instruct Codex to send SMS/WhatsApp
+- scheduled runs acquire nested or malformed lock files instead of using a single wrapper-owned lock
+- nested Codex CLI workers fail because `~/.codex/sessions` is not writable and `--ephemeral` is missing
 
 Make the smallest useful changes to the automation prompt, guardrails, task file, or review docs to correct the behavior.
 

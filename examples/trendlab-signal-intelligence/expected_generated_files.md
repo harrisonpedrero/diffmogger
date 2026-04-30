@@ -15,12 +15,18 @@ docs/HUMAN_RESPONSES_ARCHIVE.md
 docs/HUMAN_BRIDGE_SETUP.md
 docs/AUTONOMY_EXPERIMENT_LOG.md
 docs/DAILY_AUTOMATION_REVIEW.md
+scripts/acquire_codex_lock.sh
+scripts/release_codex_lock.sh
+scripts/run_codex_automation.sh
+scripts/spawn_worker_agent.sh
+scripts/summarize_worker_outputs.py
+scripts/compact_agent_state.py
 ```
 
 The bootstrap prompt should ask for fixture-first scoring, evidence display, report generation, and a one-command demo/test path.
 
 The recurring automation prompt should continue through product horizons: local demo, scoring depth, reports, safe adapters, showcase quality, and automation process improvement.
 
-It should also make explicit Codex CLI worker decisions and distinguish human-requested outbound status texts from local Markdown artifact requests.
+It should also make explicit Codex CLI worker decisions, use target-local runtime scripts, and distinguish file-only Markdown responses from notifier-mode outbound status texts.
 
 This example exercises a more involved automation workflow without copying assumptions from a real product.

@@ -28,25 +28,19 @@ Last updated: {{CREATED_AT}}
 - Reason: Initial scaffold only; no sprint has run yet.
 - Workers used: none yet.
 - Worker outputs consumed: none yet.
-- Optional helpers: Diffmogger `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` can write and consolidate reports under `target/agent_runs/<run_id>/`.
+- Local helpers: `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` can write and consolidate reports under `target/agent_runs/<run_id>/`.
 
 ## Known Issues
 
 - Product baseline still needs to be created or inspected.
 - Verification commands may need adjustment after bootstrap.
-- Scheduled runs should use `scripts/acquire_codex_lock.sh` and `scripts/release_codex_lock.sh` or equivalent lock behavior before code mutation.
+- Scheduled runs should use `scripts/run_codex_automation.sh`, which wraps local lock acquire/release before code mutation.
 
 ## Pending Human Requests
 
 - None yet.
 
-Human bridge mode:
-
-- File-only mode is always available.
-- If Diffmogger's local notifier is running, this project may call `POST http://127.0.0.1:8765/api/notify`.
-- The automation must read `docs/HUMAN_INBOX.md` at run start, interpret structured replies and freeform commands, remove handled entries only after completion or intentional deferral, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
-- If a human asks to be texted, messaged, or sent a status update, the automation should use the local notifier rather than only writing Markdown.
-- If the notifier is unavailable, record the intended outbound message in `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and continue useful work.
+{{HUMAN_TASK_NOTES}}
 
 ## Human Messages Sent
 

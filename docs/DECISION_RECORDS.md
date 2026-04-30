@@ -60,6 +60,30 @@ Decision: the notifier API's Pydantic model is authoritative at runtime. `schema
 
 Why: schema generation can become a project of its own. A small drift test gives practical honesty without pretending all schemas are enforced everywhere.
 
+## DR-011: Generated Target Repos Own Runtime Scripts
+
+Decision: scaffold target-local copies of lock, schedule, worker, summary, and compaction scripts under `scripts/`.
+
+Why: target automations should not depend on the Diffmogger checkout at runtime. The starter repo is a source for scaffolding and reference docs; generated projects should be movable and schedulable on their own.
+
+## DR-012: Scheduler Wrapper Owns Scheduled-Run Locks
+
+Decision: generated scheduled runs use `scripts/run_codex_automation.sh` to acquire and release `target/codex_automation.lock`, and export `CODEX_LOCK_ALREADY_ACQUIRED=true` so the Codex prompt does not acquire a second lock.
+
+Why: a first fresh-project run showed that both the wrapper and the prompt could attempt lock creation. One lock owner is easier to reason about and avoids malformed fallback lock files.
+
+## DR-013: File-Only And Notifier Human Bridges Are Separate Modes
+
+Decision: generated prompts and docs distinguish `file_only`, `local_notifier`, and `disabled` human bridge modes.
+
+Why: file-only mode is a valid long-term workflow, not merely notifier failure mode. In file-only mode, status and summary requests are local artifacts; in local-notifier mode, those same requests may require outbound SMS/WhatsApp.
+
+## DR-014: Nested Codex CLI Workers Use Ephemeral Sessions
+
+Decision: worker helper scripts and generated prompts use `codex exec --ephemeral` for nested CLI workers.
+
+Why: nested Codex workers launched from inside a scheduled automation sandbox may be unable to write `~/.codex/sessions`. Ephemeral child sessions avoid that failure while preserving the bounded worker-report pattern.
+
 ## Source Summary From References
 
 Local playbook PDF:

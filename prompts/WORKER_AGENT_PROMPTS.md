@@ -40,12 +40,14 @@ Default Codex CLI shape:
 export CODEX_RUN_ID="${CODEX_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "target/agent_runs/$CODEX_RUN_ID"
 
-codex exec \
+codex exec --ephemeral \
   --sandbox workspace-write \
   --ask-for-approval never \
   -c sandbox_workspace_write.network_access=false \
   "<worker prompt>"
 ```
+
+Use `--ephemeral` for nested Codex CLI workers launched from an automation run. If a worker fails because `~/.codex/sessions` is not writable from inside the parent sandbox, retry once with `codex exec --ephemeral`.
 
 Worker prompts should say: do not use network, do not spawn workers, do not send SMS/WhatsApp messages, do not touch `.env` or credentials, and stop after writing the assigned output.
 

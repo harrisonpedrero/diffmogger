@@ -3,15 +3,15 @@
 ## Loop
 
 1. Scheduler wakes Codex.
-2. Codex acquires `target/codex_automation.lock`, preferably through `scripts/acquire_codex_lock.sh`.
+2. The target repo's scheduler wrapper, usually `scripts/run_codex_automation.sh`, acquires `target/codex_automation.lock` through local `scripts/acquire_codex_lock.sh`.
 3. Codex reads `AGENTS.md`, `.agentic/automation_prompt.md`, `docs/CODEX_AUTOMATION_GUARDRAILS.md`, and `docs/CODEX_AUTOMATION_TASKS.md`.
-4. Codex reads human bridge files, classifies structured replies and freeform commands, and sends notifier responses when the human asked to be texted.
+4. Codex reads human bridge files when enabled. In file-only mode it handles manual replies locally; in local-notifier mode it sends notifier responses when the human asked to be texted.
 5. Codex removes handled inbox entries only after the requested action is complete or intentionally deferred.
 6. Codex chooses the highest-value sprint-sized milestone.
 7. Codex records a `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` decision and may spawn bounded read-only workers if useful, optionally through `scripts/spawn_worker_agent.sh`.
 8. Codex implements, verifies, and updates artifacts.
 9. Codex rewrites the task file and logs worker decisions, human messages, checks, artifacts, and status state.
-10. Codex releases the lock through `scripts/release_codex_lock.sh` when possible and returns a concise summary.
+10. The scheduler wrapper releases the lock through local `scripts/release_codex_lock.sh` when possible and Codex returns a concise summary.
 
 ## Main State Files
 
@@ -24,6 +24,12 @@
 - `docs/HUMAN_INBOX.md`: active unhandled human replies.
 - `docs/HUMAN_OUTBOX.md`: outbound human requests, direct status messages, and failed notifier attempts.
 - `docs/HUMAN_RESPONSES_ARCHIVE.md`: concise handled reply archive.
+
+## Human Bridge Modes
+
+Mode `file_only` uses Markdown queues only. Codex writes requests to `docs/HUMAN_REQUESTS.md`; the human replies in `docs/HUMAN_INBOX.md`; Codex handles replies on a later run and archives concise notes. Summary and status requests are answered locally in Markdown or app artifacts.
+
+Mode `local_notifier` adds the optional notifier service.
 
 ## Optional Notifier Service
 

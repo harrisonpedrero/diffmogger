@@ -28,8 +28,9 @@ Create the first runnable product baseline and install the automation operating 
 - Create or update human bridge docs if enabled.
 - Create or update `docs/AUTONOMY_EXPERIMENT_LOG.md`.
 - Create or update `docs/DAILY_AUTOMATION_REVIEW.md`.
+- Create or update local automation helper scripts under `scripts/`: `run_codex_automation.sh`, `acquire_codex_lock.sh`, `release_codex_lock.sh`, `spawn_worker_agent.sh`, `summarize_worker_outputs.py`, and `compact_agent_state.py`.
 - Add a one-command local verification or demo path when practical.
-- Ensure `.agentic/automation_prompt.md` explains freeform human inbox handling, notifier fallback with `NOTIFIER_UNREACHABLE`, lock helpers, state compaction, and explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` records.
+- Ensure `.agentic/automation_prompt.md` explains the configured human bridge mode, local lock helpers, wrapper-owned lock behavior with `CODEX_LOCK_ALREADY_ACQUIRED=true`, state compaction, `codex exec --ephemeral` worker usage, and explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` records.
 
 ## Behavior
 
@@ -41,6 +42,6 @@ Run relevant install, lint, test, build, or demo commands that exist or that you
 
 ## End Of Run
 
-Update `docs/CODEX_AUTOMATION_TASKS.md` with current state, completed work, checks, generated artifacts, Codex CLI worker decision, worker activity, human messages sent, known issues, pending human requests, best next milestone, suggested next sprint-sized task, and status.
+Update `docs/CODEX_AUTOMATION_TASKS.md` with current state, completed work, checks, generated artifacts, Codex CLI worker decision, worker activity, lock ownership, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status.
 
 Do not stop merely because a basic demo exists. This bootstrap is the first horizon, not the finish line.

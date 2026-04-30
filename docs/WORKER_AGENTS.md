@@ -55,7 +55,7 @@ bash scripts/spawn_worker_agent.sh \
 python3 scripts/summarize_worker_outputs.py /absolute/path/to/target-project --run-id "$CODEX_RUN_ID"
 ```
 
-`spawn_worker_agent.sh` creates `target/agent_runs/<run_id>/`, defaults to read-only report mode, uses `codex exec` when available, disables network in the worker command, tells the worker not to spawn more workers, and writes an unavailable/failure report if the CLI cannot run.
+`spawn_worker_agent.sh` creates `target/agent_runs/<run_id>/`, defaults to read-only report mode, uses `codex exec --ephemeral` when available, disables network in the worker command, tells the worker not to spawn more workers, and writes an unavailable/failure report if the CLI cannot run.
 
 `summarize_worker_outputs.py` writes `target/agent_runs/<run_id>/summary.md` by mechanically consolidating worker report highlights. The main agent still decides which findings to accept, reject, or defer.
 
@@ -94,12 +94,14 @@ Use read-only reports by default:
 export CODEX_RUN_ID="${CODEX_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "target/agent_runs/$CODEX_RUN_ID"
 
-codex exec \
+codex exec --ephemeral \
   --sandbox workspace-write \
   --ask-for-approval never \
   -c sandbox_workspace_write.network_access=false \
   "You are a read-only worker for this project. Read the repo and write a concise test-gap report to target/agent_runs/$CODEX_RUN_ID/worker_tests.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
 ```
+
+Use `--ephemeral` for nested Codex CLI workers launched from an automation run. Without it, a child worker may fail when it tries to persist session files under `~/.codex/sessions` from inside the parent run's sandbox.
 
 Worker rules:
 

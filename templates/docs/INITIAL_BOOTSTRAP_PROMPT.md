@@ -12,7 +12,7 @@ Read first:
 2. `AGENTS.md` if present.
 3. `docs/CODEX_AUTOMATION_TASKS.md`.
 4. `docs/CODEX_AUTOMATION_GUARDRAILS.md`.
-5. `docs/HUMAN_BRIDGE_SETUP.md`.
+5. `docs/HUMAN_BRIDGE_SETUP.md` if present.
 6. `.agentic/automation_prompt.md` if present.
 
 ## Goal
@@ -37,24 +37,7 @@ Desired first demo: {{DESIRED_FIRST_DEMO}}
 
 ## Human Bridge
 
-Human bridge enabled: {{HUMAN_BRIDGE_ENABLED}}
-
-If enabled, create project-side human bridge files:
-
-```text
-docs/HUMAN_REQUESTS.md
-docs/HUMAN_OUTBOX.md
-docs/HUMAN_INBOX.md
-docs/HUMAN_RESPONSES_ARCHIVE.md
-```
-
-Do not handle messaging credentials in this repo. If local notifier API mode is later enabled, this repo may call:
-
-```text
-POST http://127.0.0.1:8765/api/notify
-```
-
-Generated automation docs should say that freeform inbox requests such as `send me a summary`, `text me the blockers`, or `status update` require an outbound notifier response when available, not only a Markdown note. If the notifier is unavailable, record `NOTIFIER_UNREACHABLE` in `docs/HUMAN_OUTBOX.md`.
+{{HUMAN_BOOTSTRAP_SECTION}}
 
 ## Build Requirements
 
@@ -81,6 +64,6 @@ Run the commands that exist or that you create. Do not claim checks passed unles
 
 ## End
 
-Update `docs/CODEX_AUTOMATION_TASKS.md` with current repo state, completed work, checks, generated artifacts, Codex CLI worker decision, worker activity, human messages sent, known issues, pending human requests, best next milestone, suggested next sprint-sized task, and status.
+Update `docs/CODEX_AUTOMATION_TASKS.md` with current repo state, completed work, checks, generated artifacts, Codex CLI worker decision, worker activity, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status.
 
 Do not stop merely because a basic demo exists. This is the first horizon, not the final product.

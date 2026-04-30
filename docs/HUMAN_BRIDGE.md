@@ -28,7 +28,7 @@ docs/HUMAN_RESPONSES_ARCHIVE.md
 
 Codex writes a request. The human manually writes a reply in `HUMAN_INBOX.md`. The next run handles the reply, removes it from the inbox, and appends a concise archive entry.
 
-`HUMAN_INBOX.md` is also where freeform human commands may appear. If the human writes `send me a summary`, `text me the current blocker`, `status update`, or similar, the automation should interpret that as a request for an outbound SMS/WhatsApp response when the notifier is available. It should not satisfy that request only by writing a local Markdown note.
+`HUMAN_INBOX.md` is also where freeform human commands may appear. In file-only mode, if the human writes `send me a summary`, `status update`, or similar, the automation should answer locally in Markdown or an app artifact. It should not try to send SMS/WhatsApp unless the target project is explicitly configured for local-notifier mode.
 
 ## Style B: Bundled Local Notifier Service
 
@@ -68,6 +68,8 @@ The target project owns:
 - automation status
 - interpreting freeform human commands
 - fallback records when the notifier is unavailable
+
+In local-notifier mode, freeform requests such as `send me a summary`, `text me the current blocker`, or `status update` should produce an outbound SMS/WhatsApp response when the notifier is available. If the notifier is unavailable, the automation should record `NOTIFIER_UNREACHABLE` and continue safe work.
 
 ## Human-Unlock Request Shape
 

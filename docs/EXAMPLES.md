@@ -14,5 +14,5 @@ Use `examples/trendlab-signal-intelligence/project_intake.md` to exercise a more
 
 ```bash
 python3 scripts/scaffold_project_docs.py --intake examples/generic-web-app/project_intake.md --target /tmp/Diffmogger-example --force
-python3 scripts/check_required_files.py /tmp/Diffmogger-example
+python3 scripts/check_required_files.py --human-bridge-mode file_only /tmp/Diffmogger-example
 ```
