@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/Diffmogger/automation_task_file.schema.json",
+  "title": "Automation Task File Summary",
+  "description": "A structured summary equivalent of CODEX_AUTOMATION_TASKS.md for tools that prefer JSON.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "automation_status",
+    "current_project_state",
+    "completed_last_run",
+    "checks_from_last_run",
+    "known_issues",
+    "pending_human_requests",
+    "best_next_milestone",
+    "suggested_next_sprint_sized_task",
+    "continue_block_critical_stop_rationale"
+  ],
+  "properties": {
+    "automation_status": {
+      "type": "string",
+      "enum": [
+        "ACTIVE",
+        "ACTIVE_WITH_PENDING_USER_INPUT",
+        "BLOCKED_ON_USER",
+        "BLOCKED_ON_ENVIRONMENT",
+        "CRITICAL_STOP"
+      ]
+    },
+    "last_updated": { "type": "string", "format": "date-time" },
+    "current_project_state": { "type": "string" },
+    "completed_last_run": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "checks_from_last_run": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "result"],
+        "properties": {
+          "command": { "type": "string" },
+          "result": { "type": "string" }
+        }
+      }
+    },
+    "worker_agent_activity": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "codex_cli_worker_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "reason"],
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": ["USE", "SKIP", "UNAVAILABLE"]
+        },
+        "reason": { "type": "string" }
+      }
+    },
+    "known_issues": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "pending_human_requests": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "human_messages_sent": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "best_next_milestone": { "type": "string" },
+    "suggested_next_sprint_sized_task": { "type": "string" },
+    "ambitious_ideas_backlog": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "continue_block_critical_stop_rationale": { "type": "string" }
+  }
+}

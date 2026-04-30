@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/Diffmogger/human_request.schema.json",
+  "title": "Notifier Human Request Payload",
+  "description": "Reference JSON Schema for the agentic-notifier NotifyRequest Pydantic model. The runtime Pydantic model is authoritative; tests check this schema for field drift.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "request_id",
+    "type",
+    "priority",
+    "summary"
+  ],
+  "properties": {
+    "request_id": { "type": "string", "minLength": 1 },
+    "type": { "type": "string", "minLength": 1 },
+    "priority": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+    "context": { "type": "string", "default": "" },
+    "message_body": { "type": ["string", "null"], "default": null },
+    "agent_recommendation": { "type": "string", "default": "" },
+    "minimum_user_action": { "type": "string", "default": "" },
+    "reply_format": { "type": "string", "default": "" },
+    "unblocked_work_remaining": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "dedupe_key": { "type": ["string", "null"], "default": null },
+    "expects_reply": {
+      "type": "boolean",
+      "default": true
+    },
+    "dry_run": {
+      "type": "boolean",
+      "default": false
+    }
+  }
+}

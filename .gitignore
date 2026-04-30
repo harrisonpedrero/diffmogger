@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+
+services/agentic-notifier/.env
+services/agentic-notifier/.venv/
+services/agentic-notifier/.pytest_cache/
+services/agentic-notifier/runtime/*.jsonl
+services/agentic-notifier/runtime/*.log
