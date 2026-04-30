@@ -133,7 +133,7 @@ Codex CLI worker decision: USE / SKIP / UNAVAILABLE
 Reason: <one sentence>
 ```
 
-It must check availability with `command -v codex` before using Codex CLI workers, record `UNAVAILABLE` if the command is missing, and continue the sprint. For broad or multi-module runs, Codex CLI worker usage should be expected unless skipped with a clear reason. Include the target repo's local `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helper pattern and a read-only `codex exec --ephemeral --sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=false` fallback pattern.
+It must check availability with `command -v codex` before using Codex CLI workers, record `UNAVAILABLE` if the command is missing, and continue the sprint. For broad or multi-module runs, Codex CLI worker usage should be expected unless skipped with a clear reason. Include the target repo's local `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helper pattern and a read-only nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox -C .` fallback pattern. Also ensure the scheduled wrapper runs the parent automation with `--add-dir "$HOME/.codex"` so nested Codex CLI workers can authenticate and start inside the parent sandbox.
 
 Lock-file instructions should reference the target repo's local `scripts/run_codex_automation.sh`, `scripts/acquire_codex_lock.sh`, and `scripts/release_codex_lock.sh` helpers, the default `target/codex_automation.lock` path, `CODEX_LOCK_PATH` overrides, stale-lock detection, `CODEX_RUN_ID` identity for safe release, and `CODEX_LOCK_ALREADY_ACQUIRED=true` for wrapper-owned scheduled runs.
 

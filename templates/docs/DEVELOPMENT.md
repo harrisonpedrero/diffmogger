@@ -44,7 +44,7 @@ Scheduled runs should use the local wrapper:
 bash scripts/run_codex_automation.sh
 ```
 
-The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto`, and releases the lock when the run exits.
+The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock when the run exits.
 
 ## Human Bridge
 

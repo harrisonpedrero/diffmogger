@@ -43,19 +43,33 @@ Reason: <one sentence>
 
 Check availability with `command -v codex`. If Codex CLI is unavailable, continue without blocking the sprint and record `UNAVAILABLE`.
 
-## Nested Codex Worker Cannot Write Sessions
+## Nested Codex Worker Cannot Start Or Write Reports
 
-If a worker report says `~/.codex/sessions` is not writable, the parent automation sandbox likely blocked persistent child session files. Retry nested workers with:
+If a worker report says `~/.codex/sessions`, `~/.codex/state_5.sqlite`, or `~/.codex/shell_snapshots` is not writable, the parent automation sandbox likely blocked the child CLI before the child worker could start. Generated scheduled wrappers should grant the parent run access to Codex's home directory:
 
 ```bash
-codex exec --ephemeral \
-  --sandbox workspace-write \
-  --ask-for-approval never \
-  -c sandbox_workspace_write.network_access=false \
+--add-dir "$HOME/.codex"
+```
+
+If startup works but the worker fails with:
+
+```text
+sandbox-exec: sandbox_apply: Operation not permitted
+```
+
+the child Codex process is hitting a macOS nested sandbox failure. Generated worker helpers avoid that second sandbox layer with:
+
+```bash
+codex exec --disable plugins \
+  --ephemeral \
+  --dangerously-bypass-approvals-and-sandbox \
+  -C "$target" \
   "<worker prompt>"
 ```
 
-Generated `scripts/spawn_worker_agent.sh` uses `--ephemeral` by default.
+The bypass is for the nested child only. The scheduled parent remains the outer sandbox boundary.
+
+For existing target repos, update `scripts/run_codex_automation.sh` to add `$HOME/.codex` and update `scripts/spawn_worker_agent.sh` to use the nested-child command shape above. Then rerun the scheduled job. If worker startup still fails, record `Codex CLI worker decision: UNAVAILABLE` and continue the sprint with in-session or main-agent review.
 
 ## Notifier Outbound Works But Inbound Does Not
 

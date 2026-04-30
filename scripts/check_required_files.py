@@ -56,9 +56,24 @@ AUTOMATION_REQUIRED_STRINGS = [
     "scripts/summarize_worker_outputs.py",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
     "command -v codex",
-    "codex exec --ephemeral",
+    "--dangerously-bypass-approvals-and-sandbox",
     "ACTIVE_WITH_PENDING_USER_INPUT",
     "BLOCKED_ON_USER",
+]
+
+RUNNER_REQUIRED_STRINGS = [
+    "CODEX_LOCK_ALREADY_ACQUIRED",
+    "CODEX_NESTED_CLI_HOME",
+    "--add-dir",
+    "$HOME/.codex",
+    "codex exec --full-auto",
+]
+
+WORKER_HELPER_REQUIRED_STRINGS = [
+    "--disable plugins",
+    "--ephemeral",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "-C \"$target_abs\"",
 ]
 
 FILE_ONLY_AUTOMATION_REQUIRED_STRINGS = [
@@ -140,6 +155,20 @@ def main() -> int:
         for marker in AUTOMATION_REQUIRED_STRINGS + mode_markers:
             if marker not in automation_text:
                 problems.append(f".agentic/automation_prompt.md: missing marker {marker!r}")
+
+    runner_path = root / "scripts/run_codex_automation.sh"
+    if runner_path.exists() and runner_path.is_file():
+        runner_text = runner_path.read_text(encoding="utf-8")
+        for marker in RUNNER_REQUIRED_STRINGS:
+            if marker not in runner_text:
+                problems.append(f"scripts/run_codex_automation.sh: missing marker {marker!r}")
+
+    worker_helper_path = root / "scripts/spawn_worker_agent.sh"
+    if worker_helper_path.exists() and worker_helper_path.is_file():
+        worker_helper_text = worker_helper_path.read_text(encoding="utf-8")
+        for marker in WORKER_HELPER_REQUIRED_STRINGS:
+            if marker not in worker_helper_text:
+                problems.append(f"scripts/spawn_worker_agent.sh: missing marker {marker!r}")
 
     if problems:
         print("Required automation file check failed:", file=sys.stderr)

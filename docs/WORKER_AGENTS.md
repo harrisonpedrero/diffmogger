@@ -55,7 +55,11 @@ bash scripts/spawn_worker_agent.sh \
 python3 scripts/summarize_worker_outputs.py /absolute/path/to/target-project --run-id "$CODEX_RUN_ID"
 ```
 
-`spawn_worker_agent.sh` creates `target/agent_runs/<run_id>/`, defaults to read-only report mode, uses `codex exec --ephemeral` when available, disables network in the worker command, tells the worker not to spawn more workers, and writes an unavailable/failure report if the CLI cannot run.
+`spawn_worker_agent.sh` creates `target/agent_runs/<run_id>/`, defaults to read-only report mode, tells the worker not to spawn more workers, and writes an unavailable/failure report if the CLI cannot run.
+
+Generated scheduled wrappers grant the parent Codex run access to `$HOME/.codex` with `--add-dir`. That parent permission matters because nested `codex` processes may touch `state_5.sqlite`, `shell_snapshots`, and `sessions` during startup even when the child worker uses `--ephemeral`.
+
+Generated worker helpers run the nested child with `--disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox`. The bypass is only for the nested child process; the scheduled parent remains the outer sandbox boundary. This avoids macOS nested `sandbox-exec` failures while still keeping scheduled automation constrained by the parent run.
 
 `summarize_worker_outputs.py` writes `target/agent_runs/<run_id>/summary.md` by mechanically consolidating worker report highlights. The main agent still decides which findings to accept, reject, or defer.
 
@@ -94,14 +98,14 @@ Use read-only reports by default:
 export CODEX_RUN_ID="${CODEX_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "target/agent_runs/$CODEX_RUN_ID"
 
-codex exec --ephemeral \
-  --sandbox workspace-write \
-  --ask-for-approval never \
-  -c sandbox_workspace_write.network_access=false \
+codex exec --disable plugins \
+  --ephemeral \
+  --dangerously-bypass-approvals-and-sandbox \
+  -C . \
   "You are a read-only worker for this project. Read the repo and write a concise test-gap report to target/agent_runs/$CODEX_RUN_ID/worker_tests.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
 ```
 
-Use `--ephemeral` for nested Codex CLI workers launched from an automation run. Without it, a child worker may fail when it tries to persist session files under `~/.codex/sessions` from inside the parent run's sandbox.
+Use this command shape for nested Codex CLI workers launched from an automation run. The parent scheduled run should also allow `$HOME/.codex` with `--add-dir`; without that parent allowance, a child worker may fail while starting inside the parent run's sandbox.
 
 Worker rules:
 

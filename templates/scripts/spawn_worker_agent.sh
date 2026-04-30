@@ -17,9 +17,12 @@ Options:
   --max-prompt-chars N       Bound assignment text. Default: 12000
   -h, --help                 Show this help
 
-The script uses `codex exec --ephemeral` when available so nested workers do not
-need to persist session files under ~/.codex/sessions. If codex is unavailable
-or the worker fails, it still writes a report explaining what happened.
+The script uses `codex exec --disable plugins --ephemeral
+--dangerously-bypass-approvals-and-sandbox` for the nested child worker. The
+scheduled parent run remains the outer sandbox boundary. The parent should grant
+write access to ~/.codex with --add-dir so the nested CLI can authenticate and
+start. If codex is unavailable or the worker fails, it still writes a report
+explaining what happened.
 EOF
 }
 
@@ -172,14 +175,12 @@ if ! command -v codex >/dev/null 2>&1; then
 fi
 
 set +e
-(
-  cd "$target_abs" &&
-    codex exec --ephemeral \
-      --sandbox workspace-write \
-      --ask-for-approval never \
-      -c sandbox_workspace_write.network_access=false \
-      "$worker_prompt"
-) >"$raw_log" 2>&1
+codex exec \
+  --disable plugins \
+  --ephemeral \
+  --dangerously-bypass-approvals-and-sandbox \
+  -C "$target_abs" \
+  "$worker_prompt" >"$raw_log" 2>&1
 status=$?
 set -e
 

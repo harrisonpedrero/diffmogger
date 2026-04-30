@@ -32,7 +32,7 @@ Diagnose which failure mode is happening:
 - notifier failures are not recorded as `NOTIFIER_UNREACHABLE`
 - file-only human bridge prompts still instruct Codex to send SMS/WhatsApp
 - scheduled runs acquire nested or malformed lock files instead of using a single wrapper-owned lock
-- nested Codex CLI workers fail because `~/.codex/sessions` is not writable and `--ephemeral` is missing
+- nested Codex CLI workers fail because `~/.codex` is not writable from the parent sandbox, child workers use a stale `--ask-for-approval never` command shape, or child workers hit macOS nested `sandbox-exec` failures instead of using the nested-child bypass shape
 
 Make the smallest useful changes to the automation prompt, guardrails, task file, or review docs to correct the behavior.
 
