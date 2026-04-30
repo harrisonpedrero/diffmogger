@@ -2,7 +2,7 @@
 
 ## Summary
 
-TrendLab is a generic signal intelligence app for monitoring public trend events, scoring evidence, and producing research briefs. It is inspired by the reference workflow but is not crypto-specific.
+TrendLab is a fictional signal intelligence app for monitoring public trend events, scoring evidence, and producing research briefs. It is designed to exercise Diffmogger's workflow without relying on a real product domain.
 
 ## Product Goal
 

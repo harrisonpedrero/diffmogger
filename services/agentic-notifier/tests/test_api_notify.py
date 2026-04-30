@@ -53,7 +53,7 @@ def _payload(**overrides) -> dict[str, object]:
         "priority": "unlocking",
         "summary": "Add Service X read-only API key",
         "context": "Unlocks the next source adapter.",
-        "agent_recommendation": "Use read-only/data-only access. Do not add trading or write permissions.",
+        "agent_recommendation": "Use read-only/data-only access. Do not grant write, billing, admin, or production permissions.",
         "minimum_user_action": "Add SERVICE_X_API_KEY to your local secret store and reply HR-001 DONE.",
         "reply_format": "HR-001 DONE or HR-001 SKIP",
         "unblocked_work_remaining": ["Continue fixture-based work"],

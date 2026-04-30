@@ -17,6 +17,6 @@ This checklist records the release checks for the current public-alpha pass. It 
 - [x] No personal phone numbers.
 - [x] No ngrok URLs except placeholders.
 - [x] No local macOS user-home absolute paths.
-- [x] No accidental crypto/trading positioning in Diffmogger README.
+- [x] No stale workspace, personal-path, or product-specific positioning in Diffmogger README.
 
 The secret/PII grep can match placeholder variable names, placeholder phone numbers, placeholder ngrok domains, or ordinary words containing `sk-`. Treat those as review prompts; remove any real credential, live URL, personal phone number, or local machine path before release.
