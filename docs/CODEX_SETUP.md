@@ -49,14 +49,20 @@ command -v codex
 export CODEX_RUN_ID="${CODEX_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "target/agent_runs/$CODEX_RUN_ID"
 
-codex exec --ephemeral \
-  --sandbox workspace-write \
-  --ask-for-approval never \
-  -c sandbox_workspace_write.network_access=false \
+codex exec --disable plugins \
+  --ephemeral \
+  --dangerously-bypass-approvals-and-sandbox \
+  -C . \
   "You are a read-only worker for this project. Read the repo and write a concise report to target/agent_runs/$CODEX_RUN_ID/worker_review.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
 ```
 
-Use `--ephemeral` for nested workers launched from inside a scheduled automation run so child workers do not need to write session files under `~/.codex/sessions`.
+Use this bypass shape only for nested workers launched from inside a scheduled parent automation run. The parent remains the outer sandbox boundary; the child bypass avoids a second macOS `sandbox-exec` layer.
+
+The parent scheduled run still controls whether a nested `codex` process can touch its startup paths. Generated wrappers run the parent automation with Codex-home access:
+
+```bash
+codex exec --full-auto --add-dir "$HOME/.codex" "$(cat .agentic/automation_prompt.md)"
+```
 
 Generated target repos include local helper scripts:
 

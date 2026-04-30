@@ -30,7 +30,7 @@ Create the first runnable product baseline and install the automation operating 
 - Create or update `docs/DAILY_AUTOMATION_REVIEW.md`.
 - Create or update local automation helper scripts under `scripts/`: `run_codex_automation.sh`, `acquire_codex_lock.sh`, `release_codex_lock.sh`, `spawn_worker_agent.sh`, `summarize_worker_outputs.py`, and `compact_agent_state.py`.
 - Add a one-command local verification or demo path when practical.
-- Ensure `.agentic/automation_prompt.md` explains the configured human bridge mode, local lock helpers, wrapper-owned lock behavior with `CODEX_LOCK_ALREADY_ACQUIRED=true`, state compaction, `codex exec --ephemeral` worker usage, and explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` records.
+- Ensure `.agentic/automation_prompt.md` explains the configured human bridge mode, local lock helpers, wrapper-owned lock behavior with `CODEX_LOCK_ALREADY_ACQUIRED=true`, state compaction, nested child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` worker usage, parent wrapper `--add-dir "$HOME/.codex"` behavior for nested CLI startup, and explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` records.
 
 ## Behavior
 

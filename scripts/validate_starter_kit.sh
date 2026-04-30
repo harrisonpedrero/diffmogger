@@ -229,11 +229,33 @@ for marker in [
     "scripts/summarize_worker_outputs.py",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
     "command -v codex",
-    "codex exec --ephemeral",
+    "--dangerously-bypass-approvals-and-sandbox",
     "{{HUMAN_PROTOCOL}}",
 ]:
     if marker not in automation:
         print(f"Automation prompt missing required marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+runner = Path("templates/scripts/run_codex_automation.sh").read_text(encoding="utf-8")
+for marker in [
+    "CODEX_NESTED_CLI_HOME",
+    "$HOME/.codex",
+    "--add-dir",
+    "codex exec --full-auto",
+]:
+    if marker not in runner:
+        print(f"Scheduled runner template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+worker_helper = Path("templates/scripts/spawn_worker_agent.sh").read_text(encoding="utf-8")
+for marker in [
+    "--disable plugins",
+    "--ephemeral",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "-C \"$target_abs\"",
+]:
+    if marker not in worker_helper:
+        print(f"Worker helper template missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
 notifier_readme = Path("services/agentic-notifier/README.md").read_text(encoding="utf-8")

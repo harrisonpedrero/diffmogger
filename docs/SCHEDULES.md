@@ -42,7 +42,7 @@ Generated target projects include a local wrapper:
 bash scripts/run_codex_automation.sh
 ```
 
-The wrapper sets `CODEX_RUN_ID`, sets `CODEX_LOCK_PATH`, acquires the lock with local `scripts/acquire_codex_lock.sh`, exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, runs `codex exec --full-auto`, and releases the lock with local `scripts/release_codex_lock.sh` when the run exits.
+The wrapper sets `CODEX_RUN_ID`, sets `CODEX_LOCK_PATH`, acquires the lock with local `scripts/acquire_codex_lock.sh`, exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, runs `codex exec --full-auto`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock with local `scripts/release_codex_lock.sh` when the run exits.
 
 If a scheduler runs from another directory, call the absolute path to the target project's `scripts/run_codex_automation.sh` or set `TARGET=/absolute/path/to/target-project`.
 

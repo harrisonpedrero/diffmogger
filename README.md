@@ -193,7 +193,7 @@ bash scripts/spawn_worker_agent.sh \
 python3 scripts/summarize_worker_outputs.py ../my-project --run-id "$CODEX_RUN_ID"
 ```
 
-The helpers use `codex exec --ephemeral` when available, avoid network, tell workers not to spawn more workers, and fail gracefully if the Codex CLI is unavailable. They are optional convenience scripts, not mandatory magic.
+The helpers use `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` for nested child workers, avoid network, tell workers not to spawn more workers, and fail gracefully if the Codex CLI is unavailable. Generated scheduled wrappers also grant the parent run access to `$HOME/.codex` so nested Codex CLI workers can authenticate and start inside the parent sandbox. The scary-looking bypass is for the nested child only; the scheduled parent remains the outer sandbox boundary. These helpers are optional convenience scripts, not mandatory magic.
 
 Codex CLI must be available for `codex exec` helpers:
 
@@ -265,7 +265,7 @@ Practical SMS notes:
 
 ## Lock Files And State Compaction
 
-Short cadences need lock behavior. Generated target repos include `scripts/run_codex_automation.sh`, which wraps lock acquire/release around `codex exec`:
+Short cadences need lock behavior. Generated target repos include `scripts/run_codex_automation.sh`, which wraps lock acquire/release around `codex exec` and grants `$HOME/.codex` access for nested Codex CLI startup:
 
 ```bash
 bash scripts/run_codex_automation.sh

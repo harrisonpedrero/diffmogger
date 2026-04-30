@@ -135,14 +135,14 @@ mkdir -p "target/agent_runs/$CODEX_RUN_ID"
 Example read-only worker command:
 
 ```bash
-codex exec --ephemeral \
-  --sandbox workspace-write \
-  --ask-for-approval never \
-  -c sandbox_workspace_write.network_access=false \
+codex exec --disable plugins \
+  --ephemeral \
+  --dangerously-bypass-approvals-and-sandbox \
+  -C . \
   "You are a read-only worker for {{PROJECT_NAME}}. Read the repo and write a concise test-gap report to target/agent_runs/$CODEX_RUN_ID/worker_tests.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
 ```
 
-Use `--ephemeral` for nested Codex CLI workers so child runs do not need to persist session files under `~/.codex/sessions` from inside the parent run's sandbox. If a nested worker fails because session files are not writable, retry that worker once with `codex exec --ephemeral`.
+Use `--disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` only for nested child workers launched from inside the scheduled parent Codex run. The scheduled parent remains the outer sandbox boundary. The scheduled wrapper should grant the parent run access to `$HOME/.codex` with `--add-dir`; nested Codex startup may touch `state_5.sqlite`, `shell_snapshots`, and `sessions` even when the child command uses `--ephemeral`.
 
 Rules:
 

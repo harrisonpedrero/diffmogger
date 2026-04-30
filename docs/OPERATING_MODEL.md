@@ -3,7 +3,7 @@
 ## Loop
 
 1. Scheduler wakes Codex.
-2. The target repo's scheduler wrapper, usually `scripts/run_codex_automation.sh`, acquires `target/codex_automation.lock` through local `scripts/acquire_codex_lock.sh`.
+2. The target repo's scheduler wrapper, usually `scripts/run_codex_automation.sh`, acquires `target/codex_automation.lock` through local `scripts/acquire_codex_lock.sh` and grants `$HOME/.codex` access for nested Codex CLI startup.
 3. Codex reads `AGENTS.md`, `.agentic/automation_prompt.md`, `docs/CODEX_AUTOMATION_GUARDRAILS.md`, and `docs/CODEX_AUTOMATION_TASKS.md`.
 4. Codex reads human bridge files when enabled. In file-only mode it handles manual replies locally; in local-notifier mode it sends notifier responses when the human asked to be texted.
 5. Codex removes handled inbox entries only after the requested action is complete or intentionally deferred.

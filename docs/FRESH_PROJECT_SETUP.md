@@ -53,6 +53,14 @@ Run the local wrapper manually once:
 bash scripts/run_codex_automation.sh
 ```
 
+The generated wrapper runs the parent automation with:
+
+```bash
+--add-dir "$HOME/.codex"
+```
+
+Nested Codex startup may touch `state_5.sqlite`, `shell_snapshots`, and `sessions`, so the sessions-only allowance is too narrow. Workers still use `codex exec --ephemeral`, but the generated helper disables the child worker's inner macOS sandbox so the scheduled parent remains the single outer sandbox boundary.
+
 For macOS `launchd`, point the LaunchAgent at the target repo's wrapper:
 
 ```text
@@ -84,11 +92,11 @@ In `local_notifier` mode, the separate notifier service owns SMS/WhatsApp creden
 Nested Codex CLI workers should use ephemeral sessions:
 
 ```bash
-codex exec --ephemeral \
-  --sandbox workspace-write \
-  --ask-for-approval never \
-  -c sandbox_workspace_write.network_access=false \
+codex exec --disable plugins \
+  --ephemeral \
+  --dangerously-bypass-approvals-and-sandbox \
+  -C . \
   "<read-only worker prompt>"
 ```
 
-This avoids `~/.codex/sessions` write failures when child workers are launched from inside a parent automation sandbox.
+The parent scheduled wrapper must also allow `$HOME/.codex` with `--add-dir`. `--ephemeral` reduces child session persistence, but the nested CLI may still touch Codex state and shell snapshot files during startup.

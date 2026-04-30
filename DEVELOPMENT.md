@@ -145,6 +145,8 @@ For scripted runs:
 codex exec --full-auto "$(cat .agentic/automation_prompt.md)"
 ```
 
+Generated target repos should usually run `scripts/run_codex_automation.sh` instead of calling `codex exec` directly. The wrapper handles lock acquire/release and adds `$HOME/.codex` as a writable directory so nested Codex CLI workers can authenticate and start inside the parent sandbox.
+
 Choose sandbox and approval settings deliberately. Read-only is appropriate for reviews. Workspace-write/full-auto is appropriate only when you expect edits and trust the local environment.
 
 ## Local Vs Worktree Runs
@@ -210,12 +212,14 @@ Default read-only worker command shape:
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "target/agent_runs/$RUN_ID"
 
-codex exec \
-  --sandbox workspace-write \
-  --ask-for-approval never \
-  -c sandbox_workspace_write.network_access=false \
+codex exec --disable plugins \
+  --ephemeral \
+  --dangerously-bypass-approvals-and-sandbox \
+  -C . \
   "You are a read-only worker for this project. Read the repo and write a concise test-gap report to target/agent_runs/$RUN_ID/test_gap_worker.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
 ```
+
+Use the bypass shape only for nested child workers launched inside a scheduled parent Codex run. The parent remains the outer sandbox boundary.
 
 Rules:
 

@@ -38,7 +38,7 @@ Do not build unrelated apps or large unrelated systems.
 - Prefer read-only worker reports.
 - Main agent owns integration.
 - Record worker outputs under `target/agent_runs/<run_id>/`.
-- Use local `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helpers when available; otherwise use equivalent bounded `codex exec --ephemeral` commands.
+- Use local `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helpers when available; otherwise use equivalent bounded nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` commands from inside the scheduled parent run.
 - Do not create unbounded recursive agent loops.
 - Workers must not send SMS/WhatsApp messages, touch `.env`, handle credentials, spawn additional workers, or use network unless explicitly approved for that run.
 

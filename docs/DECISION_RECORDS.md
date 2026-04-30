@@ -78,11 +78,11 @@ Decision: generated prompts and docs distinguish `file_only`, `local_notifier`, 
 
 Why: file-only mode is a valid long-term workflow, not merely notifier failure mode. In file-only mode, status and summary requests are local artifacts; in local-notifier mode, those same requests may require outbound SMS/WhatsApp.
 
-## DR-014: Nested Codex CLI Workers Use Ephemeral Sessions
+## DR-014: Nested Codex CLI Workers Need Parent Codex-Home Access And Child Sandbox Bypass
 
-Decision: worker helper scripts and generated prompts use `codex exec --ephemeral` for nested CLI workers.
+Decision: worker helper scripts and generated prompts use `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` for nested CLI workers, and generated scheduled wrappers run the parent automation with `--add-dir "$HOME/.codex"`.
 
-Why: nested Codex workers launched from inside a scheduled automation sandbox may be unable to write `~/.codex/sessions`. Ephemeral child sessions avoid that failure while preserving the bounded worker-report pattern.
+Why: nested Codex workers launched from inside a scheduled automation sandbox may touch `~/.codex/state_5.sqlite`, `~/.codex/shell_snapshots`, and `~/.codex/sessions` during startup even when the child worker uses `--ephemeral`. After startup, macOS can reject a second child workspace sandbox with `sandbox-exec: sandbox_apply: Operation not permitted`. The scheduled parent remains the outer sandbox boundary, so the nested child bypass avoids the second sandbox layer while preserving the bounded worker-report pattern.
 
 ## Source Summary From References
 
