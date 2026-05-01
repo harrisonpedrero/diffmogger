@@ -2,7 +2,11 @@
 
 Project: `{{PROJECT_NAME}}`
 
+Mode: {{PROJECT_MODE_LABEL}}
+
 Goal: {{PRODUCT_GOAL}}
+
+{{PROJECT_MODE_GUIDANCE}}
 
 ## Setup
 
@@ -38,13 +42,19 @@ Guardrails:
 docs/CODEX_AUTOMATION_GUARDRAILS.md
 ```
 
+Project context:
+
+```text
+docs/PROJECT_CONTEXT.md
+```
+
 Scheduled runs should use the local wrapper:
 
 ```bash
 bash scripts/run_codex_automation.sh
 ```
 
-The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock when the run exits.
+The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto --skip-git-repo-check`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock when the run exits.
 
 ## Human Bridge
 

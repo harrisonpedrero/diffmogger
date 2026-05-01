@@ -2,11 +2,15 @@
 
 This repo is `{{PROJECT_NAME}}`.
 
+Project mode: {{PROJECT_MODE_LABEL}}
+
 ## Mission
 
 {{PRODUCT_GOAL}}
 
 Target user: {{TARGET_USER}}
+
+{{PROJECT_MODE_GUIDANCE}}
 
 ## Read Before Meaningful Work
 

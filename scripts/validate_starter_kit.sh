@@ -14,6 +14,7 @@ required_files=(
   "docs/CONCEPTS.md"
   "docs/OPERATING_MODEL.md"
   "docs/CODEX_SETUP.md"
+  "docs/DASHBOARD.md"
   "docs/FRESH_PROJECT_SETUP.md"
   "docs/HUMAN_BRIDGE.md"
   "docs/WORKER_AGENTS.md"
@@ -33,6 +34,7 @@ required_files=(
   "templates/AGENTS.md"
   "templates/.agentic/automation_prompt.md"
   "templates/docs/INITIAL_BOOTSTRAP_PROMPT.md"
+  "templates/docs/PROJECT_CONTEXT.md"
   "templates/docs/CODEX_AUTOMATION_TASKS.md"
   "templates/docs/CODEX_AUTOMATION_GUARDRAILS.md"
   "templates/docs/AUTONOMY_EXPERIMENT_LOG.md"
@@ -59,6 +61,7 @@ required_files=(
   "schemas/automation_task_file.schema.json"
   "scripts/check_required_files.py"
   "scripts/scaffold_project_docs.py"
+  "scripts/run_dashboard.py"
   "scripts/acquire_codex_lock.sh"
   "scripts/release_codex_lock.sh"
   "scripts/spawn_worker_agent.sh"
@@ -90,6 +93,9 @@ required_files=(
   "services/agentic-notifier/tests/test_webhook_inbound.py"
   "services/agentic-notifier/tests/test_twilio_client.py"
   "services/agentic-notifier/tests/test_schema_alignment.py"
+  "services/agentic-dashboard/README.md"
+  "services/agentic-dashboard/agentic_dashboard/__init__.py"
+  "services/agentic-dashboard/agentic_dashboard/app.py"
 )
 
 for file in "${required_files[@]}"; do
@@ -102,6 +108,7 @@ done
 python3 - <<'PY'
 from pathlib import Path
 import json
+import subprocess
 import sys
 
 for path in sorted(Path("schemas").glob("*.json")):
@@ -171,6 +178,9 @@ if missing:
 task_markers = [
     "AUTOMATION_STATUS: ACTIVE",
     "## Current Project State",
+    "## Automation Must Never Do",
+    "## Product Horizon State",
+    "## Horizon Transition Log",
     "## Completed Last Run",
     "## Checks From Last Run",
     "## Worker-Agent Activity",
@@ -188,8 +198,15 @@ if missing:
     print(f"Task template missing markers: {missing}", file=sys.stderr)
     raise SystemExit(1)
 
+context_template = Path("templates/docs/PROJECT_CONTEXT.md").read_text(encoding="utf-8")
+for marker in ["# Project Context", "{{ADDITIONAL_CONTEXT_FILES}}", "Do not place secrets"]:
+    if marker not in context_template:
+        print(f"Project context template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
 guardrail_markers = [
     "## Scope Boundaries",
+    "## Automation Must Never Do",
     "## Secrets Policy",
     "## External Side Effects Policy",
     "## Quality Policy",
@@ -231,6 +248,9 @@ for marker in [
     "command -v codex",
     "--dangerously-bypass-approvals-and-sandbox",
     "{{HUMAN_PROTOCOL}}",
+    "advancement decision: `stay`, `advance`, or `defer`",
+    "## Product Horizon State",
+    "## Horizon Transition Log",
 ]:
     if marker not in automation:
         print(f"Automation prompt missing required marker: {marker}", file=sys.stderr)
@@ -242,6 +262,9 @@ for marker in [
     "$HOME/.codex",
     "--add-dir",
     "codex exec --full-auto",
+    "--skip-git-repo-check",
+    "child_pid",
+    "forward_signal",
 ]:
     if marker not in runner:
         print(f"Scheduled runner template missing marker: {marker}", file=sys.stderr)
@@ -256,6 +279,41 @@ for marker in [
 ]:
     if marker not in worker_helper:
         print(f"Worker helper template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+for path in [
+    Path("scripts/run_dashboard.py"),
+    Path("services/agentic-dashboard/agentic_dashboard/app.py"),
+]:
+    result = subprocess.run([sys.executable, "-m", "py_compile", str(path)])
+    if result.returncode != 0:
+        print(f"Dashboard Python compile failed: {path}", file=sys.stderr)
+        raise SystemExit(1)
+
+dashboard_app = Path("services/agentic-dashboard/agentic_dashboard/app.py").read_text(encoding="utf-8")
+for marker in [
+    "DASHBOARD_STATE_FILE",
+    "Open Diffmogger Project",
+    "start_new_session=True",
+    "MAX_DASHBOARD_LOG_LINES",
+    "os.killpg",
+]:
+    if marker not in dashboard_app:
+        print(f"Dashboard app missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+dashboard_readme = Path("services/agentic-dashboard/README.md").read_text(encoding="utf-8")
+for marker in [
+    "python3 scripts/run_dashboard.py",
+    "Scaffold & Bootstrap",
+    ".agentic/dashboard_state.json",
+    "Open Diffmogger Project",
+    "docs/context/",
+    "docs/PROJECT_CONTEXT.md",
+    "Codex CLI installed and signed in",
+]:
+    if marker not in dashboard_readme:
+        print(f"Dashboard README missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
 notifier_readme = Path("services/agentic-notifier/README.md").read_text(encoding="utf-8")
@@ -285,6 +343,7 @@ for marker in [
     "## What Is Novel Here",
     "## What Diffmogger Creates",
     "## Quickstart",
+    "## Dashboard",
     "## Validation",
     "docs/FRESH_PROJECT_SETUP.md",
     "## Worker Agents",
@@ -309,6 +368,8 @@ for marker in [
     "scripts/acquire_codex_lock.sh",
     "scripts/spawn_worker_agent.sh",
     "scripts/compact_agent_state.py",
+    "scripts/run_dashboard.py",
+    "services/agentic-dashboard",
 ]:
     if marker not in readme:
         print(f"README missing marker: {marker}", file=sys.stderr)
@@ -335,6 +396,8 @@ for marker in [
         print(f"GitHub Actions validation workflow missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 PY
+
+python3 scripts/run_dashboard.py --smoke-check >/tmp/Diffmogger-dashboard-smoke.log
 
 lock_smoke_dir="$(mktemp -d)"
 CODEX_LOCK_PATH="$lock_smoke_dir/target/codex_automation.lock" \

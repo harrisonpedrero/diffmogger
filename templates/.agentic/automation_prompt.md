@@ -10,6 +10,7 @@ At the start of every run, explicitly read and follow:
 AGENTS.md
 docs/CODEX_AUTOMATION_TASKS.md
 docs/CODEX_AUTOMATION_GUARDRAILS.md
+docs/PROJECT_CONTEXT.md
 {{HUMAN_FILE_READS}}
 docs/AUTONOMY_EXPERIMENT_LOG.md
 ```
@@ -44,7 +45,8 @@ A weak run is one that only reads files and summarizes, makes a tiny doc-only ch
 1. Read required files.
 {{HUMAN_RUN_STEPS}}
 1. Inspect the repo enough to understand current state.
-1. Identify the highest-leverage milestone for this run.
+1. Read the current product horizon state from `docs/CODEX_AUTOMATION_TASKS.md`.
+1. Identify the highest-leverage milestone for this run within the current product horizon.
 1. Decide whether Codex CLI worker agents would materially improve speed, coverage, or quality.
 1. Choose a sprint-sized scope that can fit within the run window.
 1. Implement it and adjacent safe work.
@@ -64,16 +66,32 @@ For reversible or low-impact choices, choose a reasonable default and document t
 
 ## Product Horizons
 
-Keep progressing through these horizons:
+Product horizons are explicit state, not just inspiration. At the start of each run, read the `## Product Horizon State` section in `docs/CODEX_AUTOMATION_TASKS.md`. Choose work that advances the current horizon unless a regression, blocker, or human instruction requires a different focus.
 
-1. Runnable baseline.
-2. Offline/local demo.
-3. Serious core functionality.
-4. Evaluation, reporting, or comparison layer.
-5. Safe integration architecture.
-6. Showcase quality.
-7. Ambitious extensions aligned with the mission.
-8. Automation process improvement.
+Use these default horizons and advancement criteria:
+
+| Horizon | Goal | Advance when |
+| --- | --- | --- |
+| H1 Runnable baseline | Create or confirm a runnable local baseline. | Setup, run command, and at least one useful verification path exist and have run or have a documented environment blocker. |
+| H2 Offline/local demo | Make the desired first demo usable with fixtures, mocks, or local data. | A human can follow a documented local path through the core demo without live external services. |
+| H3 Serious core functionality | Replace thin placeholders with meaningful product logic. | The core workflow has real behavior, representative data, and targeted tests or smoke checks. |
+| H4 Evaluation/reporting/comparison layer | Add evidence, summaries, reports, scoring, review, or comparison surfaces appropriate to the project. | The project can produce a useful review artifact or decision-support output from local data. |
+| H5 Safe integration architecture | Prepare optional real integrations without unsafe side effects. | External adapters are mocked, gated, documented, and keep secrets outside the repo. |
+| H6 Showcase quality | Improve the demo, UX, docs, and reliability enough to review confidently. | The project has a polished review path, clear docs, and no obvious broken first-impression workflow. |
+| H7 Ambitious extensions | Extend beyond the obvious MVP while staying aligned with the mission. | At least one high-leverage extension is implemented, verified, and added to the product narrative or backlog. |
+| H8 Automation process improvement | Improve the recurring automation system itself. | The workflow has been reviewed, simplified, strengthened, or compacted based on actual run evidence. |
+
+At the end of every run, update `## Product Horizon State` with:
+
+- current horizon
+- horizon goal
+- advancement criteria
+- evidence gathered this run
+- advancement decision: `stay`, `advance`, or `defer`
+- next horizon candidate
+- remaining work before advancement
+
+If the advancement criteria are met, update the current horizon to the next horizon and append a dated note to `## Horizon Transition Log` with the previous horizon, new horizon, evidence, and checks. Do not advance merely because a demo exists; advance when the criteria are satisfied enough that the next horizon is now the highest-leverage work. It is acceptable to advance with minor known issues if they are documented and do not undermine the next horizon. If a later regression undermines an earlier horizon, keep the current horizon but make the regression the next sprint-sized task.
 
 Beyond MVP direction: {{BEYOND_MVP}}
 
@@ -231,6 +249,7 @@ Rewrite `docs/CODEX_AUTOMATION_TASKS.md` with:
 - files changed
 - checks run and results
 - generated artifacts
+- product horizon state and horizon transition log
 - Codex CLI worker decision: `USE`, `SKIP`, or `UNAVAILABLE`, with reason
 - worker-agent activity
 - worker outputs consumed

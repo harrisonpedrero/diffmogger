@@ -6,6 +6,10 @@ Paste this into Codex for the first manual run in the target repo.
 
 You are working in a fresh or newly-retrofitted repo for `{{PROJECT_NAME}}`.
 
+Project mode: {{PROJECT_MODE_LABEL}}
+
+{{PROJECT_MODE_GUIDANCE}}
+
 Read first:
 
 1. `README.md` if present.
@@ -13,7 +17,8 @@ Read first:
 3. `docs/CODEX_AUTOMATION_TASKS.md`.
 4. `docs/CODEX_AUTOMATION_GUARDRAILS.md`.
 5. `docs/HUMAN_BRIDGE_SETUP.md` if present.
-6. `.agentic/automation_prompt.md` if present.
+6. `docs/PROJECT_CONTEXT.md` if present.
+7. `.agentic/automation_prompt.md` if present.
 
 ## Goal
 
@@ -34,6 +39,14 @@ Desired first demo: {{DESIRED_FIRST_DEMO}}
 ## Safety Constraints
 
 {{SAFETY_CONSTRAINTS}}
+
+## Automation Must Never Do
+
+{{AUTOMATION_MUST_NEVER_DO}}
+
+## Additional Context
+
+{{ADDITIONAL_CONTEXT_FILES}}
 
 ## Human Bridge
 
@@ -64,6 +77,6 @@ Run the commands that exist or that you create. Do not claim checks passed unles
 
 ## End
 
-Update `docs/CODEX_AUTOMATION_TASKS.md` with current repo state, completed work, checks, generated artifacts, Codex CLI worker decision, worker activity, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status.
+Update `docs/CODEX_AUTOMATION_TASKS.md` with current repo state, product horizon state, H1 advancement evidence, completed work, checks, generated artifacts, Codex CLI worker decision, worker activity, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status.
 
 Do not stop merely because a basic demo exists. This is the first horizon, not the final product.

@@ -1,0 +1,50 @@
+# Diffmogger Dashboard
+
+The Diffmogger Dashboard is a standalone local configuration wizard and automation monitor.
+
+Launch it from the starter repo:
+
+```bash
+python3 scripts/run_dashboard.py
+```
+
+It opens a native desktop window using Python's standard-library Tkinter runtime. It does not require opening a browser.
+
+## What It Does
+
+- collects a project intake
+- splits intake into Basics, Product, Rules, Run Config, Progression, and Context steps instead of a long scroll
+- supports fresh-project and existing-project integration modes
+- covers constraints, safety rules, automation prohibitions, human bridge choices, worker settings, deliverable definition, and beyond-MVP direction
+- copies optional context files into `docs/context/`
+- writes `docs/PROJECT_CONTEXT.md`
+- scaffolds Diffmogger target-project files
+- runs the required-file check
+- starts the first `codex exec --full-auto --skip-git-repo-check` bootstrap run through one `Scaffold & Bootstrap` action
+- persists dashboard state in the selected target at `.agentic/dashboard_state.json`
+- reopens Diffmogger-managed targets through `Open Diffmogger Project`
+- enables `Start Scheduled Automation` only after the target appears bootstrapped
+- installs and loads a macOS launchd LaunchAgent that runs the target wrapper on the requested cadence
+- pauses scheduled automation by unloading and disabling that LaunchAgent
+- removes dashboard-managed schedules by deleting the target LaunchAgent plist
+- renders selected automation Markdown files
+- lets a human send file-only messages to the next automation run when SMS/WhatsApp is disabled or unavailable
+- displays prerequisites as readiness checks instead of raw command output
+
+In existing-project mode, pre-existing `AGENTS.md` and `docs/DEVELOPMENT.md` files receive a managed Diffmogger automation section instead of being replaced wholesale.
+
+## Prerequisites
+
+Before starting automation, the dashboard checks for:
+
+- Python 3.10+
+- Tkinter
+- Codex CLI installed and signed in
+- `bash`
+- `git`
+- writable target parent directory
+- Codex home availability for nested workers
+- macOS Full Disk Access advisory when the target lives under `~/Documents`
+- optional local notifier health when `local_notifier` mode is selected
+
+The dashboard keeps notifier credentials out of target projects. In local-notifier mode, use `services/agentic-notifier/` for Twilio configuration.

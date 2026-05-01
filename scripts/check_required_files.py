@@ -18,6 +18,7 @@ BASE_REQUIRED = [
     "scripts/summarize_worker_outputs.py",
     "scripts/compact_agent_state.py",
     "docs/INITIAL_BOOTSTRAP_PROMPT.md",
+    "docs/PROJECT_CONTEXT.md",
     "docs/CODEX_AUTOMATION_TASKS.md",
     "docs/CODEX_AUTOMATION_GUARDRAILS.md",
     "docs/AUTONOMY_EXPERIMENT_LOG.md",
@@ -35,6 +36,9 @@ HUMAN_REQUIRED = [
 TASK_REQUIRED_STRINGS = [
     "AUTOMATION_STATUS:",
     "## Current Project State",
+    "## Automation Must Never Do",
+    "## Product Horizon State",
+    "## Horizon Transition Log",
     "## Completed Last Run",
     "## Checks From Last Run",
     "## Worker-Agent Activity",
@@ -67,6 +71,9 @@ RUNNER_REQUIRED_STRINGS = [
     "--add-dir",
     "$HOME/.codex",
     "codex exec --full-auto",
+    "--skip-git-repo-check",
+    "child_pid",
+    "forward_signal",
 ]
 
 WORKER_HELPER_REQUIRED_STRINGS = [

@@ -25,14 +25,31 @@ A scheduled run should be large enough to matter and small enough to verify. It 
 
 ## Product Horizons
 
-1. Runnable baseline.
-2. Offline demo.
-3. Serious core functionality.
-4. Research, evaluation, or comparison layer.
-5. Safe integration architecture.
-6. Showcase quality.
-7. Ambitious extensions.
-8. Process improvement.
+Product horizons are a progression system, not a loose aspiration list. Generated task files include:
+
+```text
+## Product Horizon State
+## Horizon Transition Log
+```
+
+Every run should work mainly inside the current horizon, gather evidence, and end with an explicit advancement decision:
+
+```text
+stay | advance | defer
+```
+
+Default horizons:
+
+1. H1 Runnable baseline.
+2. H2 Offline/local demo.
+3. H3 Serious core functionality.
+4. H4 Evaluation, reporting, or comparison layer.
+5. H5 Safe integration architecture.
+6. H6 Showcase quality.
+7. H7 Ambitious extensions aligned with the mission.
+8. H8 Automation process improvement.
+
+When a horizon's advancement criteria are met, the automation should update the current horizon to the next horizon and append evidence to the transition log. If a later regression undermines an earlier horizon, the automation should keep the current horizon but make the regression the next sprint-sized task.
 
 ## Human Input
 

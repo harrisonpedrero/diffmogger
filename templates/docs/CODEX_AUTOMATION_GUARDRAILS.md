@@ -6,9 +6,17 @@ These guardrails apply to every scheduled or manual high-agency Codex run in thi
 
 Build `{{PROJECT_NAME}}`: {{PRODUCT_GOAL}}
 
+Project mode: {{PROJECT_MODE_LABEL}}
+
+{{PROJECT_MODE_GUIDANCE}}
+
 Stay aligned with the target user: {{TARGET_USER}}
 
 Do not build unrelated apps or large unrelated systems.
+
+## Automation Must Never Do
+
+{{AUTOMATION_MUST_NEVER_DO}}
 
 ## Secrets Policy
 

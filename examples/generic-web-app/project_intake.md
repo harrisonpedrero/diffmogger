@@ -4,6 +4,10 @@
 
 FocusBoard is a local-first web app for solo builders to plan, execute, and review weekly project work.
 
+## Project Mode
+
+fresh_project
+
 ## Product Goal
 
 Create a simple product workspace that turns project goals into weekly boards, daily focus plans, progress summaries, and lightweight review artifacts.
@@ -35,6 +39,12 @@ A user can create a project, add goals, generate a weekly board from seed data, 
 - Do not send notifications externally in the first demo.
 - Do not publish or deploy without approval.
 
+## Automation Must Never Do
+
+- Never read secrets or `.env` files.
+- Never spend money, deploy publicly, publish externally, or contact real users without explicit approval.
+- Never delete user data or rewrite history without approval.
+
 ## External Services
 
 - Optional calendar integration later.
@@ -48,7 +58,7 @@ A user can create a project, add goals, generate a weekly board from seed data, 
 
 ## Automation Cadence
 
-Hourly during active development. Every 30 minutes only after the first three runs are stable.
+Every 60 minutes during active development. Every 45 minutes only after the first three runs are stable.
 
 ## Human Bridge
 

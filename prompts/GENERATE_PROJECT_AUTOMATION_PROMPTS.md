@@ -8,10 +8,13 @@ You are generating project-specific Codex automation files from a project intake
 
 Read the intake brief first. If values are missing, make reasonable defaults and document assumptions. Do not ask questions unless a missing value would make the workflow unsafe.
 
+Respect the intake's project mode. For `fresh_project`, generate files for a new target repo. For `existing_project`, preserve existing architecture, commands, docs, and project-specific instructions; add Diffmogger guidance as a clearly marked managed section when updating existing `AGENTS.md` or `docs/DEVELOPMENT.md`.
+
 Create these files as complete Markdown drafts:
 
 ```text
 docs/INITIAL_BOOTSTRAP_PROMPT.md
+docs/PROJECT_CONTEXT.md
 .agentic/automation_prompt.md
 AGENTS.md
 docs/CODEX_AUTOMATION_TASKS.md
@@ -35,6 +38,10 @@ scripts/compact_agent_state.py
 
 The generated `docs/INITIAL_BOOTSTRAP_PROMPT.md` is used once or a few times. It should be project-specific, scaffold the product, create automation docs, create verification commands, and get to a first runnable demo.
 
+For existing-project integration, the first runnable demo means a meaningful integrated increment inside the current codebase, not a greenfield rewrite.
+
+The generated `docs/PROJECT_CONTEXT.md` should index supplemental project context when provided, such as PDFs, research notes, design docs, CSVs, or Markdown notes. It must warn not to include secrets, credentials, paid-account exports, or private production data.
+
 The generated `.agentic/automation_prompt.md` is used for recurring automation. It should be durable and behavioral. It must tell Codex to read the dynamic task file and guardrails every run, continue beyond MVP, support worker agents, support the human bridge, use lock files, compact state when needed, verify work, and update state.
 
 It must explicitly read and follow:
@@ -42,6 +49,7 @@ It must explicitly read and follow:
 ```text
 docs/CODEX_AUTOMATION_TASKS.md
 docs/CODEX_AUTOMATION_GUARDRAILS.md
+docs/PROJECT_CONTEXT.md
 docs/HUMAN_REQUESTS.md if present
 docs/HUMAN_INBOX.md if present
 docs/HUMAN_OUTBOX.md if present
@@ -65,6 +73,8 @@ The task file must include:
 
 - `AUTOMATION_STATUS: ACTIVE`
 - current project state
+- product horizon state
+- horizon transition log
 - completed last run
 - checks from last run
 - worker-agent activity
@@ -74,6 +84,8 @@ The task file must include:
 - suggested next sprint-sized task
 - ambitious ideas backlog
 - continue/block/critical-stop rationale
+
+The product horizon state must include current horizon, horizon goal, advancement criteria, evidence gathered this run, advancement decision (`stay`, `advance`, or `defer`), next horizon candidate, and remaining work before advancement. The automation prompt must tell Codex to advance to the next horizon only when criteria are met and to append evidence to the horizon transition log when advancement happens.
 
 The guardrails file must stay lean and include:
 

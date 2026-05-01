@@ -7,11 +7,40 @@ Last updated: {{CREATED_AT}}
 ## Current Project State
 
 - Project: `{{PROJECT_NAME}}`
+- Project mode: {{PROJECT_MODE_LABEL}}
 - Goal: {{PRODUCT_GOAL}}
 - Target user: {{TARGET_USER}}
 - Desired first demo: {{DESIRED_FIRST_DEMO}}
 - Tech preferences: {{TECH_PREFERENCES}}
+- Project-mode guidance: {{PROJECT_MODE_GUIDANCE}}
 - Current baseline: not bootstrapped yet.
+
+## Automation Must Never Do
+
+{{AUTOMATION_MUST_NEVER_DO}}
+
+## Additional Project Context
+
+{{ADDITIONAL_CONTEXT_FILES}}
+
+## Product Horizon State
+
+- Current horizon: H1 Runnable baseline
+- Horizon goal: Create or confirm a runnable local baseline for `{{PROJECT_NAME}}`.
+- Advancement criteria:
+  - Setup path is documented.
+  - A local run or demo command exists.
+  - At least one useful verification command exists and has run, or an environment blocker is documented.
+- Evidence gathered this run:
+  - Initial scaffold only; bootstrap has not run yet.
+- Advancement decision: stay
+- Next horizon candidate: H2 Offline/local demo
+- Remaining work before advancement:
+  - Run the bootstrap prompt, create or inspect the baseline, and record verification results.
+
+## Horizon Transition Log
+
+- None yet.
 
 ## Completed Last Run
 
@@ -48,11 +77,11 @@ Last updated: {{CREATED_AT}}
 
 ## Best Next Milestone
 
-Create the first runnable local baseline for `{{PROJECT_NAME}}` and verify it.
+Complete H1 Runnable baseline for `{{PROJECT_NAME}}` and record whether the project is ready to advance to H2 Offline/local demo.
 
 ## Suggested Next Sprint-Sized Task
 
-Run `docs/INITIAL_BOOTSTRAP_PROMPT.md` in Codex to scaffold the first demo, setup docs, checks, and automation state.
+Run `docs/INITIAL_BOOTSTRAP_PROMPT.md` in Codex to scaffold the first demo, setup docs, checks, automation state, and H1 advancement evidence.
 
 ## Ambitious Ideas Backlog
 

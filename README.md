@@ -70,18 +70,49 @@ CRITICAL_STOP
 
 ## What Is Novel Here
 
-These are design choices, not claims of magic:
+The individual ingredients are familiar: Markdown files, scheduled runs, lock files, worker agents, validation scripts, and human handoff queues. Diffmogger's useful claim is about the system boundary: it packages those ingredients into one local, reviewable control loop for recurring Codex work.
 
-- Markdown-first state: agent state lives in repo-local Markdown files that can be reviewed, diffed, compacted, and resumed after context resets.
-- Decoupled human bridge: the agent does not touch messaging credentials. Twilio, signature validation, and webhook hosting live in a separate service, while target projects interact through loopback HTTP and Markdown inbox/outbox files.
-- Marker-enforced contracts: validation scripts assert that load-bearing prompt and template strings exist, so prose and code expectations do not silently drift.
-- Explicit failure modes: the prompt names quiet recurring-agent failures such as under-scoping, doc-only work, ignoring "send me" requests, unbounded worker agents, and context bloat.
+The design choices that matter are:
+
+- Markdown-first state is the shared substrate: stable behavior is separated from mutable state, so the recurring prompt stays durable while `docs/CODEX_AUTOMATION_TASKS.md` carries current blockers, checks, human requests, horizon state, and the next sprint.
+- The run lifecycle is explicit: acquire a lock, read state, choose a sprint-sized milestone, decide whether workers are useful, implement, verify, update artifacts, rewrite state, and leave a clear continuation point.
+- Decoupled human bridge behavior is asynchronous and operationalized. File-only queues work without credentials, while the optional notifier keeps SMS/WhatsApp credentials in a separate service and forces delivery failures to be recorded instead of hand-waved.
+- Explicit failure modes are part of the contract. `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP` let the automation keep working around partial blockers while still making hard stops visible.
+- Marker-enforced contracts keep the scaffold honest by checking load-bearing prompt, template, schema, and documentation expectations during local validation.
+- The generated project is meant to stand on its own. Target repos get local scripts, guardrails, task files, worker conventions, compaction helpers, and validation markers instead of depending on the Diffmogger checkout at runtime.
+
+## Autonomous Case Studies
+
+These are observations from private repositories that ran on Diffmogger. They are included to show the behavior the kit is trying to make repeatable: multi-run compounding, explicit fallback paths, and useful progress without synchronous babysitting.
+
+### Rust quantitative trading engine
+
+- The automation carried a prerequisite chain across runs: deterministic replay catalogs became reviewable, replay failures became data-quality gates, and strategy work had to consume those gates instead of bypassing them.
+- Later sprints reused the earlier artifacts for provenance-aware strategy reports and explicit settlement transitions across reserves, inventory, cash, and equity.
+- The run history produced regression infrastructure around the artifacts already being generated, including tolerance-aware comparators, stable case keys, retained history, and named baselines.
+- Why it matters: Diffmogger helped the agent compound engineering state over multiple sprints instead of producing disconnected patches.
+
+### Signal-intelligence dashboard
+
+- The automation advanced product-facing source intelligence features across adapter contracts, source-quality scoring, conflict handling, evaluation paths, and UI/report surfacing.
+- When `tsx` hit sandbox-blocked IPC, the run changed strategy instead of stopping at a blocker note: report scripts were bundled through the existing `esbuild` path and executed under Node.
+- The workaround stayed inside the project contract: real adapters remained behind interfaces, fixtures drove verification, and the end-to-end demo script stayed the health check.
+- Why it matters: Diffmogger made runtime friction part of the recorded project state, so a blocked tool path became a durable implementation decision rather than a dead end.
+
+### Research-facing web app
+
+- Persistent sandbox permission errors made the Codex CLI worker path unreliable, and Mach-service permissions blocked Playwright-based visual checks.
+- The automation degraded gracefully: it used in-session read-only review for bounded critique and JSDOM smoke tests for UI verification when a browser path was unavailable.
+- Work still moved across data, dashboard, report, export, and test surfaces while the environment constraint was preserved for later runs.
+- A UI rendering bug surfaced through the file-based human inbox, was picked up by a later automation run, and was repaired without a synchronous handoff.
+- Why it matters: Diffmogger gave the agent fallback lanes and asynchronous human correction instead of assuming every worker, browser, or reviewer path would be available.
 
 ## What Diffmogger Creates
 
 - automation prompt template
 - guardrails template
 - dynamic task file template
+- project context template and optional context-file index
 - bootstrap prompt
 - autonomy experiment log
 - human request, inbox, outbox, and archive templates
@@ -92,6 +123,7 @@ These are design choices, not claims of magic:
 - worker helper scripts: `scripts/spawn_worker_agent.sh`, `scripts/summarize_worker_outputs.py`
 - state compaction script: `scripts/compact_agent_state.py`
 - bundled local notifier service in `services/agentic-notifier/`
+- standalone dashboard in `services/agentic-dashboard/`
 
 Repository layout:
 
@@ -103,33 +135,57 @@ examples/                     Example intake briefs.
 schemas/                      Reference JSON Schemas.
 scripts/                      Validation, scaffolding, lock, worker, and compaction helpers.
 services/agentic-notifier/    Reusable local SMS/WhatsApp bridge.
+services/agentic-dashboard/   Standalone local configuration wizard and dashboard.
 ```
 
 ## Quickstart
 
-Use a virtual environment for Python work. Homebrew Python may reject system-wide `pip` installs because of externally managed environment protections.
+The dashboard is the easiest path for a fresh project or an existing-project integration. It launches as a native local window, checks prerequisites, walks through project configuration, scaffolds target files, and starts the first Codex bootstrap run.
 
 ```bash
 git clone https://github.com/harrisonpedrero/diffmogger.git Diffmogger
 cd Diffmogger
 bash scripts/validate_starter_kit.sh
+python3 scripts/run_dashboard.py
 ```
 
-Scaffold target docs:
+In the dashboard:
 
-```bash
-python3 scripts/scaffold_project_docs.py \
-  --intake examples/generic-web-app/project_intake.md \
-  --target ../my-project
+1. Review the prerequisite checklist.
+2. Fill in the project intake.
+3. Add optional context files such as PDFs, research notes, CSVs, or design docs.
+4. Choose the target project directory.
+5. Click **Scaffold & Bootstrap**.
 
-python3 scripts/check_required_files.py ../my-project
-```
+The generated target includes local runtime scripts under `target/scripts/`. After the first bootstrap produces a runnable baseline, use the target repo's own `scripts/run_codex_automation.sh` for recurring Codex automation.
 
-The scaffold includes target-local runtime scripts under `../my-project/scripts/`. Scheduled target-project runs should use those local scripts rather than depending on the Diffmogger checkout.
+For the manual CLI path, see `docs/FRESH_PROJECT_SETUP.md`.
 
-Then open `../my-project/docs/INITIAL_BOOTSTRAP_PROMPT.md` and use it for the first manual Codex bootstrap run. After the target repo has a runnable baseline, schedule `../my-project/scripts/run_codex_automation.sh` as the recurring Codex automation.
+Use a virtual environment for Python package work. Homebrew Python may reject system-wide `pip` installs because of externally managed environment protections.
 
-For a fuller first-project checklist, see `docs/FRESH_PROJECT_SETUP.md`.
+For dashboard details, see `docs/DASHBOARD.md`.
+
+## Dashboard
+
+The standalone dashboard is the primary setup flow for fresh projects and existing-project integrations, and a convenience layer over the same Markdown-first scaffold contract.
+
+It supports:
+
+- a configuration wizard backed by `schemas/project_intake.schema.json`
+- fresh-project and existing-project modes
+- the full project intake, including constraints, safety rules, automation prohibitions, human bridge choices, worker-agent settings, deliverable definition, and beyond-MVP direction
+- optional context-file import into target `docs/context/`
+- generated `docs/PROJECT_CONTEXT.md`
+- a single `Scaffold & Bootstrap` pipeline
+- gated `Start Scheduled Automation` and `Pause Scheduled Automation` launchd controls after bootstrap completes
+- `Open Diffmogger Project` for reopening a target with existing dashboard state or launchd automation
+- prerequisite checks for Python, Tkinter, Codex CLI, shell tools, permissions, and optional notifier health
+- a compact automation monitor for selected Markdown files
+- file-only messages to the next automation run when SMS/WhatsApp is disabled or unavailable
+
+For existing projects, select the existing repo directory and choose existing-project mode in the wizard. Frame the intake as an integration task: describe the current stack, the existing commands to preserve, and the first meaningful integrated deliverable. Diffmogger adds or updates managed sections in existing `AGENTS.md` and `docs/DEVELOPMENT.md` instead of replacing those files outright.
+
+The dashboard stores UI state in the selected target repo at `.agentic/dashboard_state.json`, so closing and reopening the dashboard does not require repeating setup.
 
 ## Validation
 
