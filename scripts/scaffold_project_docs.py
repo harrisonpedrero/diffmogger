@@ -22,10 +22,18 @@ HUMAN_BRIDGE_FILES = {
     "docs/HUMAN_BRIDGE_SETUP.md",
 }
 VALID_HUMAN_BRIDGE_MODES = {"disabled", "file_only", "local_notifier"}
+VALID_PROJECT_MODES = {"fresh_project", "existing_project"}
+MANAGED_EXISTING_PROJECT_FILES = {
+    "AGENTS.md": "AGENTS",
+    "docs/DEVELOPMENT.md": "DEVELOPMENT",
+}
 
 
 HEADING_TO_KEY = {
     "summary": "summary",
+    "project mode": "project_mode",
+    "project type": "project_mode",
+    "target project mode": "project_mode",
     "product goal": "product_goal",
     "target user": "target_user",
     "desired first demo": "desired_first_demo",
@@ -34,7 +42,12 @@ HEADING_TO_KEY = {
     "hard constraints": "hard_constraints",
     "safety rules": "safety_constraints",
     "safety constraints": "safety_constraints",
+    "automation must never do": "automation_must_never_do",
+    "must never do": "automation_must_never_do",
     "external services": "external_services",
+    "additional context": "additional_context_files",
+    "additional context files": "additional_context_files",
+    "context files": "additional_context_files",
     "verification": "verification_commands",
     "automation cadence": "desired_cadence",
     "desired cadence": "desired_cadence",
@@ -107,6 +120,34 @@ def human_bridge_mode(data: dict[str, Any]) -> str:
     if normalize_bool(data.get("human_bridge_enabled"), False):
         return "file_only"
     return "disabled"
+
+
+def project_mode(data: dict[str, Any]) -> str:
+    raw = str(data.get("project_mode") or data.get("project_type") or "").strip().lower()
+    text = raw.replace("-", "_").replace(" ", "_")
+    if text in VALID_PROJECT_MODES:
+        return text
+    if any(term in text for term in ("existing", "integrat", "retrofit", "current_repo", "current")):
+        return "existing_project"
+    return "fresh_project"
+
+
+def project_mode_label(mode: str) -> str:
+    return "Existing project integration" if mode == "existing_project" else "Fresh project"
+
+
+def project_mode_guidance(mode: str) -> str:
+    if mode == "existing_project":
+        return (
+            "Integrate Diffmogger into the selected existing project. Preserve the existing "
+            "architecture, package manager, tests, docs, and project-specific instructions unless "
+            "the intake explicitly asks for a scoped change. Treat the desired first demo as an "
+            "integrated increment inside the current codebase, not a greenfield rewrite."
+        )
+    return (
+        "Create a new target project from the intake. Choose simple local-first defaults, create "
+        "the initial repo structure, and document setup and verification as part of bootstrap."
+    )
 
 
 def bridge_values(mode: str, text_responses: bool) -> dict[str, str]:
@@ -610,6 +651,7 @@ def parse_intake(path: Path) -> dict[str, Any]:
 
 def placeholders(data: dict[str, Any]) -> dict[str, str]:
     project_name = str(data.get("project_name") or data.get("summary") or "New Project").strip()
+    mode = project_mode(data)
     bridge_mode = human_bridge_mode(data)
     text_responses = bridge_mode == "local_notifier" and normalize_bool(
         data.get("human_requested_text_responses"),
@@ -622,15 +664,20 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
     values = {
         "PROJECT_NAME": project_name,
         "PROJECT_SLUG": slugify(project_name),
+        "PROJECT_MODE": mode,
+        "PROJECT_MODE_LABEL": project_mode_label(mode),
+        "PROJECT_MODE_GUIDANCE": project_mode_guidance(mode),
         "PRODUCT_GOAL": normalize_lines(data.get("product_goal"), "Build a useful local-first product from the intake brief."),
         "TARGET_USER": normalize_lines(data.get("target_user"), "The primary user described in the intake brief."),
         "DESIRED_FIRST_DEMO": normalize_lines(data.get("desired_first_demo"), "A runnable local demo that proves the core workflow."),
         "TECH_PREFERENCES": normalize_lines(data.get("tech_preferences"), "Use the existing repo stack or choose a simple, well-supported default."),
         "HARD_CONSTRAINTS": normalize_lines(data.get("hard_constraints"), "Keep the first demo local-first and reviewable."),
         "SAFETY_CONSTRAINTS": normalize_lines(data.get("safety_constraints"), "No secrets, paid actions, public deploys, or real-world side effects without approval."),
+        "AUTOMATION_MUST_NEVER_DO": normalize_lines(data.get("automation_must_never_do"), "Never read secrets, spend money, deploy publicly, publish externally, contact real users, or trigger real-world side effects without explicit approval."),
         "EXTERNAL_SERVICES": normalize_lines(data.get("external_services"), "None required for the first demo."),
+        "ADDITIONAL_CONTEXT_FILES": normalize_lines(data.get("additional_context_files"), "No additional context files provided."),
         "VERIFICATION_COMMANDS": verification,
-        "CADENCE": normalize_lines(data.get("desired_cadence"), "hourly"),
+        "CADENCE": normalize_lines(data.get("desired_cadence"), "every 60 minutes"),
         "WORKER_AGENTS_ALLOWED": str(normalize_bool(data.get("worker_agents_allowed"), True)).lower(),
         "MEANINGFUL_DELIVERABLE": normalize_lines(data.get("meaningful_deliverable"), "A runnable, verified increment."),
         "BEYOND_MVP": normalize_lines(data.get("beyond_mvp"), "Continue improving core value, demo quality, integrations, and automation reliability."),
@@ -654,8 +701,53 @@ def render_template(text: str, values: dict[str, str]) -> str:
     return text
 
 
+def managed_section_bounds(kind: str) -> tuple[str, str]:
+    return (f"<!-- DIFFMOGGER:START {kind} -->", f"<!-- DIFFMOGGER:END {kind} -->")
+
+
+def demote_markdown_headings(text: str) -> str:
+    lines = text.splitlines()
+    if lines and lines[0].startswith("# "):
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines = lines[1:]
+    demoted: list[str] = []
+    for line in lines:
+        if line.startswith("#"):
+            hashes = len(line) - len(line.lstrip("#"))
+            if hashes > 0 and len(line) > hashes and line[hashes] == " ":
+                line = "#" + line
+        demoted.append(line)
+    return "\n".join(demoted).strip()
+
+
+def render_managed_section(kind: str, rendered: str) -> str:
+    start, end = managed_section_bounds(kind)
+    body = demote_markdown_headings(rendered)
+    return (
+        f"{start}\n"
+        "## Diffmogger Automation\n\n"
+        "This block is managed by Diffmogger. Keep project-owned instructions outside this block.\n\n"
+        f"{body}\n"
+        f"{end}\n"
+    )
+
+
+def upsert_managed_section(existing: str, section: str, kind: str) -> str:
+    start, end = managed_section_bounds(kind)
+    pattern = re.compile(
+        rf"{re.escape(start)}.*?{re.escape(end)}\s*",
+        re.DOTALL,
+    )
+    if pattern.search(existing):
+        return pattern.sub(section, existing).rstrip() + "\n"
+    separator = "\n\n" if existing.rstrip() else ""
+    return existing.rstrip() + separator + section
+
+
 def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
     written: list[Path] = []
+    mode = values.get("PROJECT_MODE", "fresh_project")
     for template_path in sorted(TEMPLATE_ROOT.rglob("*")):
         if template_path.is_dir():
             continue
@@ -663,10 +755,17 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
         if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel.as_posix() in HUMAN_BRIDGE_FILES:
             continue
         dest = target / rel
-        if dest.exists() and not force:
-            continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         rendered = render_template(template_path.read_text(encoding="utf-8"), values)
+        managed_kind = MANAGED_EXISTING_PROJECT_FILES.get(rel.as_posix())
+        if mode == "existing_project" and managed_kind and dest.exists():
+            existing = dest.read_text(encoding="utf-8", errors="replace")
+            section = render_managed_section(managed_kind, rendered)
+            dest.write_text(upsert_managed_section(existing, section, managed_kind), encoding="utf-8")
+            written.append(dest)
+            continue
+        if dest.exists() and not force:
+            continue
         dest.write_text(rendered, encoding="utf-8")
         if rel.parts and rel.parts[0] == "scripts" and dest.suffix in {".sh", ".py"}:
             dest.chmod(0o755)

@@ -7,6 +7,7 @@
   "additionalProperties": false,
   "required": [
     "automation_status",
+    "product_horizon_state",
     "current_project_state",
     "completed_last_run",
     "checks_from_last_run",
@@ -29,6 +30,48 @@
     },
     "last_updated": { "type": "string", "format": "date-time" },
     "current_project_state": { "type": "string" },
+    "product_horizon_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current_horizon",
+        "horizon_goal",
+        "advancement_criteria",
+        "evidence_gathered_this_run",
+        "advancement_decision",
+        "next_horizon_candidate",
+        "remaining_work_before_advancement"
+      ],
+      "properties": {
+        "current_horizon": {
+          "type": "string",
+          "pattern": "^H[1-8] "
+        },
+        "horizon_goal": { "type": "string" },
+        "advancement_criteria": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "evidence_gathered_this_run": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "advancement_decision": {
+          "type": "string",
+          "enum": ["stay", "advance", "defer"]
+        },
+        "next_horizon_candidate": { "type": "string" },
+        "remaining_work_before_advancement": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "horizon_transition_log": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
     "completed_last_run": {
       "type": "array",
       "items": { "type": "string" }

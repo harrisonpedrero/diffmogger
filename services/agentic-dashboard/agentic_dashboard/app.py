@@ -1,0 +1,2246 @@
+#!/usr/bin/env python3
+"""Native local dashboard for configuring and observing Diffmogger projects."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+import plistlib
+import queue
+import re
+import select
+import signal
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+
+KIT_ROOT = Path(__file__).resolve().parents[3]
+SCRIPTS_DIR = KIT_ROOT / "scripts"
+SCAFFOLD_SCRIPT = SCRIPTS_DIR / "scaffold_project_docs.py"
+CHECK_REQUIRED_SCRIPT = SCRIPTS_DIR / "check_required_files.py"
+LAUNCHD_LABEL_PREFIX = "com.diffmogger.automation"
+SCHEDULABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
+MIN_CADENCE_MINUTES = 30
+MAX_CADENCE_MINUTES = 10080
+DEFAULT_CADENCE_MINUTES = 60
+MAX_DASHBOARD_LOG_LINES = 1200
+MAX_DASHBOARD_LOG_LINE_CHARS = 4000
+DASHBOARD_STATE_FILE = ".agentic/dashboard_state.json"
+CONTEXT_IMPORTS_START = "<!-- DIFFMOGGER:CONTEXT-IMPORTS:START -->"
+CONTEXT_IMPORTS_END = "<!-- DIFFMOGGER:CONTEXT-IMPORTS:END -->"
+
+DOC_CHOICES = {
+    "Automation Tasks": "docs/CODEX_AUTOMATION_TASKS.md",
+    "Project Context": "docs/PROJECT_CONTEXT.md",
+    "Human Requests": "docs/HUMAN_REQUESTS.md",
+    "Human Inbox": "docs/HUMAN_INBOX.md",
+    "Human Outbox": "docs/HUMAN_OUTBOX.md",
+    "Daily Review": "docs/DAILY_AUTOMATION_REVIEW.md",
+    "Experiment Log": "docs/AUTONOMY_EXPERIMENT_LOG.md",
+    "Initial Bootstrap Prompt": "docs/INITIAL_BOOTSTRAP_PROMPT.md",
+    "Automation Prompt": ".agentic/automation_prompt.md",
+}
+
+HUMAN_DOC_CHOICES = {
+    "Requests From Automation": "docs/HUMAN_REQUESTS.md",
+    "Messages Waiting For Next Run": "docs/HUMAN_INBOX.md",
+    "Sent Updates & Delivery Log": "docs/HUMAN_OUTBOX.md",
+    "Resolved Conversation History": "docs/HUMAN_RESPONSES_ARCHIVE.md",
+}
+
+INTENT_CHOICES = {
+    "General note": "info",
+    "Done / completed": "done",
+    "Skip this request": "skip",
+    "Approved": "approve",
+    "Rejected": "reject",
+    "Not sure": "unknown",
+}
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+    from tkinter.scrolledtext import ScrolledText
+
+    TK_AVAILABLE = True
+    TK_IMPORT_ERROR = ""
+except Exception as exc:  # pragma: no cover - depends on host Python build.
+    tk = None  # type: ignore[assignment]
+    ttk = None  # type: ignore[assignment]
+    filedialog = None  # type: ignore[assignment]
+    messagebox = None  # type: ignore[assignment]
+    ScrolledText = None  # type: ignore[assignment]
+    TK_AVAILABLE = False
+    TK_IMPORT_ERROR = str(exc)
+
+
+@dataclass(frozen=True)
+class PrerequisiteItem:
+    name: str
+    ok: bool
+    required: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class ContextRecord:
+    rel_path: str
+    original_name: str
+    size_bytes: int
+
+
+def load_scaffold_module() -> Any:
+    spec = importlib.util.spec_from_file_location("diffmogger_scaffold", SCAFFOLD_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load scaffold script at {SCAFFOLD_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def split_lines(value: str) -> list[str]:
+    lines: list[str] = []
+    for raw in value.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[-*]\s+", "", line)
+        lines.append(line)
+    return lines
+
+
+def nearest_existing_parent(path: Path) -> Path:
+    current = path.expanduser()
+    if current.exists():
+        return current if current.is_dir() else current.parent
+    for parent in current.parents:
+        if parent.exists():
+            return parent
+    return Path.cwd()
+
+
+def path_is_under(child: Path, parent: Path) -> bool:
+    try:
+        child.expanduser().resolve().relative_to(parent.expanduser().resolve())
+        return True
+    except ValueError:
+        return False
+    except OSError:
+        return False
+
+
+def command_detail(command: str, args: list[str] | None = None, timeout: int = 4) -> tuple[bool, str]:
+    path = shutil.which(command)
+    if not path:
+        return False, f"`{command}` not found on PATH."
+    if not args:
+        return True, path
+    try:
+        result = subprocess.run(
+            [path, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception as exc:
+        return True, f"{path}; version check failed: {exc}"
+    output = (result.stdout or result.stderr).strip().splitlines()
+    suffix = output[0] if output else "installed"
+    return True, f"{path}; {suffix}"
+
+
+def parse_cadence_seconds(value: str) -> int:
+    text = value.strip()
+    if not re.fullmatch(r"\d+", text):
+        raise ValueError("Automation cadence must be an integer number of minutes greater than 30.")
+    minutes = int(text)
+    if minutes < MIN_CADENCE_MINUTES:
+        raise ValueError("Automation cadence must be greater than 30 minutes.")
+    if minutes > MAX_CADENCE_MINUTES:
+        raise ValueError("Automation cadence must be 10080 minutes or less.")
+    return minutes * 60
+
+
+def cadence_minutes_from_text(value: Any) -> int:
+    text = str(value or "").strip().lower()
+    if not text:
+        return DEFAULT_CADENCE_MINUTES
+    if re.fullmatch(r"\d+", text):
+        minutes = int(text)
+    else:
+        minute_match = re.search(r"(\d+)\s*(?:minutes?|mins?|m)\b", text)
+        hour_match = re.search(r"(\d+)\s*(?:hours?|hrs?|h)\b", text)
+        if "hourly" in text or text == "hour":
+            minutes = 60
+        elif "daily" in text:
+            minutes = 1440
+        elif minute_match:
+            minutes = int(minute_match.group(1))
+        elif hour_match:
+            minutes = int(hour_match.group(1)) * 60
+        else:
+            return DEFAULT_CADENCE_MINUTES
+    return min(MAX_CADENCE_MINUTES, max(MIN_CADENCE_MINUTES, minutes))
+
+
+def format_interval(seconds: int) -> str:
+    minutes = max(1, seconds // 60)
+    return f"every {minutes} minutes"
+
+
+def launchd_label(target: Path) -> str:
+    target = target.expanduser().resolve()
+    base = re.sub(r"[^a-z0-9]+", "-", target.name.lower()).strip("-") or "project"
+    digest = hashlib.sha1(str(target).encode("utf-8")).hexdigest()[:10]
+    return f"{LAUNCHD_LABEL_PREFIX}.{base}.{digest}"
+
+
+def launchd_plist_path(label: str) -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+
+
+def launchd_service_target(label: str) -> str:
+    return f"gui/{os.getuid()}/{label}"
+
+
+def launchd_domain_target() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def launchd_log_dir(target: Path) -> Path:
+    return target.expanduser().resolve() / "target" / "automation_logs"
+
+
+def dashboard_state_path(target: Path) -> Path:
+    return target.expanduser().resolve() / DASHBOARD_STATE_FILE
+
+
+def write_launchd_plist(target: Path, cadence_seconds: int) -> tuple[str, Path]:
+    target = target.expanduser().resolve()
+    label = launchd_label(target)
+    plist_path = launchd_plist_path(label)
+    log_dir = launchd_log_dir(target)
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    plist = {
+        "Label": label,
+        "ProgramArguments": ["/bin/bash", str(target / "scripts" / "run_codex_automation.sh")],
+        "WorkingDirectory": str(target),
+        "RunAtLoad": True,
+        "StartInterval": cadence_seconds,
+        "StandardOutPath": str(log_dir / "stdout.log"),
+        "StandardErrorPath": str(log_dir / "stderr.log"),
+        "EnvironmentVariables": {
+            "TARGET": str(target),
+        },
+    }
+    plist_path.write_bytes(plistlib.dumps(plist, sort_keys=True))
+    return label, plist_path
+
+
+def context_record_line(record: ContextRecord) -> str:
+    return f"- `{record.rel_path}` ({record.original_name}, {record.size_bytes} bytes)"
+
+
+def render_context_imports_section(project_name: str, lines: list[str]) -> str:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    body = "\n".join(lines) if lines else "- No imported context files are currently indexed."
+    return f"""{CONTEXT_IMPORTS_START}
+## Diffmogger Imported Context Files
+
+Managed context index for `{project_name}`. Do not place secrets, credentials, paid-account exports, or private production data here.
+
+Generated at: {now}
+
+{body}
+{CONTEXT_IMPORTS_END}
+"""
+
+
+def upsert_context_imports(existing: str, project_name: str, records: list[ContextRecord]) -> str:
+    lines_by_rel: dict[str, str] = {}
+    pattern = re.compile(
+        rf"{re.escape(CONTEXT_IMPORTS_START)}(?P<body>.*?){re.escape(CONTEXT_IMPORTS_END)}",
+        re.DOTALL,
+    )
+    match = pattern.search(existing)
+    if match:
+        for line in match.group("body").splitlines():
+            line = line.strip()
+            rel_match = re.match(r"- `([^`]+)`", line)
+            if rel_match:
+                lines_by_rel[rel_match.group(1)] = line
+    for record in records:
+        lines_by_rel[record.rel_path] = context_record_line(record)
+    section = render_context_imports_section(project_name, list(lines_by_rel.values()))
+    if match:
+        return pattern.sub(section.rstrip(), existing).rstrip() + "\n"
+    separator = "\n\n" if existing.rstrip() else ""
+    return existing.rstrip() + separator + section
+
+
+def fetch_notifier_health(timeout: float = 0.6) -> tuple[bool, str]:
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8765/health", timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+        payload = json.loads(body)
+        configured = payload.get("target_repo_configured")
+        return True, f"agentic-notifier is reachable; target_repo_configured={configured}."
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        return False, f"agentic-notifier is not reachable on 127.0.0.1:8765 ({exc})."
+
+
+def check_prerequisites(target: Path, human_bridge_mode: str) -> list[PrerequisiteItem]:
+    items: list[PrerequisiteItem] = []
+
+    py_ok = sys.version_info >= (3, 10)
+    items.append(
+        PrerequisiteItem(
+            "Python 3.10+",
+            py_ok,
+            True,
+            f"Running {sys.version.split()[0]}.",
+        )
+    )
+    items.append(
+        PrerequisiteItem(
+            "Tkinter GUI runtime",
+            TK_AVAILABLE,
+            True,
+            "Available." if TK_AVAILABLE else TK_IMPORT_ERROR,
+        )
+    )
+
+    codex_ok, codex_detail = command_detail("codex", ["--version"])
+    items.append(
+        PrerequisiteItem(
+            "Codex CLI installed and signed in",
+            codex_ok,
+            True,
+            codex_detail if codex_ok else codex_detail + " Install and run `codex` once before bootstrapping.",
+        )
+    )
+
+    bash_ok, bash_detail = command_detail("bash", ["--version"])
+    items.append(PrerequisiteItem("bash available", bash_ok, True, bash_detail))
+
+    git_ok, git_detail = command_detail("git", ["--version"])
+    items.append(PrerequisiteItem("git available", git_ok, True, git_detail))
+
+    parent = nearest_existing_parent(target)
+    writable = parent.exists() and os.access(parent, os.W_OK)
+    items.append(
+        PrerequisiteItem(
+            "Target parent directory writable",
+            writable,
+            True,
+            f"Nearest existing parent: {parent}",
+        )
+    )
+
+    codex_home = Path.home() / ".codex"
+    items.append(
+        PrerequisiteItem(
+            "Codex home accessible for nested workers",
+            codex_home.exists(),
+            False,
+            f"{codex_home} exists." if codex_home.exists() else f"{codex_home} does not exist yet; run `codex` interactively once if workers fail.",
+        )
+    )
+
+    if sys.platform == "darwin" and path_is_under(target, Path.home() / "Documents"):
+        items.append(
+            PrerequisiteItem(
+                "macOS Documents permission note",
+                False,
+                False,
+                "Targets under ~/Documents may need Full Disk Access for /bin/bash and the Node executable used by Codex when scheduled.",
+            )
+        )
+    else:
+        items.append(
+            PrerequisiteItem(
+                "macOS Documents permission note",
+                True,
+                False,
+                "No Documents-folder advisory for the selected target.",
+            )
+        )
+
+    if human_bridge_mode == "local_notifier":
+        notifier_ok, notifier_detail = fetch_notifier_health()
+        items.append(
+            PrerequisiteItem(
+                "Optional local notifier reachable",
+                notifier_ok,
+                False,
+                notifier_detail + " File-only handoff remains available if notifier setup is incomplete.",
+            )
+        )
+
+    return items
+
+
+def format_prerequisites(items: list[PrerequisiteItem]) -> str:
+    required = [item for item in items if item.required]
+    optional = [item for item in items if not item.required]
+    lines = ["Required before starting automation:"]
+    for item in required:
+        marker = "OK" if item.ok else "MISSING"
+        lines.append(f"- [{marker}] {item.name}: {item.detail}")
+    lines.append("")
+    lines.append("Advisory and optional checks:")
+    for item in optional:
+        marker = "OK" if item.ok else "CHECK"
+        lines.append(f"- [{marker}] {item.name}: {item.detail}")
+    return "\n".join(lines)
+
+
+def required_failures(items: list[PrerequisiteItem]) -> list[PrerequisiteItem]:
+    return [item for item in items if item.required and not item.ok]
+
+
+def safe_context_filename(name: str) -> str:
+    source = Path(name)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", source.stem).strip(".-") or "context"
+    suffix = re.sub(r"[^A-Za-z0-9.]+", "", source.suffix)
+    return f"{stem}{suffix}"
+
+
+def copy_context_files(
+    target: Path,
+    context_paths: list[Path],
+    log: Callable[[str], None],
+) -> list[ContextRecord]:
+    if not context_paths:
+        return []
+
+    context_dir = target / "docs" / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    records: list[ContextRecord] = []
+    used_names: set[str] = set()
+
+    for source in context_paths:
+        source = source.expanduser().resolve()
+        if not source.exists() or not source.is_file():
+            log(f"Skipping missing context file: {source}")
+            continue
+        base_name = safe_context_filename(source.name)
+        candidate = base_name
+        counter = 2
+        while candidate in used_names or (context_dir / candidate).exists():
+            stem = Path(base_name).stem
+            suffix = Path(base_name).suffix
+            candidate = f"{stem}-{counter}{suffix}"
+            counter += 1
+        used_names.add(candidate)
+        dest = context_dir / candidate
+        if source == dest.resolve():
+            log(f"Context file already in target: {dest}")
+        else:
+            shutil.copy2(source, dest)
+            log(f"Copied context file: {source.name} -> docs/context/{candidate}")
+        records.append(
+            ContextRecord(
+                rel_path=f"docs/context/{candidate}",
+                original_name=source.name,
+                size_bytes=dest.stat().st_size,
+            )
+        )
+
+    return records
+
+
+def render_project_context(project_name: str, records: list[ContextRecord]) -> str:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    file_lines = (
+        "\n".join(context_record_line(record) for record in records)
+        if records
+        else "- No additional context files were provided during scaffolding."
+    )
+    return f"""# Project Context
+
+Additional reusable context for `{project_name}`.
+
+Generated at: {now}
+
+Use this file as an index for supplemental research, PDFs, notes, designs, and other source material copied into this target project. Do not place secrets, credentials, paid-account exports, or private production data here.
+
+## Context Files
+
+{file_lines}
+
+## Automation Notes
+
+- During bootstrap, inspect relevant context files when they help clarify the product goal, constraints, domain, or desired demo.
+- Prefer concise summaries in task files instead of copying long passages from context sources.
+- Treat binary context such as PDFs as reference material, not as executable input.
+"""
+
+
+def next_inbox_id(inbox_path: Path, now: datetime) -> str:
+    date_prefix = now.strftime("%Y-%m-%d")
+    if inbox_path.exists():
+        text = inbox_path.read_text(encoding="utf-8")
+    else:
+        text = ""
+    pattern = re.compile(rf"^## INBOX-{re.escape(date_prefix)}-(\d{{3,}})", re.MULTILINE)
+    existing = [int(match.group(1)) for match in pattern.finditer(text)]
+    return f"INBOX-{date_prefix}-{max(existing, default=0) + 1:03d}"
+
+
+def append_manual_inbox_entry(
+    target: Path,
+    body: str,
+    *,
+    request_id: str,
+    parsed_intent: str,
+) -> str:
+    docs_dir = target / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    inbox_path = docs_dir / "HUMAN_INBOX.md"
+    if not inbox_path.exists():
+        inbox_path.write_text(
+            "# Human Inbox\n\nActive inbox for replies from the human owner.\n\n",
+            encoding="utf-8",
+        )
+    now = datetime.now().astimezone()
+    inbox_id = next_inbox_id(inbox_path, now)
+    safe_request_id = request_id.strip() or "unknown"
+    entry = f"""## {inbox_id}
+
+- received_at: {now.isoformat(timespec="seconds")}
+- channel: manual-dashboard
+- from: dashboard
+- to: automation
+- request_id: {safe_request_id}
+- parsed_intent: {parsed_intent.strip() or "info"}
+- message_sid: manual-dashboard-{now.strftime("%Y%m%d%H%M%S")}
+- status: unhandled
+
+### Body
+
+{body.strip()}
+
+### Expected automation behavior
+
+The next target project automation run should handle this message, update any related request state, then remove this entry from `docs/HUMAN_INBOX.md` and archive a concise resolution note in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
+"""
+    text = inbox_path.read_text(encoding="utf-8").rstrip()
+    inbox_path.write_text(text + "\n\n" + entry + "\n", encoding="utf-8")
+    return inbox_id
+
+
+if TK_AVAILABLE:
+
+    class DiffmoggerDashboard:
+        def __init__(self, root: Any, initial_target: str = "") -> None:
+            self.root = root
+            self.root.title("Diffmogger Dashboard")
+            self.root.geometry("1180x780")
+            self.root.minsize(900, 620)
+            self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
+            self.running = False
+            self.current_process: subprocess.Popen[str] | None = None
+            self.context_files: list[Path] = []
+            self.bootstrap_completed_targets: set[Path] = set()
+            self.log_line_count = 0
+
+            self.target_var = tk.StringVar(value=initial_target)
+            self.project_name_var = tk.StringVar(value="New Project")
+            self.existing_project_var = tk.BooleanVar(value=False)
+            self.human_bridge_enabled_var = tk.BooleanVar(value=True)
+            self.bridge_mode_var = tk.StringVar(value="file_only")
+            self.human_text_responses_var = tk.BooleanVar(value=True)
+            self.cadence_var = tk.StringVar(value=str(DEFAULT_CADENCE_MINUTES))
+            self.force_var = tk.BooleanVar(value=False)
+            self.worker_agents_var = tk.BooleanVar(value=True)
+            self.codex_workers_var = tk.BooleanVar(value=True)
+            self.status_var = tk.StringVar(value="No target loaded.")
+            self.schedule_status_var = tk.StringVar(value="Schedule: target not loaded.")
+            self.doc_choice_var = tk.StringVar(value="Automation Tasks")
+            self.human_doc_choice_var = tk.StringVar(value="Requests From Automation")
+            self.intent_var = tk.StringVar(value="General note")
+            self.prereq_summary_var = tk.StringVar(value="Run prerequisite checks before bootstrapping.")
+
+            self.text_fields: dict[str, Any] = {}
+            self.entry_fields: dict[str, Any] = {}
+
+            self._build_ui()
+            self.root.protocol("WM_DELETE_WINDOW", self.close_dashboard)
+            if initial_target:
+                self.load_project_state(Path(initial_target).expanduser(), announce=False)
+            else:
+                self.refresh_prerequisites()
+                self._set_run_automation_state()
+            self._drain_events()
+
+        def _build_ui(self) -> None:
+            self._configure_styles()
+            notebook = ttk.Notebook(self.root)
+            notebook.pack(fill="both", expand=True)
+
+            self.setup_tab = ttk.Frame(notebook, padding=12)
+            self.monitor_tab = ttk.Frame(notebook, padding=12)
+            self.human_tab = ttk.Frame(notebook, padding=12)
+            self.prereq_tab = ttk.Frame(notebook, padding=12)
+
+            notebook.add(self.setup_tab, text="Setup Wizard")
+            notebook.add(self.monitor_tab, text="Monitor")
+            notebook.add(self.human_tab, text="Messages")
+            notebook.add(self.prereq_tab, text="Readiness")
+
+            self._build_setup_tab()
+            self._build_monitor_tab()
+            self._build_human_tab()
+            self._build_prereq_tab()
+
+        def _configure_styles(self) -> None:
+            style = ttk.Style()
+            style.configure("Title.TLabel", font=("TkDefaultFont", 16, "bold"))
+            style.configure("Section.TLabel", font=("TkDefaultFont", 12, "bold"))
+            style.configure("Help.TLabel", font=("TkDefaultFont", 10))
+            style.configure("Card.TFrame", padding=10)
+
+        def _build_setup_tab(self) -> None:
+            self.setup_tab.columnconfigure(0, weight=1)
+            self.setup_tab.rowconfigure(2, weight=5, minsize=260)
+            self.setup_tab.rowconfigure(5, weight=1, minsize=120)
+            header = ttk.Label(
+                self.setup_tab,
+                text="New Project Setup",
+                style="Title.TLabel",
+            )
+            header.grid(row=0, column=0, sticky="ew")
+            ttk.Label(
+                self.setup_tab,
+                text="Describe the project clearly enough that Codex can make good first-run decisions, then choose where to create it.",
+                style="Help.TLabel",
+                wraplength=980,
+            ).grid(row=1, column=0, sticky="ew", pady=(2, 10))
+
+            setup_pages = ttk.Notebook(self.setup_tab)
+            setup_pages.grid(row=2, column=0, sticky="nsew")
+
+            basics = self._new_form_page(setup_pages, "1. Basics")
+            product = self._new_form_page(setup_pages, "2. Product")
+            rules = self._new_form_page(setup_pages, "3. Rules")
+            automation = self._new_form_page(setup_pages, "4. Run Config")
+            progression = self._new_form_page(setup_pages, "5. Progression")
+            context = self._new_form_page(setup_pages, "6. Context")
+
+            row = 0
+            row = self._add_entry(basics, row, "Project Name", self.project_name_var)
+            row = self._add_entry(basics, row, "Target Directory", self.target_var, browse=True)
+            project_mode_frame = ttk.Frame(basics)
+            project_mode_frame.grid(row=row, column=1, sticky="ew", pady=4)
+            project_mode_frame.columnconfigure(0, weight=1)
+            ttk.Label(basics, text="Project Type", style="Section.TLabel").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=4)
+            ttk.Checkbutton(
+                project_mode_frame,
+                text="Integrating into an existing project",
+                variable=self.existing_project_var,
+            ).grid(row=0, column=0, sticky="w")
+            project_mode_help = ttk.Label(
+                project_mode_frame,
+                text="For existing repos, Diffmogger keeps your current AGENTS.md and docs/DEVELOPMENT.md content, adding a managed automation block.",
+                style="Help.TLabel",
+                wraplength=680,
+                justify="left",
+            )
+            project_mode_help.grid(row=1, column=0, sticky="ew", pady=(3, 0))
+            project_mode_frame.bind(
+                "<Configure>",
+                lambda event, label=project_mode_help: label.configure(wraplength=max(320, event.width - 12)),
+            )
+            row += 1
+            row = self._add_text(
+                basics,
+                row,
+                "Product Goal",
+                "Build a local-first workspace that helps solo builders turn project goals into weekly boards, daily focus plans, and review summaries.",
+                help_text="Be specific enough for Codex to choose product decisions without asking you. Describe the problem, the core workflow, the value created, the rough product shape, and what a useful first version should accomplish.",
+                height=4,
+            )
+            row = self._add_text(
+                basics,
+                row,
+                "Target User",
+                "Solo founders, engineers, and creative builders managing one to three active projects.",
+                help_text="Describe who this is for, what they are trying to do, their current pain, their technical comfort, and what would make the product feel useful to them.",
+                height=4,
+            )
+
+            row = 0
+            row = self._add_text(
+                product,
+                row,
+                "Desired First Demo",
+                "A user can create a project, add goals, generate a weekly board from seed data, mark tasks done, and view a daily summary.",
+                help_text="Spell out the exact local path you want after bootstrap: what the user opens, clicks, enters, sees, exports, or verifies. Include fixture data or example content if useful.",
+                height=4,
+            )
+            row = self._add_text(
+                product,
+                row,
+                "Tech Preferences",
+                "- TypeScript\n- Next.js or another simple web app stack\n- Local JSON or SQLite storage for first demo\n- Minimal dependencies",
+                help_text="List preferred language, framework, storage, testing tools, styling approach, libraries to prefer or avoid, and whether Codex should follow an existing repo stack.",
+                height=4,
+            )
+            row = self._add_text(
+                product,
+                row,
+                "Verification Commands",
+                "- npm test\n- npm run lint\n- npm run build",
+                help_text="List expected checks, even if Codex may need to create them during bootstrap. Include tests, lint, typecheck, build, demo, or smoke scripts.",
+                height=4,
+            )
+
+            row = 0
+            row = self._add_text(
+                rules,
+                row,
+                "Hard Constraints",
+                "- Local-first demo\n- No paid services required\n- Keep setup under ten minutes",
+                help_text="List non-negotiable product, technical, schedule, architecture, data, licensing, platform, or local-first constraints.",
+                height=4,
+            )
+            row = self._add_text(
+                rules,
+                row,
+                "Safety Constraints",
+                "- Do not read .env\n- Do not send notifications externally in the first demo\n- Do not publish or deploy without approval",
+                help_text="List safety rules that should guide implementation. Include privacy, security, external side effects, compliance, or domain-risk limits.",
+                height=4,
+            )
+            row = self._add_text(
+                rules,
+                row,
+                "External Services",
+                "- Optional calendar integration later\n- Optional SMS/email reminders later",
+                help_text="List integrations that may matter now or later. Say whether each is required, optional, mocked, dry-run only, or blocked until human approval.",
+                height=4,
+            )
+            row = self._add_text(
+                rules,
+                row,
+                "Automation Must Never Do",
+                "- Never read secrets or .env files\n- Never spend money, deploy publicly, publish externally, or contact real users without explicit approval\n- Never delete user data or rewrite history without approval",
+                help_text="List absolute prohibitions. These become generated guardrails, so write them as direct commands.",
+                height=4,
+            )
+
+            row = 0
+            row = self._add_cadence_control(
+                automation,
+                row,
+                "Automation Cadence Minutes",
+                self.cadence_var,
+                help_text="Number of minutes between launchd runs. Must be an integer greater than 30.",
+            )
+
+            bridge_enabled_frame = ttk.Frame(automation)
+            bridge_enabled_frame.grid(row=row, column=1, sticky="w", pady=6)
+            ttk.Label(automation, text="Human Bridge Enabled", style="Section.TLabel").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=6)
+            ttk.Checkbutton(
+                bridge_enabled_frame,
+                text="Allow automation to ask for manual unlocks and receive replies",
+                variable=self.human_bridge_enabled_var,
+                command=self.refresh_prerequisites,
+            ).pack(side="left")
+            row += 1
+
+            bridge_label_frame = ttk.Frame(automation)
+            bridge_label_frame.grid(row=row, column=0, sticky="new", padx=(0, 12), pady=6)
+            ttk.Label(bridge_label_frame, text="Human Bridge Mode", style="Section.TLabel").pack(anchor="w")
+            ttk.Label(
+                bridge_label_frame,
+                text="Choose file-only for manual dashboard/Markdown replies, local notifier for SMS/WhatsApp, or disabled for no human queue.",
+                style="Help.TLabel",
+                wraplength=260,
+                justify="left",
+            ).pack(anchor="w", pady=(3, 0))
+            bridge = ttk.Combobox(
+                automation,
+                textvariable=self.bridge_mode_var,
+                values=["file_only", "local_notifier", "disabled"],
+                state="readonly",
+            )
+            bridge.grid(row=row, column=1, sticky="ew", pady=6)
+            bridge.bind("<<ComboboxSelected>>", lambda _event: self.refresh_prerequisites())
+            row += 1
+
+            text_response_frame = ttk.Frame(automation)
+            text_response_frame.grid(row=row, column=1, sticky="w", pady=6)
+            ttk.Label(automation, text="Notifier Text Responses", style="Section.TLabel").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=6)
+            ttk.Checkbutton(
+                text_response_frame,
+                text="Freeform human requests should receive SMS/WhatsApp responses when the notifier is available",
+                variable=self.human_text_responses_var,
+            ).pack(side="left")
+            row += 1
+
+            checks = ttk.LabelFrame(automation, text="Worker Agents")
+            checks.grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
+            ttk.Checkbutton(checks, text="Worker agents are allowed", variable=self.worker_agents_var).pack(side="left", padx=8, pady=8)
+            ttk.Checkbutton(checks, text="Codex CLI worker reports are expected on broad runs", variable=self.codex_workers_var).pack(side="left", padx=8, pady=8)
+            ttk.Checkbutton(checks, text="Overwrite existing scaffold files", variable=self.force_var).pack(side="left", padx=8, pady=8)
+            row += 1
+
+            row = 0
+            row = self._add_text(
+                progression,
+                row,
+                "Meaningful Deliverable",
+                "A runnable UI or local workflow improvement backed by tests, build, or a demo script.",
+                help_text="Define what counts as a real integrated increment. This prevents runs from stopping after tiny doc-only or placeholder changes.",
+                height=4,
+            )
+            row = self._add_text(
+                progression,
+                row,
+                "Beyond MVP",
+                "Add recurring review capsules, local import/export, richer planning views, and optional notification adapters behind feature gates.",
+                help_text="Describe what the automation should aim for after the first demo works. Mention product horizons, quality bar, integrations, polish, or ambitious extensions.",
+                height=4,
+            )
+            row = self._add_text(
+                progression,
+                row,
+                "Assumptions",
+                "- The first version does not need authentication\n- Local data is acceptable for the first demo",
+                help_text="List assumptions Codex may rely on until contradicted. These are useful for ambiguous product or technical choices.",
+                height=4,
+            )
+
+            context.columnconfigure(0, weight=1)
+            context.rowconfigure(0, weight=1)
+            row = 0
+            context_frame = ttk.LabelFrame(context, text="Additional Context Files")
+            context_frame.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=10)
+            context_frame.rowconfigure(0, weight=1)
+            context_frame.columnconfigure(0, weight=1)
+            self.context_listbox = tk.Listbox(context_frame, height=8)
+            self.context_listbox.grid(row=0, column=0, rowspan=3, sticky="nsew", padx=8, pady=8)
+            ttk.Button(context_frame, text="Add Files", command=self.add_context_files).grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 4))
+            ttk.Button(context_frame, text="Remove Selected", command=self.remove_context_file).grid(row=1, column=1, sticky="ew", padx=8, pady=4)
+            ttk.Label(
+                context_frame,
+                text="Files are copied into docs/context/ and indexed in docs/PROJECT_CONTEXT.md. Do not add secrets.",
+                wraplength=360,
+            ).grid(row=2, column=1, sticky="ew", padx=8, pady=(4, 8))
+            row += 1
+
+            action_row = ttk.Frame(self.setup_tab)
+            action_row.grid(row=3, column=0, sticky="ew", pady=(10, 6))
+            action_row.columnconfigure(0, weight=1)
+            primary_actions = ttk.Frame(action_row)
+            primary_actions.grid(row=0, column=0, sticky="ew")
+            schedule_actions = ttk.Frame(action_row)
+            schedule_actions.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+            self.scaffold_button = ttk.Button(
+                primary_actions,
+                text="Scaffold & Bootstrap",
+                command=self.start_scaffold_bootstrap,
+            )
+            self.open_project_button = ttk.Button(
+                primary_actions,
+                text="Open Diffmogger Project",
+                command=self.open_project,
+            )
+            self.cancel_button = ttk.Button(primary_actions, text="Cancel Current Dashboard Run", command=self.cancel_process, state="disabled")
+            refresh_button = ttk.Button(primary_actions, text="Refresh Dashboard", command=self.refresh_all)
+            self.run_automation_button = ttk.Button(
+                schedule_actions,
+                text="Start Scheduled Automation",
+                command=self.start_scheduled_automation,
+                state="disabled",
+            )
+            self.pause_automation_button = ttk.Button(
+                schedule_actions,
+                text="Pause Scheduled Automation",
+                command=self.pause_scheduled_automation,
+                state="disabled",
+            )
+            self.remove_schedule_button = ttk.Button(
+                schedule_actions,
+                text="Remove Schedule",
+                command=self.remove_scheduled_automation,
+                state="disabled",
+            )
+            self._wrap_button_row(
+                primary_actions,
+                [self.open_project_button, self.scaffold_button, self.cancel_button, refresh_button],
+                min_button_width=250,
+            )
+            self._wrap_button_row(
+                schedule_actions,
+                [self.run_automation_button, self.pause_automation_button, self.remove_schedule_button],
+                min_button_width=270,
+            )
+
+            schedule_status_frame = ttk.Frame(self.setup_tab)
+            schedule_status_frame.grid(row=4, column=0, sticky="ew", pady=(2, 8))
+            schedule_status_frame.columnconfigure(0, weight=1)
+            self.schedule_status_label = ttk.Label(
+                schedule_status_frame,
+                textvariable=self.schedule_status_var,
+                style="Help.TLabel",
+                justify="left",
+                wraplength=980,
+            )
+            self.schedule_status_label.grid(row=0, column=0, sticky="ew")
+            schedule_status_frame.bind(
+                "<Configure>",
+                lambda event: self.schedule_status_label.configure(wraplength=max(360, event.width - 8)),
+            )
+
+            log_frame = ttk.LabelFrame(self.setup_tab, text="Run Log")
+            log_frame.grid(row=5, column=0, sticky="nsew")
+            self.log_text = ScrolledText(log_frame, height=4, wrap="word")
+            self.log_text.pack(fill="both", expand=True)
+            self.log_text.configure(state="disabled")
+
+        def _wrap_button_row(
+            self,
+            frame: Any,
+            buttons: list[Any],
+            *,
+            min_button_width: int,
+        ) -> None:
+            state: dict[str, int | None] = {"columns": None}
+
+            def relayout(event: Any | None = None) -> None:
+                width = event.width if event is not None else frame.winfo_width()
+                columns = max(1, min(len(buttons), max(1, width // min_button_width)))
+                if state["columns"] == columns:
+                    return
+                state["columns"] = columns
+                for button in buttons:
+                    button.grid_forget()
+                for column in range(len(buttons)):
+                    frame.columnconfigure(column, weight=0, uniform="")
+                for index, button in enumerate(buttons):
+                    row, column = divmod(index, columns)
+                    frame.columnconfigure(column, weight=1, uniform=str(id(frame)))
+                    button.grid(
+                        row=row,
+                        column=column,
+                        sticky="ew",
+                        padx=(0 if column == 0 else 8, 0),
+                        pady=(0 if row == 0 else 6, 0),
+                    )
+
+            frame.bind("<Configure>", relayout)
+            frame.after_idle(relayout)
+
+        def _build_monitor_tab(self) -> None:
+            self.monitor_tab.columnconfigure(0, weight=1)
+            self.monitor_tab.rowconfigure(2, weight=1)
+
+            target_row = ttk.Frame(self.monitor_tab)
+            target_row.grid(row=0, column=0, sticky="ew")
+            target_row.columnconfigure(1, weight=1)
+            ttk.Label(target_row, text="Target Directory").grid(row=0, column=0, padx=(0, 8))
+            ttk.Entry(target_row, textvariable=self.target_var).grid(row=0, column=1, sticky="ew")
+            ttk.Button(target_row, text="Browse", command=self.browse_target).grid(row=0, column=2, padx=8)
+            ttk.Button(target_row, text="Refresh", command=self.refresh_all).grid(row=0, column=3)
+
+            summary = ttk.LabelFrame(self.monitor_tab, text="Status")
+            summary.grid(row=1, column=0, sticky="ew", pady=10)
+            summary.columnconfigure(0, weight=1)
+            ttk.Label(summary, textvariable=self.status_var, justify="left", wraplength=980).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+
+            viewer_frame = ttk.LabelFrame(self.monitor_tab, text="Markdown Viewer")
+            viewer_frame.grid(row=2, column=0, sticky="nsew")
+            viewer_frame.rowconfigure(1, weight=1)
+            viewer_frame.columnconfigure(0, weight=1)
+            doc_row = ttk.Frame(viewer_frame)
+            doc_row.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+            ttk.Combobox(
+                doc_row,
+                textvariable=self.doc_choice_var,
+                values=list(DOC_CHOICES.keys()),
+                state="readonly",
+                width=32,
+            ).pack(side="left")
+            ttk.Button(doc_row, text="Load", command=self.load_selected_doc).pack(side="left", padx=8)
+            self.markdown_text = ScrolledText(viewer_frame, wrap="word")
+            self.markdown_text.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+            self._configure_markdown_tags(self.markdown_text)
+            self.markdown_text.configure(state="disabled")
+
+        def _build_human_tab(self) -> None:
+            self.human_tab.columnconfigure(0, weight=1)
+            self.human_tab.rowconfigure(2, weight=1)
+
+            compose = ttk.LabelFrame(self.human_tab, text="Message The Automation")
+            compose.grid(row=0, column=0, sticky="ew")
+            compose.columnconfigure(1, weight=1)
+            ttk.Label(
+                compose,
+                text="Write a message for the next automation run. This is the dashboard-friendly way to reply when SMS/WhatsApp is disabled or unavailable.",
+                wraplength=980,
+                style="Help.TLabel",
+            ).grid(row=0, column=0, columnspan=4, sticky="w", padx=8, pady=(8, 4))
+            ttk.Label(compose, text="Related request").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+            self.reply_request_entry = ttk.Entry(compose)
+            self.reply_request_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=4)
+            ttk.Label(compose, text="Message type").grid(row=1, column=2, sticky="w", padx=8, pady=4)
+            ttk.Combobox(
+                compose,
+                textvariable=self.intent_var,
+                values=list(INTENT_CHOICES.keys()),
+                state="readonly",
+                width=18,
+            ).grid(row=1, column=3, sticky="ew", padx=8, pady=4)
+            ttk.Label(
+                compose,
+                text="Optional. Use the request id shown in Requests From Automation, such as HR-001.",
+                style="Help.TLabel",
+                wraplength=420,
+            ).grid(row=2, column=1, sticky="w", padx=8, pady=(0, 4))
+            ttk.Label(compose, text="Your message").grid(row=3, column=0, sticky="nw", padx=8, pady=4)
+            self.reply_body = ScrolledText(compose, height=5, wrap="word")
+            self.reply_body.grid(row=3, column=1, columnspan=3, sticky="ew", padx=8, pady=4)
+            self.reply_body.configure(font=("TkDefaultFont", 11))
+            ttk.Label(
+                compose,
+                text="Examples: 'HR-001 DONE, key added locally.' or 'Please focus next run on the demo polish.'",
+                style="Help.TLabel",
+                wraplength=720,
+            ).grid(row=4, column=1, columnspan=3, sticky="w", padx=8, pady=(0, 6))
+            ttk.Button(compose, text="Send To Next Run", command=self.add_inbox_reply).grid(row=5, column=1, sticky="w", padx=8, pady=(4, 8))
+            ttk.Button(compose, text="Check Texting Service", command=self.check_notifier_health).grid(row=5, column=2, sticky="w", padx=8, pady=(4, 8))
+
+            doc_row = ttk.Frame(self.human_tab)
+            doc_row.grid(row=1, column=0, sticky="ew", pady=8)
+            ttk.Label(doc_row, text="Conversation view").pack(side="left", padx=(0, 8))
+            ttk.Combobox(
+                doc_row,
+                textvariable=self.human_doc_choice_var,
+                values=list(HUMAN_DOC_CHOICES.keys()),
+                state="readonly",
+                width=34,
+            ).pack(side="left")
+            ttk.Button(doc_row, text="Load", command=self.load_selected_human_doc).pack(side="left", padx=8)
+            ttk.Button(doc_row, text="Refresh", command=self.refresh_human).pack(side="left")
+
+            self.human_text = ScrolledText(self.human_tab, wrap="word")
+            self.human_text.grid(row=2, column=0, sticky="nsew")
+            self._configure_markdown_tags(self.human_text)
+            self.human_text.configure(state="disabled")
+
+        def _build_prereq_tab(self) -> None:
+            self.prereq_tab.columnconfigure(0, weight=1)
+            self.prereq_tab.rowconfigure(2, weight=1)
+            top = ttk.Frame(self.prereq_tab)
+            top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+            ttk.Label(
+                top,
+                text="Readiness Checks",
+                style="Title.TLabel",
+            ).pack(side="left")
+            ttk.Button(top, text="Check Prerequisites", command=self.refresh_prerequisites).pack(side="right")
+            ttk.Label(
+                self.prereq_tab,
+                textvariable=self.prereq_summary_var,
+                style="Help.TLabel",
+                wraplength=980,
+            ).grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+            table_frame = ttk.Frame(self.prereq_tab)
+            table_frame.grid(row=2, column=0, sticky="nsew")
+            table_frame.rowconfigure(0, weight=1)
+            table_frame.columnconfigure(0, weight=1)
+            self.prereq_tree = ttk.Treeview(
+                table_frame,
+                columns=("status", "required", "check", "detail"),
+                show="headings",
+                selectmode="browse",
+            )
+            self.prereq_tree.heading("status", text="Status")
+            self.prereq_tree.heading("required", text="Type")
+            self.prereq_tree.heading("check", text="Check")
+            self.prereq_tree.heading("detail", text="Detail")
+            self.prereq_tree.column("status", width=90, stretch=False)
+            self.prereq_tree.column("required", width=90, stretch=False)
+            self.prereq_tree.column("check", width=240, stretch=False)
+            self.prereq_tree.column("detail", width=720, stretch=True)
+            self.prereq_tree.tag_configure("ok", foreground="#2e7d32")
+            self.prereq_tree.tag_configure("missing", foreground="#b00020")
+            self.prereq_tree.tag_configure("check", foreground="#9a6700")
+            self.prereq_tree.grid(row=0, column=0, sticky="nsew")
+            scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.prereq_tree.yview)
+            scrollbar.grid(row=0, column=1, sticky="ns")
+            self.prereq_tree.configure(yscrollcommand=scrollbar.set)
+
+        def _add_entry(
+            self,
+            parent: Any,
+            row: int,
+            label: str,
+            var: Any,
+            browse: bool = False,
+            help_text: str = "",
+        ) -> int:
+            label_frame = ttk.Frame(parent)
+            label_frame.grid(row=row, column=0, sticky="nw", padx=(0, 8), pady=4)
+            ttk.Label(label_frame, text=label).pack(anchor="w")
+            if help_text:
+                ttk.Label(
+                    label_frame,
+                    text=help_text,
+                    style="Help.TLabel",
+                    wraplength=260,
+                    justify="left",
+                ).pack(anchor="w", pady=(3, 0))
+            frame = ttk.Frame(parent)
+            frame.grid(row=row, column=1, sticky="ew", pady=4)
+            frame.columnconfigure(0, weight=1)
+            entry = ttk.Entry(frame, textvariable=var)
+            entry.grid(row=0, column=0, sticky="ew")
+            if browse:
+                ttk.Button(frame, text="Browse", command=self.browse_target).grid(row=0, column=1, padx=(8, 0))
+            self.entry_fields[label] = entry
+            return row + 1
+
+        def _add_cadence_control(
+            self,
+            parent: Any,
+            row: int,
+            label: str,
+            var: Any,
+            help_text: str,
+        ) -> int:
+            label_frame = ttk.Frame(parent)
+            label_frame.grid(row=row, column=0, sticky="nw", padx=(0, 8), pady=4)
+            ttk.Label(label_frame, text=label).pack(anchor="w")
+            ttk.Label(
+                label_frame,
+                text=help_text,
+                style="Help.TLabel",
+                wraplength=260,
+                justify="left",
+            ).pack(anchor="w", pady=(3, 0))
+
+            frame = ttk.Frame(parent)
+            frame.grid(row=row, column=1, sticky="ew", pady=4)
+            validate_digits = self.root.register(lambda value: value == "" or value.isdigit())
+            spinbox_cls = getattr(ttk, "Spinbox", tk.Spinbox)
+            spinbox = spinbox_cls(
+                frame,
+                from_=MIN_CADENCE_MINUTES,
+                to=MAX_CADENCE_MINUTES,
+                increment=15,
+                textvariable=var,
+                width=8,
+                validate="key",
+                validatecommand=(validate_digits, "%P"),
+            )
+            spinbox.grid(row=0, column=0, sticky="w")
+            ttk.Label(frame, text="minutes between runs", style="Help.TLabel").grid(
+                row=0,
+                column=1,
+                sticky="w",
+                padx=(8, 0),
+            )
+            self.entry_fields[label] = spinbox
+            return row + 1
+
+        def _new_form_page(self, notebook: Any, title: str) -> Any:
+            outer = ttk.Frame(notebook)
+            outer.rowconfigure(0, weight=1)
+            outer.columnconfigure(0, weight=1)
+            background = ttk.Style().lookup("TFrame", "background") or self.root.cget("background")
+            canvas = tk.Canvas(outer, borderwidth=0, highlightthickness=0, background=background)
+            scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
+            canvas.grid(row=0, column=0, sticky="nsew")
+            scrollbar.grid(row=0, column=1, sticky="ns")
+
+            page = ttk.Frame(canvas, padding=10)
+            page.columnconfigure(1, weight=1)
+            window_id = canvas.create_window((0, 0), window=page, anchor="nw")
+            wheel_bound_widgets: set[str] = set()
+
+            def update_scrollbar() -> None:
+                needs_scroll = page.winfo_reqheight() > canvas.winfo_height()
+                if needs_scroll:
+                    scrollbar.grid(row=0, column=1, sticky="ns")
+                    canvas.configure(yscrollcommand=scrollbar.set)
+                else:
+                    scrollbar.grid_remove()
+                    canvas.yview_moveto(0)
+
+            def on_page_configure(_event: Any) -> None:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                bind_mousewheel_tree(page)
+                update_scrollbar()
+
+            def on_canvas_configure(event: Any) -> None:
+                canvas.itemconfigure(window_id, width=event.width)
+                update_scrollbar()
+
+            def on_mousewheel(event: Any) -> str | None:
+                if page.winfo_reqheight() <= canvas.winfo_height():
+                    return None
+                delta = getattr(event, "delta", 0)
+                if delta == 0:
+                    return None
+                direction = -1 if delta > 0 else 1
+                canvas.yview_scroll(direction * 3, "units")
+                return "break"
+
+            def on_scroll_up(_event: Any) -> str | None:
+                if page.winfo_reqheight() <= canvas.winfo_height():
+                    return None
+                canvas.yview_scroll(-3, "units")
+                return "break"
+
+            def on_scroll_down(_event: Any) -> str | None:
+                if page.winfo_reqheight() <= canvas.winfo_height():
+                    return None
+                canvas.yview_scroll(3, "units")
+                return "break"
+
+            def bind_mousewheel_tree(widget: Any) -> None:
+                widget_id = str(widget)
+                if widget_id not in wheel_bound_widgets:
+                    widget.bind("<MouseWheel>", on_mousewheel)
+                    widget.bind("<Button-4>", on_scroll_up)
+                    widget.bind("<Button-5>", on_scroll_down)
+                    wheel_bound_widgets.add(widget_id)
+                for child in widget.winfo_children():
+                    bind_mousewheel_tree(child)
+
+            page.bind("<Configure>", on_page_configure)
+            canvas.bind("<Configure>", on_canvas_configure)
+            canvas.bind("<MouseWheel>", on_mousewheel)
+            canvas.bind("<Button-4>", on_scroll_up)
+            canvas.bind("<Button-5>", on_scroll_down)
+            notebook.add(outer, text=title)
+            return page
+
+        def _add_section(self, parent: Any, row: int, title: str) -> int:
+            ttk.Label(parent, text=title, style="Title.TLabel").grid(
+                row=row,
+                column=0,
+                columnspan=2,
+                sticky="ew",
+                pady=(16, 6),
+            )
+            return row + 1
+
+        def _add_text(
+            self,
+            parent: Any,
+            row: int,
+            label: str,
+                default: str,
+                *,
+                help_text: str = "",
+                height: int = 4,
+        ) -> int:
+            label_frame = ttk.Frame(parent)
+            label_frame.grid(row=row, column=0, sticky="new", padx=(0, 12), pady=6)
+            ttk.Label(label_frame, text=label, style="Section.TLabel").pack(anchor="w")
+            if help_text:
+                ttk.Label(
+                    label_frame,
+                    text=help_text,
+                    style="Help.TLabel",
+                    wraplength=260,
+                    justify="left",
+                ).pack(anchor="w", pady=(3, 0))
+            text = tk.Text(parent, height=height, wrap="word", undo=True)
+            text.grid(row=row, column=1, sticky="ew", pady=6)
+            text.configure(font=("TkDefaultFont", 11))
+            text.insert("1.0", default)
+            self.text_fields[label] = text
+            return row + 1
+
+        def _text_value(self, label: str) -> str:
+            return self.text_fields[label].get("1.0", "end").strip()
+
+        def browse_target(self) -> None:
+            selected = filedialog.askdirectory(title="Choose target project directory")
+            if selected:
+                target = Path(selected).expanduser()
+                if self._target_has_dashboard_state(target):
+                    self.load_project_state(target, announce=True)
+                else:
+                    self.target_var.set(str(target))
+                    self.refresh_prerequisites()
+                    self._set_run_automation_state()
+
+        def open_project(self) -> None:
+            selected = filedialog.askdirectory(title="Open Diffmogger-managed project")
+            if selected:
+                self.load_project_state(Path(selected).expanduser(), announce=True)
+
+        def _target_has_dashboard_state(self, target: Path) -> bool:
+            target = target.expanduser()
+            return (
+                dashboard_state_path(target).exists()
+                or (target / ".agentic" / "project_intake.json").exists()
+                or (target / "docs" / "CODEX_AUTOMATION_TASKS.md").exists()
+            )
+
+        def load_project_state(self, target: Path, *, announce: bool) -> None:
+            target = target.expanduser().resolve()
+            self.target_var.set(str(target))
+            intake_path = target / ".agentic" / "project_intake.json"
+            state_path = dashboard_state_path(target)
+            loaded = False
+
+            if intake_path.exists():
+                try:
+                    intake = json.loads(intake_path.read_text(encoding="utf-8"))
+                    self._apply_intake_to_form(intake)
+                    loaded = True
+                except (OSError, json.JSONDecodeError) as exc:
+                    self._append_log(f"Could not load {intake_path}: {exc}")
+
+            if state_path.exists():
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    self._apply_dashboard_state(state)
+                    loaded = True
+                except (OSError, json.JSONDecodeError) as exc:
+                    self._append_log(f"Could not load {state_path}: {exc}")
+
+            self.context_files.clear()
+            self.context_listbox.delete(0, "end")
+            self.refresh_all()
+            if loaded:
+                self.write_dashboard_state(target, last_action="opened")
+                if announce:
+                    self._append_log(f"Opened Diffmogger project state from {target}.")
+            elif announce:
+                messagebox.showwarning(
+                    "No Diffmogger state found",
+                    "The selected directory does not have Diffmogger dashboard state or project intake files yet.",
+                )
+
+        def _apply_intake_to_form(self, intake: dict[str, Any]) -> None:
+            self.project_name_var.set(str(intake.get("project_name") or "New Project"))
+            self.existing_project_var.set(str(intake.get("project_mode") or "fresh_project") == "existing_project")
+            self._set_text_field("Product Goal", intake.get("product_goal", ""))
+            self._set_text_field("Target User", intake.get("target_user", ""))
+            self._set_text_field("Desired First Demo", intake.get("desired_first_demo", ""))
+            self._set_text_field("Tech Preferences", intake.get("tech_preferences", []))
+            self._set_text_field("Hard Constraints", intake.get("hard_constraints", []))
+            self._set_text_field("Safety Constraints", intake.get("safety_constraints", []))
+            self._set_text_field("External Services", intake.get("external_services", []))
+            self._set_text_field("Verification Commands", intake.get("verification_commands", []))
+            self._set_text_field("Automation Must Never Do", intake.get("automation_must_never_do", []))
+            self._set_text_field("Meaningful Deliverable", intake.get("meaningful_deliverable", ""))
+            self._set_text_field("Beyond MVP", intake.get("beyond_mvp", ""))
+            self._set_text_field("Assumptions", intake.get("assumptions", []))
+
+            mode = str(intake.get("human_bridge_mode") or "file_only")
+            if mode not in {"file_only", "local_notifier", "disabled"}:
+                mode = "file_only"
+            enabled = bool(intake.get("human_bridge_enabled", mode != "disabled")) and mode != "disabled"
+            self.human_bridge_enabled_var.set(enabled)
+            self.bridge_mode_var.set(mode if enabled else "disabled")
+            self.human_text_responses_var.set(bool(intake.get("human_requested_text_responses", True)))
+            self.worker_agents_var.set(bool(intake.get("worker_agents_allowed", True)))
+            self.codex_workers_var.set(bool(intake.get("codex_cli_workers_expected_on_broad_runs", True)))
+            self.cadence_var.set(str(cadence_minutes_from_text(intake.get("desired_cadence"))))
+
+        def _apply_dashboard_state(self, state: dict[str, Any]) -> None:
+            cadence = state.get("cadence_minutes")
+            if cadence is not None:
+                self.cadence_var.set(str(cadence_minutes_from_text(cadence)))
+            if "overwrite_existing_scaffold_files" in state:
+                self.force_var.set(bool(state.get("overwrite_existing_scaffold_files")))
+
+        def _set_text_field(self, label: str, value: Any) -> None:
+            if label not in self.text_fields:
+                return
+            if isinstance(value, list):
+                text = "\n".join(f"- {item}" for item in value)
+            else:
+                text = str(value or "")
+            widget = self.text_fields[label]
+            widget.delete("1.0", "end")
+            widget.insert("1.0", text)
+
+        def write_dashboard_state(self, target: Path, *, last_action: str) -> None:
+            target = target.expanduser().resolve()
+            if target == KIT_ROOT:
+                self._append_log("Skipped dashboard state write for the Diffmogger kit repo.")
+                return
+            try:
+                cadence_minutes = self.cadence_minutes()
+            except ValueError:
+                cadence_minutes = DEFAULT_CADENCE_MINUTES
+            label = launchd_label(target)
+            plist_path = launchd_plist_path(label)
+            ready, reason = self._automation_ready(target)
+            state = {
+                "schema_version": 1,
+                "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "project_name": self.project_name_var.get().strip() or "New Project",
+                "project_mode": "existing_project" if bool(self.existing_project_var.get()) else "fresh_project",
+                "cadence_minutes": cadence_minutes,
+                "human_bridge_enabled": bool(self.human_bridge_enabled_var.get()),
+                "human_bridge_mode": self.bridge_mode_var.get(),
+                "human_requested_text_responses": bool(self.human_text_responses_var.get()),
+                "worker_agents_allowed": bool(self.worker_agents_var.get()),
+                "codex_cli_workers_expected_on_broad_runs": bool(self.codex_workers_var.get()),
+                "overwrite_existing_scaffold_files": bool(self.force_var.get()),
+                "last_action": last_action,
+                "automation_ready": ready,
+                "automation_ready_reason": reason,
+                "launchd_label": label,
+                "launchd_plist": str(plist_path),
+                "launchd_loaded": self._launchd_loaded(label),
+                "launchd_disabled": self._launchd_disabled(label),
+            }
+            path = dashboard_state_path(target)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        def close_dashboard(self) -> None:
+            target_text = self.target_var.get().strip()
+            if target_text:
+                target = Path(target_text).expanduser()
+                if self._target_has_dashboard_state(target):
+                    try:
+                        self.write_dashboard_state(target, last_action="closed")
+                    except Exception:
+                        pass
+            self.root.destroy()
+
+        def add_context_files(self) -> None:
+            paths = filedialog.askopenfilenames(
+                title="Choose additional project context files",
+                filetypes=[
+                    ("Context files", "*.pdf *.md *.txt *.csv *.json *.docx *.pptx *.xlsx"),
+                    ("All files", "*.*"),
+                ],
+            )
+            existing = {path.expanduser().resolve() for path in self.context_files}
+            for raw in paths:
+                path = Path(raw).expanduser().resolve()
+                if path not in existing:
+                    self.context_files.append(path)
+                    self.context_listbox.insert("end", str(path))
+                    existing.add(path)
+
+        def remove_context_file(self) -> None:
+            selected = list(self.context_listbox.curselection())
+            for index in reversed(selected):
+                self.context_listbox.delete(index)
+                del self.context_files[index]
+
+        def cadence_minutes(self) -> int:
+            return parse_cadence_seconds(self.cadence_var.get()) // 60
+
+        def collect_intake(self) -> dict[str, Any]:
+            mode = self.bridge_mode_var.get()
+            bridge_enabled = bool(self.human_bridge_enabled_var.get()) and mode != "disabled"
+            context_names = [f"docs/context/{safe_context_filename(path.name)}" for path in self.context_files]
+            cadence_minutes = self.cadence_minutes()
+            return {
+                "project_name": self.project_name_var.get().strip() or "New Project",
+                "project_mode": "existing_project" if bool(self.existing_project_var.get()) else "fresh_project",
+                "product_goal": self._text_value("Product Goal"),
+                "target_user": self._text_value("Target User"),
+                "desired_first_demo": self._text_value("Desired First Demo"),
+                "tech_preferences": split_lines(self._text_value("Tech Preferences")),
+                "hard_constraints": split_lines(self._text_value("Hard Constraints")),
+                "safety_constraints": split_lines(self._text_value("Safety Constraints")),
+                "automation_must_never_do": split_lines(self._text_value("Automation Must Never Do")),
+                "external_services": split_lines(self._text_value("External Services")),
+                "verification_commands": split_lines(self._text_value("Verification Commands")),
+                "desired_cadence": f"every {cadence_minutes} minutes",
+                "human_bridge_enabled": bridge_enabled,
+                "human_bridge_mode": mode if bridge_enabled else "disabled",
+                "human_requested_text_responses": bool(self.human_text_responses_var.get()),
+                "worker_agents_allowed": bool(self.worker_agents_var.get()),
+                "codex_cli_workers_expected_on_broad_runs": bool(self.codex_workers_var.get()),
+                "meaningful_deliverable": self._text_value("Meaningful Deliverable"),
+                "beyond_mvp": self._text_value("Beyond MVP"),
+                "assumptions": split_lines(self._text_value("Assumptions")),
+                "additional_context_files": context_names,
+            }
+
+        def refresh_prerequisites(self) -> None:
+            target_text = self.target_var.get().strip() or str(Path.cwd() / "my-project")
+            target = Path(target_text).expanduser()
+            mode = self.bridge_mode_var.get() if self.human_bridge_enabled_var.get() else "disabled"
+            items = check_prerequisites(target, mode)
+            self._show_prerequisites(items)
+
+        def _show_prerequisites(self, items: list[PrerequisiteItem]) -> None:
+            if not hasattr(self, "prereq_tree"):
+                return
+            for item_id in self.prereq_tree.get_children():
+                self.prereq_tree.delete(item_id)
+
+            required = [item for item in items if item.required]
+            optional = [item for item in items if not item.required]
+            required_missing = [item for item in required if not item.ok]
+            advisory_attention = [item for item in optional if not item.ok]
+            if required_missing:
+                self.prereq_summary_var.set(
+                    f"{len(required_missing)} required check(s) need attention before bootstrapping."
+                )
+            elif advisory_attention:
+                self.prereq_summary_var.set(
+                    "Required checks passed. Review advisory items before scheduling recurring runs."
+                )
+            else:
+                self.prereq_summary_var.set(
+                    "All required checks passed. You can start the scaffold/bootstrap pipeline."
+                )
+
+            for item in items:
+                if item.ok:
+                    status = "OK"
+                    tag = "ok"
+                elif item.required:
+                    status = "Missing"
+                    tag = "missing"
+                else:
+                    status = "Review"
+                    tag = "check"
+                kind = "Required" if item.required else "Advisory"
+                self.prereq_tree.insert(
+                    "",
+                    "end",
+                    values=(status, kind, item.name, item.detail),
+                    tags=(tag,),
+                )
+
+        def start_scaffold_bootstrap(self) -> None:
+            if self.running:
+                messagebox.showinfo("Bootstrap running", "A scaffold/bootstrap pipeline is already running.")
+                return
+            target_text = self.target_var.get().strip()
+            if not target_text:
+                messagebox.showerror("Missing target", "Choose where to create the target project directory.")
+                return
+            target = Path(target_text).expanduser().resolve()
+            try:
+                intake = self.collect_intake()
+            except ValueError as exc:
+                messagebox.showerror("Invalid automation cadence", str(exc))
+                return
+            items = check_prerequisites(target, intake["human_bridge_mode"])
+            self._show_prerequisites(items)
+            failures = required_failures(items)
+            if failures:
+                messagebox.showerror(
+                    "Prerequisites missing",
+                    "Fix required prerequisites before starting automation:\n\n"
+                    + "\n".join(f"- {item.name}: {item.detail}" for item in failures),
+                )
+                return
+            advisory = [item for item in items if not item.required and not item.ok]
+            if advisory:
+                proceed = messagebox.askyesno(
+                    "Advisory checks",
+                    "Some advisory checks need attention. Continue anyway?\n\n"
+                    + "\n".join(f"- {item.name}: {item.detail}" for item in advisory),
+                )
+                if not proceed:
+                    return
+
+            target.mkdir(parents=True, exist_ok=True)
+            self.write_dashboard_state(target, last_action="scaffold_bootstrap_started")
+            self.running = True
+            self.open_project_button.configure(state="disabled")
+            self.scaffold_button.configure(state="disabled")
+            self.run_automation_button.configure(state="disabled")
+            self.pause_automation_button.configure(state="disabled")
+            self.remove_schedule_button.configure(state="disabled")
+            self.cancel_button.configure(state="normal")
+            self._append_log("Starting combined scaffold/bootstrap pipeline.")
+            thread = threading.Thread(
+                target=self._scaffold_bootstrap_worker,
+                args=(target, intake, bool(self.force_var.get()), list(self.context_files)),
+                daemon=True,
+            )
+            thread.start()
+
+        def _scaffold_bootstrap_worker(
+            self,
+            target: Path,
+            intake: dict[str, Any],
+            force: bool,
+            context_paths: list[Path],
+        ) -> None:
+            try:
+                self._thread_log(f"Target: {target}")
+                target.mkdir(parents=True, exist_ok=True)
+                context_index_existed = (target / "docs" / "PROJECT_CONTEXT.md").exists()
+                records = copy_context_files(target, context_paths, self._thread_log)
+                intake["additional_context_files"] = [record.rel_path for record in records]
+
+                agentic_dir = target / ".agentic"
+                agentic_dir.mkdir(parents=True, exist_ok=True)
+                intake_path = agentic_dir / "project_intake.json"
+                intake_path.write_text(json.dumps(intake, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                self._thread_log("Wrote .agentic/project_intake.json")
+
+                scaffold_module = load_scaffold_module()
+                values = scaffold_module.placeholders(intake)
+                written = scaffold_module.scaffold(target, values, force)
+                self._thread_log(f"Scaffolded {len(written)} files.")
+                for path in written[:20]:
+                    self._thread_log(f"  wrote {path.relative_to(target)}")
+                if len(written) > 20:
+                    self._thread_log(f"  ... {len(written) - 20} more files")
+
+                context_path = target / "docs" / "PROJECT_CONTEXT.md"
+                if records and (force or not context_index_existed):
+                    context_text = render_project_context(intake["project_name"], records)
+                    context_path.write_text(context_text, encoding="utf-8")
+                    self._thread_log("Updated docs/PROJECT_CONTEXT.md with imported context files.")
+                elif records:
+                    existing_context = context_path.read_text(encoding="utf-8", errors="replace") if context_path.exists() else ""
+                    context_path.write_text(
+                        upsert_context_imports(existing_context, intake["project_name"], records),
+                        encoding="utf-8",
+                    )
+                    self._thread_log("Updated managed context-file index in docs/PROJECT_CONTEXT.md.")
+
+                check_cmd = [
+                    sys.executable,
+                    str(CHECK_REQUIRED_SCRIPT),
+                    "--human-bridge-mode",
+                    intake["human_bridge_mode"],
+                    str(target),
+                ]
+                check_code = self._run_command(check_cmd, cwd=KIT_ROOT)
+                if check_code != 0:
+                    raise RuntimeError("Required-file check failed; bootstrap was not started.")
+
+                prompt_path = target / "docs" / "INITIAL_BOOTSTRAP_PROMPT.md"
+                prompt = prompt_path.read_text(encoding="utf-8")
+                self._thread_log("Starting Codex bootstrap run.")
+                code = self._run_command(["codex", "exec", "--full-auto", "--skip-git-repo-check", prompt], cwd=target)
+                if code != 0:
+                    raise RuntimeError(f"Codex bootstrap exited with code {code}.")
+                self._thread_log("Codex bootstrap completed.")
+                self.events.put(("bootstrap_done", str(target)))
+                self.events.put(("refresh", None))
+            except Exception as exc:
+                self._thread_log(f"ERROR: {exc}")
+            finally:
+                self.current_process = None
+                self.events.put(("done", None))
+
+        def _run_command(self, cmd: list[str], cwd: Path) -> int:
+            self._thread_log("$ " + self._format_command_for_log(cmd))
+            process = subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                bufsize=1,
+                start_new_session=True,
+            )
+            self.current_process = process
+            assert process.stdout is not None
+            while process.poll() is None:
+                self._read_available_process_output(process, timeout=0.12)
+            code = process.wait()
+            self._terminate_process_group(
+                process,
+                reason="command completed; cleaning up lingering child processes",
+                from_thread=True,
+                force=False,
+            )
+            self._read_available_process_output(process, timeout=0)
+            return code
+
+        def _format_command_for_log(self, cmd: list[str]) -> str:
+            rendered: list[str] = []
+            for part in cmd:
+                if len(part) > 240:
+                    rendered.append(f"<{len(part)} chars omitted>")
+                else:
+                    rendered.append(part)
+            return " ".join(rendered)
+
+        def _read_available_process_output(
+            self,
+            process: subprocess.Popen[str],
+            *,
+            timeout: float,
+        ) -> None:
+            if process.stdout is None:
+                return
+            try:
+                ready, _, _ = select.select([process.stdout], [], [], timeout)
+            except (OSError, ValueError):
+                return
+            while ready:
+                line = process.stdout.readline()
+                if not line:
+                    return
+                self._thread_log(line.rstrip())
+                try:
+                    ready, _, _ = select.select([process.stdout], [], [], 0)
+                except (OSError, ValueError):
+                    return
+
+        def _terminate_process_group(
+            self,
+            process: subprocess.Popen[str],
+            *,
+            reason: str,
+            from_thread: bool,
+            force: bool,
+        ) -> None:
+            def emit(message: str) -> None:
+                if from_thread:
+                    self._thread_log(message)
+                else:
+                    self._append_log(message)
+
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+            except PermissionError as exc:
+                emit(f"Could not terminate process group after {reason}: {exc}")
+                return
+            except OSError:
+                return
+
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    force = True
+
+            if force:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    emit(f"Force-killed dashboard-launched process group after {reason}.")
+                except ProcessLookupError:
+                    pass
+                except OSError as exc:
+                    emit(f"Could not force-kill process group after {reason}: {exc}")
+                return
+
+            time.sleep(0.15)
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                return
+            except OSError:
+                return
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                emit(f"Cleaned up lingering child processes after {reason}.")
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                emit(f"Could not clean up lingering child processes after {reason}: {exc}")
+
+        def cancel_process(self) -> None:
+            if self.current_process and self.current_process.poll() is None:
+                self._terminate_process_group(
+                    self.current_process,
+                    reason="dashboard cancellation",
+                    from_thread=False,
+                    force=True,
+                )
+                self._append_log("Sent terminate signal to dashboard-launched process group.")
+
+        def refresh_all(self) -> None:
+            self.refresh_prerequisites()
+            self.refresh_monitor()
+            self.load_selected_doc()
+            self.refresh_human()
+            self._set_run_automation_state()
+
+        def refresh_monitor(self) -> None:
+            target = Path(self.target_var.get().strip() or ".").expanduser()
+            task_path = target / "docs" / "CODEX_AUTOMATION_TASKS.md"
+            if not task_path.exists():
+                self.status_var.set("No generated automation task file found for the selected target.")
+                self._set_run_automation_state()
+                return
+            text = task_path.read_text(encoding="utf-8", errors="replace")
+            status = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", text, re.MULTILINE)
+            updated = re.search(r"^Last updated:\s*(.+)", text, re.MULTILINE)
+            horizon = re.search(r"^- Current horizon:\s*(.+)", text, re.MULTILINE)
+            horizon_decision = re.search(r"^- Advancement decision:\s*(.+)", text, re.MULTILINE)
+            requests_path = target / "docs" / "HUMAN_REQUESTS.md"
+            inbox_path = target / "docs" / "HUMAN_INBOX.md"
+            outbox_path = target / "docs" / "HUMAN_OUTBOX.md"
+            request_count = self._count_marker(requests_path, r"^##\s+HR-")
+            inbox_count = self._count_marker(inbox_path, r"status:\s*unhandled")
+            outbox_count = self._count_marker(outbox_path, r"^##\s+OUTBOX-")
+            worker_reports = sorted((target / "target" / "agent_runs").glob("*/worker_*.md")) if (target / "target" / "agent_runs").exists() else []
+            parts = [
+                f"Status: {status.group(1) if status else 'unknown'}",
+                f"Horizon: {horizon.group(1) if horizon else 'unknown'}",
+                f"Horizon decision: {horizon_decision.group(1) if horizon_decision else 'unknown'}",
+                f"Last updated: {updated.group(1) if updated else 'unknown'}",
+                f"Pending request headings: {request_count}",
+                f"Unhandled inbox entries: {inbox_count}",
+                f"Outbound records: {outbox_count}",
+                f"Worker reports: {len(worker_reports)}",
+            ]
+            self.status_var.set("  |  ".join(parts))
+            self._set_run_automation_state()
+
+        def _count_marker(self, path: Path, pattern: str) -> int:
+            if not path.exists():
+                return 0
+            text = path.read_text(encoding="utf-8", errors="replace")
+            return len(re.findall(pattern, text, re.MULTILINE))
+
+        def load_selected_doc(self) -> None:
+            target = Path(self.target_var.get().strip() or ".").expanduser()
+            rel = DOC_CHOICES.get(self.doc_choice_var.get(), "docs/CODEX_AUTOMATION_TASKS.md")
+            self._load_markdown_file(self.markdown_text, target / rel)
+
+        def load_selected_human_doc(self) -> None:
+            target = Path(self.target_var.get().strip() or ".").expanduser()
+            rel = HUMAN_DOC_CHOICES.get(self.human_doc_choice_var.get(), "docs/HUMAN_REQUESTS.md")
+            self._load_markdown_file(self.human_text, target / rel)
+
+        def refresh_human(self) -> None:
+            self.load_selected_human_doc()
+
+        def _automation_ready(self, target: Path) -> tuple[bool, str]:
+            target = target.expanduser().resolve()
+            required = [
+                target / ".agentic" / "project_intake.json",
+                target / ".agentic" / "automation_prompt.md",
+                target / "docs" / "INITIAL_BOOTSTRAP_PROMPT.md",
+                target / "docs" / "CODEX_AUTOMATION_TASKS.md",
+                target / "scripts" / "run_codex_automation.sh",
+            ]
+            missing = [path.relative_to(target).as_posix() for path in required if not path.exists()]
+            if missing:
+                return False, "Missing " + ", ".join(missing)
+            task_text = (target / "docs" / "CODEX_AUTOMATION_TASKS.md").read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+            if "Current baseline: not bootstrapped yet" in task_text:
+                return False, "Bootstrap has not completed yet."
+            status_match = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", task_text, re.MULTILINE)
+            if not status_match:
+                return False, "Missing AUTOMATION_STATUS in docs/CODEX_AUTOMATION_TASKS.md."
+            status = status_match.group(1).strip().upper()
+            if status not in SCHEDULABLE_STATUSES:
+                return False, f"Automation status is {status}; scheduling requires ACTIVE or ACTIVE_WITH_PENDING_USER_INPUT."
+            return True, "Ready."
+
+        def _launchd_loaded(self, label: str) -> bool:
+            if sys.platform != "darwin":
+                return False
+            result = subprocess.run(
+                ["launchctl", "print", launchd_service_target(label)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return result.returncode == 0
+
+        def _launchd_disabled(self, label: str) -> bool:
+            if sys.platform != "darwin":
+                return False
+            result = subprocess.run(
+                ["launchctl", "print-disabled", launchd_domain_target()],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                return False
+            output = result.stdout or result.stderr
+            return re.search(rf'"{re.escape(label)}"\s*=>\s*true', output) is not None
+
+        def _target_human_bridge_mode(self, target: Path) -> str:
+            intake_path = target / ".agentic" / "project_intake.json"
+            if intake_path.exists():
+                try:
+                    intake = json.loads(intake_path.read_text(encoding="utf-8"))
+                    mode = str(intake.get("human_bridge_mode") or "disabled")
+                    enabled = bool(intake.get("human_bridge_enabled", mode != "disabled"))
+                    return mode if enabled and mode in {"file_only", "local_notifier"} else "disabled"
+                except (OSError, json.JSONDecodeError):
+                    pass
+            return self.bridge_mode_var.get() if self.human_bridge_enabled_var.get() else "disabled"
+
+        def _schedule_prerequisites(self, target: Path) -> list[PrerequisiteItem]:
+            items = check_prerequisites(target, self._target_human_bridge_mode(target))
+            launchctl_path = shutil.which("launchctl") if sys.platform == "darwin" else None
+            items.append(
+                PrerequisiteItem(
+                    "launchctl available for scheduled automation",
+                    bool(launchctl_path),
+                    True,
+                    launchctl_path or "launchctl is required for dashboard-managed schedules on macOS.",
+                )
+            )
+            return items
+
+        def _set_run_automation_state(self) -> None:
+            if not hasattr(self, "run_automation_button"):
+                return
+            if not hasattr(self, "pause_automation_button"):
+                return
+            if not hasattr(self, "remove_schedule_button"):
+                return
+            if self.running:
+                if hasattr(self, "open_project_button"):
+                    self.open_project_button.configure(state="disabled")
+                self.run_automation_button.configure(state="disabled")
+                self.pause_automation_button.configure(state="disabled")
+                self.remove_schedule_button.configure(state="disabled")
+                return
+            if hasattr(self, "open_project_button"):
+                self.open_project_button.configure(state="normal")
+            target_text = self.target_var.get().strip()
+            if not target_text:
+                self.run_automation_button.configure(state="disabled")
+                self.pause_automation_button.configure(state="disabled")
+                self.remove_schedule_button.configure(state="disabled")
+                self.schedule_status_var.set("Schedule: target not loaded.")
+                return
+            target = Path(target_text).expanduser().resolve()
+            ready, reason = self._automation_ready(target)
+            label = launchd_label(target)
+            plist_path = launchd_plist_path(label)
+            loaded = self._launchd_loaded(label)
+            disabled = self._launchd_disabled(label)
+            if sys.platform != "darwin":
+                self.run_automation_button.configure(state="disabled")
+                self.pause_automation_button.configure(state="disabled")
+                self.remove_schedule_button.configure(state="disabled")
+                self.schedule_status_var.set("Schedule: launchd scheduling is available on macOS only.")
+                return
+            self.run_automation_button.configure(state="normal" if ready else "disabled")
+            self.pause_automation_button.configure(state="normal" if loaded or (plist_path.exists() and not disabled) else "disabled")
+            self.remove_schedule_button.configure(state="normal" if loaded or plist_path.exists() else "disabled")
+            if loaded:
+                self.schedule_status_var.set(f"Schedule: running via launchd ({label}).")
+            elif plist_path.exists() and disabled:
+                self.schedule_status_var.set(f"Schedule: paused and disabled ({label}). Remove Schedule deletes the LaunchAgent plist.")
+            elif plist_path.exists():
+                self.schedule_status_var.set(f"Schedule: installed but not loaded: {plist_path}.")
+            elif ready:
+                self.schedule_status_var.set("Schedule: not installed. Start scheduled automation to load launchd.")
+            else:
+                self.schedule_status_var.set(f"Schedule: not ready. {reason}")
+
+        def start_scheduled_automation(self) -> None:
+            if self.running:
+                messagebox.showinfo("Process running", "A dashboard-launched process is already running.")
+                return
+            if sys.platform != "darwin":
+                messagebox.showerror("launchd unavailable", "Scheduled automation from the dashboard currently requires macOS launchd.")
+                return
+            target_text = self.target_var.get().strip()
+            if not target_text:
+                messagebox.showerror("Missing target", "Choose a target project directory first.")
+                return
+            target = Path(target_text).expanduser().resolve()
+            ready, reason = self._automation_ready(target)
+            if not ready:
+                messagebox.showerror(
+                    "Automation not ready",
+                    "Run Scaffold & Bootstrap first. Current blocker:\n\n" + reason,
+                )
+                self._set_run_automation_state()
+                return
+            items = self._schedule_prerequisites(target)
+            self._show_prerequisites(items)
+            failures = required_failures(items)
+            if failures:
+                messagebox.showerror(
+                    "Prerequisites missing",
+                    "Fix required prerequisites before starting scheduled automation:\n\n"
+                    + "\n".join(f"- {item.name}: {item.detail}" for item in failures),
+                )
+                return
+            advisory = [item for item in items if not item.required and not item.ok]
+            if advisory:
+                proceed = messagebox.askyesno(
+                    "Advisory checks",
+                    "Some advisory checks need attention before scheduling. Continue anyway?\n\n"
+                    + "\n".join(f"- {item.name}: {item.detail}" for item in advisory),
+                )
+                if not proceed:
+                    return
+            try:
+                interval = parse_cadence_seconds(self.cadence_var.get())
+                label, plist_path = write_launchd_plist(target, interval)
+                self._launchctl(["enable", launchd_service_target(label)], allow_failure=True)
+                if self._launchd_loaded(label):
+                    self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
+                    self._launchctl(["bootout", launchd_domain_target(), str(plist_path)], allow_failure=True)
+                self._launchctl(["bootstrap", launchd_domain_target(), str(plist_path)])
+                self._launchctl(["enable", launchd_service_target(label)])
+                self._append_log(
+                    f"Started scheduled automation: {label} ({format_interval(interval)})."
+                )
+                self._append_log(f"LaunchAgent: {plist_path}")
+                self._append_log(f"Logs: {launchd_log_dir(target)}")
+                self.write_dashboard_state(target, last_action="schedule_started")
+                self._set_run_automation_state()
+            except Exception as exc:
+                messagebox.showerror("Could not start schedule", str(exc))
+                self._append_log(f"ERROR: {exc}")
+                self._set_run_automation_state()
+
+        def pause_scheduled_automation(self) -> None:
+            if sys.platform != "darwin":
+                messagebox.showerror("launchd unavailable", "Scheduled automation from the dashboard currently requires macOS launchd.")
+                return
+            target_text = self.target_var.get().strip()
+            if not target_text:
+                messagebox.showerror("Missing target", "Choose a target project directory first.")
+                return
+            target = Path(target_text).expanduser().resolve()
+            label = launchd_label(target)
+            plist_path = launchd_plist_path(label)
+            try:
+                if self._launchd_loaded(label):
+                    result = self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
+                    if result.returncode != 0:
+                        self._launchctl(["bootout", launchd_domain_target(), str(plist_path)])
+                if plist_path.exists():
+                    self._launchctl(["disable", launchd_service_target(label)])
+                    self._append_log(f"Paused and disabled scheduled automation: {label}.")
+                else:
+                    self._append_log("Scheduled automation plist was not found.")
+                self.write_dashboard_state(target, last_action="schedule_paused")
+                self._set_run_automation_state()
+            except Exception as exc:
+                messagebox.showerror("Could not pause schedule", str(exc))
+                self._append_log(f"ERROR: {exc}")
+                self._set_run_automation_state()
+
+        def remove_scheduled_automation(self) -> None:
+            if sys.platform != "darwin":
+                messagebox.showerror("launchd unavailable", "Scheduled automation from the dashboard currently requires macOS launchd.")
+                return
+            target_text = self.target_var.get().strip()
+            if not target_text:
+                messagebox.showerror("Missing target", "Choose a target project directory first.")
+                return
+            target = Path(target_text).expanduser().resolve()
+            label = launchd_label(target)
+            plist_path = launchd_plist_path(label)
+            proceed = messagebox.askyesno(
+                "Remove schedule",
+                "Remove the dashboard-managed LaunchAgent for this target?\n\n"
+                "This stops future scheduled runs and deletes the plist. Generated project files are not deleted.",
+            )
+            if not proceed:
+                return
+            try:
+                if self._launchd_loaded(label):
+                    result = self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
+                    if result.returncode != 0:
+                        self._launchctl(["bootout", launchd_domain_target(), str(plist_path)], allow_failure=True)
+                self._launchctl(["disable", launchd_service_target(label)], allow_failure=True)
+                self._launchctl(["enable", launchd_service_target(label)], allow_failure=True)
+                if plist_path.exists():
+                    plist_path.unlink()
+                    self._append_log(f"Removed scheduled automation LaunchAgent: {plist_path}")
+                else:
+                    self._append_log("Scheduled automation plist was not found.")
+                self.write_dashboard_state(target, last_action="schedule_removed")
+                self._set_run_automation_state()
+            except Exception as exc:
+                messagebox.showerror("Could not remove schedule", str(exc))
+                self._append_log(f"ERROR: {exc}")
+                self._set_run_automation_state()
+
+        def _launchctl(self, args: list[str], allow_failure: bool = False) -> subprocess.CompletedProcess[str]:
+            self._append_log("$ launchctl " + " ".join(args))
+            result = subprocess.run(
+                ["launchctl", *args],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                check=False,
+            )
+            output = (result.stdout or result.stderr).strip()
+            if output:
+                self._append_log(output)
+            if result.returncode != 0 and not allow_failure:
+                raise RuntimeError(output or f"launchctl exited with code {result.returncode}")
+            return result
+
+        def add_inbox_reply(self) -> None:
+            target = Path(self.target_var.get().strip() or ".").expanduser()
+            body = self.reply_body.get("1.0", "end").strip()
+            if not body:
+                messagebox.showerror("Missing reply", "Write the reply body first.")
+                return
+            inbox_id = append_manual_inbox_entry(
+                target,
+                body,
+                request_id=self.reply_request_entry.get().strip(),
+                parsed_intent=INTENT_CHOICES.get(self.intent_var.get(), "info"),
+            )
+            self.reply_body.delete("1.0", "end")
+            self._append_log(f"Queued message for next automation run: {inbox_id}.")
+            self.refresh_human()
+
+        def check_notifier_health(self) -> None:
+            ok, detail = fetch_notifier_health(timeout=1.2)
+            title = "Notifier reachable" if ok else "Notifier unavailable"
+            messagebox.showinfo(title, detail)
+
+        def _load_markdown_file(self, widget: Any, path: Path) -> None:
+            if path.exists() and path.is_file():
+                text = path.read_text(encoding="utf-8", errors="replace")
+                self._render_markdown(widget, text)
+            else:
+                self._set_text(widget, f"{path} does not exist yet.")
+
+        def _configure_markdown_tags(self, widget: Any) -> None:
+            widget.tag_configure("h1", font=("TkDefaultFont", 18, "bold"), spacing1=8, spacing3=6)
+            widget.tag_configure("h2", font=("TkDefaultFont", 14, "bold"), spacing1=8, spacing3=4)
+            widget.tag_configure("h3", font=("TkDefaultFont", 12, "bold"), spacing1=6, spacing3=3)
+            widget.tag_configure("code", font=("TkFixedFont", 10), background="#f4f4f4")
+            widget.tag_configure("bullet", lmargin1=20, lmargin2=36)
+
+        def _render_markdown(self, widget: Any, text: str) -> None:
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+            in_code = False
+            for raw_line in text.splitlines(keepends=True):
+                line = raw_line.rstrip("\n")
+                tag = None
+                if line.startswith("```"):
+                    in_code = not in_code
+                    tag = "code"
+                elif in_code:
+                    tag = "code"
+                elif line.startswith("# "):
+                    tag = "h1"
+                elif line.startswith("## "):
+                    tag = "h2"
+                elif line.startswith("### "):
+                    tag = "h3"
+                elif line.startswith("- ") or re.match(r"^\d+\.\s", line):
+                    tag = "bullet"
+                widget.insert("end", raw_line, tag)
+            widget.configure(state="disabled")
+
+        def _set_text(self, widget: Any, text: str) -> None:
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+            widget.insert("1.0", text)
+            widget.configure(state="disabled")
+
+        def _append_log(self, text: str) -> None:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            self.log_text.configure(state="normal")
+            lines = str(text).splitlines() or [""]
+            for line in lines:
+                if len(line) > MAX_DASHBOARD_LOG_LINE_CHARS:
+                    line = line[:MAX_DASHBOARD_LOG_LINE_CHARS] + " ... [truncated]"
+                self.log_text.insert("end", f"[{timestamp}] {line}\n")
+                self.log_line_count += 1
+            if self.log_line_count > MAX_DASHBOARD_LOG_LINES:
+                excess = self.log_line_count - MAX_DASHBOARD_LOG_LINES
+                self.log_text.delete("1.0", f"{excess + 1}.0")
+                self.log_line_count = MAX_DASHBOARD_LOG_LINES
+            self.log_text.see("end")
+            self.log_text.configure(state="disabled")
+
+        def _thread_log(self, text: str) -> None:
+            self.events.put(("log", text))
+
+        def _drain_events(self) -> None:
+            try:
+                while True:
+                    event, payload = self.events.get_nowait()
+                    if event == "log":
+                        self._append_log(str(payload))
+                    elif event == "refresh":
+                        self.refresh_all()
+                    elif event == "bootstrap_done":
+                        target = Path(str(payload)).expanduser().resolve()
+                        self.bootstrap_completed_targets.add(target)
+                        self.write_dashboard_state(target, last_action="bootstrap_completed")
+                        self._set_run_automation_state()
+                    elif event == "done":
+                        self.running = False
+                        self.open_project_button.configure(state="normal")
+                        self.scaffold_button.configure(state="normal")
+                        self._set_run_automation_state()
+                        self.cancel_button.configure(state="disabled")
+                        self._append_log("Process finished.")
+            except queue.Empty:
+                pass
+            self.root.after(120, self._drain_events)
+
+
+def smoke_check() -> int:
+    problems: list[str] = []
+    for path in [SCAFFOLD_SCRIPT, CHECK_REQUIRED_SCRIPT]:
+        if not path.exists():
+            problems.append(f"Missing required script: {path}")
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        return 1
+    print("OK: dashboard module smoke check passed")
+    if not TK_AVAILABLE:
+        print(f"NOTE: Tkinter is unavailable in this Python environment: {TK_IMPORT_ERROR}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", default="", help="Optional target project directory to prefill")
+    parser.add_argument("--smoke-check", action="store_true", help="Check dashboard wiring without launching the GUI")
+    args = parser.parse_args(argv)
+
+    if args.smoke_check:
+        return smoke_check()
+
+    if not TK_AVAILABLE:
+        print(
+            "Tkinter is required for the standalone Diffmogger dashboard but is not available: "
+            + TK_IMPORT_ERROR,
+            file=sys.stderr,
+        )
+        return 1
+
+    root = tk.Tk()
+    DiffmoggerDashboard(root, initial_target=args.target)
+    root.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

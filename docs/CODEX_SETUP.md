@@ -38,7 +38,7 @@ codex exec "summarize the repository structure"
 For recurring local automation, use explicit sandbox and approval settings. Current docs say `codex exec` defaults to read-only. Use `--full-auto` only when edits and workspace commands are expected:
 
 ```bash
-codex exec --full-auto "$(cat .agentic/automation_prompt.md)"
+codex exec --full-auto --skip-git-repo-check "$(cat .agentic/automation_prompt.md)"
 ```
 
 For read-only worker reports from an automation run, prefer an explicit bounded command:
@@ -61,7 +61,7 @@ Use this bypass shape only for nested workers launched from inside a scheduled p
 The parent scheduled run still controls whether a nested `codex` process can touch its startup paths. Generated wrappers run the parent automation with Codex-home access:
 
 ```bash
-codex exec --full-auto --add-dir "$HOME/.codex" "$(cat .agentic/automation_prompt.md)"
+codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" "$(cat .agentic/automation_prompt.md)"
 ```
 
 Generated target repos include local helper scripts:

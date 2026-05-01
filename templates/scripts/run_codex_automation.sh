@@ -6,6 +6,7 @@ export PATH="${CODEX_AUTOMATION_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:
 export CODEX_RUN_ID="${CODEX_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 export CODEX_LOCK_PATH="${CODEX_LOCK_PATH:-$TARGET/target/codex_automation.lock}"
 export CODEX_LOCK_ALREADY_ACQUIRED="false"
+child_pid=""
 
 cd "$TARGET" || exit 1
 
@@ -25,10 +26,26 @@ release_lock() {
   fi
 }
 
-trap release_lock EXIT INT TERM
+forward_signal() {
+  signal="$1"
+  exit_code="$2"
+  if [ -n "${child_pid:-}" ] && kill -0 "$child_pid" >/dev/null 2>&1; then
+    kill "-$signal" "$child_pid" >/dev/null 2>&1 || true
+    wait "$child_pid" >/dev/null 2>&1 || true
+  fi
+  exit "$exit_code"
+}
+
+trap release_lock EXIT
+trap 'forward_signal TERM 143' TERM
+trap 'forward_signal INT 130' INT
 
 bash scripts/acquire_codex_lock.sh "{{PROJECT_NAME}} scheduled sprint" || exit 0
 export CODEX_LOCK_ALREADY_ACQUIRED="true"
 
-codex exec --full-auto "${CODEX_PARENT_ARGS[@]}" "$(cat .agentic/automation_prompt.md)"
-exit $?
+codex exec --full-auto --skip-git-repo-check "${CODEX_PARENT_ARGS[@]}" "$(cat .agentic/automation_prompt.md)" &
+child_pid="$!"
+wait "$child_pid"
+exit_code="$?"
+child_pid=""
+exit "$exit_code"

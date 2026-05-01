@@ -11,22 +11,25 @@ Interview me briefly and produce a concise project intake brief. If I provide an
 Capture:
 
 1. Project name.
-2. Product goal.
-3. Target user.
-4. Desired first demo.
-5. Tech preferences.
-6. Hard constraints.
-7. Safety constraints.
-8. External services or integrations.
-9. Verification commands or expected checks.
-10. Desired automation cadence.
-11. Whether a human bridge is enabled.
-12. Human bridge mode: file-only, local notifier, or disabled.
-13. Whether freeform human requests should receive SMS/WhatsApp responses when the notifier is available.
-14. Whether worker agents are allowed and whether Codex CLI worker reports are expected on broad runs.
-15. What counts as a meaningful integrated deliverable.
-16. What beyond-MVP should look like.
-17. What the automation must never do.
+2. Project mode: fresh project or existing project integration.
+3. Product goal.
+4. Target user.
+5. Desired first demo.
+6. Tech preferences.
+7. Hard constraints.
+8. Safety constraints.
+9. External services or integrations.
+10. Verification commands or expected checks.
+11. Desired automation cadence as an integer number of minutes greater than 30.
+12. Whether a human bridge is enabled.
+13. Human bridge mode: file-only, local notifier, or disabled.
+14. Whether freeform human requests should receive SMS/WhatsApp responses when the notifier is available.
+15. Whether worker agents are allowed and whether Codex CLI worker reports are expected on broad runs.
+16. What counts as a meaningful integrated deliverable.
+17. What beyond-MVP should look like.
+18. What the automation must never do.
+
+For existing project integration, explicitly capture what already exists, which stack and commands must be preserved, and what the first integrated change should prove.
 
 Output in this structure:
 
@@ -34,6 +37,8 @@ Output in this structure:
 # Project Intake: <project name>
 
 ## Summary
+
+## Project Mode
 
 ## Product Goal
 
@@ -46,6 +51,8 @@ Output in this structure:
 ## Constraints
 
 ## Safety Rules
+
+## Automation Must Never Do
 
 ## External Services
 

@@ -4,6 +4,10 @@
 
 TrendLab is a fictional signal intelligence app for monitoring public trend events, scoring evidence, and producing research briefs. It is designed to exercise Diffmogger's workflow without relying on a real product domain.
 
+## Project Mode
+
+fresh_project
+
 ## Product Goal
 
 Create a local-first app that ingests fixture trend events, scores relevance/novelty/confidence/risk, shows evidence-backed dashboards, and generates comparison reports.
@@ -36,6 +40,12 @@ A dashboard shows fixture trend events, scored signals, source evidence, a gener
 - Do not make investment, medical, legal, or safety-critical recommendations.
 - Do not publish externally without approval.
 
+## Automation Must Never Do
+
+- Never read secrets or `.env` files.
+- Never scrape, call paid APIs, publish, or contact real users without explicit approval.
+- Never present generated briefs as investment, medical, legal, or safety-critical advice.
+
 ## External Services
 
 - Optional read-only news/search adapter later.
@@ -51,7 +61,7 @@ A dashboard shows fixture trend events, scored signals, source evidence, a gener
 
 ## Automation Cadence
 
-Hourly at first. Every 15 minutes only with lock-file behavior.
+Every 60 minutes at first. Every 45 minutes only with lock-file behavior.
 
 ## Human Bridge
 

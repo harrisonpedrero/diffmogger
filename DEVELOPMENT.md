@@ -21,6 +21,14 @@ work/
   my-project/
 ```
 
+Recommended dashboard path:
+
+```bash
+python3 scripts/run_dashboard.py
+```
+
+The dashboard checks prerequisites, gathers the intake, copies optional context files into the target, scaffolds required files, validates them, and starts the first bootstrap run through a single `Scaffold & Bootstrap` action.
+
 Create a target repo:
 
 ```bash
@@ -71,13 +79,16 @@ Use `prompts/PROJECT_INTAKE_PROMPT.md` to turn a vague idea into a usable brief.
 The intake should cover:
 
 - project name
+- project mode: fresh project or existing project integration
 - product goal
 - target user
 - desired first demo
 - tech preferences
 - hard constraints
 - safety constraints
+- automation must-never-do rules
 - external services
+- additional context files when useful
 - verification commands
 - cadence
 - human bridge preference
@@ -86,6 +97,8 @@ The intake should cover:
 - beyond-MVP direction
 
 If values are missing, the generation prompt should make reasonable defaults and document assumptions.
+
+For existing projects, keep the intake explicit about the current stack, verification commands, files that should not be rewritten, and the first integrated deliverable. Diffmogger updates existing `AGENTS.md` and `docs/DEVELOPMENT.md` through managed sections instead of replacing the whole file.
 
 ## Generate Project-Specific Prompts
 
@@ -101,6 +114,7 @@ It should produce:
 AGENTS.md
 .agentic/automation_prompt.md
 docs/INITIAL_BOOTSTRAP_PROMPT.md
+docs/PROJECT_CONTEXT.md
 docs/CODEX_AUTOMATION_TASKS.md
 docs/CODEX_AUTOMATION_GUARDRAILS.md
 docs/HUMAN_REQUESTS.md

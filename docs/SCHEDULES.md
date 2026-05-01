@@ -4,7 +4,7 @@ Codex automations should be scheduled according to expected run length and revie
 
 ## Recommended Cadences
 
-Hourly:
+60 minutes:
 
 ```text
 Run once per hour.
@@ -12,21 +12,21 @@ Run once per hour.
 
 Good for substantial engineering sprints.
 
-Every 30 minutes:
+45 minutes:
 
 ```text
-Run twice per hour.
+Run once every 45 minutes.
 ```
 
 Good for active experiments after early runs are stable.
 
-Every 15 minutes:
+31 minutes:
 
 ```text
-Run four times per hour.
+Shortest dashboard-accepted cadence.
 ```
 
-Use only with a lock file and short, reliable run boundaries.
+Use only with a lock file and short, reliable run boundaries. The dashboard accepts only integer minute values greater than 30 and passes them to launchd as `StartInterval` seconds.
 
 ## Lock File
 
@@ -42,9 +42,31 @@ Generated target projects include a local wrapper:
 bash scripts/run_codex_automation.sh
 ```
 
-The wrapper sets `CODEX_RUN_ID`, sets `CODEX_LOCK_PATH`, acquires the lock with local `scripts/acquire_codex_lock.sh`, exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, runs `codex exec --full-auto`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock with local `scripts/release_codex_lock.sh` when the run exits.
+The wrapper sets `CODEX_RUN_ID`, sets `CODEX_LOCK_PATH`, acquires the lock with local `scripts/acquire_codex_lock.sh`, exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, runs `codex exec --full-auto --skip-git-repo-check`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock with local `scripts/release_codex_lock.sh` when the run exits.
 
 If a scheduler runs from another directory, call the absolute path to the target project's `scripts/run_codex_automation.sh` or set `TARGET=/absolute/path/to/target-project`.
+
+## Dashboard LaunchAgent Controls
+
+On macOS, the dashboard can manage the recurring schedule directly after bootstrap:
+
+- **Start Scheduled Automation** writes a target-specific plist under `~/Library/LaunchAgents/`, clears any disabled state when possible, loads it with `launchctl bootstrap`, enables it with `launchctl enable`, sets `RunAtLoad`, and schedules the target wrapper with `StartInterval`.
+- **Pause Scheduled Automation** unloads that LaunchAgent with `launchctl bootout` and disables it with `launchctl disable`, stopping future scheduled runs across login/reboot until the schedule is started again.
+- **Remove Schedule** unloads that LaunchAgent, clears its disabled state, and deletes the plist from `~/Library/LaunchAgents/`. It does not delete generated project files.
+- **Cancel Current Dashboard Run** only terminates a bootstrap/check process launched by the dashboard itself. It is not the launchd scheduler control.
+
+Dashboard-managed jobs use labels shaped like:
+
+```text
+com.diffmogger.automation.<target-name>.<hash>
+```
+
+Logs are written under the target repo:
+
+```text
+target/automation_logs/stdout.log
+target/automation_logs/stderr.log
+```
 
 The lock includes:
 

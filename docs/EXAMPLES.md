@@ -4,7 +4,9 @@ The `examples/` directory contains intake briefs and expected generated files.
 
 ## Generic Web App
 
-Use `examples/generic-web-app/project_intake.md` to test the kit against a normal product idea. It exercises project goals, target users, stack preferences, first demo, verification, human bridge, and worker-agent settings.
+Use `examples/generic-web-app/project_intake.md` to test the kit against a normal fresh-project idea. It exercises project mode, project goals, target users, stack preferences, first demo, verification, human bridge, and worker-agent settings.
+
+The dashboard can add supplemental context files at setup time. Those files are copied into the generated target under `docs/context/` and indexed in `docs/PROJECT_CONTEXT.md`.
 
 ## TrendLab Signal Intelligence
 

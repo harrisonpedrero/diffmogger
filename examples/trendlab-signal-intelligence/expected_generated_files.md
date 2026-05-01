@@ -6,6 +6,7 @@ The generation prompt should produce the standard automation file set:
 AGENTS.md
 .agentic/automation_prompt.md
 docs/INITIAL_BOOTSTRAP_PROMPT.md
+docs/PROJECT_CONTEXT.md
 docs/CODEX_AUTOMATION_TASKS.md
 docs/CODEX_AUTOMATION_GUARDRAILS.md
 docs/HUMAN_REQUESTS.md
@@ -23,9 +24,9 @@ scripts/summarize_worker_outputs.py
 scripts/compact_agent_state.py
 ```
 
-The bootstrap prompt should ask for fixture-first scoring, evidence display, report generation, and a one-command demo/test path.
+The bootstrap prompt should identify this as `fresh_project` mode and ask for fixture-first scoring, evidence display, report generation, and a one-command demo/test path.
 
-The recurring automation prompt should continue through product horizons: local demo, scoring depth, reports, safe adapters, showcase quality, and automation process improvement.
+The recurring automation prompt should continue through explicit product horizon state: local demo, scoring depth, reports, safe adapters, showcase quality, and automation process improvement. Each run should record whether it stayed in the current horizon or advanced with evidence.
 
 It should also make explicit Codex CLI worker decisions, use target-local runtime scripts, and distinguish file-only Markdown responses from notifier-mode outbound status texts.
 
