@@ -65,6 +65,7 @@ required_files=(
   "templates/scripts/spawn_worker_agent.sh"
   "templates/scripts/summarize_worker_outputs.py"
   "templates/scripts/compact_agent_state.py"
+  "tests/test_run_observatory.py"
   "examples/generic-web-app/project_intake.md"
   "examples/generic-web-app/expected_generated_files.md"
   "examples/trendlab-signal-intelligence/project_intake.md"
@@ -620,6 +621,8 @@ for marker in [
         print(f"GitHub Actions validation workflow missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 PY
+
+python3 -m unittest tests/test_run_observatory.py
 
 python3 scripts/run_dashboard.py --smoke-check >/tmp/Diffmogger-dashboard-smoke.log
 
