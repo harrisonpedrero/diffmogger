@@ -384,6 +384,7 @@ for marker in [
 	    "automation_queue",
 	    "ThreadingHTTPServer",
 	    "--open",
+	    "Self Review",
 	    "Active Signals",
 	    "Conveyor Health",
 	    "Recent Outcomes",
@@ -877,7 +878,7 @@ fi
 exec "$real_git" "\$@"
 SH
 chmod +x "$fake_git_dir/git"
-if PATH="$fake_git_dir:$PATH" python3 scripts/integrate_role_outputs.py "$tmp_dir" --dry-run >/tmp/Diffmogger-remote-guard.log 2>&1; then
+if env -u MULTI_ROLE_ALLOW_REMOTES PATH="$fake_git_dir:$PATH" python3 scripts/integrate_role_outputs.py "$tmp_dir" --dry-run >/tmp/Diffmogger-remote-guard.log 2>&1; then
     echo "Integrator remote guard failed: run unexpectedly succeeded with remote configured" >&2
     rm -rf "$tmp_dir" "$tmp_intake" "$fake_git_dir"
     exit 1

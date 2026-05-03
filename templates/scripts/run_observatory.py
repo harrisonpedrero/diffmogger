@@ -27,6 +27,8 @@ MAX_HISTORY = 14
 MAX_LOG_FILES = 8
 MAX_LOG_LINE_CHARS = 220
 MAX_SIGNALS = 8
+MAX_REVIEW_ITEMS = 6
+MAX_CHECK_ITEMS = 8
 
 
 def utc_now() -> str:
@@ -104,6 +106,75 @@ def markdown_section(text: str, heading: str) -> str:
     return text[match.end() : end]
 
 
+def section_bullets(text: str, heading: str, *, limit: int = MAX_REVIEW_ITEMS) -> list[str]:
+    section = markdown_section(text, heading)
+    bullets: list[str] = []
+    in_code_block = False
+    for raw in section.splitlines():
+        line = raw.strip()
+        if line.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block or not line.startswith("- "):
+            continue
+        item = clean_text(line[2:], limit=260)
+        if item:
+            bullets.append(item)
+        if len(bullets) >= limit:
+            break
+    return bullets
+
+
+def keyed_section_value(text: str, heading: str, keys: list[str]) -> str:
+    section = markdown_section(text, heading)
+    for key in keys:
+        match = re.search(rf"^-\s*{re.escape(key)}:\s*(.+)", section, re.MULTILINE)
+        if match:
+            value = clean_text(match.group(1), limit=260)
+            if value:
+                return value
+    return ""
+
+
+def validation_snapshot(text: str) -> dict[str, Any]:
+    checks: list[dict[str, str]] = []
+    counts = {"pass": 0, "fail": 0, "warn": 0, "pending": 0, "info": 0}
+    for bullet in section_bullets(text, "Checks From Last Run", limit=MAX_CHECK_ITEMS):
+        lower = bullet.lower()
+        if lower.startswith("preferred commands"):
+            continue
+        if bullet.startswith("`") and any(item["status"] == "pending" for item in checks):
+            continue
+        status = "info"
+        if lower.startswith("pass"):
+            status = "pass"
+        elif lower.startswith("fail"):
+            status = "fail"
+        elif lower.startswith("warn"):
+            status = "warn"
+        elif "not run" in lower:
+            status = "pending"
+        counts[status] += 1
+        checks.append({"status": status, "text": bullet})
+
+    if not checks:
+        return {
+            "summary": "No validation results recorded yet.",
+            "counts": counts,
+            "items": [],
+        }
+
+    if counts["fail"]:
+        summary = f"{counts['pass']} pass, {counts['fail']} fail or environment note."
+    elif counts["pass"]:
+        summary = f"{counts['pass']} passing check(s) recorded."
+    elif counts["pending"]:
+        summary = "Validation is recorded as not run yet."
+    else:
+        summary = "Validation notes are recorded without pass/fail status."
+    return {"summary": summary, "counts": counts, "items": checks}
+
+
 def count_section_matches(path: Path, heading: str, pattern: str) -> int:
     section = markdown_section(read_text(path), heading)
     return len(re.findall(pattern, section, re.MULTILINE | re.IGNORECASE))
@@ -115,14 +186,22 @@ def parse_task_state(target: Path) -> dict[str, Any]:
     updated = re.search(r"^Last updated:\s*(.+)", text, re.MULTILINE)
     horizon = re.search(r"^-\s*Current horizon:\s*(.+)", text, re.MULTILINE)
     decision = re.search(r"^-\s*Advancement decision:\s*(.+)", text, re.MULTILINE)
+    current_assessment = keyed_section_value(
+        text,
+        "Current Project State",
+        ["Current assessment", "Current baseline", "Goal"],
+    )
     return {
         "status": status.group(1).strip() if status else "UNKNOWN",
         "last_updated": clean_text(updated.group(1), limit=120) if updated else "unknown",
         "horizon": clean_text(horizon.group(1), limit=160) if horizon else "unknown",
         "horizon_decision": clean_text(decision.group(1), limit=160) if decision else "unknown",
+        "current_assessment": current_assessment or first_nonempty_section_line(text, "Current Project State") or "No current assessment recorded yet.",
         "best_next_milestone": first_nonempty_section_line(text, "Best Next Milestone") or "No milestone recorded yet.",
         "suggested_next_task": first_nonempty_section_line(text, "Suggested Next Sprint-Sized Task") or "No sprint task recorded yet.",
         "known_issue": first_nonempty_section_line(text, "Known Issues") or "No active issue summary.",
+        "known_issues": section_bullets(text, "Known Issues", limit=MAX_REVIEW_ITEMS),
+        "validation": validation_snapshot(text),
     }
 
 
@@ -337,17 +416,108 @@ def conveyor_health(conveyor: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def progress_snapshot(progress_text: str) -> dict[str, Any]:
+    deferred_depth = 0
+    match = re.search(r"^-\s*Current deferred queue depth:\s*(\d+)", progress_text, re.MULTILINE)
+    if match:
+        deferred_depth = int(match.group(1))
+    return {
+        "recent_activity": first_nonempty_section_line(progress_text, "Recent Activity Log") or "No multi-role activity recorded yet.",
+        "deferred_queue_depth": deferred_depth,
+        "deferred_backlog": section_bullets(progress_text, "Deferred-Patch Backlog", limit=MAX_REVIEW_ITEMS),
+    }
+
+
+def self_review_snapshot(
+    task: dict[str, Any],
+    queue: dict[str, Any],
+    signals: dict[str, Any],
+    conveyor: dict[str, Any],
+    human: dict[str, int],
+    progress: dict[str, Any],
+) -> dict[str, Any]:
+    totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
+    queued = int(totals.get("queued", 0) or 0)
+    deferred = int(totals.get("deferred", 0) or 0)
+    progress_deferred = int(progress.get("deferred_queue_depth", 0) or 0)
+    if queued or deferred or progress_deferred:
+        queue_parts = [f"{queued} queued", f"{deferred} deferred manifest(s)"]
+        if progress_deferred and progress_deferred != deferred:
+            queue_parts.append(f"progress file reports {progress_deferred} deferred backlog item(s)")
+        queue_summary = "; ".join(queue_parts) + "."
+    else:
+        queue_summary = "No queued or deferred role patches."
+
+    active_signals = signals.get("active") if isinstance(signals.get("active"), list) else []
+    if active_signals:
+        names = [
+            f"{item.get('id', 'signal')} ({item.get('owner_role', 'unknown')})"
+            for item in active_signals[:3]
+            if isinstance(item, dict)
+        ]
+        signal_summary = f"{signals.get('active_count', len(active_signals))} active: {', '.join(names)}."
+    else:
+        signal_summary = "No active signal nudges."
+
+    active_run = conveyor.get("active_role_run") if isinstance(conveyor.get("active_role_run"), dict) else {}
+    if active_run.get("role"):
+        reason = clean_text(active_run.get("reason") or "no reason recorded", limit=160).rstrip(".")
+        conveyor_summary = f"{active_run.get('role')} is {active_run.get('status', 'recorded')}: {reason}."
+    else:
+        decisions = conveyor.get("decision_queue") if isinstance(conveyor.get("decision_queue"), list) else []
+        if decisions:
+            first = decisions[0] if isinstance(decisions[0], dict) else {}
+            reason = clean_text(first.get("reason") or "no reason recorded", limit=160).rstrip(".")
+            conveyor_summary = f"Next lane: {first.get('role', 'idle')} ({first.get('state', 'planned')}) - {reason}."
+        else:
+            conveyor_summary = "No conveyor decision recorded yet."
+
+    pending_human = int(human.get("pending_requests", 0) or 0)
+    inbox = int(human.get("unhandled_inbox", 0) or 0)
+    human_summary = (
+        f"{pending_human} pending request(s), {inbox} unhandled inbox message(s)."
+        if pending_human or inbox
+        else "No pending human requests or unhandled inbox messages."
+    )
+
+    validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
+    return {
+        "items": [
+            {"label": "Current assessment", "body": task.get("current_assessment") or "No current assessment recorded yet."},
+            {"label": "Validation", "body": validation.get("summary") or "No validation results recorded yet."},
+            {"label": "Signals", "body": signal_summary},
+            {"label": "Queue and conveyor", "body": f"{queue_summary} {conveyor_summary}"},
+            {"label": "Human bridge", "body": human_summary},
+            {"label": "Next sprint", "body": task.get("suggested_next_task") or "No sprint task recorded yet."},
+        ],
+        "checks": list(validation.get("items") or [])[:MAX_CHECK_ITEMS],
+        "known_issues": list(task.get("known_issues") or [])[:MAX_REVIEW_ITEMS],
+    }
+
+
 def build_snapshot(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     conveyor = read_json(target / "target" / "automation_conveyor_state.json")
     queue = queue_snapshot(target)
     task = parse_task_state(target)
     progress_text = read_text(target / "docs" / "MULTI_ROLE_PROGRESS.md", limit=40_000)
-    progress_recent = first_nonempty_section_line(progress_text, "Recent Activity Log") or "No multi-role activity recorded yet."
+    progress = progress_snapshot(progress_text)
     human = {
         "pending_requests": count_section_matches(target / "docs" / "HUMAN_REQUESTS.md", "Active Requests", r"^###\s+HR-"),
         "unhandled_inbox": count_section_matches(target / "docs" / "HUMAN_INBOX.md", "Active Inbound Messages", r"status:\s*unhandled"),
         "outbound_records": count_section_matches(target / "docs" / "HUMAN_OUTBOX.md", "Outbound Records", r"^###\s+OUTBOX-"),
+    }
+    signals = signals_snapshot(target)
+    conveyor_state = {
+        "cycles": int(conveyor.get("cycles", 0) or 0),
+        "updated_at": clean_text(conveyor.get("updated_at") or "never", limit=80),
+        "last_decision": conveyor.get("last_decision") if isinstance(conveyor.get("last_decision"), dict) else {},
+        "active_role_run": active_run(conveyor),
+        "last_active_role_run": conveyor.get("last_active_role_run") if isinstance(conveyor.get("last_active_role_run"), dict) else {},
+        "decision_queue": decision_queue(conveyor, queue),
+        "health": conveyor_health(conveyor),
+        "no_progress": conveyor.get("integrator_no_progress") if isinstance(conveyor.get("integrator_no_progress"), dict) else {},
+        "history": list(conveyor.get("history") or [])[-MAX_HISTORY:] if isinstance(conveyor.get("history"), list) else [],
     }
     return {
         "schema_version": 1,
@@ -357,19 +527,11 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "human": human,
         "git": git_snapshot(target),
         "queue": queue,
-        "signals": signals_snapshot(target),
-        "conveyor": {
-            "cycles": int(conveyor.get("cycles", 0) or 0),
-            "updated_at": clean_text(conveyor.get("updated_at") or "never", limit=80),
-            "last_decision": conveyor.get("last_decision") if isinstance(conveyor.get("last_decision"), dict) else {},
-            "active_role_run": active_run(conveyor),
-            "last_active_role_run": conveyor.get("last_active_role_run") if isinstance(conveyor.get("last_active_role_run"), dict) else {},
-            "decision_queue": decision_queue(conveyor, queue),
-            "health": conveyor_health(conveyor),
-            "no_progress": conveyor.get("integrator_no_progress") if isinstance(conveyor.get("integrator_no_progress"), dict) else {},
-            "history": list(conveyor.get("history") or [])[-MAX_HISTORY:] if isinstance(conveyor.get("history"), list) else [],
-        },
-        "progress_recent": progress_recent,
+        "signals": signals,
+        "conveyor": conveyor_state,
+        "progress": progress,
+        "review": self_review_snapshot(task, queue, signals, conveyor_state, human, progress),
+        "progress_recent": progress.get("recent_activity") or "No multi-role activity recorded yet.",
         "logs": log_snapshot(target),
     }
 
@@ -598,6 +760,13 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
     .mission p { margin: 0; color: var(--muted); }
     .mission strong { display: block; color: var(--text); margin-bottom: 4px; }
+    .review-list, .check-list {
+      display: grid;
+      gap: 10px;
+    }
+    .check-list {
+      margin-top: 12px;
+    }
     .status-line {
       display: flex;
       flex-wrap: wrap;
@@ -659,6 +828,13 @@ HTML_TEMPLATE = r"""<!doctype html>
         <section>
           <h2>Mission State</h2>
           <div class="content mission" id="mission"></div>
+        </section>
+        <section>
+          <h2>Self Review</h2>
+          <div class="content">
+            <div class="review-list" id="selfReview"></div>
+            <div class="check-list" id="checkList"></div>
+          </div>
         </section>
         <section>
           <h2>Signals</h2>
@@ -768,6 +944,14 @@ HTML_TEMPLATE = r"""<!doctype html>
       return row;
     }
 
+    function checkChipClass(status) {
+      if (status === "pass") return "applied";
+      if (status === "fail") return "failed";
+      if (status === "warn") return "deferred";
+      if (status === "pending") return "queued";
+      return "skipped";
+    }
+
     function render(data) {
       document.getElementById("generated").textContent = "Updated " + (data.generated_at || "now");
       document.getElementById("targetName").textContent = data.target_name || "target";
@@ -793,6 +977,39 @@ HTML_TEMPLATE = r"""<!doctype html>
       pills.appendChild(el("span", "status-pill info", "horizon: " + (data.task.horizon_decision || "unknown")));
       pills.appendChild(el("span", "status-pill", "last: " + (data.task.last_updated || "unknown")));
       mission.appendChild(pills);
+
+      const review = data.review || {};
+      const selfReview = document.getElementById("selfReview");
+      clear(selfReview);
+      (review.items || []).forEach(item => {
+        const row = el("div", "item");
+        row.appendChild(el("div", "item-title", item.label || "Review item"));
+        row.appendChild(el("div", "muted", item.body || "No detail recorded."));
+        selfReview.appendChild(row);
+      });
+      (review.known_issues || []).slice(0, 3).forEach(issue => {
+        const row = el("div", "item");
+        const title = el("div", "item-title");
+        title.appendChild(el("span", "", "Known issue"));
+        title.appendChild(el("span", "chip deferred", "watch"));
+        row.appendChild(title);
+        row.appendChild(el("div", "muted", issue));
+        selfReview.appendChild(row);
+      });
+      if (!selfReview.children.length) selfReview.appendChild(el("div", "item muted", "No self-review state recorded yet."));
+
+      const checkList = document.getElementById("checkList");
+      clear(checkList);
+      (review.checks || []).forEach(check => {
+        const row = el("div", "item");
+        const title = el("div", "item-title");
+        title.appendChild(el("span", "", "Validation"));
+        title.appendChild(el("span", "chip " + checkChipClass(check.status), check.status || "info"));
+        row.appendChild(title);
+        row.appendChild(el("div", "muted", check.text || "No check detail."));
+        checkList.appendChild(row);
+      });
+      if (!checkList.children.length) checkList.appendChild(el("div", "item muted", "No validation checks recorded yet."));
 
       const metrics = document.getElementById("metrics");
       clear(metrics);
@@ -928,7 +1145,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
         render(await response.json());
       } catch (error) {
-        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, logs: []};
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, review: {items: [], checks: [], known_issues: []}, logs: []};
         fallback.progress_recent = "Observatory refresh failed: " + error;
         render(fallback);
       }
