@@ -899,7 +899,7 @@ Integrator cadence: minutes `25` and `55`
 
 The current single-lane automation remains valid for manual runs. Scheduled multi-role mode uses local role prompts under `.agentic/roles/`, isolated git worktrees under `target/automation_worktrees/`, queued patches under `target/automation_queue/`, and durable progress state in `docs/MULTI_ROLE_PROGRESS.md`.
 
-Dashboard scheduling can use the fixed multi-role cadence or the continuous conveyor. The conveyor is one local launchd job that chooses the next runnable lane from current state, prioritizing queued integration first, fast-follow replanning after a planner patch is newly deferred, due planning second, builder momentum by default, and one hardener pass after integrated builder work.
+Dashboard scheduling can use the fixed multi-role cadence or the continuous conveyor. The conveyor is one local launchd job that chooses the next runnable lane from current state, prioritizing queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work.
 
 Multi-role mode is local-only. Roles must never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run any git command that touches a remote. Local commits, local branches, local tags, and local worktrees are allowed. Any remote-touching attempt is a `CRITICAL_STOP`.
 
@@ -917,7 +917,7 @@ Planner, builder, and hardener start from the latest main `HEAD` at run start. T
 - Role profile: `{profile}`
 - Automation schedule strategy: `{schedule_strategy}`
 - Planner runs hourly at minute `0`; builder, hardener, and integrator run on staggered half-hour offsets.
-- Continuous conveyor mode is available through `scripts/run_conveyor_automation.sh`; it prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred, due planning second, builder momentum by default, and one hardener pass after integrated builder work.
+- Continuous conveyor mode is available through `scripts/run_conveyor_automation.sh`; it prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work.
 - Integrator maintains `docs/MULTI_ROLE_PROGRESS.md` and local checkpoint commits.
 - Deferred patches remain visible through `scripts/list_deferred_patches.py`.
 - Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""

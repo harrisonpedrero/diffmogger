@@ -392,6 +392,17 @@ def update_integrator_no_progress(
         metadata["just_tripped"] = False
         return metadata
 
+    if exit_code == 0 and deferred_delta < 0:
+        state[NO_PROGRESS_STATE_KEY] = {
+            "active": False,
+            "streak": 0,
+            "reason": "integrator resolved deferred patches",
+            "cleared_at": finished_at,
+        }
+        metadata["progress_success"] = True
+        metadata["just_tripped"] = False
+        return metadata
+
     if no_progress:
         streak = int(previous.get("streak", 0)) + 1 if same_signature else 1
         active = streak >= threshold
@@ -457,16 +468,25 @@ def last_integrator_accepted_by_role(state: dict[str, Any]) -> dict[str, int] | 
     return {role: int(raw.get(role, 0) or 0) for role in ("planner", "builder", "hardener")}
 
 
-def planner_fast_follow_after_deferral(state: dict[str, Any]) -> bool:
+def planner_fast_follow_reason_after_deferral_change(state: dict[str, Any]) -> str | None:
     if str(state.get("last_completed_role") or "") != "integrator":
-        return False
+        return None
     metadata = last_integrator_metadata(state)
     if not metadata:
-        return False
+        return None
     deferred_delta = metadata.get("deferred_delta_by_role")
     if not isinstance(deferred_delta, dict):
-        return False
-    return int(deferred_delta.get("planner", 0) or 0) > 0
+        return None
+    planner_delta = int(deferred_delta.get("planner", 0) or 0)
+    if planner_delta > 0:
+        return "planner patch deferred by latest integration; fast-follow replanning before hourly interval"
+    if planner_delta < 0:
+        return "planner deferred patch resolved by latest integration; fast-follow replanning before hourly interval"
+    return None
+
+
+def planner_fast_follow_after_deferral(state: dict[str, Any]) -> bool:
+    return planner_fast_follow_reason_after_deferral_change(state) is not None
 
 
 def role_after_integrator(state: dict[str, Any]) -> tuple[str, str]:
@@ -514,8 +534,9 @@ def choose_next(
     if unhandled_human_inbox_count(target) and planner_due(state, min(planner_interval_seconds, 900)):
         return "planner", "unhandled human inbox message(s) need triage", False
 
-    if planner_fast_follow_after_deferral(state):
-        return "planner", "planner patch deferred by latest integration; fast-follow replanning before hourly interval", False
+    fast_follow_reason = planner_fast_follow_reason_after_deferral_change(state)
+    if fast_follow_reason:
+        return "planner", fast_follow_reason, False
 
     if planner_due(state, planner_interval_seconds):
         return "planner", "planner interval elapsed", False
@@ -588,10 +609,12 @@ def conveyor_decision_queue(
             add(None, "blocked", f"no-progress circuit breaker active after planner handoff: {reason}")
     elif unhandled_human_inbox_count(target) and planner_due(state, min(planner_interval_seconds, 900)):
         add("planner", "ready", "unhandled human inbox message(s) need triage")
-    elif planner_fast_follow_after_deferral(state):
-        add("planner", "ready", "planner patch deferred by latest integration; fast-follow replanning before hourly interval")
-    elif planner_due(state, planner_interval_seconds):
-        add("planner", "ready", "planner interval elapsed")
+    else:
+        fast_follow_reason = planner_fast_follow_reason_after_deferral_change(state)
+        if fast_follow_reason:
+            add("planner", "ready", fast_follow_reason)
+        elif planner_due(state, planner_interval_seconds):
+            add("planner", "ready", "planner interval elapsed")
 
     last_role = str(state.get("last_completed_role") or "")
     if last_role == "integrator":

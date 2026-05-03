@@ -24,7 +24,7 @@ The default loop is single-lane. When a generated target explicitly enables `mul
 - hardener: minutes `20` and `50`
 - integrator: minutes `25` and `55`
 
-As an alternative, the dashboard can install one continuous conveyor LaunchAgent. The conveyor runs `scripts/run_conveyor_automation.sh`, records state in `target/automation_conveyor_state.json`, and chooses the next runnable lane from queue depth, planning freshness, builder momentum, and bounded hardening after integrated builder work. Conveyor state includes the active role run and a bounded future decision queue for local observability.
+As an alternative, the dashboard can install one continuous conveyor LaunchAgent. The conveyor runs `scripts/run_conveyor_automation.sh`, records state in `target/automation_conveyor_state.json`, and chooses the next runnable lane from queue depth, planner deferral changes, planning freshness, builder momentum, and bounded hardening after integrated builder work. Conveyor state includes the active role run and a bounded future decision queue for local observability.
 
 Generated targets also include an optional automation signal helper. When `automation_signals_enabled` is true, `docs/AUTOMATION_SIGNALS.md` defines recurring local nudges and `target/automation_signals.json` records due/completed state. Signals never override guardrails or task state.
 

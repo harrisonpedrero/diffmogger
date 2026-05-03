@@ -130,7 +130,7 @@ Why: implementation roles should execute against a stable plan through two imple
 
 Decision: generated targets include `scripts/run_conveyor_automation.sh` and `scripts/run_conveyor_automation.py`. Dashboard-managed schedules can use one conveyor LaunchAgent instead of exact periodic role jobs.
 
-Why: work-conserving automation should keep useful local work moving when prior lanes finish early or role timing would otherwise leave gaps. The conveyor records reviewable local state, uses its own dispatcher lock, delegates mutation to existing wrappers, and prioritizes queued integration, due planning, builder momentum, and one hardener pass after integrated builder work.
+Why: work-conserving automation should keep useful local work moving when prior lanes finish early or role timing would otherwise leave gaps. The conveyor records reviewable local state, uses its own dispatcher lock, delegates mutation to existing wrappers, and prioritizes queued integration, fast-follow replanning for planner deferral changes, due planning, builder momentum, and one hardener pass after integrated builder work.
 
 ## Source Summary From References
 

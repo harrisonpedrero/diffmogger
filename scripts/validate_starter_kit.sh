@@ -369,14 +369,15 @@ for marker in [
     "run_codex_automation.sh",
 	    "MULTI_ROLE_ALLOW_REMOTES",
 	    "active_role_run",
-	    "decision_queue",
-	    "accepted_by_role",
-	    "deferred_delta_by_role",
-	    "builder-first policy",
-	]:
-	    if marker not in conveyor:
-	        print(f"Conveyor runner template missing marker: {marker}", file=sys.stderr)
-	        raise SystemExit(1)
+    "decision_queue",
+    "accepted_by_role",
+    "deferred_delta_by_role",
+    "planner deferred patch resolved",
+    "builder-first policy",
+]:
+    if marker not in conveyor:
+        print(f"Conveyor runner template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
 
 observatory = Path("templates/scripts/run_observatory.py").read_text(encoding="utf-8")
 for marker in [
@@ -1144,6 +1145,18 @@ role, reason, stop = module.choose_next(
 if role != "planner" or "fast-follow replanning" not in reason or stop:
     print(("planner-deferral-fast-follow", role, reason, stop), file=sys.stderr)
     raise SystemExit(1)
+role, reason, stop = module.choose_next(
+    target,
+    conveyor_state(
+        accepted_by_role={"planner": 0, "builder": 0, "hardener": 0},
+        deferred_delta_by_role={"planner": -1, "builder": 0, "hardener": 0},
+    ),
+    3600,
+    2,
+)
+if role != "planner" or "resolved" not in reason or "fast-follow replanning" not in reason or stop:
+    print(("planner-deferral-resolved-fast-follow", role, reason, stop), file=sys.stderr)
+    raise SystemExit(1)
 
 (target / "target/automation_queue/hardener/run-skipped").mkdir(parents=True)
 (target / "target/automation_queue/hardener/run-skipped/manifest.json").write_text(
@@ -1215,6 +1228,31 @@ if role is not None or "circuit breaker active" not in reason:
 progress = (target / "docs/MULTI_ROLE_PROGRESS.md").read_text(encoding="utf-8")
 if "conveyor-no-progress" not in progress:
     print(progress, file=sys.stderr)
+    raise SystemExit(1)
+resolved_metadata = module.update_integrator_no_progress(
+    state,
+    before={
+        "queued": 0,
+        "deferred": 1,
+        "applied": 0,
+        "failed": 0,
+        "deferred_signature": "staleness:no_detail",
+        "deferred_by_role": {"planner": 1, "builder": 0, "hardener": 0},
+    },
+    after={
+        "queued": 0,
+        "deferred": 0,
+        "applied": 0,
+        "failed": 0,
+        "deferred_signature": "none",
+        "deferred_by_role": {"planner": 0, "builder": 0, "hardener": 0},
+    },
+    exit_code=0,
+    threshold=2,
+    finished_at=module.utc_now(),
+)
+if module.no_progress_active(state, 2) or not resolved_metadata.get("progress_success"):
+    print(("deferral-resolution-did-not-clear-no-progress", state, resolved_metadata), file=sys.stderr)
     raise SystemExit(1)
 PY
 rm -rf "$tmp_dir"

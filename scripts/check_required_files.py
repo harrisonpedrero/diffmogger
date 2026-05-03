@@ -108,6 +108,7 @@ CONVEYOR_REQUIRED_STRINGS = [
     "MULTI_ROLE_ALLOW_REMOTES",
     "active_role_run",
     "decision_queue",
+    "planner deferred patch resolved",
 ]
 
 OBSERVATORY_REQUIRED_STRINGS = [
