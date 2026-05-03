@@ -29,6 +29,12 @@ MAX_LOG_LINE_CHARS = 220
 MAX_SIGNALS = 8
 MAX_REVIEW_ITEMS = 6
 MAX_CHECK_ITEMS = 8
+EMPTY_STATES = {
+    "next_up": "No conveyor decision yet. After the first conveyor cycle, the next local role lane and reason will appear here.",
+    "patch_queue": "No queued or deferred patches yet. First role patch manifests will appear here after builder, hardener, or planner lanes write local queue outputs.",
+    "recent_outcomes": "No integration outcomes yet. Applied, failed, skipped, and deferred role outputs appear here after integrator review.",
+    "timeline": "No conveyor timeline yet. Completed role runs will appear here with exit status, progress result, and integration notes.",
+}
 
 
 def utc_now() -> str:
@@ -385,8 +391,15 @@ def decision_queue(conveyor: dict[str, Any], queue: dict[str, Any]) -> list[dict
 
     last = conveyor.get("last_decision") if isinstance(conveyor.get("last_decision"), dict) else {}
     role = str(last.get("role") or "idle")
-    reason = str(last.get("reason") or "No conveyor decision recorded yet.")
-    entries = [{"role": role, "state": "next", "reason": clean_text(reason, limit=180)}]
+    has_last_decision = bool(last.get("role") or last.get("reason"))
+    reason = str(last.get("reason") or EMPTY_STATES["next_up"])
+    entries = [
+        {
+            "role": role,
+            "state": "next" if has_last_decision else "first-run",
+            "reason": clean_text(reason, limit=180),
+        }
+    ]
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     if int(totals.get("queued", 0) or 0):
         entries.insert(0, {"role": "integrator", "state": "ready", "reason": f"{totals.get('queued')} queued patch(es) need integration"})
@@ -465,7 +478,7 @@ def self_review_snapshot(
             queue_parts.append(f"progress file reports {progress_deferred} deferred backlog item(s)")
         queue_summary = "; ".join(queue_parts) + "."
     else:
-        queue_summary = "No queued or deferred role patches."
+        queue_summary = EMPTY_STATES["patch_queue"]
 
     active_signals = signals.get("active") if isinstance(signals.get("active"), list) else []
     if active_signals:
@@ -555,6 +568,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "conveyor": conveyor_state,
         "progress": progress,
         "review": self_review_snapshot(task, queue, signals, conveyor_state, human, progress),
+        "empty_states": dict(EMPTY_STATES),
         "progress_recent": progress.get("recent_activity") or "No multi-role activity recorded yet.",
         "logs": log_snapshot(target),
     }
@@ -1107,21 +1121,22 @@ HTML_TEMPLATE = r"""<!doctype html>
         row.appendChild(el("div", "muted", item.reason || "No reason recorded."));
         nextUp.appendChild(row);
       });
-      if (!nextUp.children.length) nextUp.appendChild(el("div", "item muted", active.status === "running" ? "Current role is running; next decision refreshes after it exits." : "No conveyor decision recorded yet."));
+      const emptyStates = data.empty_states || {};
+      if (!nextUp.children.length) nextUp.appendChild(el("div", "item muted", active.status === "running" ? "Current role is running; next decision refreshes after it exits." : (emptyStates.next_up || "No conveyor decision recorded yet.")));
 
       const patches = document.getElementById("patches");
       clear(patches);
       (data.queue.manifests || []).forEach(item => {
         patches.appendChild(renderManifest(item));
       });
-      if (!patches.children.length) patches.appendChild(el("div", "item muted", "No queued or deferred patches yet."));
+      if (!patches.children.length) patches.appendChild(el("div", "item muted", emptyStates.patch_queue || "No queued or deferred patches yet."));
 
       const outcomes = document.getElementById("outcomes");
       clear(outcomes);
       (data.queue.recent_outcomes || []).forEach(item => {
         outcomes.appendChild(renderManifest(item));
       });
-      if (!outcomes.children.length) outcomes.appendChild(el("div", "item muted", "No recent applied, failed, or skipped role outputs yet."));
+      if (!outcomes.children.length) outcomes.appendChild(el("div", "item muted", emptyStates.recent_outcomes || "No recent applied, failed, or skipped role outputs yet."));
 
       const timeline = document.getElementById("timeline");
       clear(timeline);
@@ -1137,7 +1152,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         if (acceptedText) row.appendChild(el("div", "muted", acceptedText));
         timeline.appendChild(row);
       });
-      if (!timeline.children.length) timeline.appendChild(el("div", "item muted", "No conveyor history yet."));
+      if (!timeline.children.length) timeline.appendChild(el("div", "item muted", emptyStates.timeline || "No conveyor history yet."));
 
       const progress = document.getElementById("progress");
       progress.textContent = data.progress_recent || "No progress pulse yet.";
@@ -1169,7 +1184,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
         render(await response.json());
       } catch (error) {
-        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, review: {items: [], checks: [], known_issues: []}, logs: []};
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
         fallback.progress_recent = "Observatory refresh failed: " + error;
         render(fallback);
       }
@@ -1208,6 +1223,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     conveyor = snapshot.get("conveyor") if isinstance(snapshot.get("conveyor"), dict) else {}
     human = snapshot.get("human") if isinstance(snapshot.get("human"), dict) else {}
     progress = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {}
+    empty_states = snapshot.get("empty_states") if isinstance(snapshot.get("empty_states"), dict) else {}
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
 
     lines = [
@@ -1267,6 +1283,10 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     lines.append(f"- deferred_patches: {int(totals.get('deferred', 0) or 0)}")
     lines.append(f"- applied_patches: {int(totals.get('applied', 0) or 0)}")
     lines.append(f"- failed_patches: {int(totals.get('failed', 0) or 0)}")
+    if not any(int(totals.get(status, 0) or 0) for status in QUEUE_STATUSES):
+        lines.append(
+            f"- first_run_queue_state: {clean_text(empty_states.get('patch_queue') or EMPTY_STATES['patch_queue'], limit=420)}"
+        )
     health = conveyor.get("health") if isinstance(conveyor.get("health"), dict) else {}
     lines.append(f"- conveyor_health: {clean_text(health.get('summary') or 'No conveyor health recorded.', limit=420)}")
     decisions = [item for item in list(conveyor.get("decision_queue") or []) if isinstance(item, dict)]

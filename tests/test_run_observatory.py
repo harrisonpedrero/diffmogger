@@ -236,6 +236,59 @@ class ObservatorySnapshotTests(unittest.TestCase):
             },
         )
 
+    def seed_first_run_target(self, root: Path) -> None:
+        self.write_text(
+            root,
+            "docs/CODEX_AUTOMATION_TASKS.md",
+            """
+            # Codex Automation Tasks
+
+            AUTOMATION_STATUS: ACTIVE
+
+            Last updated: 2026-05-03T22:45:00+00:00
+
+            ## Current Project State
+
+            - Current assessment: Fresh local automation state is ready for first review.
+
+            ## Product Horizon State
+
+            - Current horizon: H2 Offline/local demo
+            - Advancement decision: stay
+
+            ## Checks From Last Run
+
+            - PASS: `bash scripts/validate_starter_kit.sh`
+
+            ## Known Issues
+
+            None.
+
+            ## Best Next Milestone
+
+            Start the first conveyor pass.
+
+            ## Suggested Next Sprint-Sized Task
+
+            Run one local builder lane and integrate the result.
+            """,
+        )
+        self.write_text(
+            root,
+            "docs/MULTI_ROLE_PROGRESS.md",
+            """
+            # Multi-Role Progress
+
+            ## Recent Activity Log
+
+            No multi-role activity recorded yet.
+
+            ## Deferred-Patch Backlog
+
+            None.
+            """,
+        )
+
     def test_build_snapshot_counts_active_human_bridge_records(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
@@ -299,6 +352,27 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("pending_requests: 1", report)
                     self.assertIn("System python lacks pytest", report)
                     self.assertIn("Add a local validation fixture", report)
+
+    def test_first_run_empty_states_explain_future_queue_outputs(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_first_run_target(target)
+
+                    snapshot = module.build_snapshot(target)
+                    review_items = {item["label"]: item["body"] for item in snapshot["review"]["items"]}
+                    decision = snapshot["conveyor"]["decision_queue"][0]
+                    html = module.render_html(snapshot, live=False)
+                    report = module.render_review_markdown(snapshot)
+
+                    self.assertIn("First role patch manifests", snapshot["empty_states"]["patch_queue"])
+                    self.assertIn("First role patch manifests", review_items["Queue and conveyor"])
+                    self.assertEqual(decision["state"], "first-run")
+                    self.assertIn("first conveyor cycle", decision["reason"])
+                    self.assertIn("No conveyor timeline yet", html)
+                    self.assertIn("first_run_queue_state:", report)
+                    self.assertIn("First role patch manifests", report)
 
 
 if __name__ == "__main__":
