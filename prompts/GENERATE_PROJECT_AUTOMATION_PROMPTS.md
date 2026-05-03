@@ -29,6 +29,8 @@ docs/DAILY_AUTOMATION_REVIEW.md
 scripts/acquire_codex_lock.sh
 scripts/release_codex_lock.sh
 scripts/run_codex_automation.sh
+scripts/run_observatory.py
+scripts/repair_environment.py
 scripts/spawn_worker_agent.sh
 scripts/summarize_worker_outputs.py
 scripts/compact_agent_state.py
@@ -143,6 +145,7 @@ The generated automation prompt must make an explicit Codex CLI worker decision 
 ```text
 Codex CLI worker decision: USE / SKIP / UNAVAILABLE
 Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS
+Parallelism budget: <0-N workers>
 Reason: <one sentence>
 ```
 
@@ -150,15 +153,15 @@ It must check availability with `command -v codex` before using Codex CLI worker
 
 Preserve read-only worker-report behavior. Read-only workers are the default for exploration, review, risk checks, product polish, and test-gap analysis.
 
-Support optional bounded write workers only when the project intake explicitly enables `write_worker_agents_allowed`. The intake should also provide `max_write_worker_count`, capped at 10, and `write_worker_guidance`. Generated projects must remain conservative when that field is absent or false.
+Support optional bounded write workers only when the project intake explicitly enables `write_worker_agents_allowed`. The intake should also provide `max_write_worker_count`, capped at 10, and `write_worker_guidance`. Generated projects must keep write workers disabled when that field is absent or false, but enabled targets should treat write workers as bounded acceleration rather than a last resort.
 
 When write workers are enabled, the generated automation prompt must teach the main agent to:
 
 - make an explicit worker strategy decision every run
-- use write workers only for large, well-planned changes
-- recommend fewer than the maximum when fewer are enough
-- define contracts, interfaces, data shapes, or command boundaries before implementation begins
-- define disjoint file/module ownership for each write worker
+- choose a parallelism budget every run
+- use the most parallelism the task can safely absorb
+- define enough contracts, interfaces, data shapes, or command boundaries to keep parallel work coherent
+- define reviewable file/module ownership for each write worker
 - document any coordination protocol before overlapping ownership is allowed
 - tell workers they are not alone in the codebase and must not revert unrelated edits or changes made by others
 - require each worker to list changed files, checks run, integration notes, and risks
@@ -172,15 +175,17 @@ If the target helper script supports write workers, keep read-only as the defaul
 
 Support optional multi-role automation only when the project intake explicitly enables `multi_role_automations_allowed`. The v1 supported profile is `planner_builder_hardener_integrator`; default generated projects must stay single-lane when that field is absent or false.
 
-Generated targets must include `scripts/run_conveyor_automation.sh`, `scripts/run_conveyor_automation.py`, and `scripts/update_automation_signals.py` as optional local automation helpers. When `automation_signals_enabled` is true, generate `docs/AUTOMATION_SIGNALS.md`. When multi-role mode is enabled, also generate `.agentic/roles/planner.md`, `.agentic/roles/builder.md`, `.agentic/roles/hardener.md`, `.agentic/roles/integrator.md`, `docs/MULTI_ROLE_PROGRESS.md`, `scripts/run_role_automation.sh`, `scripts/integrate_role_outputs.py`, and `scripts/list_deferred_patches.py`.
+Generated targets must include `scripts/run_conveyor_automation.sh`, `scripts/run_conveyor_automation.py`, `scripts/run_observatory.py`, `scripts/repair_environment.py`, and `scripts/update_automation_signals.py` as optional local automation helpers. When `automation_signals_enabled` is true, generate `docs/AUTOMATION_SIGNALS.md`. When multi-role mode is enabled, also generate `.agentic/roles/planner.md`, `.agentic/roles/builder.md`, `.agentic/roles/hardener.md`, `.agentic/roles/integrator.md`, `docs/MULTI_ROLE_PROGRESS.md`, `scripts/run_role_automation.sh`, `scripts/integrate_role_outputs.py`, and `scripts/list_deferred_patches.py`.
 
 Generated multi-role prompts must state that:
 
 - every role is local-only and must never push, fetch, pull, configure remotes, set upstream tracking, or run remote-affecting git commands
 - no-remote violations are `CRITICAL_STOP`
 - fixed cadence mode runs planner hourly at minute `0`; continuous conveyor mode may run planner when planning is due
+- continuous conveyor mode prioritizes queued integration first, due planning second, builder momentum by default, and one hardener pass after integrated builder work
 - builder and hardener start from latest main `HEAD` in isolated worktrees and may see partially integrated state from earlier patches in the cycle
 - integrator owns the main checkout, dirty-checkpoint commits, FIFO patch application, batched verification with individual fallback, local commits, task-state updates, progress updates, and retention
+- successful empty role patches are recorded as `skipped` instead of queued for integration
 - deferred patches must use machine-readable `deferral_reason` values
 
 Generated guardrails must prohibit recursive role spawning, unbounded write ownership, blind acceptance of role patches, destructive cleanup, remote git operations, and hook-based pushes.

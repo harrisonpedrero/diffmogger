@@ -21,6 +21,8 @@ scripts/release_codex_lock.sh
 scripts/run_codex_automation.sh
 scripts/run_conveyor_automation.py
 scripts/run_conveyor_automation.sh
+scripts/run_observatory.py
+scripts/repair_environment.py
 scripts/update_automation_signals.py
 scripts/spawn_worker_agent.sh
 scripts/summarize_worker_outputs.py

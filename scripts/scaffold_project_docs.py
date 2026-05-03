@@ -741,9 +741,9 @@ def worker_values(data: dict[str, Any]) -> dict[str, str]:
     guidance = normalize_lines(
         data.get("write_worker_guidance"),
         (
-            "Write workers are optional and should be used only for large, well-planned "
-            "changes with disjoint file or module ownership. Prefer fewer workers when "
-            "the change can be done clearly by the main agent."
+            "Use the most parallelism the task can safely absorb. Write workers are "
+            "optional acceleration for broad work with reviewable ownership boundaries; "
+            "keep coordination lightweight and let the main agent integrate and verify."
         ),
     )
 
@@ -752,28 +752,28 @@ def worker_values(data: dict[str, Any]) -> dict[str, str]:
 
 {guidance}
 
-Write workers are optional, never mandatory. Use fewer than the maximum whenever that is enough; 2-4 write workers are usually better than 8-10. Integration-only runs with no workers are valid when the main agent can finish safely.
+Write workers are optional, never mandatory, and should be used as bounded acceleration. Default to the most useful parallelism the task can safely absorb: no workers for tiny or tightly coupled changes, a few workers for normal multi-surface work, and up to {max_write_workers} workers for broad implementation, audit, hardening, observability, docs, examples, validation, or competing prototype lanes.
+
+The goal is to maximize validated useful diff per unit time while preserving local-first safety and reviewability. Prefer reviewable progress and repairable local breakage over over-planning a run into tiny changes.
 
 At the beginning of every run, make an explicit strategy decision in addition to the Codex CLI availability decision:
 
 ```text
 Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS
 Write-worker count planned: <0-{max_write_workers}>
+Parallelism budget: <0-{max_write_workers} workers>
 Reason: <one sentence>
 ```
 
 Use read-only workers by default for exploration, review, risk checks, product polish, and test-gap analysis.
 
-Use write workers only when all of these are true:
+Use write workers when the work can be split into useful bounded lanes and the main agent can integrate the results. Before spawning write workers, keep the plan lightweight but concrete:
 
-- the run is a large, well-planned change
-- the main agent has already chosen the milestone, architecture, and verification plan
-- contracts, interfaces, data shapes, or command boundaries are defined before implementation begins
-- each worker has disjoint file/module ownership
-- the write-worker count is at most {max_write_workers}
-- the main agent can review and integrate all changes before the run ends
-
-Before spawning write workers, write a short ownership plan in the task file or run notes:
+- choose the milestone
+- assign rough file/module ownership for each worker
+- define only the shared contracts, interfaces, data shapes, or command boundaries that matter
+- document a coordination protocol only when ownership overlaps
+- choose expected checks
 
 ```text
 Write-worker ownership plan:
@@ -812,9 +812,9 @@ After write workers finish, the main agent must:
 - integrate the slices into one coherent change
 - run relevant verification
 - update `docs/CODEX_AUTOMATION_TASKS.md` with worker strategy, workers used, changed files, checks, accepted/rejected/deferred outputs, and final status"""
-        guardrails = f"""- Write-capable workers are enabled but optional; use them only for large, well-planned changes with disjoint ownership.
-- Spawn at most {max_write_workers} write workers in one run, and prefer fewer when the work does not need maximum parallelism.
-- Define contracts/interfaces and disjoint file/module ownership before write workers begin.
+        guardrails = f"""- Write-capable workers are enabled but optional; use them as bounded acceleration when work can split into reviewable lanes.
+- Spawn at most {max_write_workers} write workers in one run, and use the most parallelism the task can safely absorb.
+- Define enough contracts/interfaces and file/module ownership for workers to avoid chaotic overlap, without turning planning into ceremony.
 - Do not allow overlapping write ownership unless an explicit coordination protocol is documented first.
 - Do not create unbounded recursive agent loops. Workers must not spawn workers.
 - Do not blindly accept worker changes; the main agent must review, integrate, resolve conflicts, and verify.
@@ -822,22 +822,23 @@ After write workers finish, the main agent must:
         task_notes = f"""Write-capable worker agents allowed: true
 
 - Max write worker count: {max_write_workers}
-- Write workers are optional and only for large, well-planned changes with disjoint ownership.
+- Parallelism budget: choose 0-{max_write_workers} workers based on how much useful parallelism the task can absorb.
+- Write workers are optional acceleration for broad work with reviewable ownership boundaries.
 - Read-only workers remain the default for exploration and review.
-- Integration-only runs with no workers are valid when safer.
-- The main agent must define ownership/contracts first, then review, integrate, verify, and update task state."""
+- Integration-only runs with no workers are valid when faster or safer.
+- The main agent must assign ownership, reject weak output, integrate strong output, verify, and update task state."""
         development = f"""Write-capable worker agents allowed: true
 
 Max write worker count: {max_write_workers}
 
-Write workers are optional. Use them only for large, planned changes with disjoint ownership and a main-agent integration plan. The helper supports `--mode write`, but it does not replace code review or conflict resolution."""
+Write workers are optional acceleration. Use the most parallelism the task can safely absorb while keeping ownership reviewable and the main agent responsible for integration. The helper supports `--mode write`, but it does not replace code review or conflict resolution."""
         bootstrap = f"""Worker agents allowed: {str(workers_allowed).lower()}
 
 Write-capable worker agents allowed: true
 
 Max write worker count: {max_write_workers}
 
-Recurring automation should use read-only worker reports by default, and may use bounded write workers only after the main agent defines a plan, ownership boundaries, contracts, verification, and integration responsibilities."""
+Recurring automation should use read-only worker reports for exploration and use bounded write workers as acceleration when work can split into useful parallel lanes. Keep planning lightweight, but make ownership, verification, and integration responsibilities clear."""
     else:
         orchestration = """Write workers are disabled for this project. Do not spawn nested workers that modify source files or docs. Use read-only worker reports when useful, and let the main agent implement, integrate, verify, and update task state directly.
 
@@ -898,7 +899,7 @@ Integrator cadence: minutes `25` and `55`
 
 The current single-lane automation remains valid for manual runs. Scheduled multi-role mode uses local role prompts under `.agentic/roles/`, isolated git worktrees under `target/automation_worktrees/`, queued patches under `target/automation_queue/`, and durable progress state in `docs/MULTI_ROLE_PROGRESS.md`.
 
-Dashboard scheduling can use the fixed multi-role cadence or the continuous conveyor. The conveyor is one local launchd job that chooses the next runnable lane from current state, prioritizing queued integration, due planning, hardening after integration, and builder momentum.
+Dashboard scheduling can use the fixed multi-role cadence or the continuous conveyor. The conveyor is one local launchd job that chooses the next runnable lane from current state, prioritizing queued integration first, due planning second, builder momentum by default, and one hardener pass after integrated builder work.
 
 Multi-role mode is local-only. Roles must never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run any git command that touches a remote. Local commits, local branches, local tags, and local worktrees are allowed. Any remote-touching attempt is a `CRITICAL_STOP`.
 
@@ -916,7 +917,7 @@ Planner, builder, and hardener start from the latest main `HEAD` at run start. T
 - Role profile: `{profile}`
 - Automation schedule strategy: `{schedule_strategy}`
 - Planner runs hourly at minute `0`; builder, hardener, and integrator run on staggered half-hour offsets.
-- Continuous conveyor mode is available through `scripts/run_conveyor_automation.sh`; it chooses the next runnable lane instead of using exact role times.
+- Continuous conveyor mode is available through `scripts/run_conveyor_automation.sh`; it prioritizes queued integration first, due planning second, builder momentum by default, and one hardener pass after integrated builder work.
 - Integrator maintains `docs/MULTI_ROLE_PROGRESS.md` and local checkpoint commits.
 - Deferred patches remain visible through `scripts/list_deferred_patches.py`.
 - Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""

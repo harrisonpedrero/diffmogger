@@ -8,13 +8,15 @@ Worker agents are a force multiplier for complex tasks. They are not a replaceme
 
 ```text
 Codex CLI worker decision: USE / SKIP / UNAVAILABLE
+Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS
+Parallelism budget: <0-N workers>
 Reason: <one sentence>
 ```
 
 - Use one generation of workers by default.
 - Prefer read-only worker reports.
 - Use write-capable workers only when the generated project intake explicitly enables them.
-- Use write-capable workers only for large, well-planned changes with disjoint write scopes or isolated work areas.
+- Use write-capable workers as bounded acceleration when work can split into reviewable write scopes or isolated work areas.
 - The main agent owns integration and verification.
 - Record worker activity in `docs/CODEX_AUTOMATION_TASKS.md`.
 
@@ -107,31 +109,32 @@ If workers are skipped on a broad task, record the reason in `docs/CODEX_AUTOMAT
 
 ## Optional Write Workers
 
-Generated target projects are conservative by default. Write-capable workers are disabled unless the intake sets:
+Generated target projects are conservative by default only in the sense that write-capable workers require explicit opt-in. Once enabled, they are meant to accelerate progress when work can split into reviewable lanes.
 
 ```json
 {
   "write_worker_agents_allowed": true,
-  "max_write_worker_count": 4,
-  "write_worker_guidance": "Use write workers only for large planned changes with disjoint ownership."
+  "max_write_worker_count": 10,
+  "write_worker_guidance": "Use the most parallelism the task can safely absorb while keeping ownership reviewable."
 }
 ```
 
-`max_write_worker_count` is capped at 10. Prompts should still recommend fewer workers when fewer are enough.
+`max_write_worker_count` is capped at 10. The main agent should use the most parallelism the task can safely absorb: no workers for tiny or tightly coupled changes, a few workers for normal multi-surface work, and up to the cap for broad implementation, hardening, observability, docs, examples, validation, or competing prototype lanes.
 
 Every run should choose a strategy:
 
 ```text
 Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS
 Write-worker count planned: <0-N>
+Parallelism budget: <0-N workers>
 Reason: <one sentence>
 ```
 
-Use write workers only after the main agent has a clear plan. Before spawning them, define:
+Use write workers after the main agent has enough plan to split the work without chaos. Keep coordination lightweight. Before spawning them, define:
 
 - the milestone and implementation plan
 - shared contracts, interfaces, data shapes, or command boundaries
-- disjoint file/module ownership for each worker
+- rough file/module ownership for each worker
 - an explicit coordination protocol if any ownership overlaps
 - verification expected from each worker
 
@@ -145,7 +148,7 @@ Each write worker must be told:
 
 After write workers finish, the main agent must review diffs, integrate the slices, resolve conflicts, run verification, and update the task file. Worker changes are never accepted blindly.
 
-Integration-only runs with no workers are valid when the main agent can finish safely.
+Integration-only runs with no workers are valid when the main agent can finish faster or more safely. Ambitious local changes may break temporarily, but the breakage must be visible, reviewable, and repaired by the same run or follow-up integration work.
 
 ## Multi-Role Automation Is Separate
 

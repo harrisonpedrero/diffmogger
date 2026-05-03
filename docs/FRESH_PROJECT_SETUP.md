@@ -45,8 +45,8 @@ Write-capable worker agents are disabled unless the intake explicitly enables th
 ```json
 {
   "write_worker_agents_allowed": true,
-  "max_write_worker_count": 4,
-  "write_worker_guidance": "Use write workers only for large planned changes with disjoint ownership."
+  "max_write_worker_count": 10,
+  "write_worker_guidance": "Use the most parallelism the task can safely absorb while keeping ownership reviewable."
 }
 ```
 
@@ -84,6 +84,8 @@ scripts/release_codex_lock.sh
 scripts/run_codex_automation.sh
 scripts/run_conveyor_automation.py
 scripts/run_conveyor_automation.sh
+scripts/run_observatory.py
+scripts/repair_environment.py
 scripts/update_automation_signals.py
 scripts/spawn_worker_agent.sh
 scripts/summarize_worker_outputs.py
@@ -131,7 +133,7 @@ If the scheduling strategy is continuous conveyor, the dashboard writes one Laun
 bash scripts/run_conveyor_automation.sh
 ```
 
-The conveyor keeps running locally, chooses the next runnable lane from current state, and records state in `target/automation_conveyor_state.json`. It falls back to `scripts/run_codex_automation.sh` when multi-role files are absent.
+The conveyor keeps running locally, chooses the next runnable lane from current state, and records state in `target/automation_conveyor_state.json`. It prioritizes queued integration first, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It falls back to `scripts/run_codex_automation.sh` when multi-role files are absent.
 
 The target wrapper can still be run manually for debugging:
 
@@ -139,7 +141,14 @@ The target wrapper can still be run manually for debugging:
 bash scripts/run_codex_automation.sh
 bash scripts/run_conveyor_automation.sh --dry-run
 bash scripts/run_conveyor_automation.sh --once
+python3 scripts/run_observatory.py --open
 ```
+
+The observatory is a local browser page for demos and live monitoring. It reads
+target-local state, including `target/automation_conveyor_state.json`,
+`target/automation_queue/`, automation logs, and progress docs, then shows the
+active conveyor role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline
+events without requiring external services.
 
 The generated wrapper runs the parent automation with:
 
@@ -202,7 +211,7 @@ codex exec --disable plugins \
 
 The parent scheduled wrapper must also allow `$HOME/.codex` with `--add-dir`. `--ephemeral` reduces child session persistence, but the nested CLI may still touch Codex state and shell snapshot files during startup.
 
-Read-only worker reports are the default. When write workers are explicitly enabled in the intake, generated prompts allow bounded write mode for large planned changes:
+Read-only worker reports are the default for exploration and review. When write workers are explicitly enabled in the intake, generated prompts allow bounded write mode as acceleration for work that can split into reviewable lanes:
 
 ```bash
 bash scripts/spawn_worker_agent.sh \
@@ -214,4 +223,4 @@ bash scripts/spawn_worker_agent.sh \
   --prompt "Implement the assigned slice and report changed files/checks."
 ```
 
-The main automation agent still owns planning, disjoint ownership, contract definitions, integration, conflict resolution, verification, and final task-state updates. Integration-only runs with no workers are valid.
+The main automation agent still owns planning, reviewable ownership, necessary contract definitions, integration, conflict resolution, verification, and final task-state updates. Integration-only runs with no workers are valid when faster or safer.

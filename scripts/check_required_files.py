@@ -16,6 +16,8 @@ BASE_REQUIRED = [
     "scripts/run_codex_automation.sh",
     "scripts/run_conveyor_automation.py",
     "scripts/run_conveyor_automation.sh",
+    "scripts/run_observatory.py",
+    "scripts/repair_environment.py",
     "scripts/update_automation_signals.py",
     "scripts/spawn_worker_agent.sh",
     "scripts/summarize_worker_outputs.py",
@@ -60,6 +62,7 @@ TASK_REQUIRED_STRINGS = [
     "## Completed Last Run",
     "## Checks From Last Run",
     "## Worker-Agent Activity",
+    "Parallelism budget:",
     "## Known Issues",
     "## Pending Human Requests",
     "## Human Messages Sent",
@@ -91,6 +94,7 @@ RUNNER_REQUIRED_STRINGS = [
     "codex exec --full-auto",
     "--skip-git-repo-check",
     "update_automation_signals.py",
+    "repair_environment.py",
     "child_pid",
     "forward_signal",
 ]
@@ -102,6 +106,16 @@ CONVEYOR_REQUIRED_STRINGS = [
     "run_role_automation.sh",
     "run_codex_automation.sh",
     "MULTI_ROLE_ALLOW_REMOTES",
+    "active_role_run",
+    "decision_queue",
+]
+
+OBSERVATORY_REQUIRED_STRINGS = [
+    "Diffmogger Observatory",
+    "automation_conveyor_state.json",
+    "automation_queue",
+    "ThreadingHTTPServer",
+    "--open",
 ]
 
 SIGNAL_HELPER_REQUIRED_STRINGS = [
@@ -120,6 +134,7 @@ WORKER_HELPER_REQUIRED_STRINGS = [
 
 WRITE_WORKER_AUTOMATION_REQUIRED_STRINGS = [
     "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS",
+    "Parallelism budget:",
     "Write-capable worker agents allowed: true",
     "Max write worker count:",
     "--mode write",
@@ -201,6 +216,7 @@ RUN_ROLE_REQUIRED_STRINGS = [
     "git add -N",
     "CRITICAL_STOP",
     "update_automation_signals.py",
+    "repair_environment.py",
     "manifest.json",
     "automation_worktrees",
     "automation_queue",
@@ -215,6 +231,7 @@ INTEGRATOR_REQUIRED_STRINGS = [
     "git push",
     "hooks",
     "checkpoint pre-existing local changes",
+    "repair_environment.py",
     "worktree",
     "prune",
 ]
@@ -342,6 +359,13 @@ def main() -> int:
         for marker in CONVEYOR_REQUIRED_STRINGS:
             if marker not in conveyor_text:
                 problems.append(f"scripts/run_conveyor_automation.py: missing marker {marker!r}")
+
+    observatory_path = root / "scripts/run_observatory.py"
+    if observatory_path.exists() and observatory_path.is_file():
+        observatory_text = observatory_path.read_text(encoding="utf-8")
+        for marker in OBSERVATORY_REQUIRED_STRINGS:
+            if marker not in observatory_text:
+                problems.append(f"scripts/run_observatory.py: missing marker {marker!r}")
 
     signal_helper_path = root / "scripts/update_automation_signals.py"
     if signal_helper_path.exists() and signal_helper_path.is_file():

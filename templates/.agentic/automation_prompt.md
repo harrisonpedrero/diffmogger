@@ -109,6 +109,7 @@ At the beginning of every run, make an explicit worker decision:
 ```text
 Codex CLI worker decision: USE / SKIP / UNAVAILABLE
 Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS
+Parallelism budget: <0-N workers>
 Reason: <one sentence>
 ```
 
@@ -254,7 +255,7 @@ Preferred commands:
 {{VERIFICATION_COMMANDS}}
 ```
 
-Run the checks that match the files changed. Do not claim checks passed unless they were run. If a check cannot run, document why.
+Run the checks that match the files changed. Do not claim checks passed unless they were run. If a check cannot run because of missing local tooling or dependencies, diagnose the environment and use `scripts/repair_environment.py` or an equivalent local-only repair before declaring an environment blocker. Never install globally.
 
 ## End-Of-Run Requirements
 

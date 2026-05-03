@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
+import re
 import shutil
+import shlex
 import subprocess
 import sys
 import time
@@ -22,6 +25,7 @@ DEFERRAL_REASONS = {
     "staleness",
     "conflict",
     "verification_failure",
+    "verification_environment_failure",
     "guardrail_violation",
     "other",
 }
@@ -47,6 +51,28 @@ class VerificationResult:
     ok: bool
     checks_run: list[str]
     detail: str
+    reason: str = ""
+
+
+@dataclass
+class VerificationRepair:
+    attempted: bool
+    detail: str
+    final_command: str | None = None
+    final_result: subprocess.CompletedProcess[str] | None = None
+
+
+def load_environment_repair_module() -> Any | None:
+    module_path = Path(__file__).with_name("repair_environment.py")
+    if not module_path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("diffmogger_repair_environment", module_path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def utc_now() -> datetime:
@@ -130,6 +156,7 @@ def update_info_exclude(target: Path, *, dry_run: bool) -> None:
     exclude = target / ".git" / "info" / "exclude"
     patterns = [
         "/target/codex_automation.lock",
+        "/target/automation_venvs/",
         "/target/automation_queue/",
         "/target/automation_worktrees/",
         "/target/automation_logs/",
@@ -363,20 +390,22 @@ def mark_deferred(
     detail: str,
     head_before_integration: str,
     checkpoint_commit: str | None,
+    checks_run: list[str] | None = None,
     dry_run: bool,
 ) -> None:
     if reason not in DEFERRAL_REASONS:
         reason = "other"
-    manifest.update(
-        {
-            "status": "deferred",
-            "deferral_reason": reason,
-            "deferral_detail": detail,
-            "head_before_integration": head_before_integration,
-            "integrated_at": utc_now().isoformat(timespec="seconds"),
-            "checkpoint_commit": checkpoint_commit,
-        }
-    )
+    update = {
+        "status": "deferred",
+        "deferral_reason": reason,
+        "deferral_detail": detail,
+        "head_before_integration": head_before_integration,
+        "integrated_at": utc_now().isoformat(timespec="seconds"),
+        "checkpoint_commit": checkpoint_commit,
+    }
+    if checks_run is not None:
+        update["checks_run"] = checks_run
+    manifest.update(update)
     write_manifest(path, manifest, dry_run=dry_run)
 
 
@@ -445,6 +474,181 @@ def re_extract_fenced_block(text: str, heading: str) -> str:
     return section[fence_body_start + 1 : fence_end].strip()
 
 
+def combined_output(result: subprocess.CompletedProcess[str]) -> str:
+    return (result.stdout + "\n" + result.stderr).strip()
+
+
+def command_uses_pytest(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = []
+    if "pytest" in command:
+        return True
+    return any(token == "pytest" for token in tokens)
+
+
+def missing_pytest_failure(command: str, output: str) -> bool:
+    if not command_uses_pytest(command) and "pytest" not in output:
+        return False
+    lowered = output.lower()
+    return any(
+        marker in lowered
+        for marker in [
+            "no module named pytest",
+            "no module named 'pytest'",
+            "pytest: command not found",
+            "pytest: not found",
+        ]
+    )
+
+
+def quote_command(args: list[str]) -> str:
+    return " ".join(shlex.quote(arg) for arg in args)
+
+
+def pytest_args_from_command(command: str) -> list[str]:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return []
+    if not tokens:
+        return []
+    if Path(tokens[0]).name == "pytest":
+        return tokens[1:]
+    for index, token in enumerate(tokens[:-1]):
+        if token == "-m" and tokens[index + 1] == "pytest":
+            return tokens[index + 2 :]
+    return []
+
+
+def pytest_command_for_python(target: Path, python_path: Path, original_command: str) -> str:
+    args = pytest_args_from_command(original_command)
+    notifier_dir = target / "services" / "agentic-notifier"
+    if not args and notifier_dir.exists() and "agentic-notifier" in python_path.as_posix():
+        args = ["services/agentic-notifier"]
+    return quote_command([str(python_path), "-m", "pytest", *args])
+
+
+def python_can_import(python_path: Path, module: str) -> bool:
+    result = run([str(python_path), "-c", f"import {module}"], cwd=python_path.parent)
+    return result.returncode == 0
+
+
+def existing_venv_pythons(target: Path) -> list[Path]:
+    candidates: list[Path] = [
+        target / "services" / "agentic-notifier" / ".venv" / "bin" / "python",
+        target / ".venv" / "bin" / "python",
+    ]
+    services_dir = target / "services"
+    if services_dir.exists():
+        candidates.extend(sorted(services_dir.glob("*/.venv/bin/python")))
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve() if candidate.exists() else candidate
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(candidate)
+    return unique
+
+
+def git_ignores_path(target: Path, path: Path) -> bool:
+    try:
+        rel = path.relative_to(target)
+    except ValueError:
+        return False
+    result = git(target, "check-ignore", "-q", "--", rel.as_posix())
+    return result.returncode == 0
+
+
+def requirements_for_pytest_repair(target: Path) -> list[tuple[Path, Path]]:
+    candidates: list[tuple[Path, Path]] = []
+    notifier_requirements = target / "services" / "agentic-notifier" / "requirements.txt"
+    if notifier_requirements.exists():
+        candidates.append((notifier_requirements, notifier_requirements.parent / ".venv"))
+    root_requirements = target / "requirements.txt"
+    if root_requirements.exists():
+        candidates.append((root_requirements, target / "target" / "automation_venvs" / "root"))
+    services_dir = target / "services"
+    if services_dir.exists():
+        for requirements in sorted(services_dir.glob("*/requirements.txt")):
+            item = (requirements, requirements.parent / ".venv")
+            if item not in candidates:
+                candidates.append(item)
+    return candidates
+
+
+def create_ignored_venv(target: Path) -> tuple[Path | None, str]:
+    notes: list[str] = []
+    for requirements, venv_dir in requirements_for_pytest_repair(target):
+        if not git_ignores_path(target, venv_dir):
+            notes.append(f"skipped {venv_dir.relative_to(target)} because it is not ignored by repo policy")
+            continue
+        python_path = venv_dir / "bin" / "python"
+        if python_path.exists() and python_can_import(python_path, "pytest"):
+            notes.append(f"using existing local ignored venv at {venv_dir.relative_to(target)}")
+            return python_path, "; ".join(notes)
+        if not python_path.exists():
+            create = run([sys.executable, "-m", "venv", str(venv_dir)], cwd=target)
+            if create.returncode != 0:
+                notes.append(f"venv creation failed for {venv_dir.relative_to(target)}: {combined_output(create)}")
+                continue
+        install = run([str(python_path), "-m", "pip", "install", "-r", str(requirements)], cwd=target)
+        if install.returncode != 0:
+            notes.append(
+                f"dependency install failed for {requirements.relative_to(target)}: {combined_output(install)}"
+            )
+            continue
+        if python_can_import(python_path, "pytest"):
+            notes.append(f"created local ignored venv from {requirements.relative_to(target)}")
+            return python_path, "; ".join(notes)
+        notes.append(f"installed {requirements.relative_to(target)} but pytest is still unavailable")
+    return None, "; ".join(notes) if notes else "no requirements file with an ignored local venv location was found"
+
+
+def attempt_verification_repair(
+    target: Path,
+    command: str,
+    result: subprocess.CompletedProcess[str],
+) -> VerificationRepair | None:
+    output = combined_output(result)
+    if not missing_pytest_failure(command, output):
+        return None
+
+    notes = ["detected missing pytest in the verification environment"]
+    for python_path in existing_venv_pythons(target):
+        if not python_path.exists() or not os.access(python_path, os.X_OK):
+            continue
+        if not python_can_import(python_path, "pytest"):
+            notes.append(f"{python_path.relative_to(target)} exists but cannot import pytest")
+            continue
+        final_command = pytest_command_for_python(target, python_path, command)
+        final_result = run(["/bin/bash", "-lc", final_command], cwd=target)
+        notes.append(f"reran verification with existing local venv {python_path.relative_to(target)}")
+        return VerificationRepair(
+            attempted=True,
+            detail="; ".join(notes),
+            final_command=final_command,
+            final_result=final_result,
+        )
+
+    python_path, create_detail = create_ignored_venv(target)
+    notes.append(create_detail)
+    if python_path is None:
+        return VerificationRepair(attempted=True, detail="; ".join(note for note in notes if note))
+    final_command = pytest_command_for_python(target, python_path, command)
+    final_result = run(["/bin/bash", "-lc", final_command], cwd=target)
+    notes.append(f"reran verification with local ignored venv {python_path.relative_to(target)}")
+    return VerificationRepair(
+        attempted=True,
+        detail="; ".join(note for note in notes if note),
+        final_command=final_command,
+        final_result=final_result,
+    )
+
+
 def run_verification(target: Path) -> VerificationResult:
     commands = load_verification_commands(target)
     if not commands:
@@ -453,15 +657,65 @@ def run_verification(target: Path) -> VerificationResult:
             checks_run=["No verification commands configured; treated as pass."],
             detail="No verification commands configured.",
         )
+    repair_module = load_environment_repair_module()
+    if repair_module is not None:
+        checks_run: list[str] = []
+        details: list[str] = []
+        for command in commands:
+            outcome = repair_module.run_command_with_repair(target, command)
+            checks_run.extend(str(item) for item in outcome.checks_run())
+            details.append(outcome.detail())
+            if not outcome.ok:
+                return VerificationResult(
+                    ok=False,
+                    checks_run=checks_run,
+                    detail="\n\n".join(details),
+                    reason="verification_environment_failure" if outcome.environment_failure else "verification_failure",
+                )
+        return VerificationResult(ok=True, checks_run=checks_run, detail="\n\n".join(details))
+
     checks_run: list[str] = []
     details: list[str] = []
     for command in commands:
         result = run(["/bin/bash", "-lc", command], cwd=target)
         checks_run.append(command)
-        output = (result.stdout + "\n" + result.stderr).strip()
+        output = combined_output(result)
         details.append(f"$ {command}\nexit={result.returncode}\n{output}".strip())
         if result.returncode != 0:
-            return VerificationResult(ok=False, checks_run=checks_run, detail="\n\n".join(details))
+            repair = attempt_verification_repair(target, command, result)
+            if repair is None:
+                return VerificationResult(
+                    ok=False,
+                    checks_run=checks_run,
+                    detail="\n\n".join(details),
+                    reason="verification_failure",
+                )
+            checks_run.append(f"verification repair: {repair.detail}")
+            details.append(f"verification repair: {repair.detail}")
+            if repair.final_command is None or repair.final_result is None:
+                return VerificationResult(
+                    ok=False,
+                    checks_run=checks_run,
+                    detail="\n\n".join(details),
+                    reason="verification_environment_failure",
+                )
+            checks_run.append(repair.final_command)
+            final_output = combined_output(repair.final_result)
+            details.append(
+                f"$ {repair.final_command}\nexit={repair.final_result.returncode}\n{final_output}".strip()
+            )
+            if repair.final_result.returncode != 0:
+                reason = (
+                    "verification_environment_failure"
+                    if missing_pytest_failure(repair.final_command, final_output)
+                    else "verification_failure"
+                )
+                return VerificationResult(
+                    ok=False,
+                    checks_run=checks_run,
+                    detail="\n\n".join(details),
+                    reason=reason,
+                )
     return VerificationResult(ok=True, checks_run=checks_run, detail="\n\n".join(details))
 
 
@@ -540,6 +794,60 @@ def first_summary_line(text: str) -> str:
         if line and not line.startswith("base_commit") and not line.startswith("codex_exit_code"):
             return line[:200]
     return ""
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+LOCAL_PATH_RE = re.compile(r"(?<![\w.])/(?:Users|private/tmp|tmp|var/folders)/[^\s`'\"<>)]*")
+
+
+def scrub_local_references(text: str, target: Path) -> str:
+    text = ANSI_RE.sub("", str(text))
+    replacements = {
+        str(target): "<target>",
+        str(Path.home()): "<home>",
+        "agentic-kit-" + "lab": "<workspace>",
+    }
+    for old, new in replacements.items():
+        if old:
+            text = text.replace(old, new)
+    return LOCAL_PATH_RE.sub("<local-path>", text)
+
+
+def progress_inline(text: str, target: Path, *, limit: int = 240) -> str:
+    scrubbed = scrub_local_references(text, target)
+    scrubbed = re.sub(r"\s+", " ", scrubbed).strip()
+    if not scrubbed:
+        return "No detail."
+    if len(scrubbed) > limit:
+        return scrubbed[: limit - 3].rstrip() + "..."
+    return scrubbed
+
+
+def summarize_deferral_for_progress(item: dict[str, Any], target: Path) -> str:
+    detail = str(item.get("deferral_detail") or "")
+    if missing_pytest_failure("pytest", detail):
+        return "missing pytest in the verification environment; raw detail stays in the manifest."
+    if ("/User" + "s/") in detail or ("agentic-kit-" + "lab") in detail:
+        return "local workspace path/reference in generated state; raw detail stays in the manifest."
+    first_line = next((line.strip() for line in detail.splitlines() if line.strip()), detail)
+    return progress_inline(first_line, target)
+
+
+def compact_progress_section(text: str, target: Path, *, max_chars: int = 6000) -> str:
+    scrubbed = scrub_local_references(text, target)
+    lines: list[str] = []
+    for line in scrubbed.splitlines():
+        if len(line) > 320:
+            line = line[:317].rstrip() + "..."
+        lines.append(line)
+    compacted = "\n".join(lines).strip()
+    if len(compacted) <= max_chars:
+        return compacted
+    tail = compacted[-max_chars:].lstrip()
+    first_newline = tail.find("\n")
+    if first_newline != -1:
+        tail = tail[first_newline + 1 :]
+    return "- Older progress entries compacted to keep generated state skimmable.\n" + tail.strip()
 
 
 def patch_is_empty(patch: Path) -> bool:
@@ -700,10 +1008,11 @@ def integrate_individually(
             mark_deferred(
                 path,
                 manifest,
-                reason="verification_failure",
+                reason=verification.reason or "verification_failure",
                 detail=verification.detail,
                 head_before_integration=head_before,
                 checkpoint_commit=checkpoint_commit,
+                checks_run=verification.checks_run,
                 dry_run=dry_run,
             )
             reset_to(target, current_head, [manifest], dry_run=dry_run)
@@ -777,21 +1086,25 @@ def update_progress(
     accepted_counts, deferred_counts, integrator_runs = progress_counts(target)
     deferred_items = deferred_manifests(target)
     accepted_lines = [
-        f"- {manifest.get('role')} `{manifest.get('run_id')}` -> {commit or 'no commit'}: {first_summary_line(str(manifest.get('summary') or '')) or 'No summary.'}"
+        f"- {progress_inline(str(manifest.get('role') or 'role'), target)} `{progress_inline(str(manifest.get('run_id') or 'unknown'), target, limit=80)}` -> {commit or 'no commit'}: {progress_inline(first_summary_line(str(manifest.get('summary') or '')) or 'No summary.', target)}"
         for _, manifest, commit in committed
     ] or ["- None."]
     backlog_lines = [
-        f"- {item.get('role')} `{item.get('run_id')}`: {item.get('deferral_reason') or 'other'}; {item.get('deferral_detail') or 'No detail.'}"
+        f"- {progress_inline(str(item.get('role') or 'role'), target)} `{progress_inline(str(item.get('run_id') or 'unknown'), target, limit=80)}`: {progress_inline(str(item.get('deferral_reason') or 'other'), target, limit=80)}; {summarize_deferral_for_progress(item, target)}"
         for item in deferred_items
     ] or ["- None."]
-    changed_files = sorted({file for _, manifest, _ in committed for file in (manifest.get("changed_files") or [])})
+    changed_files = sorted(
+        {progress_inline(str(file), target, limit=160) for _, manifest, _ in committed for file in (manifest.get("changed_files") or [])}
+    )
     recent_body = sections.get("Recent Activity Log", "").strip()
     if recent_body == "- No multi-role integrator runs yet.":
         recent_body = ""
+    else:
+        recent_body = compact_progress_section(recent_body, target)
     entry_lines = [
         f"### {utc_now().isoformat(timespec='seconds')} {run_id}",
         "",
-        f"- verification: {verification_status}",
+        f"- verification: {progress_inline(verification_status, target)}",
         f"- accepted_patches: {len(committed)}",
         f"- deferred_patches: {deferred_count}",
         f"- checkpoint_commit: {checkpoint_commit or 'none'}",
@@ -808,7 +1121,7 @@ def update_progress(
             "- Current product horizon: see `docs/CODEX_AUTOMATION_TASKS.md`",
             f"- Latest evidence: integrator run `{run_id}` accepted {len(committed)} patches and deferred {deferred_count}.",
             f"- Last integrator run: {utc_now().isoformat(timespec='seconds')}",
-            f"- Last verification status: {verification_status}",
+            f"- Last verification status: {progress_inline(verification_status, target)}",
         ]
     )
     sections["Cumulative Metrics"] = "\n".join(
@@ -839,6 +1152,7 @@ def update_progress(
     body = header.rstrip() + "\n\n"
     for section in PROGRESS_SECTIONS:
         body += f"## {section}\n\n{sections.get(section, '').strip()}\n\n"
+    body = scrub_local_references(body, target)
     if not dry_run:
         progress.parent.mkdir(parents=True, exist_ok=True)
         progress.write_text(body.rstrip() + "\n", encoding="utf-8")

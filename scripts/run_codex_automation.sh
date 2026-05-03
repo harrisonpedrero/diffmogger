@@ -47,9 +47,67 @@ if [ -f "scripts/update_automation_signals.py" ] && [ -f "docs/AUTOMATION_SIGNAL
   python3 scripts/update_automation_signals.py . --refresh --summary || true
 fi
 
-codex exec --full-auto --skip-git-repo-check "${CODEX_PARENT_ARGS[@]}" "$(cat .agentic/automation_prompt.md)" &
+mkdir -p target/automation_logs
+run_stdout="target/automation_logs/codex.${CODEX_RUN_ID}.stdout.log"
+run_stderr="target/automation_logs/codex.${CODEX_RUN_ID}.stderr.log"
+env_repair_path="target/automation_logs/codex.${CODEX_RUN_ID}.environment_repair.json"
+rerun_stdout="target/automation_logs/codex.${CODEX_RUN_ID}.rerun.stdout.log"
+rerun_stderr="target/automation_logs/codex.${CODEX_RUN_ID}.rerun.stderr.log"
+
+codex exec --full-auto --skip-git-repo-check "${CODEX_PARENT_ARGS[@]}" "$(cat .agentic/automation_prompt.md)" >"$run_stdout" 2>"$run_stderr" &
 child_pid="$!"
 wait "$child_pid"
 exit_code="$?"
 child_pid=""
+cat "$run_stdout"
+cat "$run_stderr" >&2
+
+if [ "$exit_code" != "0" ] && [ -f "scripts/repair_environment.py" ]; then
+  repair_status=0
+  python3 scripts/repair_environment.py . \
+    --command "codex exec single-lane automation" \
+    --exit-code "$exit_code" \
+    --stdout-file "$run_stdout" \
+    --stderr-file "$run_stderr" \
+    --status-file "$env_repair_path" >/dev/null 2>&1 || repair_status=$?
+  if python3 - "$env_repair_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if data.get("repair_performed") else 1)
+PY
+  then
+    while IFS= read -r path_item; do
+      if [ -n "$path_item" ]; then
+        export PATH="$path_item:$PATH"
+      fi
+    done <<EOF
+$(python3 - "$env_repair_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+for item in data.get("path_prepend") or []:
+    print(item)
+PY
+)
+EOF
+    printf 'Environment repair attempted; repair_status=%s\n' "$repair_status"
+    cat "$env_repair_path"
+    codex exec --full-auto --skip-git-repo-check "${CODEX_PARENT_ARGS[@]}" "$(cat .agentic/automation_prompt.md)" >"$rerun_stdout" 2>"$rerun_stderr" &
+    child_pid="$!"
+    wait "$child_pid"
+    exit_code="$?"
+    child_pid=""
+    cat "$rerun_stdout"
+    cat "$rerun_stderr" >&2
+  fi
+fi
+
 exit "$exit_code"

@@ -55,6 +55,7 @@ Last updated: {{CREATED_AT}}
 
 - Codex CLI worker decision: SKIP
 - Worker strategy: NO_WORKERS
+- Parallelism budget: 0 workers
 - Reason: Initial scaffold only; no sprint has run yet.
 - Workers used: none yet.
 - Worker outputs consumed: none yet.

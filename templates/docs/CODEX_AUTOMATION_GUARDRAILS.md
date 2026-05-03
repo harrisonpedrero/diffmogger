@@ -34,6 +34,8 @@ Do not build unrelated apps or large unrelated systems.
 ## Quality Policy
 
 - Run relevant checks when possible.
+- Diagnose missing local tooling or dependency failures and attempt safe project-local repair before declaring `BLOCKED_ON_ENVIRONMENT`.
+- Do not install dependencies globally; use ignored local venvs, `node_modules`, or other project-local runtime state.
 - Do not delete tests just to pass checks.
 - Do not hide broad classes of errors with blanket suppressions.
 - Keep changes scoped to the current sprint.
@@ -43,6 +45,7 @@ Do not build unrelated apps or large unrelated systems.
 - Use worker agents only for bounded subtasks.
 - Make an explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` every run.
 - Make an explicit worker strategy decision every run: `READ_ONLY_REPORTS`, `WRITE_WORKERS`, `INTEGRATION_ONLY`, or `NO_WORKERS`.
+- Choose and record a parallelism budget every run.
 - Check `command -v codex` before using Codex CLI workers.
 - Prefer read-only worker reports.
 - Main agent owns integration.

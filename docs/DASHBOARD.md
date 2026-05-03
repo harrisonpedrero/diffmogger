@@ -57,7 +57,7 @@ It collects the same project intake fields supported by `schemas/project_intake.
 - whether the human bridge is enabled
 - human bridge mode
 - whether freeform human requests should receive SMS/WhatsApp responses when the notifier is available
-- worker-agent settings, including optional bounded write workers disabled by default
+- worker-agent settings, including optional bounded write-worker acceleration disabled by default
 - optional recurring local automation signals, disabled by default
 - advanced multi-role automation settings, disabled by default, including a local-only remote opt-in for repos that already have git remotes configured
 - meaningful deliverable
@@ -159,7 +159,15 @@ If the strategy is **Continuous conveyor**, the dashboard writes one LaunchAgent
 bash scripts/run_conveyor_automation.sh
 ```
 
-The conveyor sets `RunAtLoad`, keeps running locally, and chooses the next runnable lane instead of using exact role times. It prioritizes queued integration, due planning, hardening after integration, and builder momentum. Conveyor state stays in `target/automation_conveyor_state.json`; its duplicate-dispatcher lock is `target/automation_conveyor.lock`.
+The conveyor sets `RunAtLoad`, keeps running locally, and chooses the next runnable lane instead of using exact role times. It prioritizes queued integration first, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state stays in `target/automation_conveyor_state.json`; its duplicate-dispatcher lock is `target/automation_conveyor.lock`.
+
+The monitor tab can also launch:
+
+```text
+Launch Observatory
+```
+
+This opens a local browser page backed by `scripts/run_observatory.py`. The page is meant for live demos and reviews: it shows conveyor health, the active role, upcoming lanes, queued and deferred patches, recent outcomes, progress pulse, and bounded log tails. It reads only target-local files and does not require external services.
 
 For multi-role jobs in repos with configured git remotes, the dashboard blocks scheduling unless the advanced **Allow local-only multi-role automation when this repo has git remotes** option is checked. When checked, LaunchAgents receive `MULTI_ROLE_ALLOW_REMOTES=1`; scripts still refuse pushes, fetches, pulls, remote configuration, and remote-touching git commands.
 

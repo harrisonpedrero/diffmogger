@@ -7,6 +7,7 @@ Each automation run should record:
 ```text
 Codex CLI worker decision: USE / SKIP / UNAVAILABLE
 Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS
+Parallelism budget: <0-N workers>
 Reason: <one sentence>
 ```
 
@@ -41,7 +42,7 @@ When generated project intake explicitly enables write-capable workers, use expl
 bash scripts/spawn_worker_agent.sh --mode write --target /absolute/path/to/target-project --run-id "$CODEX_RUN_ID" --role feature_a --ownership "src/feature-a/** and tests/feature-a/** only" --prompt "Implement the assigned slice and write changed files/checks to the report."
 ```
 
-Write workers are optional and only for large, well-planned changes. Use fewer than the configured maximum when fewer are enough. The main agent must define ownership, contracts, verification, and integration strategy before spawning them.
+Write workers are optional acceleration. Use the most parallelism the task can safely absorb, up to the configured maximum, when work can split into reviewable lanes. The main agent should define enough ownership, contracts, verification, and integration strategy to keep the work coherent without turning planning into ceremony.
 
 Default Codex CLI shape:
 

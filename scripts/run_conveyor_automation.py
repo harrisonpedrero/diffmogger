@@ -30,7 +30,10 @@ DEFAULT_ERROR_SLEEP_SECONDS = 300
 DEFAULT_CYCLE_COOLDOWN_SECONDS = 5
 DEFAULT_PLANNER_INTERVAL_SECONDS = 3600
 DEFAULT_LOCK_STALE_SECONDS = 43200
+DEFAULT_NO_PROGRESS_THRESHOLD = 2
 STATE_HISTORY_LIMIT = 60
+NO_PROGRESS_STATE_KEY = "integrator_no_progress"
+DECISION_QUEUE_LIMIT = 8
 
 CHILD: subprocess.Popen[str] | None = None
 TERMINATE_REQUESTED = False
@@ -175,6 +178,66 @@ def write_state(path: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def command_display(command: list[str]) -> str:
+    return " ".join(command)
+
+
+def split_h2_sections(text: str) -> tuple[str, dict[str, str], list[str]]:
+    lines = text.splitlines()
+    header_lines: list[str] = []
+    sections: dict[str, list[str]] = {}
+    order: list[str] = []
+    current: str | None = None
+    for line in lines:
+        if line.startswith("## "):
+            current = line.removeprefix("## ").strip()
+            sections[current] = []
+            order.append(current)
+        elif current is None:
+            header_lines.append(line)
+        else:
+            sections[current].append(line)
+    return "\n".join(header_lines).strip(), {key: "\n".join(value).strip() for key, value in sections.items()}, order
+
+
+def write_no_progress_progress_note(target: Path, info: dict[str, Any]) -> None:
+    progress = target / "docs" / "MULTI_ROLE_PROGRESS.md"
+    if not progress.exists():
+        return
+    text = read_text(progress)
+    header, sections, order = split_h2_sections(text)
+    if not header:
+        header = "# Multi-Role Progress"
+    reason = re.sub(r"\s+", " ", str(info.get("reason") or "integrator made no patch progress")).strip()
+    reason = reason[:240] if len(reason) > 240 else reason
+    stamp = utc_now()
+    entry = "\n".join(
+        [
+            f"### {stamp} conveyor-no-progress",
+            "",
+            f"- circuit_breaker: active after {info.get('streak', 0)} no-progress integrator cycle(s).",
+            f"- reason: {reason}",
+            "- next_lane: planner handoff or idle until the blocked condition changes.",
+        ]
+    )
+    recent = sections.get("Recent Activity Log", "").strip()
+    if recent == "- No multi-role integrator runs yet.":
+        recent = ""
+    sections["Recent Activity Log"] = (recent.rstrip() + "\n\n" + entry).strip()
+    role_health = sections.get("Role Health", "").splitlines()
+    role_health = [line for line in role_health if not line.startswith("- conveyor:")]
+    role_health.append(f"- conveyor: no-progress circuit breaker active; {reason}")
+    sections["Role Health"] = "\n".join(line for line in role_health if line.strip())
+    if "Recent Activity Log" not in order:
+        order.append("Recent Activity Log")
+    if "Role Health" not in order:
+        order.append("Role Health")
+    body = header.rstrip() + "\n\n"
+    for section in order:
+        body += f"## {section}\n\n{sections.get(section, '').strip()}\n\n"
+    progress.write_text(body.rstrip() + "\n", encoding="utf-8")
+
+
 def automation_status(target: Path) -> str:
     task_text = read_text(target / "docs" / "CODEX_AUTOMATION_TASKS.md")
     match = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", task_text, re.MULTILINE)
@@ -206,6 +269,132 @@ def queued_manifests(target: Path) -> list[Path]:
     return manifests
 
 
+def normalized_deferral_signature(manifest: dict[str, Any]) -> str:
+    reason = str(manifest.get("deferral_reason") or "other")
+    detail = re.sub(r"\s+", " ", str(manifest.get("deferral_detail") or "")).strip()
+    lowered = detail.lower()
+    if "no module named pytest" in lowered or "pytest: command not found" in lowered:
+        detail_class = "missing_pytest"
+    elif re.search(r"/(?:user" + r"s|tmp|private/tmp|var/folders)/", lowered) or (
+        "agentic-kit-" + "lab"
+    ) in lowered:
+        detail_class = "local_path_reference"
+    else:
+        detail_class = detail[:120] if detail else "no_detail"
+    return f"{reason}:{detail_class}"
+
+
+def queue_snapshot(target: Path) -> dict[str, Any]:
+    queue_root = target / "target" / "automation_queue"
+    counts = {"queued": 0, "deferred": 0, "applied": 0, "failed": 0, "skipped": 0}
+    applied_by_role = {"planner": 0, "builder": 0, "hardener": 0}
+    deferred_signatures: dict[str, int] = {}
+    for path in sorted(queue_root.glob("*/*/manifest.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(data.get("role") or "") not in {"planner", "builder", "hardener"}:
+            continue
+        status = str(data.get("status") or "unknown")
+        if status in counts:
+            counts[status] += 1
+        if status == "applied":
+            role = str(data.get("role") or "")
+            if role in applied_by_role:
+                applied_by_role[role] += 1
+        if status == "deferred":
+            signature = normalized_deferral_signature(data)
+            deferred_signatures[signature] = deferred_signatures.get(signature, 0) + 1
+    signature_parts = sorted(deferred_signatures)
+    return {
+        **counts,
+        "applied_by_role": applied_by_role,
+        "deferred_signature": "|".join(signature_parts) if signature_parts else "none",
+        "deferred_signature_counts": deferred_signatures,
+    }
+
+
+def no_progress_info(state: dict[str, Any]) -> dict[str, Any]:
+    info = state.get(NO_PROGRESS_STATE_KEY)
+    return info if isinstance(info, dict) else {}
+
+
+def no_progress_active(state: dict[str, Any], threshold: int) -> bool:
+    info = no_progress_info(state)
+    return bool(info.get("active")) and int(info.get("streak", 0)) >= threshold
+
+
+def update_integrator_no_progress(
+    state: dict[str, Any],
+    *,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    exit_code: int,
+    threshold: int,
+    finished_at: str,
+) -> dict[str, Any]:
+    accepted_delta = max(0, int(after.get("applied", 0)) - int(before.get("applied", 0)))
+    deferred_delta = int(after.get("deferred", 0)) - int(before.get("deferred", 0))
+    before_by_role = before.get("applied_by_role") if isinstance(before.get("applied_by_role"), dict) else {}
+    after_by_role = after.get("applied_by_role") if isinstance(after.get("applied_by_role"), dict) else {}
+    accepted_by_role = {
+        role: max(0, int(after_by_role.get(role, 0)) - int(before_by_role.get(role, 0)))
+        for role in ("planner", "builder", "hardener")
+    }
+    previous = no_progress_info(state)
+    signature = str(after.get("deferred_signature") or "none")
+    same_signature = bool(signature and signature != "none" and signature == previous.get("signature"))
+    stuck_same_reason = same_signature and int(after.get("deferred", 0)) >= int(before.get("deferred", 0))
+    no_progress = exit_code == 0 and accepted_delta == 0 and (deferred_delta > 0 or stuck_same_reason)
+
+    metadata = {
+        "accepted_delta": accepted_delta,
+        "deferred_delta": deferred_delta,
+        "queued_before": int(before.get("queued", 0)),
+        "queued_after": int(after.get("queued", 0)),
+        "deferred_after": int(after.get("deferred", 0)),
+        "deferred_signature": signature,
+        "accepted_by_role": accepted_by_role,
+        "no_progress": no_progress,
+    }
+
+    if exit_code == 0 and accepted_delta > 0:
+        state[NO_PROGRESS_STATE_KEY] = {
+            "active": False,
+            "streak": 0,
+            "reason": "integrator accepted patches",
+            "cleared_at": finished_at,
+        }
+        metadata["progress_success"] = True
+        metadata["just_tripped"] = False
+        return metadata
+
+    if no_progress:
+        streak = int(previous.get("streak", 0)) + 1 if same_signature else 1
+        active = streak >= threshold
+        state[NO_PROGRESS_STATE_KEY] = {
+            "active": active,
+            "streak": streak,
+            "threshold": threshold,
+            "signature": signature,
+            "reason": (
+                f"integrator accepted 0 patches; deferred queue "
+                f"{'grew' if deferred_delta > 0 else 'stayed blocked'} for {signature}"
+            ),
+            "last_seen_at": finished_at,
+            "last_snapshot": after,
+            "planner_requested_at": previous.get("planner_requested_at") if same_signature else None,
+        }
+        metadata["progress_success"] = False
+        metadata["just_tripped"] = active and not bool(previous.get("active"))
+        return metadata
+
+    metadata["progress_success"] = exit_code == 0
+    metadata["just_tripped"] = False
+    return metadata
+
+
 def planner_due(state: dict[str, Any], interval_seconds: int) -> bool:
     last_success = (
         state.get("last_success_by_role", {})
@@ -222,7 +411,41 @@ def planner_due(state: dict[str, Any], interval_seconds: int) -> bool:
     return (datetime.now(timezone.utc) - last).total_seconds() >= interval_seconds
 
 
-def choose_next(target: Path, state: dict[str, Any], planner_interval_seconds: int) -> tuple[str | None, str, bool]:
+def last_integrator_accepted_by_role(state: dict[str, Any]) -> dict[str, int] | None:
+    history = state.get("history")
+    if not isinstance(history, list):
+        return None
+    for entry in reversed(history):
+        if not isinstance(entry, dict) or entry.get("role") != "integrator":
+            continue
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        raw = metadata.get("accepted_by_role")
+        if not isinstance(raw, dict):
+            return None
+        return {role: int(raw.get(role, 0) or 0) for role in ("planner", "builder", "hardener")}
+    return None
+
+
+def role_after_integrator(state: dict[str, Any]) -> tuple[str, str]:
+    accepted_by_role = last_integrator_accepted_by_role(state)
+    if not accepted_by_role:
+        return "builder", "builder-first policy: last integration has no source-role metadata"
+    if int(accepted_by_role.get("builder", 0)) > 0:
+        return "hardener", "builder patch integrated; hardener gets one verification pass"
+    accepted_total = sum(int(value) for value in accepted_by_role.values())
+    if accepted_total > 0:
+        return "builder", "builder-first policy: last integration did not accept builder patches"
+    return "builder", "builder-first policy: last integration accepted no patches"
+
+
+def choose_next(
+    target: Path,
+    state: dict[str, Any],
+    planner_interval_seconds: int,
+    no_progress_threshold: int = DEFAULT_NO_PROGRESS_THRESHOLD,
+) -> tuple[str | None, str, bool]:
     status = automation_status(target)
     if status == "CRITICAL_STOP":
         return None, "automation status is CRITICAL_STOP", True
@@ -240,6 +463,13 @@ def choose_next(target: Path, state: dict[str, Any], planner_interval_seconds: i
     if queue_depth:
         return "integrator", f"{queue_depth} queued role patch(es) need integration", False
 
+    if no_progress_active(state, no_progress_threshold):
+        info = no_progress_info(state)
+        reason = str(info.get("reason") or "integrator made no patch progress")
+        if not info.get("planner_requested_at"):
+            return "planner", f"no-progress circuit breaker tripped: {reason}", False
+        return None, f"no-progress circuit breaker active after planner handoff: {reason}", False
+
     if unhandled_human_inbox_count(target) and planner_due(state, min(planner_interval_seconds, 900)):
         return "planner", "unhandled human inbox message(s) need triage", False
 
@@ -248,10 +478,87 @@ def choose_next(target: Path, state: dict[str, Any], planner_interval_seconds: i
 
     last_role = str(state.get("last_completed_role") or "")
     if last_role == "integrator":
-        return "hardener", "recent integration should be hardened or verified", False
+        role, reason = role_after_integrator(state)
+        return role, reason, False
     if last_role == "builder":
         return "hardener", "builder lane completed without queued work; hardener gets the next look", False
     return "builder", "builder lane is next runnable work", False
+
+
+def conveyor_decision_queue(
+    target: Path,
+    state: dict[str, Any],
+    next_role: str | None,
+    next_reason: str,
+    planner_interval_seconds: int,
+    no_progress_threshold: int,
+) -> list[dict[str, str]]:
+    """Build a small display queue for observability; choose_next remains authoritative."""
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(role: str | None, state_name: str, reason: str) -> None:
+        key = role or "idle"
+        if key in seen:
+            return
+        seen.add(key)
+        entries.append(
+            {
+                "role": key,
+                "state": state_name,
+                "reason": re.sub(r"\s+", " ", reason).strip()[:240],
+            }
+        )
+
+    add(next_role, "next" if next_role else "idle", next_reason)
+    if len(entries) >= DECISION_QUEUE_LIMIT:
+        return entries
+
+    status = automation_status(target)
+    if status == "CRITICAL_STOP":
+        add(None, "blocked", "automation status is CRITICAL_STOP")
+        return entries[:DECISION_QUEUE_LIMIT]
+    if status not in ACTIVE_STATUSES:
+        add(None, "blocked", f"automation status is {status}; waiting")
+        return entries[:DECISION_QUEUE_LIMIT]
+
+    active, detail = lock_is_active(target / "target" / "codex_automation.lock")
+    if active:
+        add(None, "blocked", f"main automation lock active: {detail}")
+        return entries[:DECISION_QUEUE_LIMIT]
+
+    if not target_has_multi_role(target):
+        add("single_lane", "ready", "multi-role files not found; running single-lane wrapper")
+        return entries[:DECISION_QUEUE_LIMIT]
+
+    queue_depth = len(queued_manifests(target))
+    if queue_depth:
+        add("integrator", "ready", f"{queue_depth} queued role patch(es) need integration")
+
+    if no_progress_active(state, no_progress_threshold):
+        info = no_progress_info(state)
+        reason = str(info.get("reason") or "integrator made no patch progress")
+        if not info.get("planner_requested_at"):
+            add("planner", "ready", f"no-progress circuit breaker tripped: {reason}")
+        else:
+            add(None, "blocked", f"no-progress circuit breaker active after planner handoff: {reason}")
+    elif unhandled_human_inbox_count(target) and planner_due(state, min(planner_interval_seconds, 900)):
+        add("planner", "ready", "unhandled human inbox message(s) need triage")
+    elif planner_due(state, planner_interval_seconds):
+        add("planner", "ready", "planner interval elapsed")
+
+    last_role = str(state.get("last_completed_role") or "")
+    if last_role == "integrator":
+        role, reason = role_after_integrator(state)
+        add(role, "planned", reason)
+    elif last_role == "builder":
+        add("hardener", "planned", "builder lane completed without queued work")
+    else:
+        add("builder", "planned", "builder lane is the default momentum lane")
+
+    add("hardener", "standby", "hardener verifies recently changed work when integration or builder output exists")
+    add("builder", "standby", "builder can create the next implementation patch when planning is fresh")
+    return entries[:DECISION_QUEUE_LIMIT]
 
 
 def command_for_role(role: str) -> list[str]:
@@ -279,16 +586,25 @@ def handle_signal(signum: int, _frame: Any) -> None:
     terminate_child()
 
 
-def run_role(target: Path, role: str, allow_remotes: bool) -> int:
+def run_role(
+    target: Path,
+    role: str,
+    allow_remotes: bool,
+    *,
+    state_path: Path | None = None,
+    reason: str = "",
+    started_at: str = "",
+) -> int:
     global CHILD
     env = os.environ.copy()
     env["TARGET"] = str(target)
-    env["CODEX_RUN_ID"] = run_id(role)
+    run_id_value = run_id(role)
+    env["CODEX_RUN_ID"] = run_id_value
     env["PATH"] = env.get("CODEX_AUTOMATION_PATH", DEFAULT_AUTOMATION_PATH)
     if allow_remotes:
         env["MULTI_ROLE_ALLOW_REMOTES"] = "1"
     command = command_for_role(role)
-    print(f"CONVEYOR_RUN role={role} command={' '.join(command)}", flush=True)
+    print(f"CONVEYOR_RUN role={role} run_id={run_id_value} command={command_display(command)}", flush=True)
     CHILD = subprocess.Popen(
         command,
         cwd=str(target),
@@ -296,10 +612,35 @@ def run_role(target: Path, role: str, allow_remotes: bool) -> int:
         text=True,
         start_new_session=True,
     )
+    if state_path is not None:
+        state = load_state(state_path)
+        state["active_role_run"] = {
+            "role": role,
+            "run_id": run_id_value,
+            "reason": reason,
+            "started_at": started_at or utc_now(),
+            "pid": CHILD.pid,
+            "command": command,
+            "command_display": command_display(command),
+            "status": "running",
+        }
+        write_state(state_path, state)
     try:
         return CHILD.wait()
     finally:
         CHILD = None
+
+
+def finish_active_role_run(state: dict[str, Any], *, exit_code: int, finished_at: str) -> None:
+    active = state.get("active_role_run")
+    if not isinstance(active, dict):
+        return
+    finished = dict(active)
+    finished["status"] = "finished"
+    finished["exit_code"] = exit_code
+    finished["finished_at"] = finished_at
+    state["last_active_role_run"] = finished
+    state["active_role_run"] = None
 
 
 def record_cycle(
@@ -310,12 +651,15 @@ def record_cycle(
     exit_code: int,
     started_at: str,
     finished_at: str,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    metadata = metadata or {}
     counts = state.setdefault("role_counts", {})
     if isinstance(counts, dict):
         counts[role] = int(counts.get(role, 0)) + 1
     successes = state.setdefault("last_success_by_role", {})
-    if isinstance(successes, dict) and exit_code == 0:
+    progress_success = bool(metadata.get("progress_success", exit_code == 0))
+    if isinstance(successes, dict) and exit_code == 0 and progress_success:
         successes[role] = finished_at
     history = state.setdefault("history", [])
     entry = {
@@ -324,14 +668,22 @@ def record_cycle(
         "exit_code": exit_code,
         "started_at": started_at,
         "finished_at": finished_at,
+        "progress_success": progress_success,
     }
+    if metadata:
+        entry["metadata"] = metadata
     if isinstance(history, list):
         history.append(entry)
         del history[:-STATE_HISTORY_LIMIT]
+    if role == "planner" and no_progress_active(state, int(no_progress_info(state).get("threshold", DEFAULT_NO_PROGRESS_THRESHOLD))):
+        info = no_progress_info(state)
+        info["planner_requested_at"] = finished_at
+        state[NO_PROGRESS_STATE_KEY] = info
     state["cycles"] = int(state.get("cycles", 0)) + 1
     state["last_completed_role"] = role
     state["last_completed_at"] = finished_at
     state["last_exit_code"] = exit_code
+    state["last_progress_success"] = progress_success
     return state
 
 
@@ -357,15 +709,24 @@ def main() -> int:
     parser.add_argument("--cycle-cooldown-seconds", type=positive_int, default=DEFAULT_CYCLE_COOLDOWN_SECONDS)
     parser.add_argument("--planner-interval-seconds", type=positive_int, default=DEFAULT_PLANNER_INTERVAL_SECONDS)
     parser.add_argument("--scheduler-lock-stale-seconds", type=positive_int, default=DEFAULT_LOCK_STALE_SECONDS)
+    parser.add_argument("--no-progress-threshold", type=positive_int, default=DEFAULT_NO_PROGRESS_THRESHOLD)
     args = parser.parse_args()
 
     target = Path(args.target).expanduser().resolve()
     state_path = target / "target" / "automation_conveyor_state.json"
     lock_path = target / "target" / "automation_conveyor.lock"
     state = load_state(state_path)
-    role, reason, stop = choose_next(target, state, args.planner_interval_seconds)
+    role, reason, stop = choose_next(target, state, args.planner_interval_seconds, args.no_progress_threshold)
 
     if args.dry_run:
+        queue = conveyor_decision_queue(
+            target,
+            state,
+            role,
+            reason,
+            args.planner_interval_seconds,
+            args.no_progress_threshold,
+        )
         print(
             json.dumps(
                 {
@@ -373,8 +734,10 @@ def main() -> int:
                     "next_role": role,
                     "reason": reason,
                     "stop": stop,
+                    "decision_queue": queue,
                     "queued_patch_count": len(queued_manifests(target)),
                     "automation_status": automation_status(target),
+                    "integrator_no_progress": no_progress_info(state),
                 },
                 indent=2,
                 sort_keys=True,
@@ -394,8 +757,16 @@ def main() -> int:
     try:
         while not TERMINATE_REQUESTED:
             state = load_state(state_path)
-            role, reason, stop = choose_next(target, state, args.planner_interval_seconds)
+            role, reason, stop = choose_next(target, state, args.planner_interval_seconds, args.no_progress_threshold)
             state["last_decision"] = {"role": role, "reason": reason, "decided_at": utc_now()}
+            state["decision_queue"] = conveyor_decision_queue(
+                target,
+                state,
+                role,
+                reason,
+                args.planner_interval_seconds,
+                args.no_progress_threshold,
+            )
             write_state(state_path, state)
             print(f"CONVEYOR_DECISION role={role or 'idle'} reason={reason}", flush=True)
 
@@ -408,9 +779,31 @@ def main() -> int:
                 continue
 
             started_at = utc_now()
-            exit_code = run_role(target, role, allow_remotes)
+            before_snapshot = queue_snapshot(target) if role == "integrator" else None
+            exit_code = run_role(
+                target,
+                role,
+                allow_remotes,
+                state_path=state_path,
+                reason=reason,
+                started_at=started_at,
+            )
             finished_at = utc_now()
             state = load_state(state_path)
+            finish_active_role_run(state, exit_code=exit_code, finished_at=finished_at)
+            metadata: dict[str, Any] = {}
+            if role == "integrator" and before_snapshot is not None:
+                after_snapshot = queue_snapshot(target)
+                metadata = update_integrator_no_progress(
+                    state,
+                    before=before_snapshot,
+                    after=after_snapshot,
+                    exit_code=exit_code,
+                    threshold=args.no_progress_threshold,
+                    finished_at=finished_at,
+                )
+                if metadata.get("just_tripped"):
+                    write_no_progress_progress_note(target, no_progress_info(state))
             record_cycle(
                 state,
                 role=role,
@@ -418,9 +811,13 @@ def main() -> int:
                 exit_code=exit_code,
                 started_at=started_at,
                 finished_at=finished_at,
+                metadata=metadata,
             )
             write_state(state_path, state)
-            print(f"CONVEYOR_RESULT role={role} exit={exit_code}", flush=True)
+            print(
+                f"CONVEYOR_RESULT role={role} exit={exit_code} progress={state.get('last_progress_success')}",
+                flush=True,
+            )
             last_exit = exit_code
             cycles += 1
 

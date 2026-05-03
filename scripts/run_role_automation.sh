@@ -121,16 +121,59 @@ stdout_log="$log_dir/$role.stdout.log"
 stderr_log="$log_dir/$role.stderr.log"
 run_stdout="$queue_dir/codex.stdout.log"
 run_stderr="$queue_dir/codex.stderr.log"
+env_repair_path="$queue_dir/environment_repair.json"
+rerun_stdout="$queue_dir/codex.rerun.stdout.log"
+rerun_stderr="$queue_dir/codex.rerun.stderr.log"
 
 git worktree add --detach "$worktree_dir" "$base_commit" >/dev/null
 
 if [[ -f "$target_abs/scripts/update_automation_signals.py" && -f "$target_abs/docs/AUTOMATION_SIGNALS.md" ]]; then
   python3 "$target_abs/scripts/update_automation_signals.py" "$target_abs" --refresh --role "$role" --summary || true
-  if [[ -f "$target_abs/target/automation_signals.json" ]]; then
-    mkdir -p "$worktree_dir/target"
-    cp "$target_abs/target/automation_signals.json" "$worktree_dir/target/automation_signals.json"
-  fi
 fi
+
+context_paths=(
+  ".agentic/automation_prompt.md"
+  ".agentic/verification_commands.txt"
+  ".agentic/roles"
+  "docs/CODEX_AUTOMATION_TASKS.md"
+  "docs/MULTI_ROLE_PROGRESS.md"
+  "docs/CODEX_AUTOMATION_GUARDRAILS.md"
+  "docs/PROJECT_CONTEXT.md"
+  "docs/AUTOMATION_SIGNALS.md"
+  "docs/AUTONOMY_EXPERIMENT_LOG.md"
+  "docs/DAILY_AUTOMATION_REVIEW.md"
+  "docs/HUMAN_BRIDGE_SETUP.md"
+  "docs/HUMAN_INBOX.md"
+  "docs/HUMAN_OUTBOX.md"
+  "docs/HUMAN_REQUESTS.md"
+  "docs/HUMAN_RESPONSES_ARCHIVE.md"
+  "target/automation_signals.json"
+)
+
+context_excludes=()
+for rel in "${context_paths[@]}"; do
+  context_excludes+=(":(exclude)$rel")
+done
+
+seed_context_path() {
+  local rel="$1"
+  local src="$target_abs/$rel"
+  local dst="$worktree_dir/$rel"
+  if [[ ! -e "$src" ]]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$dst")"
+  rm -rf "$dst"
+  if [[ -d "$src" ]]; then
+    cp -R "$src" "$dst"
+  else
+    cp "$src" "$dst"
+  fi
+}
+
+for rel in "${context_paths[@]}"; do
+  seed_context_path "$rel"
+done
 
 set +e
 codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" -C "$worktree_dir" "$(cat "$prompt_path")" >"$run_stdout" 2>"$run_stderr"
@@ -170,6 +213,69 @@ if detect_critical_stop "$run_stdout" || detect_critical_stop "$run_stderr"; the
   fi
 fi
 
+if [[ "$codex_status" != "0" && "$critical_stop_detected" != "1" && -f "$target_abs/scripts/repair_environment.py" ]]; then
+  repair_status=0
+  python3 "$target_abs/scripts/repair_environment.py" "$target_abs" \
+    --command "codex exec role $role" \
+    --exit-code "$codex_status" \
+    --stdout-file "$run_stdout" \
+    --stderr-file "$run_stderr" \
+    --status-file "$env_repair_path" >/dev/null 2>&1 || repair_status=$?
+  if python3 - "$env_repair_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+if data.get("repair_performed"):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+  then
+    while IFS= read -r path_item; do
+      if [[ -n "$path_item" ]]; then
+        export PATH="$path_item:$PATH"
+      fi
+    done < <(python3 - "$env_repair_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+for item in data.get("path_prepend") or []:
+    print(item)
+PY
+)
+    set +e
+    codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" -C "$worktree_dir" "$(cat "$prompt_path")" >"$rerun_stdout" 2>"$rerun_stderr"
+    rerun_status=$?
+    set -e
+    {
+      printf '\n=== environment repair attempted; repair_status=%s ===\n' "$repair_status"
+      cat "$env_repair_path"
+      printf '\n=== rerun after environment repair exit=%s ===\n' "$rerun_status"
+      cat "$rerun_stdout"
+    } >>"$run_stdout"
+    {
+      printf '\n=== environment repair attempted; repair_status=%s ===\n' "$repair_status"
+      cat "$env_repair_path"
+      printf '\n=== rerun after environment repair exit=%s ===\n' "$rerun_status"
+      cat "$rerun_stderr"
+    } >>"$run_stderr"
+    codex_status="$rerun_status"
+    if detect_critical_stop "$rerun_stdout" || detect_critical_stop "$rerun_stderr"; then
+      critical_stop_detected=1
+      if [[ "$codex_status" == "0" ]]; then
+        codex_status=90
+      fi
+    fi
+  fi
+fi
+
 if [[ -f "$target_abs/scripts/update_automation_signals.py" && -f "$worktree_dir/target/automation_signals.json" ]]; then
   python3 "$target_abs/scripts/update_automation_signals.py" "$target_abs" --merge-state "$worktree_dir/target/automation_signals.json" --refresh --role "$role" --summary || true
 fi
@@ -197,12 +303,12 @@ fi
 
 (
   cd "$worktree_dir"
-  git ls-files --others --exclude-standard -z >"$queue_dir/untracked_files.z"
+  git ls-files --others --exclude-standard -z -- . "${context_excludes[@]}" >"$queue_dir/untracked_files.z"
   if [[ -s "$queue_dir/untracked_files.z" ]]; then
     xargs -0 git add -N -- <"$queue_dir/untracked_files.z"
   fi
-  git diff --binary "$base_commit" >"$patch_path"
-  git diff --name-only "$base_commit" >"$queue_dir/changed_files.txt"
+  git diff --binary "$base_commit" -- . "${context_excludes[@]}" >"$patch_path"
+  git diff --name-only "$base_commit" -- . "${context_excludes[@]}" >"$queue_dir/changed_files.txt"
 )
 
 if [[ ! -s "$summary_path" ]]; then
@@ -235,12 +341,14 @@ changed_files = [
     if line.strip()
 ] if changed_files_path.exists() else []
 summary = summary_path.read_text(encoding="utf-8", errors="replace")[:2000] if summary_path.exists() else ""
+patch_empty = not patch_path.exists() or patch_path.stat().st_size == 0
+status = "failed" if exit_code != 0 else ("skipped" if patch_empty else "queued")
 manifest = {
     "role": role,
     "run_id": run_id,
     "base_commit": base_commit,
     "head_before_integration": None,
-    "status": "queued" if exit_code == 0 else "failed",
+    "status": status,
     "deferral_reason": None,
     "deferral_detail": "",
     "patch_path": str(patch_path),
@@ -255,5 +363,12 @@ manifest = {
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
-printf 'ROLE_RUN role=%s run_id=%s status=%s manifest=%s\n' "$role" "$run_id" "$([[ "$codex_status" == "0" ]] && echo queued || echo failed)" "$manifest_path"
+if [[ "$codex_status" != "0" ]]; then
+  manifest_status="failed"
+elif [[ -s "$patch_path" ]]; then
+  manifest_status="queued"
+else
+  manifest_status="skipped"
+fi
+printf 'ROLE_RUN role=%s run_id=%s status=%s manifest=%s\n' "$role" "$run_id" "$manifest_status" "$manifest_path"
 exit "$codex_status"

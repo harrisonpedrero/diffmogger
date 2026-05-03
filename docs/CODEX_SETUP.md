@@ -73,7 +73,7 @@ python3 scripts/summarize_worker_outputs.py . --run-id "$CODEX_RUN_ID"
 
 If `command -v codex` fails, record `Codex CLI worker decision: UNAVAILABLE` in the task file and continue without blocking the sprint.
 
-Read-only worker reports are the default. Generated projects may enable bounded write workers through intake config, but only for large planned changes with disjoint ownership and main-agent integration.
+Read-only worker reports are the default. Generated projects may enable bounded write workers through intake config as acceleration for work that can split into reviewable ownership lanes with main-agent integration.
 
 ## Automations
 

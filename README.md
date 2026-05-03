@@ -30,7 +30,7 @@ Diffmogger splits recurring agent work into stable instructions and mutable stat
 - Dynamic task file: current state, checks, blockers, pending human requests, and next sprint.
 - Verification: tests, builds, demos, screenshots, reports, or an honest note about what could not run.
 - Lock files: reduce overlapping scheduled mutations of the same checkout.
-- Worker helpers: bounded reports by default, optional bounded write workers only when explicitly enabled, integrated by the main agent.
+- Worker helpers: bounded reports by default, optional bounded write workers as acceleration when explicitly enabled, integrated by the main agent.
 - Multi-role mode: optional local-only planner, builder, hardener, and integrator schedules with isolated worktrees and FIFO patch integration.
 - Human bridge: manual Markdown queues first, optional local notifier later.
 
@@ -77,7 +77,7 @@ The design choices that matter are:
 
 - Markdown-first state is the shared substrate: stable behavior is separated from mutable state, so the recurring prompt stays durable while `docs/CODEX_AUTOMATION_TASKS.md` carries current blockers, checks, human requests, horizon state, and the next sprint.
 - The run lifecycle is explicit: acquire a lock, read state, choose a sprint-sized milestone, decide whether workers are useful, implement, verify, update artifacts, rewrite state, and leave a clear continuation point.
-- Worker parallelism is bounded: read-only worker reports are the default, while write-capable workers require explicit intake opt-in, disjoint ownership, contract-first planning, and main-agent integration.
+- Worker parallelism is bounded: read-only worker reports are the default, while write-capable workers require explicit intake opt-in, reviewable ownership, lightweight coordination, and main-agent integration.
 - Multi-role automation is opt-in and local-only: role work happens in isolated git worktrees, the integrator owns the main checkout, and no generated role may push, fetch, pull, or configure remotes.
 - Decoupled human bridge behavior is asynchronous and operationalized. File-only queues work without credentials, while the optional notifier keeps SMS/WhatsApp credentials in a separate service and forces delivery failures to be recorded instead of hand-waved.
 - Explicit failure modes are part of the contract. `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP` let the automation keep working around partial blockers while still making hard stops visible.
@@ -124,6 +124,8 @@ These are observations from private repositories that ran on Diffmogger. They ar
 - lock scripts: `scripts/acquire_codex_lock.sh`, `scripts/release_codex_lock.sh`
 - scheduled-run wrapper template: `scripts/run_codex_automation.sh`
 - continuous conveyor wrapper: `scripts/run_conveyor_automation.sh`, `scripts/run_conveyor_automation.py`
+- local observatory page: `scripts/run_observatory.py`
+- local environment repair helper: `scripts/repair_environment.py`
 - optional automation signal helper: `scripts/update_automation_signals.py`
 - worker helper scripts: `scripts/spawn_worker_agent.sh`, `scripts/summarize_worker_outputs.py`
 - optional multi-role prompts: `.agentic/roles/planner.md`, `builder.md`, `hardener.md`, `integrator.md`
@@ -185,6 +187,7 @@ It supports:
 - optional bounded write-worker settings with a capped count and guidance text
 - optional automation signals for recurring local review nudges
 - optional multi-role automation mode with fixed role-specific launchd jobs, continuous conveyor scheduling, and local-only git guards
+- optional local observatory launch for a browser-based demo view of conveyor state, active role runs, queued patches, and recent automation timeline
 - optional context-file import into target `docs/context/`
 - generated `docs/PROJECT_CONTEXT.md`
 - a single `Scaffold & Bootstrap` pipeline
@@ -246,12 +249,12 @@ Write-capable workers are disabled unless a generated target intake explicitly e
 ```json
 {
   "write_worker_agents_allowed": true,
-  "max_write_worker_count": 4,
-  "write_worker_guidance": "Use write workers only for large planned changes with disjoint ownership."
+  "max_write_worker_count": 10,
+  "write_worker_guidance": "Use the most parallelism the task can safely absorb while keeping ownership reviewable."
 }
 ```
 
-The scaffold caps write workers at 10, and generated prompts still recommend fewer workers when fewer are enough. The main agent must choose a worker strategy each run, define ownership/contracts before spawning write workers, review worker diffs, integrate, verify, and update task state. Integration-only runs with no workers are valid.
+The scaffold caps write workers at 10. Generated prompts ask the main agent to choose a worker strategy and parallelism budget each run, use as much parallelism as the task can safely absorb, keep coordination lightweight, review worker diffs, integrate, verify, and update task state. Integration-only runs with no workers are valid when faster or safer.
 
 Outputs go under:
 
@@ -320,7 +323,7 @@ Generated targets then receive role prompts under `.agentic/roles/`, helper scri
 
 Planner, builder, and hardener start from the latest main `HEAD` in isolated worktrees and queue patches. The integrator owns the main checkout, checkpoints dirty local changes as automation-authored local commits, runs `git apply --check`, batches verification, falls back to individual verification on failure, commits accepted patches locally, and updates task/progress docs.
 
-Alternatively, continuous conveyor scheduling writes one LaunchAgent that runs `scripts/run_conveyor_automation.sh`, records state under `target/automation_conveyor_state.json`, and chooses the next runnable lane as soon as the previous lane exits.
+Alternatively, continuous conveyor scheduling writes one LaunchAgent that runs `scripts/run_conveyor_automation.sh`, records state under `target/automation_conveyor_state.json`, and chooses the next runnable lane as soon as the previous lane exits. It prioritizes queued integration first, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state includes the active role run and a small future decision queue so `scripts/run_observatory.py` and the dashboard-launched observatory can show what is running now and what is likely next.
 
 Multi-role mode is local-only. Role prompts and scripts prohibit pushes, fetches, pulls, remote configuration, upstream tracking, and remote-affecting git commands. Scripts refuse to run with configured remotes unless `MULTI_ROLE_ALLOW_REMOTES=1` is set, and the integrator refuses executable git hooks containing `git push`.
 

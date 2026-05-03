@@ -30,6 +30,7 @@ KIT_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_DIR = KIT_ROOT / "scripts"
 SCAFFOLD_SCRIPT = SCRIPTS_DIR / "scaffold_project_docs.py"
 CHECK_REQUIRED_SCRIPT = SCRIPTS_DIR / "check_required_files.py"
+OBSERVATORY_SCRIPT = SCRIPTS_DIR / "run_observatory.py"
 LAUNCHD_LABEL_PREFIX = "com.diffmogger.automation"
 SCHEDULABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
 MIN_CADENCE_MINUTES = 30
@@ -686,6 +687,7 @@ if TK_AVAILABLE:
             self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
             self.running = False
             self.current_process: subprocess.Popen[str] | None = None
+            self.observatory_processes: list[subprocess.Popen[str]] = []
             self.context_files: list[Path] = []
             self.bootstrap_completed_targets: set[Path] = set()
             self.log_line_count = 0
@@ -977,7 +979,7 @@ if TK_AVAILABLE:
             ttk.Checkbutton(checks, text="Overwrite existing scaffold files", variable=self.force_var).grid(row=2, column=0, sticky="w", padx=8, pady=(4, 8))
             ttk.Label(
                 checks,
-                text="Write-capable workers are optional and only for large, planned changes with disjoint ownership. Generated projects keep them disabled unless this box is enabled.",
+                text="Write-capable workers are optional bounded acceleration. Use as much parallelism as the task can safely absorb, while keeping ownership reviewable and main-agent integration explicit.",
                 style="Help.TLabel",
                 wraplength=660,
                 justify="left",
@@ -994,8 +996,8 @@ if TK_AVAILABLE:
                 automation,
                 row,
                 "Write Worker Guidance",
-                "Write workers are optional and should be used only for large, well-planned changes with disjoint file or module ownership. Prefer fewer workers when the change can be done clearly by the main agent.",
-                help_text="Optional project-specific guidance for write-capable workers. Keep it generic and focused on ownership boundaries, contracts, integration, and verification.",
+                "Use the most parallelism the task can safely absorb. Write workers are optional acceleration for broad work with reviewable ownership boundaries; keep coordination lightweight and let the main agent integrate and verify.",
+                help_text="Optional project-specific guidance for write-capable workers. Keep it generic and focused on useful parallelism, ownership boundaries, integration, and verification.",
                 height=3,
             )
             multi_role = ttk.LabelFrame(automation, text="Multi-Role Automation")
@@ -1206,6 +1208,7 @@ if TK_AVAILABLE:
             ttk.Entry(target_row, textvariable=self.target_var).grid(row=0, column=1, sticky="ew")
             ttk.Button(target_row, text="Browse", command=self.browse_target).grid(row=0, column=2, padx=8)
             ttk.Button(target_row, text="Refresh", command=self.refresh_all).grid(row=0, column=3)
+            ttk.Button(target_row, text="Launch Observatory", command=self.launch_observatory).grid(row=0, column=4, padx=(8, 0))
 
             summary = ttk.LabelFrame(self.monitor_tab, text="Status")
             summary.grid(row=1, column=0, sticky="ew", pady=10)
@@ -1749,7 +1752,23 @@ if TK_AVAILABLE:
                         self.write_dashboard_state(target, last_action="closed")
                     except Exception:
                         pass
+            self._terminate_observatories()
             self.root.destroy()
+
+        def _terminate_observatories(self) -> None:
+            for process in list(self.observatory_processes):
+                if process.poll() is not None:
+                    continue
+                try:
+                    process.terminate()
+                    process.wait(timeout=1.5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                except OSError:
+                    pass
+            self.observatory_processes = [
+                process for process in self.observatory_processes if process.poll() is None
+            ]
 
         def add_context_files(self) -> None:
             paths = filedialog.askopenfilenames(
@@ -2171,6 +2190,46 @@ if TK_AVAILABLE:
             target = Path(self.target_var.get().strip() or ".").expanduser()
             rel = DOC_CHOICES.get(self.doc_choice_var.get(), "docs/CODEX_AUTOMATION_TASKS.md")
             self._load_markdown_file(self.markdown_text, target / rel)
+
+        def launch_observatory(self) -> None:
+            target_text = self.target_var.get().strip()
+            if not target_text:
+                messagebox.showerror("Missing target", "Choose a target project directory first.")
+                return
+            target = Path(target_text).expanduser().resolve()
+            if not target.exists():
+                messagebox.showerror("Missing target", f"Target directory does not exist:\n\n{target}")
+                return
+            if not OBSERVATORY_SCRIPT.exists():
+                messagebox.showerror("Observatory unavailable", f"Missing observatory helper:\n\n{OBSERVATORY_SCRIPT}")
+                return
+            self.observatory_processes = [
+                process for process in self.observatory_processes if process.poll() is None
+            ]
+            try:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(OBSERVATORY_SCRIPT),
+                        "--target",
+                        str(target),
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        "0",
+                        "--open",
+                    ],
+                    cwd=str(KIT_ROOT),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                messagebox.showerror("Could not launch observatory", str(exc))
+                return
+            self.observatory_processes.append(process)
+            self._append_log("Launched local observatory page for the selected target.")
 
         def load_selected_human_doc(self) -> None:
             target = Path(self.target_var.get().strip() or ".").expanduser()
@@ -2761,7 +2820,7 @@ if TK_AVAILABLE:
 
 def smoke_check() -> int:
     problems: list[str] = []
-    for path in [SCAFFOLD_SCRIPT, CHECK_REQUIRED_SCRIPT]:
+    for path in [SCAFFOLD_SCRIPT, CHECK_REQUIRED_SCRIPT, OBSERVATORY_SCRIPT]:
         if not path.exists():
             problems.append(f"Missing required script: {path}")
     if problems:

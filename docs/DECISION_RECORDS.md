@@ -88,7 +88,7 @@ Why: nested Codex workers launched from inside a scheduled automation sandbox ma
 
 Decision: generated target projects support optional bounded write-capable workers only when the intake explicitly enables `write_worker_agents_allowed`, with `max_write_worker_count` capped at 10 and read-only worker reports preserved as the default.
 
-Why: high-throughput implementation can help large, planned changes, but overlapping autonomous writes are risky. The main agent must choose a strategy each run, define ownership and contracts before spawning write workers, tell workers they are not alone in the codebase, review and integrate diffs, run verification, and update task state. Integration-only runs with no workers remain valid.
+Why: high-throughput implementation can help when work can split into reviewable lanes, but overlapping autonomous writes are risky. The main agent must choose a strategy and parallelism budget each run, define enough ownership and contracts before spawning write workers, tell workers they are not alone in the codebase, review and integrate diffs, run verification, and update task state. Integration-only runs with no workers remain valid when faster or safer.
 
 ## DR-016: Multi-Role Worktree Orchestration Is Opt-In
 
@@ -130,7 +130,7 @@ Why: implementation roles should execute against a stable plan through two imple
 
 Decision: generated targets include `scripts/run_conveyor_automation.sh` and `scripts/run_conveyor_automation.py`. Dashboard-managed schedules can use one conveyor LaunchAgent instead of exact periodic role jobs.
 
-Why: work-conserving automation should keep useful local work moving when prior lanes finish early or role timing would otherwise leave gaps. The conveyor records reviewable local state, uses its own dispatcher lock, delegates mutation to existing wrappers, and prioritizes queued integration, due planning, hardening after integration, and builder momentum.
+Why: work-conserving automation should keep useful local work moving when prior lanes finish early or role timing would otherwise leave gaps. The conveyor records reviewable local state, uses its own dispatcher lock, delegates mutation to existing wrappers, and prioritizes queued integration, due planning, builder momentum, and one hardener pass after integrated builder work.
 
 ## Source Summary From References
 

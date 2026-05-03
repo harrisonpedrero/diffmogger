@@ -10,7 +10,7 @@
 6. Codex reads `## Product Horizon State`, chooses the highest-value sprint-sized milestone inside the current horizon, and gathers advancement evidence.
 7. Codex records a `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` decision plus a worker strategy: `READ_ONLY_REPORTS`, `WRITE_WORKERS`, `INTEGRATION_ONLY`, or `NO_WORKERS`.
 8. Codex may spawn bounded read-only workers if useful, optionally through `scripts/spawn_worker_agent.sh`.
-9. If the generated target intake explicitly enabled write-capable workers, Codex may spawn up to the capped write-worker count for large, well-planned changes with disjoint ownership. The main agent must define contracts first, review diffs, integrate, verify, and update task state.
+9. If the generated target intake explicitly enabled write-capable workers, Codex may spawn up to the capped write-worker count as bounded acceleration for work that can split into reviewable lanes. The main agent must choose a parallelism budget, define enough ownership/contracts to keep work coherent, review diffs, integrate, verify, and update task state.
 10. Codex implements, verifies, and updates artifacts.
 11. Codex rewrites the task file and logs product horizon state, horizon transitions, worker decisions, human messages, checks, artifacts, and status state.
 12. The scheduler wrapper releases the lock through local `scripts/release_codex_lock.sh` when possible and Codex returns a concise summary.
@@ -24,7 +24,7 @@ The default loop is single-lane. When a generated target explicitly enables `mul
 - hardener: minutes `20` and `50`
 - integrator: minutes `25` and `55`
 
-As an alternative, the dashboard can install one continuous conveyor LaunchAgent. The conveyor runs `scripts/run_conveyor_automation.sh`, records state in `target/automation_conveyor_state.json`, and chooses the next runnable lane from queue depth, planning freshness, hardening needs, and builder momentum.
+As an alternative, the dashboard can install one continuous conveyor LaunchAgent. The conveyor runs `scripts/run_conveyor_automation.sh`, records state in `target/automation_conveyor_state.json`, and chooses the next runnable lane from queue depth, planning freshness, builder momentum, and bounded hardening after integrated builder work. Conveyor state includes the active role run and a bounded future decision queue for local observability.
 
 Generated targets also include an optional automation signal helper. When `automation_signals_enabled` is true, `docs/AUTOMATION_SIGNALS.md` defines recurring local nudges and `target/automation_signals.json` records due/completed state. Signals never override guardrails or task state.
 
@@ -40,6 +40,8 @@ Multi-role mode is local-only. Role prompts prohibit pushes, fetches, pulls, rem
 - `.agentic/automation_prompt.md`: recurring automation behavior.
 - `.agentic/roles/*.md`: optional static role prompts for multi-role mode.
 - `scripts/run_conveyor_automation.py`: optional work-conserving local scheduler.
+- `scripts/run_observatory.py`: optional local browser observatory for conveyor, queue, log, and progress state.
+- `scripts/repair_environment.py`: local environment diagnosis and safe repair helper.
 - `scripts/update_automation_signals.py`: optional recurring signal refresher and completion helper.
 - `docs/CODEX_AUTOMATION_GUARDRAILS.md`: static boundaries.
 - `docs/PROJECT_CONTEXT.md`: optional supplemental context index for PDFs, research notes, design docs, and other reusable references.

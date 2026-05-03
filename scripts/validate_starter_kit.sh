@@ -56,6 +56,8 @@ required_files=(
   "templates/scripts/run_codex_automation.sh"
   "templates/scripts/run_conveyor_automation.py"
   "templates/scripts/run_conveyor_automation.sh"
+  "templates/scripts/run_observatory.py"
+  "templates/scripts/repair_environment.py"
   "templates/scripts/update_automation_signals.py"
   "templates/scripts/run_role_automation.sh"
   "templates/scripts/integrate_role_outputs.py"
@@ -79,6 +81,8 @@ required_files=(
   "scripts/release_codex_lock.sh"
   "scripts/run_conveyor_automation.py"
   "scripts/run_conveyor_automation.sh"
+  "scripts/run_observatory.py"
+  "scripts/repair_environment.py"
   "scripts/update_automation_signals.py"
   "scripts/run_role_automation.sh"
   "scripts/integrate_role_outputs.py"
@@ -166,6 +170,15 @@ stale_terms = [
 ]
 
 
+def git_ignored(path: Path) -> bool:
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "--", path.as_posix()],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
 def skip_stale_reference_scan(path: Path) -> bool:
     runtime_parts = {
         ".git",
@@ -176,7 +189,9 @@ def skip_stale_reference_scan(path: Path) -> bool:
     }
     if any(part in runtime_parts for part in path.parts):
         return True
-    if path == Path(".agentic/dashboard_state.json"):
+    if path.parts and path.parts[0] == ".agentic":
+        return True
+    if git_ignored(path):
         return True
     if path.name == ".env" or path.name.startswith(".env."):
         return True
@@ -245,6 +260,7 @@ task_markers = [
     "## Checks From Last Run",
     "## Worker-Agent Activity",
     "Worker strategy:",
+    "Parallelism budget:",
     "## Known Issues",
     "## Pending Human Requests",
     "## Human Messages Sent",
@@ -272,6 +288,7 @@ guardrail_markers = [
     "## External Side Effects Policy",
     "## Quality Policy",
     "## Worker-Agent Policy",
+    "parallelism budget",
     "{{WRITE_WORKER_GUARDRAILS_POLICY}}",
     "## Multi-Role Automation Policy",
     "{{MULTI_ROLE_GUARDRAILS_POLICY}}",
@@ -310,6 +327,7 @@ for marker in [
     "scripts/summarize_worker_outputs.py",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
     "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS",
+    "Parallelism budget:",
     "Write-capable worker agents allowed:",
     "Max write worker count:",
     "command -v codex",
@@ -333,6 +351,7 @@ for marker in [
     "codex exec --full-auto",
     "--skip-git-repo-check",
     "update_automation_signals.py",
+    "repair_environment.py",
     "child_pid",
     "forward_signal",
 ]:
@@ -347,11 +366,29 @@ for marker in [
     "queued role patch",
     "run_role_automation.sh",
     "run_codex_automation.sh",
-    "MULTI_ROLE_ALLOW_REMOTES",
-]:
-    if marker not in conveyor:
-        print(f"Conveyor runner template missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
+	    "MULTI_ROLE_ALLOW_REMOTES",
+	    "active_role_run",
+	    "decision_queue",
+	    "accepted_by_role",
+	    "builder-first policy",
+	]:
+	    if marker not in conveyor:
+	        print(f"Conveyor runner template missing marker: {marker}", file=sys.stderr)
+	        raise SystemExit(1)
+
+observatory = Path("templates/scripts/run_observatory.py").read_text(encoding="utf-8")
+for marker in [
+    "Diffmogger Observatory",
+    "automation_conveyor_state.json",
+	    "automation_queue",
+	    "ThreadingHTTPServer",
+	    "--open",
+	    "Conveyor Health",
+	    "Recent Outcomes",
+	]:
+	    if marker not in observatory:
+	        print(f"Observatory template missing marker: {marker}", file=sys.stderr)
+	        raise SystemExit(1)
 
 signals = Path("templates/scripts/update_automation_signals.py").read_text(encoding="utf-8")
 for marker in [
@@ -401,6 +438,7 @@ for marker in [
     "git add -N",
     "CRITICAL_STOP",
     "update_automation_signals.py",
+    "repair_environment.py",
     "automation_queue",
     "automation_worktrees",
     "manifest.json",
@@ -417,6 +455,7 @@ for marker in [
     "verification_failure",
     "MULTI_ROLE_ALLOW_REMOTES",
     "checkpoint pre-existing local changes",
+    "repair_environment.py",
     "git push",
     "worktree",
     "prune",
@@ -442,6 +481,10 @@ for marker in [
 for path in [
     Path("scripts/run_conveyor_automation.py"),
     Path("templates/scripts/run_conveyor_automation.py"),
+    Path("scripts/run_observatory.py"),
+    Path("templates/scripts/run_observatory.py"),
+    Path("scripts/repair_environment.py"),
+    Path("templates/scripts/repair_environment.py"),
     Path("scripts/run_dashboard.py"),
     Path("services/agentic-dashboard/agentic_dashboard/app.py"),
 ]:
@@ -464,6 +507,9 @@ for marker in [
     "planner_builder_hardener_integrator",
     "write_role_launchd_plist",
     "write_conveyor_launchd_plist",
+    "OBSERVATORY_SCRIPT",
+    "Launch Observatory",
+    "run_observatory.py",
     "run_conveyor_automation.sh",
     "DEFAULT_AUTOMATION_PATH",
     "StartCalendarInterval",
@@ -626,6 +672,7 @@ for marker in \
     "Write-capable worker agents allowed: true" \
     "Max write worker count: 10" \
     "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS" \
+    "Parallelism budget:" \
     "--mode write" \
     "not alone in the codebase" \
     "blindly accepting changes"; do
@@ -845,6 +892,540 @@ if PATH="$fake_git_dir:$PATH" MULTI_ROLE_ALLOW_REMOTES=1 python3 scripts/integra
     exit 1
 fi
 rm -rf "$tmp_dir" "$tmp_intake" "$fake_git_dir"
+
+tmp_dir="$(mktemp -d)"
+(
+  cd "$tmp_dir"
+  git init >/tmp/Diffmogger-pytest-repair-git-init.log
+  git config user.name "Diffmogger Validation"
+  git config user.email "diffmogger-validation@example.invalid"
+  mkdir -p .agentic services/agentic-notifier/.venv/bin
+  printf './missing_pytest_python -m pytest\n' > .agentic/verification_commands.txt
+  cat > missing_pytest_python <<'SH'
+#!/usr/bin/env sh
+echo "No module named pytest" >&2
+exit 1
+SH
+  chmod +x missing_pytest_python
+  cat > services/agentic-notifier/.venv/bin/python <<'SH'
+#!/usr/bin/env sh
+if [ "$1" = "-c" ]; then
+  exit 0
+fi
+if [ "$1" = "-m" ] && [ "$2" = "pytest" ] && [ "$3" = "services/agentic-notifier" ]; then
+  exit 0
+fi
+echo "unexpected fake venv invocation: $*" >&2
+exit 2
+SH
+  chmod +x services/agentic-notifier/.venv/bin/python
+  git add .
+  git commit -m "pytest repair smoke base" >/tmp/Diffmogger-pytest-repair-commit.log
+)
+python3 - "$tmp_dir" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("integrate_role_outputs", Path("scripts/integrate_role_outputs.py"))
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+result = module.run_verification(target)
+if not result.ok:
+    print(result.detail, file=sys.stderr)
+    raise SystemExit(1)
+checks = "\n".join(result.checks_run)
+if "environment repair:" not in checks or "services/agentic-notifier/.venv/bin/python" not in checks:
+    print(f"Missing pytest repair evidence in checks_run: {checks}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+rm -rf "$tmp_dir"
+
+tmp_dir="$(mktemp -d)"
+fake_npm_dir="$(mktemp -d)"
+cat >"$fake_npm_dir/npm" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "ci" ]; then
+  mkdir -p node_modules/.bin
+  cat > node_modules/.bin/vite <<'EOF'
+#!/usr/bin/env sh
+echo fake-vite-ok
+exit 0
+EOF
+  chmod +x node_modules/.bin/vite
+  exit 0
+fi
+echo "unexpected npm invocation: $*" >&2
+exit 2
+SH
+chmod +x "$fake_npm_dir/npm"
+(
+  cd "$tmp_dir"
+  git init >/tmp/Diffmogger-node-repair-git-init.log
+  git config user.name "Diffmogger Validation"
+  git config user.email "diffmogger-validation@example.invalid"
+  printf '{"scripts":{"test":"vite --version"},"dependencies":{"vite":"0.0.0"}}\n' > package.json
+  printf '{"lockfileVersion":3,"packages":{}}\n' > package-lock.json
+  mkdir -p .git/info
+  printf '/node_modules/\n' >> .git/info/exclude
+  git add package.json package-lock.json
+  git commit -m "node repair smoke base" >/tmp/Diffmogger-node-repair-commit.log
+)
+PATH="$fake_npm_dir:$PATH" python3 - "$tmp_dir" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("repair_environment", Path("scripts/repair_environment.py"))
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+outcome = module.run_command_with_repair(target, "vite --version")
+if not outcome.ok or not outcome.repair_performed:
+    print(outcome.detail(), file=sys.stderr)
+    raise SystemExit(1)
+if "node_modules/.bin" not in "\n".join(outcome.path_prepend):
+    print(outcome.to_json(), file=sys.stderr)
+    raise SystemExit(1)
+PY
+rm -rf "$tmp_dir" "$fake_npm_dir"
+
+tmp_dir="$(mktemp -d)"
+python3 - "$tmp_dir" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+(target / "docs").mkdir(parents=True)
+(target / "target/automation_queue/builder/run-bad").mkdir(parents=True)
+(target / "docs/MULTI_ROLE_PROGRESS.md").write_text(
+    "# Multi-Role Progress\n\n## Recent Activity Log\n\n- No multi-role integrator runs yet.\n",
+    encoding="utf-8",
+)
+manifest = {
+    "role": "builder",
+    "run_id": "run-bad",
+    "status": "deferred",
+    "deferral_reason": "verification_failure",
+    "deferral_detail": "failed at /User" + "s/example/agentic-kit-" + "lab/project with huge output\n" + ("x" * 5000),
+    "changed_files": [],
+}
+(target / "target/automation_queue/builder/run-bad/manifest.json").write_text(
+    json.dumps(manifest),
+    encoding="utf-8",
+)
+spec = importlib.util.spec_from_file_location("integrate_role_outputs", Path("scripts/integrate_role_outputs.py"))
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+module.update_progress(
+    target,
+    run_id="sanitize-smoke",
+    verification_status="failed at /User" + "s/example/agentic-kit-" + "lab/project",
+    committed=[],
+    deferred_count=1,
+    checkpoint_commit=None,
+    cleanup_summary=[],
+    dry_run=False,
+)
+progress = (target / "docs/MULTI_ROLE_PROGRESS.md").read_text(encoding="utf-8")
+if ("/User" + "s/") in progress or ("agentic-kit-" + "lab") in progress:
+    print(progress, file=sys.stderr)
+    raise SystemExit(1)
+if len(progress) > 5000:
+    print("Progress sanitation smoke produced oversized progress output", file=sys.stderr)
+    raise SystemExit(1)
+PY
+rm -rf "$tmp_dir"
+
+tmp_dir="$(mktemp -d)"
+python3 - "$tmp_dir" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+(target / "docs").mkdir(parents=True)
+(target / ".agentic/roles").mkdir(parents=True)
+(target / "scripts").mkdir(parents=True)
+(target / "docs/CODEX_AUTOMATION_TASKS.md").write_text("AUTOMATION_STATUS: ACTIVE\n", encoding="utf-8")
+(target / "docs/MULTI_ROLE_PROGRESS.md").write_text(
+    "# Multi-Role Progress\n\n## Recent Activity Log\n\n- No multi-role integrator runs yet.\n\n## Role Health\n\n- integrator: no runs yet\n",
+    encoding="utf-8",
+)
+(target / "scripts/run_role_automation.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+for role in ["planner", "builder", "hardener", "integrator"]:
+    (target / ".agentic/roles" / f"{role}.md").write_text(role, encoding="utf-8")
+spec = importlib.util.spec_from_file_location("run_conveyor_automation", Path("scripts/run_conveyor_automation.py"))
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+def conveyor_state(last_role="integrator", accepted_by_role=None, include_metadata=True):
+    entry = {"role": "integrator", "exit_code": 0, "progress_success": True}
+    if include_metadata:
+        entry["metadata"] = {"accepted_by_role": accepted_by_role or {"planner": 0, "builder": 0, "hardener": 0}}
+    return {
+        "schema_version": 1,
+        "cycles": 1,
+        "role_counts": {},
+        "history": [entry],
+        "last_success_by_role": {"planner": module.utc_now()},
+        "last_completed_role": last_role,
+    }
+
+role, reason, stop = module.choose_next(
+    target,
+    conveyor_state(accepted_by_role={"planner": 1, "builder": 0, "hardener": 0}),
+    3600,
+    2,
+)
+if role != "builder" or "builder-first" not in reason or stop:
+    print(("planner-integrated", role, reason, stop), file=sys.stderr)
+    raise SystemExit(1)
+role, reason, stop = module.choose_next(
+    target,
+    conveyor_state(accepted_by_role={"planner": 0, "builder": 0, "hardener": 1}),
+    3600,
+    2,
+)
+if role != "builder" or "builder-first" not in reason or stop:
+    print(("hardener-integrated", role, reason, stop), file=sys.stderr)
+    raise SystemExit(1)
+role, reason, stop = module.choose_next(
+    target,
+    conveyor_state(accepted_by_role={"planner": 0, "builder": 1, "hardener": 0}),
+    3600,
+    2,
+)
+if role != "hardener" or "builder patch integrated" not in reason or stop:
+    print(("builder-integrated", role, reason, stop), file=sys.stderr)
+    raise SystemExit(1)
+role, reason, stop = module.choose_next(target, conveyor_state(include_metadata=False), 3600, 2)
+if role != "builder" or "builder-first" not in reason or stop:
+    print(("missing-metadata", role, reason, stop), file=sys.stderr)
+    raise SystemExit(1)
+
+(target / "target/automation_queue/hardener/run-skipped").mkdir(parents=True)
+(target / "target/automation_queue/hardener/run-skipped/manifest.json").write_text(
+    '{"role":"hardener","run_id":"run-skipped","status":"skipped"}\n',
+    encoding="utf-8",
+)
+role, reason, stop = module.choose_next(target, conveyor_state(include_metadata=False), 3600, 2)
+if role == "integrator" or stop:
+    print(("skipped-counted-as-queued", role, reason, stop), file=sys.stderr)
+    raise SystemExit(1)
+(target / "target/automation_queue/planner/run-queued").mkdir(parents=True)
+queued_manifest = target / "target/automation_queue/planner/run-queued/manifest.json"
+queued_manifest.write_text(
+    '{"role":"planner","run_id":"run-queued","status":"queued"}\n',
+    encoding="utf-8",
+)
+role, reason, stop = module.choose_next(target, conveyor_state(include_metadata=False), 3600, 2)
+if role != "integrator" or stop:
+    print(("queued-did-not-preempt", role, reason, stop), file=sys.stderr)
+    raise SystemExit(1)
+queued_manifest.unlink()
+
+state = {"schema_version": 1, "cycles": 0, "role_counts": {}, "history": []}
+before = {"queued": 1, "deferred": 0, "applied": 0, "failed": 0, "deferred_signature": "none"}
+after = {
+    "queued": 0,
+    "deferred": 1,
+    "applied": 0,
+    "failed": 0,
+    "deferred_signature": "verification_environment_failure:missing_pytest",
+}
+module.update_integrator_no_progress(
+    state,
+    before=before,
+    after=after,
+    exit_code=0,
+    threshold=2,
+    finished_at=module.utc_now(),
+)
+before = after
+after = {
+    "queued": 0,
+    "deferred": 1,
+    "applied": 0,
+    "failed": 0,
+    "deferred_signature": "verification_environment_failure:missing_pytest",
+}
+metadata = module.update_integrator_no_progress(
+    state,
+    before=before,
+    after=after,
+    exit_code=0,
+    threshold=2,
+    finished_at=module.utc_now(),
+)
+if not metadata.get("just_tripped") or not module.no_progress_active(state, 2):
+    print(state, file=sys.stderr)
+    raise SystemExit(1)
+module.write_no_progress_progress_note(target, state["integrator_no_progress"])
+role, reason, stop = module.choose_next(target, state, 3600, 2)
+if role != "planner" or stop:
+    print((role, reason, stop), file=sys.stderr)
+    raise SystemExit(1)
+state["integrator_no_progress"]["planner_requested_at"] = module.utc_now()
+role, reason, stop = module.choose_next(target, state, 3600, 2)
+if role is not None or "circuit breaker active" not in reason:
+    print((role, reason, stop), file=sys.stderr)
+    raise SystemExit(1)
+progress = (target / "docs/MULTI_ROLE_PROGRESS.md").read_text(encoding="utf-8")
+if "conveyor-no-progress" not in progress:
+    print(progress, file=sys.stderr)
+    raise SystemExit(1)
+PY
+rm -rf "$tmp_dir"
+
+tmp_dir="$(mktemp -d)"
+python3 - "$tmp_dir" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+(target / "docs").mkdir(parents=True)
+(target / "target/automation_queue/builder/run-observe").mkdir(parents=True)
+(target / "target/automation_logs").mkdir(parents=True)
+(target / "docs/CODEX_AUTOMATION_TASKS.md").write_text(
+    "\n".join(
+        [
+            "AUTOMATION_STATUS: ACTIVE",
+            "Last updated: validation smoke",
+            "",
+            "## Product Horizon State",
+            "",
+            "- Current horizon: local demo",
+            "- Advancement decision: stay",
+            "",
+            "## Best Next Milestone",
+            "",
+            "- Ship the demo observatory.",
+            "",
+            "## Suggested Next Sprint-Sized Task",
+            "",
+            "- Tighten the conveyor timeline.",
+            "",
+            "## Known Issues",
+            "",
+            "- No known issues.",
+        ]
+    )
+    + "\n",
+    encoding="utf-8",
+)
+(target / "docs/MULTI_ROLE_PROGRESS.md").write_text(
+    "# Multi-Role Progress\n\n## Recent Activity Log\n\n- builder queued an observatory smoke patch.\n",
+    encoding="utf-8",
+)
+(target / "target/automation_logs/conveyor.stdout.log").write_text(
+    "CONVEYOR_DECISION role=builder reason=validation smoke\n",
+    encoding="utf-8",
+)
+(target / "target/automation_conveyor_state.json").write_text(
+    json.dumps(
+        {
+            "schema_version": 1,
+            "cycles": 2,
+            "updated_at": "2026-05-03T00:00:00+00:00",
+            "active_role_run": {
+                "role": "builder",
+                "run_id": "observe-smoke",
+                "reason": "validation smoke",
+                "pid": os.getpid(),
+                "started_at": "2026-05-03T00:00:00+00:00",
+                "status": "running",
+            },
+            "decision_queue": [
+                {"role": "builder", "state": "next", "reason": "builder lane is next"},
+                {"role": "integrator", "state": "ready", "reason": "queued patch needs integration"},
+            ],
+	            "history": [
+	                {
+	                    "role": "hardener",
+	                    "reason": "builder lane completed without queued work",
+	                    "exit_code": 0,
+	                    "finished_at": "2026-05-03T00:00:00+00:00",
+	                    "progress_success": True,
+	                },
+	                {
+	                    "role": "integrator",
+	                    "reason": "queued patch needs integration",
+	                    "exit_code": 0,
+	                    "finished_at": "2026-05-03T00:01:00+00:00",
+	                    "progress_success": True,
+	                    "metadata": {"accepted_by_role": {"planner": 0, "builder": 0, "hardener": 1}},
+	                },
+	                {
+	                    "role": "hardener",
+	                    "reason": "hardener churn smoke",
+	                    "exit_code": 0,
+	                    "finished_at": "2026-05-03T00:02:00+00:00",
+	                    "progress_success": True,
+	                },
+	                {
+	                    "role": "integrator",
+	                    "reason": "queued patch needs integration",
+	                    "exit_code": 0,
+	                    "finished_at": "2026-05-03T00:03:00+00:00",
+	                    "progress_success": True,
+	                    "metadata": {"accepted_by_role": {"planner": 0, "builder": 0, "hardener": 1}},
+	                },
+	            ],
+	        },
+	        indent=2,
+	    )
+    + "\n",
+    encoding="utf-8",
+)
+(target / "target/automation_queue/builder/run-observe/manifest.json").write_text(
+    json.dumps(
+        {
+            "role": "builder",
+            "run_id": "run-observe",
+            "status": "queued",
+            "summary": "Render a local observatory page.",
+            "changed_files": ["scripts/run_observatory.py"],
+            "created_at": "2026-05-03T00:00:00+00:00",
+        }
+    ),
+    encoding="utf-8",
+)
+(target / "target/automation_queue/hardener/run-skipped").mkdir(parents=True)
+(target / "target/automation_queue/hardener/run-skipped/manifest.json").write_text(
+    json.dumps(
+        {
+            "role": "hardener",
+            "run_id": "run-skipped",
+            "status": "skipped",
+            "summary": "No hardening changes were needed.",
+            "changed_files": [],
+            "created_at": "2026-05-03T00:04:00+00:00",
+        }
+    ),
+    encoding="utf-8",
+)
+PY
+python3 scripts/run_observatory.py --target "$tmp_dir" --once --output "$tmp_dir/target/observatory/index.html" >/tmp/Diffmogger-observatory-render.log
+for marker in "Diffmogger Observatory" "Conveyor Belt" "run-observe" "builder" "Conveyor Health" "Recent Outcomes" "run-skipped" "skipped" "hardener/integrator churn"; do
+    if ! grep -q "$marker" "$tmp_dir/target/observatory/index.html"; then
+        echo "Observatory render smoke missing marker: $marker" >&2
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+done
+if grep -q "$tmp_dir" "$tmp_dir/target/observatory/index.html"; then
+    echo "Observatory render leaked an absolute target path" >&2
+    rm -rf "$tmp_dir"
+    exit 1
+fi
+rm -rf "$tmp_dir"
+
+tmp_dir="$(mktemp -d)"
+fake_codex_dir="$(mktemp -d)"
+cat >"$fake_codex_dir/codex" <<'SH'
+#!/usr/bin/env bash
+worktree=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-C" ]; then
+    worktree="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+if [ -z "$worktree" ]; then
+  echo "missing -C worktree" >&2
+  exit 2
+fi
+test -f "$worktree/.agentic/roles/builder.md" || exit 3
+test -f "$worktree/docs/CODEX_AUTOMATION_TASKS.md" || exit 4
+test -f "$worktree/docs/MULTI_ROLE_PROGRESS.md" || exit 5
+printf 'role context smoke\n' > "$worktree/feature.txt"
+exit 0
+SH
+chmod +x "$fake_codex_dir/codex"
+(
+  cd "$tmp_dir"
+  git init >/tmp/Diffmogger-role-context-git-init.log
+  git config user.name "Diffmogger Validation"
+  git config user.email "diffmogger-validation@example.invalid"
+  printf '# Role Context Smoke\n' > README.md
+  git add README.md
+  git commit -m "role context smoke base" >/tmp/Diffmogger-role-context-commit.log
+  mkdir -p .agentic/roles docs
+  printf 'builder prompt\n' > .agentic/roles/builder.md
+  printf 'planner prompt\n' > .agentic/roles/planner.md
+  printf 'hardener prompt\n' > .agentic/roles/hardener.md
+  printf 'integrator prompt\n' > .agentic/roles/integrator.md
+  printf 'AUTOMATION_STATUS: ACTIVE\n' > docs/CODEX_AUTOMATION_TASKS.md
+  printf '# Multi-Role Progress\n' > docs/MULTI_ROLE_PROGRESS.md
+  mkdir -p .git/info
+  {
+    printf '/.agentic/\n'
+    printf '/docs/CODEX_AUTOMATION_TASKS.md\n'
+    printf '/docs/MULTI_ROLE_PROGRESS.md\n'
+  } >> .git/info/exclude
+)
+CODEX_AUTOMATION_PATH="$fake_codex_dir:$PATH" CODEX_RUN_ID="validation-context" \
+  bash scripts/run_role_automation.sh --target "$tmp_dir" --role builder >/tmp/Diffmogger-role-context.log
+patch_path="$tmp_dir/target/automation_queue/builder/validation-context/changes.patch"
+changed_path="$tmp_dir/target/automation_queue/builder/validation-context/changed_files.txt"
+if ! grep -q "feature.txt" "$patch_path"; then
+    echo "Role context smoke did not export fake feature change" >&2
+    cat /tmp/Diffmogger-role-context.log >&2
+    rm -rf "$tmp_dir" "$fake_codex_dir"
+    exit 1
+fi
+if grep -E "\\.agentic|CODEX_AUTOMATION_TASKS|MULTI_ROLE_PROGRESS" "$patch_path" "$changed_path" >/tmp/Diffmogger-role-context-pollution.log; then
+    echo "Role context smoke leaked seeded context into queued patch" >&2
+    cat /tmp/Diffmogger-role-context-pollution.log >&2
+    rm -rf "$tmp_dir" "$fake_codex_dir"
+    exit 1
+fi
+rm -rf "$tmp_dir" "$fake_codex_dir"
+
+tmp_dir="$(mktemp -d)"
+fake_codex_dir="$(mktemp -d)"
+cat >"$fake_codex_dir/codex" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$fake_codex_dir/codex"
+(
+  cd "$tmp_dir"
+  git init >/tmp/Diffmogger-role-skipped-git-init.log
+  git config user.name "Diffmogger Validation"
+  git config user.email "diffmogger-validation@example.invalid"
+  printf '# Role Skipped Smoke\n' > README.md
+  git add README.md
+  git commit -m "role skipped smoke base" >/tmp/Diffmogger-role-skipped-commit.log
+  mkdir -p .agentic/roles docs
+  printf 'builder prompt\n' > .agentic/roles/builder.md
+)
+CODEX_AUTOMATION_PATH="$fake_codex_dir:$PATH" CODEX_RUN_ID="validation-skipped" \
+  bash scripts/run_role_automation.sh --target "$tmp_dir" --role builder >/tmp/Diffmogger-role-skipped.log
+if ! grep '"status": "skipped"' "$tmp_dir/target/automation_queue/builder/validation-skipped/manifest.json" >/tmp/Diffmogger-role-skipped-status.log; then
+    echo "Role no-op smoke did not mark empty patch as skipped" >&2
+    cat /tmp/Diffmogger-role-skipped.log >&2
+    rm -rf "$tmp_dir" "$fake_codex_dir"
+    exit 1
+fi
+rm -rf "$tmp_dir" "$fake_codex_dir"
 
 tmp_dir="$(mktemp -d)"
 tmp_intake="$(mktemp /tmp/Diffmogger-local-notifier.XXXXXX)"

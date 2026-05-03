@@ -26,7 +26,7 @@ Continuous conveyor:
 One local dispatcher chooses the next runnable lane as soon as the previous lane exits.
 ```
 
-Good when you want work-conserving local automation instead of exact role times. The conveyor prioritizes queued integration, due planning, hardening after integration, and builder momentum. It records state in `target/automation_conveyor_state.json` and uses `target/automation_conveyor.lock` so only one dispatcher runs.
+Good when you want work-conserving local automation instead of exact role times. The conveyor prioritizes queued integration first, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It records state in `target/automation_conveyor_state.json`, including the active role run and next decision queue, and uses `target/automation_conveyor.lock` so only one dispatcher runs.
 
 45 minutes:
 
@@ -67,6 +67,7 @@ Generated targets also include an optional conveyor wrapper:
 ```bash
 bash scripts/run_conveyor_automation.sh --dry-run
 bash scripts/run_conveyor_automation.sh --once
+python3 scripts/run_observatory.py --open
 ```
 
 When multi-role files are present, the conveyor invokes `scripts/run_role_automation.sh --role <role>`. Without multi-role files, it falls back to `scripts/run_codex_automation.sh`.

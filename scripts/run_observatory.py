@@ -1,0 +1,952 @@
+#!/usr/bin/env python3
+"""Run a local visual observatory for Diffmogger automation state."""
+
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import webbrowser
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+
+ROLES = ("planner", "builder", "hardener", "integrator")
+QUEUE_STATUSES = ("queued", "deferred", "applied", "failed", "skipped")
+MAX_MANIFESTS = 18
+MAX_OUTCOMES = 12
+MAX_HISTORY = 14
+MAX_LOG_FILES = 8
+MAX_LOG_LINE_CHARS = 220
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def read_text(path: Path, limit: int | None = None) -> str:
+    try:
+        if limit is None:
+            return path.read_text(encoding="utf-8", errors="replace")
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return handle.read(limit)
+    except OSError:
+        return ""
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def read_tail_text(path: Path, max_bytes: int = 40_000) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def process_alive(pid: Any) -> bool:
+    try:
+        parsed = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if parsed <= 0:
+        return False
+    try:
+        os.kill(parsed, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def clean_text(value: Any, *, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) > limit:
+        return text[: max(0, limit - 15)].rstrip() + " ... [truncated]"
+    return text
+
+
+def first_nonempty_section_line(text: str, heading: str) -> str:
+    pattern = re.compile(rf"^##\s+{re.escape(heading)}\s*$", re.MULTILINE)
+    match = pattern.search(text)
+    if not match:
+        return ""
+    next_heading = re.search(r"^##\s+", text[match.end() :], re.MULTILINE)
+    end = match.end() + next_heading.start() if next_heading else len(text)
+    section = text[match.end() : end]
+    for raw in section.splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            return clean_text(re.sub(r"^[-*]\s+", "", line), limit=220)
+    return ""
+
+
+def parse_task_state(target: Path) -> dict[str, Any]:
+    text = read_text(target / "docs" / "CODEX_AUTOMATION_TASKS.md")
+    status = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", text, re.MULTILINE)
+    updated = re.search(r"^Last updated:\s*(.+)", text, re.MULTILINE)
+    horizon = re.search(r"^-\s*Current horizon:\s*(.+)", text, re.MULTILINE)
+    decision = re.search(r"^-\s*Advancement decision:\s*(.+)", text, re.MULTILINE)
+    return {
+        "status": status.group(1).strip() if status else "UNKNOWN",
+        "last_updated": clean_text(updated.group(1), limit=120) if updated else "unknown",
+        "horizon": clean_text(horizon.group(1), limit=160) if horizon else "unknown",
+        "horizon_decision": clean_text(decision.group(1), limit=160) if decision else "unknown",
+        "best_next_milestone": first_nonempty_section_line(text, "Best Next Milestone") or "No milestone recorded yet.",
+        "suggested_next_task": first_nonempty_section_line(text, "Suggested Next Sprint-Sized Task") or "No sprint task recorded yet.",
+        "known_issue": first_nonempty_section_line(text, "Known Issues") or "No active issue summary.",
+    }
+
+
+def count_matches(path: Path, pattern: str) -> int:
+    text = read_text(path)
+    return len(re.findall(pattern, text, re.MULTILINE | re.IGNORECASE))
+
+
+def queue_snapshot(target: Path) -> dict[str, Any]:
+    queue_root = target / "target" / "automation_queue"
+    counts: dict[str, dict[str, int]] = {
+        role: {status: 0 for status in QUEUE_STATUSES} for role in ROLES
+    }
+    totals = {status: 0 for status in QUEUE_STATUSES}
+    manifests: list[dict[str, Any]] = []
+
+    for manifest_path in sorted(queue_root.glob("*/*/manifest.json")):
+        manifest = read_json(manifest_path)
+        role = str(manifest.get("role") or manifest_path.parent.parent.name)
+        if role not in counts:
+            continue
+        status = str(manifest.get("status") or "unknown")
+        if status in counts[role]:
+            counts[role][status] += 1
+            totals[status] += 1
+        timestamp = manifest.get("integrated_at") or manifest.get("created_at") or ""
+        manifests.append(
+            {
+                "role": role,
+                "run_id": clean_text(manifest.get("run_id") or manifest_path.parent.name, limit=80),
+                "status": status,
+                "created_at": clean_text(manifest.get("created_at"), limit=80),
+                "timestamp": clean_text(timestamp, limit=80),
+                "summary": clean_text(manifest.get("summary") or "No summary.", limit=180),
+                "deferral_reason": clean_text(manifest.get("deferral_reason"), limit=80),
+                "changed_files": [
+                    clean_text(item, limit=80)
+                    for item in list(manifest.get("changed_files") or [])[:5]
+                ],
+            }
+        )
+
+    def manifest_sort_key(item: dict[str, Any]) -> tuple[int, str]:
+        status_rank = {"queued": 0, "deferred": 1}.get(str(item.get("status")), 4)
+        return status_rank, str(item.get("timestamp") or item.get("created_at") or "")
+
+    actionable = [item for item in manifests if item.get("status") in {"queued", "deferred"}]
+    outcomes = [item for item in manifests if item.get("status") in {"applied", "failed", "skipped"}]
+
+    return {
+        "counts_by_role": counts,
+        "totals": totals,
+        "manifests": sorted(actionable, key=manifest_sort_key)[:MAX_MANIFESTS],
+        "recent_outcomes": sorted(
+            outcomes,
+            key=lambda item: str(item.get("timestamp") or item.get("created_at") or ""),
+            reverse=True,
+        )[:MAX_OUTCOMES],
+    }
+
+
+def git_snapshot(target: Path) -> dict[str, Any]:
+    def run_git(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=3,
+            check=False,
+        )
+
+    branch_result = run_git(["branch", "--show-current"])
+    status_result = run_git(["status", "--short"])
+    log_result = run_git(["log", "--oneline", "-5"])
+    dirty_lines = [line for line in (status_result.stdout or "").splitlines() if line.strip()]
+    return {
+        "branch": clean_text(branch_result.stdout.strip() or "unknown", limit=80) if branch_result.returncode == 0 else "unknown",
+        "dirty_count": len(dirty_lines) if status_result.returncode == 0 else 0,
+        "recent_commits": [
+            clean_text(line, limit=120)
+            for line in (log_result.stdout or "").splitlines()
+            if line.strip()
+        ][:5]
+        if log_result.returncode == 0
+        else [],
+    }
+
+
+def log_snapshot(target: Path) -> list[dict[str, Any]]:
+    log_dir = target / "target" / "automation_logs"
+    if not log_dir.exists():
+        return []
+    files = sorted(
+        [path for path in log_dir.glob("*.log") if path.is_file()],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    items: list[dict[str, Any]] = []
+    for path in files[:MAX_LOG_FILES]:
+        text = read_tail_text(path)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        items.append(
+            {
+                "name": path.name,
+                "updated_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"),
+                "tail": clean_text(lines[-1] if lines else "No log lines yet.", limit=MAX_LOG_LINE_CHARS),
+            }
+        )
+    return items
+
+
+def decision_queue(conveyor: dict[str, Any], queue: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = conveyor.get("decision_queue")
+    if isinstance(raw, list) and raw:
+        return [
+            {
+                "role": clean_text(item.get("role") or "idle", limit=40),
+                "state": clean_text(item.get("state") or "planned", limit=40),
+                "reason": clean_text(item.get("reason") or "", limit=180),
+            }
+            for item in raw[:8]
+            if isinstance(item, dict)
+        ]
+
+    last = conveyor.get("last_decision") if isinstance(conveyor.get("last_decision"), dict) else {}
+    role = str(last.get("role") or "idle")
+    reason = str(last.get("reason") or "No conveyor decision recorded yet.")
+    entries = [{"role": role, "state": "next", "reason": clean_text(reason, limit=180)}]
+    totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
+    if int(totals.get("queued", 0) or 0):
+        entries.insert(0, {"role": "integrator", "state": "ready", "reason": f"{totals.get('queued')} queued patch(es) need integration"})
+    return entries[:8]
+
+
+def active_run(conveyor: dict[str, Any]) -> dict[str, Any]:
+    active = conveyor.get("active_role_run")
+    if not isinstance(active, dict):
+        return {}
+    alive = process_alive(active.get("pid"))
+    return {
+        "role": clean_text(active.get("role") or "unknown", limit=40),
+        "run_id": clean_text(active.get("run_id") or "unknown", limit=80),
+        "reason": clean_text(active.get("reason") or "", limit=180),
+        "started_at": clean_text(active.get("started_at") or "", limit=80),
+        "pid": active.get("pid"),
+        "alive": alive,
+        "status": "running" if alive else "stale",
+    }
+
+
+def conveyor_health(conveyor: dict[str, Any]) -> dict[str, Any]:
+    history = conveyor.get("history") if isinstance(conveyor.get("history"), list) else []
+    roles = [
+        str(item.get("role") or "")
+        for item in history
+        if isinstance(item, dict) and item.get("role")
+    ]
+    recent = roles[-6:]
+    churn_sequences = (
+        ["hardener", "integrator", "hardener", "integrator"],
+        ["integrator", "hardener", "integrator", "hardener"],
+    )
+    churn = any(recent[-4:] == sequence for sequence in churn_sequences) if len(recent) >= 4 else False
+    if churn:
+        return {
+            "status": "warning",
+            "summary": "hardener/integrator churn detected; builder-first policy should route the next idle cycle to builder.",
+            "recent_roles": recent,
+        }
+    return {
+        "status": "ok",
+        "summary": "builder-first conveyor policy active; hardener runs once after integrated builder work.",
+        "recent_roles": recent,
+    }
+
+
+def build_snapshot(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    conveyor = read_json(target / "target" / "automation_conveyor_state.json")
+    queue = queue_snapshot(target)
+    task = parse_task_state(target)
+    progress_text = read_text(target / "docs" / "MULTI_ROLE_PROGRESS.md", limit=40_000)
+    progress_recent = first_nonempty_section_line(progress_text, "Recent Activity Log") or "No multi-role activity recorded yet."
+    human = {
+        "pending_requests": count_matches(target / "docs" / "HUMAN_REQUESTS.md", r"^##\s+HR-"),
+        "unhandled_inbox": count_matches(target / "docs" / "HUMAN_INBOX.md", r"status:\s*unhandled"),
+        "outbound_records": count_matches(target / "docs" / "HUMAN_OUTBOX.md", r"^##\s+OUTBOX-"),
+    }
+    return {
+        "schema_version": 1,
+        "generated_at": utc_now(),
+        "target_name": target.name or "target",
+        "task": task,
+        "human": human,
+        "git": git_snapshot(target),
+        "queue": queue,
+        "conveyor": {
+            "cycles": int(conveyor.get("cycles", 0) or 0),
+            "updated_at": clean_text(conveyor.get("updated_at") or "never", limit=80),
+            "last_decision": conveyor.get("last_decision") if isinstance(conveyor.get("last_decision"), dict) else {},
+            "active_role_run": active_run(conveyor),
+            "last_active_role_run": conveyor.get("last_active_role_run") if isinstance(conveyor.get("last_active_role_run"), dict) else {},
+            "decision_queue": decision_queue(conveyor, queue),
+            "health": conveyor_health(conveyor),
+            "no_progress": conveyor.get("integrator_no_progress") if isinstance(conveyor.get("integrator_no_progress"), dict) else {},
+            "history": list(conveyor.get("history") or [])[-MAX_HISTORY:] if isinstance(conveyor.get("history"), list) else [],
+        },
+        "progress_recent": progress_recent,
+        "logs": log_snapshot(target),
+    }
+
+
+HTML_TEMPLATE = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diffmogger Observatory</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101214;
+      --panel: #181c20;
+      --panel-2: #20262b;
+      --text: #f3f1e8;
+      --muted: #a8b0aa;
+      --line: #333b40;
+      --green: #57c785;
+      --blue: #67a6ff;
+      --amber: #f0b84f;
+      --red: #ff6b6b;
+      --violet: #b993ff;
+      --cyan: #59d0cf;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .shell {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: end;
+      padding: 24px 28px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #13171a;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 56px);
+      line-height: .95;
+      letter-spacing: 0;
+    }
+    .subtitle {
+      margin-top: 10px;
+      color: var(--muted);
+      max-width: 780px;
+      font-size: 15px;
+    }
+    .clock {
+      min-width: 260px;
+      text-align: right;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    main {
+      display: grid;
+      grid-template-columns: minmax(300px, 1.1fr) minmax(420px, 1.8fr) minmax(300px, 1fr);
+      gap: 16px;
+      padding: 16px;
+    }
+    section, .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    section > h2 {
+      margin: 0;
+      padding: 12px 14px;
+      font-size: 13px;
+      letter-spacing: 0;
+      color: var(--muted);
+      text-transform: uppercase;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-2);
+    }
+    .stack { display: grid; gap: 16px; align-content: start; }
+    .content { padding: 14px; }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #15191c;
+      min-height: 88px;
+    }
+    .metric b {
+      display: block;
+      font-size: 26px;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .metric span {
+      display: block;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .belt {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      padding: 14px;
+    }
+    .role {
+      position: relative;
+      min-height: 154px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #14181b;
+    }
+    .role.running {
+      border-color: var(--green);
+      box-shadow: 0 0 0 1px rgba(87,199,133,.35) inset;
+    }
+    .role.next {
+      border-color: var(--blue);
+    }
+    .role h3 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: 0;
+      text-transform: capitalize;
+    }
+    .role .state {
+      margin-top: 10px;
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      color: #08100c;
+      background: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .role.running .state { background: var(--green); }
+    .role.next .state { background: var(--blue); color: #07111f; }
+    .role .counts {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .active-run {
+      margin: 0 14px 14px;
+      padding: 14px;
+      border: 1px solid rgba(87,199,133,.45);
+      border-radius: 8px;
+      background: rgba(87,199,133,.08);
+    }
+    .active-run strong { color: var(--green); }
+    .queue-list, .timeline, .logs { display: grid; gap: 10px; }
+    .health {
+      margin: 0 14px 14px;
+      padding: 12px 14px;
+      border: 1px solid rgba(87,199,133,.45);
+      border-radius: 8px;
+      background: rgba(87,199,133,.07);
+      color: var(--muted);
+    }
+    .health.warning {
+      border-color: rgba(240,184,79,.65);
+      background: rgba(240,184,79,.09);
+    }
+    .health strong { display: block; color: var(--green); margin-bottom: 4px; }
+    .health.warning strong { color: var(--amber); }
+    .item {
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #14181b;
+    }
+    .item-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 6px;
+      font-weight: 700;
+    }
+    .muted { color: var(--muted); }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .chip {
+      display: inline-flex;
+      min-height: 24px;
+      align-items: center;
+      padding: 3px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .chip.queued { color: var(--blue); border-color: rgba(103,166,255,.5); }
+    .chip.deferred { color: var(--amber); border-color: rgba(240,184,79,.5); }
+    .chip.failed { color: var(--red); border-color: rgba(255,107,107,.5); }
+    .chip.applied { color: var(--green); border-color: rgba(87,199,133,.5); }
+    .chip.skipped { color: var(--muted); border-color: rgba(168,176,170,.45); }
+    .mission {
+      display: grid;
+      gap: 12px;
+    }
+    .mission p { margin: 0; color: var(--muted); }
+    .mission strong { display: block; color: var(--text); margin-bottom: 4px; }
+    .status-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .status-pill {
+      padding: 6px 9px;
+      border-radius: 999px;
+      background: #111518;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .status-pill.good { color: var(--green); }
+    .status-pill.warn { color: var(--amber); }
+    .status-pill.info { color: var(--cyan); }
+    .progress-note {
+      color: var(--muted);
+      min-height: 72px;
+    }
+    @media (max-width: 1180px) {
+      main { grid-template-columns: 1fr; }
+      .belt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      header { grid-template-columns: 1fr; }
+      .clock { text-align: left; min-width: 0; }
+    }
+    @media (max-width: 640px) {
+      main { padding: 10px; }
+      header { padding: 18px 16px 14px; }
+      .belt, .metric-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <h1>Diffmogger Observatory</h1>
+        <div class="subtitle" id="subtitle">Local automation telemetry for a running target.</div>
+      </div>
+      <div class="clock">
+        <div id="generated">Waiting for state...</div>
+        <div id="targetName"></div>
+      </div>
+    </header>
+    <main>
+      <div class="stack">
+        <section>
+          <h2>Mission State</h2>
+          <div class="content mission" id="mission"></div>
+        </section>
+        <section>
+          <h2>Signals</h2>
+          <div class="content">
+            <div class="metric-grid" id="metrics"></div>
+          </div>
+        </section>
+        <section>
+          <h2>Recent Logs</h2>
+          <div class="content logs" id="logs"></div>
+        </section>
+      </div>
+      <div class="stack">
+        <section>
+          <h2>Conveyor Belt</h2>
+          <div class="belt" id="belt"></div>
+          <div id="activeRun"></div>
+        </section>
+        <section>
+          <h2>Conveyor Health</h2>
+          <div class="content" id="health"></div>
+        </section>
+        <section>
+          <h2>Next Up</h2>
+          <div class="content queue-list" id="nextUp"></div>
+        </section>
+        <section>
+          <h2>Patch Queue</h2>
+          <div class="content queue-list" id="patches"></div>
+        </section>
+        <section>
+          <h2>Recent Outcomes</h2>
+          <div class="content queue-list" id="outcomes"></div>
+        </section>
+      </div>
+      <div class="stack">
+        <section>
+          <h2>Timeline</h2>
+          <div class="content timeline" id="timeline"></div>
+        </section>
+        <section>
+          <h2>Progress Pulse</h2>
+          <div class="content progress-note" id="progress"></div>
+        </section>
+        <section>
+          <h2>Local Repo</h2>
+          <div class="content" id="repo"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script>
+    const INITIAL_STATE = __INITIAL_STATE__;
+    const STATE_URL = __STATE_URL__;
+    const ROLES = ["planner", "builder", "hardener", "integrator"];
+
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    function clear(node) {
+      while (node.firstChild) node.removeChild(node.firstChild);
+    }
+
+    function renderMetric(label, value) {
+      const node = el("div", "metric");
+      node.appendChild(el("b", "", String(value)));
+      node.appendChild(el("span", "", label));
+      return node;
+    }
+
+    function historyLabel(item) {
+      if (!item.progress_success) return "no progress";
+      const role = item.role || "";
+      if (role === "integrator") {
+        const accepted = ((item.metadata || {}).accepted_by_role) || {};
+        const total = Object.values(accepted).reduce((sum, value) => sum + Number(value || 0), 0);
+        return total ? "accepted " + total : "integrated";
+      }
+      if (role === "planner") return "planned";
+      if (role === "builder") return "built";
+      if (role === "hardener") return "hardened";
+      return "progress";
+    }
+
+    function acceptedRoleText(item) {
+      const accepted = ((item.metadata || {}).accepted_by_role) || {};
+      const parts = Object.entries(accepted).filter(([, value]) => Number(value || 0) > 0).map(([role, value]) => role + ": " + value);
+      return parts.length ? "accepted by role: " + parts.join(", ") : "";
+    }
+
+    function renderManifest(item) {
+      const row = el("div", "item");
+      const title = el("div", "item-title");
+      title.appendChild(el("span", "", item.role + " / " + item.run_id));
+      title.appendChild(el("span", "chip " + item.status, item.status));
+      row.appendChild(title);
+      row.appendChild(el("div", "", item.summary || "No summary."));
+      if (item.deferral_reason) row.appendChild(el("div", "muted", "deferral: " + item.deferral_reason));
+      const chips = el("div", "chips");
+      (item.changed_files || []).forEach(file => chips.appendChild(el("span", "chip", file)));
+      if (chips.children.length) row.appendChild(chips);
+      return row;
+    }
+
+    function render(data) {
+      document.getElementById("generated").textContent = "Updated " + (data.generated_at || "now");
+      document.getElementById("targetName").textContent = data.target_name || "target";
+      document.getElementById("subtitle").textContent = "Conveyor, queue, role, and verification state for " + (data.target_name || "the selected target") + ".";
+
+      const mission = document.getElementById("mission");
+      clear(mission);
+      [
+        ["Automation status", data.task.status],
+        ["Current horizon", data.task.horizon],
+        ["Best next milestone", data.task.best_next_milestone],
+        ["Suggested next task", data.task.suggested_next_task],
+        ["Known issue", data.task.known_issue]
+      ].forEach(([title, body]) => {
+        const p = el("p");
+        p.appendChild(el("strong", "", title));
+        p.appendChild(document.createTextNode(body || "unknown"));
+        mission.appendChild(p);
+      });
+      const pills = el("div", "status-line");
+      const statusClass = (data.task.status || "").startsWith("ACTIVE") ? "good" : "warn";
+      pills.appendChild(el("span", "status-pill " + statusClass, data.task.status || "UNKNOWN"));
+      pills.appendChild(el("span", "status-pill info", "horizon: " + (data.task.horizon_decision || "unknown")));
+      pills.appendChild(el("span", "status-pill", "last: " + (data.task.last_updated || "unknown")));
+      mission.appendChild(pills);
+
+      const metrics = document.getElementById("metrics");
+      clear(metrics);
+      metrics.appendChild(renderMetric("Queued patches", data.queue.totals.queued || 0));
+      metrics.appendChild(renderMetric("Deferred patches", data.queue.totals.deferred || 0));
+      metrics.appendChild(renderMetric("Conveyor cycles", data.conveyor.cycles || 0));
+      metrics.appendChild(renderMetric("Unhandled inbox", data.human.unhandled_inbox || 0));
+
+      const active = data.conveyor.active_role_run || {};
+      const visibleDecisionQueue = (data.conveyor.decision_queue || []).filter(item => !(active.status === "running" && item.role === active.role));
+      const nextRoles = new Set(visibleDecisionQueue.map(item => item.role));
+      const belt = document.getElementById("belt");
+      clear(belt);
+      ROLES.forEach(role => {
+        const counts = (data.queue.counts_by_role || {})[role] || {};
+        const card = el("div", "role" + (active.role === role && active.status === "running" ? " running" : "") + (nextRoles.has(role) ? " next" : ""));
+        card.appendChild(el("h3", "", role));
+        const state = active.role === role && active.status === "running" ? "running" : (nextRoles.has(role) ? "next" : "standby");
+        card.appendChild(el("div", "state", state));
+        const countGrid = el("div", "counts");
+        ["queued", "deferred", "applied", "failed", "skipped"].forEach(status => {
+          countGrid.appendChild(el("div", "", status + ": " + (counts[status] || 0)));
+        });
+        card.appendChild(countGrid);
+        belt.appendChild(card);
+      });
+
+      const activeRun = document.getElementById("activeRun");
+      clear(activeRun);
+      if (active.role) {
+        const node = el("div", "active-run");
+        node.appendChild(el("strong", "", active.status === "running" ? "Running now: " + active.role : "Last active run looks stale: " + active.role));
+        node.appendChild(el("div", "muted", (active.run_id || "unknown") + " | " + (active.reason || "no reason recorded")));
+          activeRun.appendChild(node);
+      }
+
+      const health = document.getElementById("health");
+      clear(health);
+      const healthData = (data.conveyor || {}).health || {};
+      const healthNode = el("div", "health " + (healthData.status || "ok"));
+      healthNode.appendChild(el("strong", "", (healthData.status || "ok").toUpperCase()));
+      healthNode.appendChild(el("div", "", healthData.summary || "builder-first conveyor policy active."));
+      if ((healthData.recent_roles || []).length) healthNode.appendChild(el("div", "muted", "recent roles: " + healthData.recent_roles.join(" -> ")));
+      health.appendChild(healthNode);
+
+      const nextUp = document.getElementById("nextUp");
+      clear(nextUp);
+      visibleDecisionQueue.forEach(item => {
+        const row = el("div", "item");
+        const title = el("div", "item-title");
+        title.appendChild(el("span", "", item.role || "idle"));
+        title.appendChild(el("span", "chip " + (item.state || ""), item.state || "planned"));
+        row.appendChild(title);
+        row.appendChild(el("div", "muted", item.reason || "No reason recorded."));
+        nextUp.appendChild(row);
+      });
+      if (!nextUp.children.length) nextUp.appendChild(el("div", "item muted", active.status === "running" ? "Current role is running; next decision refreshes after it exits." : "No conveyor decision recorded yet."));
+
+      const patches = document.getElementById("patches");
+      clear(patches);
+      (data.queue.manifests || []).forEach(item => {
+        patches.appendChild(renderManifest(item));
+      });
+      if (!patches.children.length) patches.appendChild(el("div", "item muted", "No queued or deferred patches yet."));
+
+      const outcomes = document.getElementById("outcomes");
+      clear(outcomes);
+      (data.queue.recent_outcomes || []).forEach(item => {
+        outcomes.appendChild(renderManifest(item));
+      });
+      if (!outcomes.children.length) outcomes.appendChild(el("div", "item muted", "No recent applied, failed, or skipped role outputs yet."));
+
+      const timeline = document.getElementById("timeline");
+      clear(timeline);
+      (data.conveyor.history || []).slice().reverse().forEach(item => {
+        const row = el("div", "item");
+        const title = el("div", "item-title");
+        title.appendChild(el("span", "", item.role || "role"));
+        title.appendChild(el("span", "chip " + (item.progress_success ? "applied" : "deferred"), historyLabel(item)));
+        row.appendChild(title);
+        row.appendChild(el("div", "muted", (item.finished_at || "") + " | exit " + item.exit_code));
+        row.appendChild(el("div", "", item.reason || "No reason recorded."));
+        const acceptedText = acceptedRoleText(item);
+        if (acceptedText) row.appendChild(el("div", "muted", acceptedText));
+        timeline.appendChild(row);
+      });
+      if (!timeline.children.length) timeline.appendChild(el("div", "item muted", "No conveyor history yet."));
+
+      const progress = document.getElementById("progress");
+      progress.textContent = data.progress_recent || "No progress pulse yet.";
+
+      const logs = document.getElementById("logs");
+      clear(logs);
+      (data.logs || []).forEach(item => {
+        const row = el("div", "item");
+        row.appendChild(el("div", "item-title", item.name || "log"));
+        row.appendChild(el("div", "muted", item.tail || "No log lines."));
+        logs.appendChild(row);
+      });
+      if (!logs.children.length) logs.appendChild(el("div", "item muted", "No automation logs yet."));
+
+      const repo = document.getElementById("repo");
+      clear(repo);
+      repo.appendChild(renderMetric("Dirty files", data.git.dirty_count || 0));
+      const commits = el("div", "chips");
+      (data.git.recent_commits || []).forEach(commit => commits.appendChild(el("span", "chip", commit)));
+      repo.appendChild(commits);
+    }
+
+    async function refresh() {
+      if (!STATE_URL) {
+        render(INITIAL_STATE);
+        return;
+      }
+      try {
+        const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
+        render(await response.json());
+      } catch (error) {
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, conveyor: {decision_queue: [], history: []}, logs: []};
+        fallback.progress_recent = "Observatory refresh failed: " + error;
+        render(fallback);
+      }
+    }
+
+    refresh();
+    if (STATE_URL) setInterval(refresh, 2500);
+  </script>
+</body>
+</html>
+"""
+
+
+def render_html(snapshot: dict[str, Any], *, live: bool) -> str:
+    initial_json = json.dumps(snapshot, sort_keys=True).replace("</", "<\\/")
+    state_url = '"/state.json"' if live else "null"
+    return (
+        HTML_TEMPLATE.replace("__INITIAL_STATE__", initial_json)
+        .replace("__STATE_URL__", state_url)
+    )
+
+
+class ObservatoryHandler(BaseHTTPRequestHandler):
+    target: Path
+
+    def _send(self, body: str | bytes, content_type: str, status: int = 200) -> None:
+        payload = body if isinstance(body, bytes) else body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
+        path = urlparse(self.path).path
+        if path in {"/", "/index.html"}:
+            self._send(render_html(build_snapshot(self.target), live=True), "text/html; charset=utf-8")
+            return
+        if path == "/state.json":
+            self._send(json.dumps(build_snapshot(self.target), indent=2, sort_keys=True) + "\n", "application/json; charset=utf-8")
+            return
+        self._send("Not found\n", "text/plain; charset=utf-8", status=404)
+
+    def log_message(self, _format: str, *_args: Any) -> None:
+        return
+
+
+def run_server(target: Path, host: str, port: int, open_browser: bool) -> int:
+    class Handler(ObservatoryHandler):
+        pass
+
+    Handler.target = target
+    server = ThreadingHTTPServer((host, port), Handler)
+    actual_host, actual_port = server.server_address
+    url = f"http://{actual_host}:{actual_port}/"
+    print(f"Diffmogger observatory: {url}", flush=True)
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        server.server_close()
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", default=".", help="Target project directory to observe")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host for the local observatory server")
+    parser.add_argument("--port", type=int, default=0, help="Bind port; 0 chooses a free local port")
+    parser.add_argument("--open", action="store_true", help="Open the observatory URL in the default browser")
+    parser.add_argument("--once", action="store_true", help="Render a standalone HTML snapshot and exit")
+    parser.add_argument("--output", default="", help="Output path for --once; stdout is used when omitted")
+    args = parser.parse_args(argv)
+
+    target = Path(args.target).expanduser().resolve()
+    snapshot = build_snapshot(target)
+    if args.once:
+        body = render_html(snapshot, live=False)
+        if args.output:
+            output = Path(args.output).expanduser().resolve()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(body, encoding="utf-8")
+            print(f"Wrote observatory snapshot: {output}")
+        else:
+            sys.stdout.write(body)
+        return 0
+
+    return run_server(target, args.host, args.port, args.open)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
