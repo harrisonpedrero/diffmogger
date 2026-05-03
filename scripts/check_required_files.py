@@ -117,6 +117,7 @@ OBSERVATORY_REQUIRED_STRINGS = [
     "automation_queue",
     "ThreadingHTTPServer",
     "--open",
+    "--review-output",
     "Self Review",
     "Active Signals",
 ]

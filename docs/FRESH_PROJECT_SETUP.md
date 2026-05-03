@@ -150,6 +150,12 @@ target-local state, including `target/automation_conveyor_state.json`,
 then shows active signal nudges, the active conveyor role, upcoming lanes, queued/deferred
 patches, recent outcomes, and timeline events without requiring external services.
 
+For a first-run review artifact from the same local state, run:
+
+```bash
+python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md
+```
+
 The generated wrapper runs the parent automation with:
 
 ```bash

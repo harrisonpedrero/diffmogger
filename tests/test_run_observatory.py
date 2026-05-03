@@ -266,6 +266,36 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("human-inbox-triage", review_items["Signals"])
                     self.assertIn("1 queued", review_items["Queue and conveyor"])
 
+    def test_review_markdown_export_summarizes_local_state(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    output = target / "target" / "self-review.md"
+
+                    exit_code = module.main(
+                        [
+                            "--target",
+                            str(target),
+                            "--review-output",
+                            str(output),
+                        ]
+                    )
+
+                    report = output.read_text(encoding="utf-8")
+                    self.assertEqual(exit_code, 0)
+                    self.assertIn("# Diffmogger Self-Review Snapshot", report)
+                    self.assertIn("automation_status: `ACTIVE`", report)
+                    self.assertIn("## Validation", report)
+                    self.assertIn("PASS:", report)
+                    self.assertIn("FAIL:", report)
+                    self.assertIn("`human-inbox-triage`", report)
+                    self.assertIn("queued_patches: 1", report)
+                    self.assertIn("pending_requests: 1", report)
+                    self.assertIn("System python lacks pytest", report)
+                    self.assertIn("Add a local validation fixture", report)
+
 
 if __name__ == "__main__":
     unittest.main()

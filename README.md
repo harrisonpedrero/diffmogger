@@ -187,7 +187,7 @@ It supports:
 - optional bounded write-worker settings with a capped count and guidance text
 - optional automation signals for recurring local review nudges
 - optional multi-role automation mode with fixed role-specific launchd jobs, continuous conveyor scheduling, and local-only git guards
-- optional local observatory launch for a browser-based demo view of active signal nudges, conveyor state, active role runs, queued patches, and recent automation timeline
+- optional local observatory launch and Markdown self-review export for active signal nudges, conveyor state, active role runs, queued patches, validation state, and recent automation timeline
 - optional context-file import into target `docs/context/`
 - generated `docs/PROJECT_CONTEXT.md`
 - a single `Scaffold & Bootstrap` pipeline

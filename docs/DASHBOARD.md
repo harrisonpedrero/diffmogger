@@ -171,6 +171,12 @@ This opens a local browser page backed by `scripts/run_observatory.py`. The page
 
 The observatory also includes a compact self-review panel that pulls from local task state, signal state, queue manifests, and human bridge files. Use it as the first stop in a local review: it summarizes the current assessment, validation results, active nudges, queue/conveyor state, known issues, and next sprint recommendation without requiring a tour through every Markdown file.
 
+For a durable local review artifact, render the same state to Markdown:
+
+```bash
+python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md
+```
+
 For multi-role jobs in repos with configured git remotes, the dashboard blocks scheduling unless the advanced **Allow local-only multi-role automation when this repo has git remotes** option is checked. When checked, LaunchAgents receive `MULTI_ROLE_ALLOW_REMOTES=1`; scripts still refuse pushes, fetches, pulls, remote configuration, and remote-touching git commands.
 
 Pause and remove controls manage all dashboard-owned jobs for that target: periodic, fixed-role, and conveyor.

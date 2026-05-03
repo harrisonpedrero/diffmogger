@@ -1168,6 +1168,134 @@ def render_html(snapshot: dict[str, Any], *, live: bool) -> str:
     )
 
 
+def append_markdown_bullets(lines: list[str], items: list[Any], *, empty: str) -> None:
+    if not items:
+        lines.append(f"- {empty}")
+        return
+    for item in items:
+        lines.append(f"- {clean_text(item, limit=420)}")
+
+
+def render_review_markdown(snapshot: dict[str, Any]) -> str:
+    task = snapshot.get("task") if isinstance(snapshot.get("task"), dict) else {}
+    review = snapshot.get("review") if isinstance(snapshot.get("review"), dict) else {}
+    signals = snapshot.get("signals") if isinstance(snapshot.get("signals"), dict) else {}
+    queue = snapshot.get("queue") if isinstance(snapshot.get("queue"), dict) else {}
+    conveyor = snapshot.get("conveyor") if isinstance(snapshot.get("conveyor"), dict) else {}
+    human = snapshot.get("human") if isinstance(snapshot.get("human"), dict) else {}
+    progress = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {}
+    totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
+
+    lines = [
+        "# Diffmogger Self-Review Snapshot",
+        "",
+        f"- generated_at: {clean_text(snapshot.get('generated_at') or 'unknown', limit=120)}",
+        f"- target: `{clean_text(snapshot.get('target_name') or 'target', limit=120)}`",
+        f"- automation_status: `{clean_text(task.get('status') or 'UNKNOWN', limit=80)}`",
+        f"- current_horizon: {clean_text(task.get('horizon') or 'unknown', limit=180)}",
+        f"- horizon_decision: {clean_text(task.get('horizon_decision') or 'unknown', limit=120)}",
+        "",
+        "## Review Summary",
+        "",
+    ]
+
+    review_item_count = 0
+    for item in list(review.get("items") or [])[:MAX_REVIEW_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        label = clean_text(item.get("label") or "Review item", limit=80)
+        body = clean_text(item.get("body") or "No detail recorded.", limit=420)
+        lines.append(f"- **{label}:** {body}")
+        review_item_count += 1
+    if not review_item_count:
+        lines.append("- No self-review state recorded yet.")
+
+    lines.extend(["", "## Validation", ""])
+    checks = [item for item in list(review.get("checks") or []) if isinstance(item, dict)]
+    if checks:
+        for check in checks[:MAX_CHECK_ITEMS]:
+            status = clean_text(check.get("status") or "info", limit=40).upper()
+            text = clean_text(check.get("text") or "No check detail.", limit=420)
+            text = re.sub(
+                r"^(PASS(?:\s+fallback)?|FAIL(?:\s+with\s+environment\s+note)?|WARN|PENDING|INFO):\s*",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            )
+            lines.append(f"- {status}: {text}")
+    else:
+        lines.append("- No validation checks recorded yet.")
+
+    lines.extend(["", "## Active Signals", ""])
+    active_signals = [item for item in list(signals.get("active") or []) if isinstance(item, dict)]
+    if active_signals:
+        for item in active_signals[:MAX_SIGNALS]:
+            signal_id = clean_text(item.get("id") or "signal", limit=80)
+            owner = clean_text(item.get("owner_role") or "unknown", limit=40)
+            priority = clean_text(item.get("priority") or "medium", limit=40)
+            due = clean_text(item.get("next_due_at") or "unknown", limit=80)
+            lines.append(f"- `{signal_id}`: {priority}, owner `{owner}`, due {due}")
+    else:
+        lines.append("- No active signal nudges.")
+
+    lines.extend(["", "## Queue And Conveyor", ""])
+    lines.append(f"- queued_patches: {int(totals.get('queued', 0) or 0)}")
+    lines.append(f"- deferred_patches: {int(totals.get('deferred', 0) or 0)}")
+    lines.append(f"- applied_patches: {int(totals.get('applied', 0) or 0)}")
+    lines.append(f"- failed_patches: {int(totals.get('failed', 0) or 0)}")
+    health = conveyor.get("health") if isinstance(conveyor.get("health"), dict) else {}
+    lines.append(f"- conveyor_health: {clean_text(health.get('summary') or 'No conveyor health recorded.', limit=420)}")
+    decisions = [item for item in list(conveyor.get("decision_queue") or []) if isinstance(item, dict)]
+    if decisions:
+        first = decisions[0]
+        role = clean_text(first.get("role") or "idle", limit=40)
+        state = clean_text(first.get("state") or "planned", limit=40)
+        reason = clean_text(first.get("reason") or "No reason recorded.", limit=300)
+        lines.append(f"- next_lane: `{role}` ({state}) - {reason}")
+    else:
+        lines.append("- next_lane: No conveyor decision recorded yet.")
+    append_markdown_bullets(
+        lines,
+        list(progress.get("deferred_backlog") or [])[:MAX_REVIEW_ITEMS],
+        empty="No deferred backlog recorded in progress state.",
+    )
+
+    lines.extend(["", "## Human Bridge", ""])
+    lines.append(f"- pending_requests: {int(human.get('pending_requests', 0) or 0)}")
+    lines.append(f"- unhandled_inbox: {int(human.get('unhandled_inbox', 0) or 0)}")
+    lines.append(f"- outbound_records: {int(human.get('outbound_records', 0) or 0)}")
+
+    lines.extend(["", "## Known Issues", ""])
+    append_markdown_bullets(
+        lines,
+        list(review.get("known_issues") or [])[:MAX_REVIEW_ITEMS],
+        empty="No known issues recorded.",
+    )
+
+    lines.extend(
+        [
+            "",
+            "## Next Sprint",
+            "",
+            f"- {clean_text(task.get('suggested_next_task') or 'No sprint task recorded yet.', limit=500)}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_output_file(path_value: str, body: str, *, label: str) -> None:
+    if path_value == "-":
+        sys.stdout.write(body)
+        if not body.endswith("\n"):
+            sys.stdout.write("\n")
+        return
+    output = Path(path_value).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(body, encoding="utf-8")
+    print(f"Wrote {label}: {output}")
+
+
 class ObservatoryHandler(BaseHTTPRequestHandler):
     target: Path
 
@@ -1222,19 +1350,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--open", action="store_true", help="Open the observatory URL in the default browser")
     parser.add_argument("--once", action="store_true", help="Render a standalone HTML snapshot and exit")
     parser.add_argument("--output", default="", help="Output path for --once; stdout is used when omitted")
+    parser.add_argument(
+        "--review-output",
+        default="",
+        help="Write a compact Markdown self-review report; use '-' for stdout",
+    )
     args = parser.parse_args(argv)
+    if args.once and not args.output and args.review_output == "-":
+        parser.error("--review-output - cannot be combined with --once unless --output is also set")
 
     target = Path(args.target).expanduser().resolve()
     snapshot = build_snapshot(target)
     if args.once:
         body = render_html(snapshot, live=False)
         if args.output:
-            output = Path(args.output).expanduser().resolve()
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(body, encoding="utf-8")
-            print(f"Wrote observatory snapshot: {output}")
+            write_output_file(args.output, body, label="observatory snapshot")
         else:
             sys.stdout.write(body)
+    if args.review_output:
+        write_output_file(args.review_output, render_review_markdown(snapshot), label="self-review report")
+    if args.once or args.review_output:
         return 0
 
     return run_server(target, args.host, args.port, args.open)
