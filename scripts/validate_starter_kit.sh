@@ -66,6 +66,7 @@ required_files=(
   "templates/scripts/summarize_worker_outputs.py"
   "templates/scripts/compact_agent_state.py"
   "tests/test_run_observatory.py"
+  "tests/test_run_conveyor_automation.py"
   "examples/generic-web-app/project_intake.md"
   "examples/generic-web-app/expected_generated_files.md"
   "examples/trendlab-signal-intelligence/project_intake.md"
@@ -625,7 +626,7 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests/test_run_observatory.py
+python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py
 
 python3 scripts/run_dashboard.py --smoke-check >/tmp/Diffmogger-dashboard-smoke.log
 
