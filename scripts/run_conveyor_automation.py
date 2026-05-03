@@ -288,6 +288,8 @@ def queue_snapshot(target: Path) -> dict[str, Any]:
     queue_root = target / "target" / "automation_queue"
     counts = {"queued": 0, "deferred": 0, "applied": 0, "failed": 0, "skipped": 0}
     applied_by_role = {"planner": 0, "builder": 0, "hardener": 0}
+    deferred_by_role = {"planner": 0, "builder": 0, "hardener": 0}
+    queued_by_role = {"planner": 0, "builder": 0, "hardener": 0}
     deferred_signatures: dict[str, int] = {}
     for path in sorted(queue_root.glob("*/*/manifest.json")):
         try:
@@ -299,17 +301,23 @@ def queue_snapshot(target: Path) -> dict[str, Any]:
         status = str(data.get("status") or "unknown")
         if status in counts:
             counts[status] += 1
+        role = str(data.get("role") or "")
+        if status == "queued" and role in queued_by_role:
+            queued_by_role[role] += 1
         if status == "applied":
-            role = str(data.get("role") or "")
             if role in applied_by_role:
                 applied_by_role[role] += 1
         if status == "deferred":
+            if role in deferred_by_role:
+                deferred_by_role[role] += 1
             signature = normalized_deferral_signature(data)
             deferred_signatures[signature] = deferred_signatures.get(signature, 0) + 1
     signature_parts = sorted(deferred_signatures)
     return {
         **counts,
         "applied_by_role": applied_by_role,
+        "deferred_by_role": deferred_by_role,
+        "queued_by_role": queued_by_role,
         "deferred_signature": "|".join(signature_parts) if signature_parts else "none",
         "deferred_signature_counts": deferred_signatures,
     }
@@ -342,6 +350,16 @@ def update_integrator_no_progress(
         role: max(0, int(after_by_role.get(role, 0)) - int(before_by_role.get(role, 0)))
         for role in ("planner", "builder", "hardener")
     }
+    before_deferred_by_role = (
+        before.get("deferred_by_role") if isinstance(before.get("deferred_by_role"), dict) else {}
+    )
+    after_deferred_by_role = (
+        after.get("deferred_by_role") if isinstance(after.get("deferred_by_role"), dict) else {}
+    )
+    deferred_delta_by_role = {
+        role: int(after_deferred_by_role.get(role, 0)) - int(before_deferred_by_role.get(role, 0))
+        for role in ("planner", "builder", "hardener")
+    }
     previous = no_progress_info(state)
     signature = str(after.get("deferred_signature") or "none")
     same_signature = bool(signature and signature != "none" and signature == previous.get("signature"))
@@ -356,6 +374,10 @@ def update_integrator_no_progress(
         "deferred_after": int(after.get("deferred", 0)),
         "deferred_signature": signature,
         "accepted_by_role": accepted_by_role,
+        "deferred_by_role": {
+            role: int(after_deferred_by_role.get(role, 0)) for role in ("planner", "builder", "hardener")
+        },
+        "deferred_delta_by_role": deferred_delta_by_role,
         "no_progress": no_progress,
     }
 
@@ -411,7 +433,7 @@ def planner_due(state: dict[str, Any], interval_seconds: int) -> bool:
     return (datetime.now(timezone.utc) - last).total_seconds() >= interval_seconds
 
 
-def last_integrator_accepted_by_role(state: dict[str, Any]) -> dict[str, int] | None:
+def last_integrator_metadata(state: dict[str, Any]) -> dict[str, Any] | None:
     history = state.get("history")
     if not isinstance(history, list):
         return None
@@ -421,11 +443,30 @@ def last_integrator_accepted_by_role(state: dict[str, Any]) -> dict[str, int] | 
         metadata = entry.get("metadata")
         if not isinstance(metadata, dict):
             return None
-        raw = metadata.get("accepted_by_role")
-        if not isinstance(raw, dict):
-            return None
-        return {role: int(raw.get(role, 0) or 0) for role in ("planner", "builder", "hardener")}
+        return metadata
     return None
+
+
+def last_integrator_accepted_by_role(state: dict[str, Any]) -> dict[str, int] | None:
+    metadata = last_integrator_metadata(state)
+    if not metadata:
+        return None
+    raw = metadata.get("accepted_by_role")
+    if not isinstance(raw, dict):
+        return None
+    return {role: int(raw.get(role, 0) or 0) for role in ("planner", "builder", "hardener")}
+
+
+def planner_fast_follow_after_deferral(state: dict[str, Any]) -> bool:
+    if str(state.get("last_completed_role") or "") != "integrator":
+        return False
+    metadata = last_integrator_metadata(state)
+    if not metadata:
+        return False
+    deferred_delta = metadata.get("deferred_delta_by_role")
+    if not isinstance(deferred_delta, dict):
+        return False
+    return int(deferred_delta.get("planner", 0) or 0) > 0
 
 
 def role_after_integrator(state: dict[str, Any]) -> tuple[str, str]:
@@ -472,6 +513,9 @@ def choose_next(
 
     if unhandled_human_inbox_count(target) and planner_due(state, min(planner_interval_seconds, 900)):
         return "planner", "unhandled human inbox message(s) need triage", False
+
+    if planner_fast_follow_after_deferral(state):
+        return "planner", "planner patch deferred by latest integration; fast-follow replanning before hourly interval", False
 
     if planner_due(state, planner_interval_seconds):
         return "planner", "planner interval elapsed", False
@@ -544,6 +588,8 @@ def conveyor_decision_queue(
             add(None, "blocked", f"no-progress circuit breaker active after planner handoff: {reason}")
     elif unhandled_human_inbox_count(target) and planner_due(state, min(planner_interval_seconds, 900)):
         add("planner", "ready", "unhandled human inbox message(s) need triage")
+    elif planner_fast_follow_after_deferral(state):
+        add("planner", "ready", "planner patch deferred by latest integration; fast-follow replanning before hourly interval")
     elif planner_due(state, planner_interval_seconds):
         add("planner", "ready", "planner interval elapsed")
 

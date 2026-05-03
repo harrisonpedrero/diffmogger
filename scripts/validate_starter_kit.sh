@@ -371,6 +371,7 @@ for marker in [
 	    "active_role_run",
 	    "decision_queue",
 	    "accepted_by_role",
+	    "deferred_delta_by_role",
 	    "builder-first policy",
 	]:
 	    if marker not in conveyor:
@@ -1078,10 +1079,18 @@ assert spec.loader is not None
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
-def conveyor_state(last_role="integrator", accepted_by_role=None, include_metadata=True):
+def conveyor_state(
+    last_role="integrator",
+    accepted_by_role=None,
+    deferred_delta_by_role=None,
+    include_metadata=True,
+):
     entry = {"role": "integrator", "exit_code": 0, "progress_success": True}
     if include_metadata:
-        entry["metadata"] = {"accepted_by_role": accepted_by_role or {"planner": 0, "builder": 0, "hardener": 0}}
+        entry["metadata"] = {
+            "accepted_by_role": accepted_by_role or {"planner": 0, "builder": 0, "hardener": 0},
+            "deferred_delta_by_role": deferred_delta_by_role or {"planner": 0, "builder": 0, "hardener": 0},
+        }
     return {
         "schema_version": 1,
         "cycles": 1,
@@ -1121,6 +1130,19 @@ if role != "hardener" or "builder patch integrated" not in reason or stop:
 role, reason, stop = module.choose_next(target, conveyor_state(include_metadata=False), 3600, 2)
 if role != "builder" or "builder-first" not in reason or stop:
     print(("missing-metadata", role, reason, stop), file=sys.stderr)
+    raise SystemExit(1)
+
+role, reason, stop = module.choose_next(
+    target,
+    conveyor_state(
+        accepted_by_role={"planner": 0, "builder": 0, "hardener": 0},
+        deferred_delta_by_role={"planner": 1, "builder": 0, "hardener": 0},
+    ),
+    3600,
+    2,
+)
+if role != "planner" or "fast-follow replanning" not in reason or stop:
+    print(("planner-deferral-fast-follow", role, reason, stop), file=sys.stderr)
     raise SystemExit(1)
 
 (target / "target/automation_queue/hardener/run-skipped").mkdir(parents=True)

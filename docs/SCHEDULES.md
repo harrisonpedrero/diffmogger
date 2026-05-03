@@ -26,7 +26,7 @@ Continuous conveyor:
 One local dispatcher chooses the next runnable lane as soon as the previous lane exits.
 ```
 
-Good when you want work-conserving local automation instead of exact role times. The conveyor prioritizes queued integration first, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It records state in `target/automation_conveyor_state.json`, including the active role run and next decision queue, and uses `target/automation_conveyor.lock` so only one dispatcher runs.
+Good when you want work-conserving local automation instead of exact role times. The conveyor prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It records state in `target/automation_conveyor_state.json`, including the active role run and next decision queue, and uses `target/automation_conveyor.lock` so only one dispatcher runs.
 
 45 minutes:
 

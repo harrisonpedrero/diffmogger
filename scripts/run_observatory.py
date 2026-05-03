@@ -443,7 +443,7 @@ def conveyor_health(conveyor: dict[str, Any]) -> dict[str, Any]:
         }
     return {
         "status": "ok",
-        "summary": "builder-first conveyor policy active; hardener runs once after integrated builder work.",
+        "summary": "planner fast-follow and builder-first conveyor policy active; hardener runs once after integrated builder work.",
         "recent_roles": recent,
     }
 
