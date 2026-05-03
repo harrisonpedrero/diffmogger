@@ -181,23 +181,46 @@ def validation_snapshot(text: str) -> dict[str, Any]:
     return {"summary": summary, "counts": counts, "items": checks}
 
 
-def count_section_matches(path: Path, heading: str, pattern: str) -> int:
-    section = markdown_section(read_text(path), heading)
-    return len(re.findall(pattern, section, re.MULTILINE | re.IGNORECASE))
+def strip_fenced_code_blocks(text: str) -> str:
+    return re.sub(r"```.*?```", "", text, flags=re.DOTALL)
 
 
-def count_section_records_with_status(
+def concrete_record_heading(prefix: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"^(#{{2,6}})\s+({re.escape(prefix)}-\d{{4}}-\d{{2}}-\d{{2}}(?:-[A-Za-z0-9]+)+)\s*$",
+        re.MULTILINE,
+    )
+
+
+def concrete_record_ranges(text: str, prefix: str) -> list[tuple[str, str]]:
+    text = strip_fenced_code_blocks(text)
+    record_matches = list(concrete_record_heading(prefix).finditer(text))
+    all_headings = list(re.finditer(r"^(#{1,6})\s+.+$", text, re.MULTILINE))
+    records: list[tuple[str, str]] = []
+    for match in record_matches:
+        level = len(match.group(1))
+        end = len(text)
+        for heading_match in all_headings:
+            if heading_match.start() <= match.start():
+                continue
+            if len(heading_match.group(1)) <= level:
+                end = heading_match.start()
+                break
+        records.append((match.group(2), text[match.end() : end]))
+    return records
+
+
+def count_concrete_records(path: Path, prefix: str) -> int:
+    return len(concrete_record_ranges(read_text(path), prefix))
+
+
+def count_concrete_records_with_status(
     path: Path,
-    heading: str,
-    record_heading_pattern: str,
+    prefix: str,
     active_statuses: set[str],
 ) -> int:
-    section = markdown_section(read_text(path), heading)
-    matches = list(re.finditer(record_heading_pattern, section, re.MULTILINE | re.IGNORECASE))
     count = 0
-    for index, match in enumerate(matches):
-        next_start = matches[index + 1].start() if index + 1 < len(matches) else len(section)
-        record = section[match.end() : next_start]
+    for _record_id, record in concrete_record_ranges(read_text(path), prefix):
         status_match = re.search(r"^-\s*status:\s*([A-Za-z0-9_-]+)", record, re.MULTILINE | re.IGNORECASE)
         status = status_match.group(1).lower() if status_match else ""
         if status in active_statuses:
@@ -535,14 +558,17 @@ def build_snapshot(target: Path) -> dict[str, Any]:
     progress_text = read_text(target / "docs" / "MULTI_ROLE_PROGRESS.md", limit=40_000)
     progress = progress_snapshot(progress_text)
     human = {
-        "pending_requests": count_section_records_with_status(
+        "pending_requests": count_concrete_records_with_status(
             target / "docs" / "HUMAN_REQUESTS.md",
-            "Active Requests",
-            r"^###\s+HR-",
-            {"awaiting_user"},
+            "HR",
+            {"active", "awaiting_user"},
         ),
-        "unhandled_inbox": count_section_matches(target / "docs" / "HUMAN_INBOX.md", "Active Inbound Messages", r"status:\s*unhandled"),
-        "outbound_records": count_section_matches(target / "docs" / "HUMAN_OUTBOX.md", "Outbound Records", r"^###\s+OUTBOX-"),
+        "unhandled_inbox": count_concrete_records_with_status(
+            target / "docs" / "HUMAN_INBOX.md",
+            "INBOX",
+            {"unhandled"},
+        ),
+        "outbound_records": count_concrete_records(target / "docs" / "HUMAN_OUTBOX.md", "OUTBOX"),
     }
     signals = signals_snapshot(target)
     conveyor_state = {

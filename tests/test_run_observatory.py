@@ -91,19 +91,23 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
             ## Active Requests
 
-            ### HR-2026-05-03-001
-
-            - status: awaiting_user
-
-            ### HR-2026-05-03-002
-
-            - status: resolved
+            None.
 
             ## Request Template
 
+            ```markdown
             ### HR-YYYY-MM-DD-001
 
             - status: awaiting_user
+            ```
+
+            ## HR-2026-05-03-001
+
+            - status: active
+
+            ## HR-2026-05-03-002
+
+            - status: resolved
             """,
         )
         self.write_text(
@@ -114,19 +118,23 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
             ## Active Inbound Messages
 
-            ### INBOX-2026-05-03-001
+            None.
+
+            ## Entry Template
+
+            ```markdown
+            ### INBOX-YYYY-MM-DD-001
+
+            - status: unhandled
+            ```
+
+            ## INBOX-2026-05-03-001
 
             - status: unhandled
 
             #### Body
 
             Please summarize status.
-
-            ## Entry Template
-
-            ### INBOX-YYYY-MM-DD-001
-
-            - status: unhandled
             """,
         )
         self.write_text(
@@ -137,13 +145,17 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
             ## Outbound Records
 
-            ### OUTBOX-2026-05-03-001
-
-            - status: local_record
+            None.
 
             ## Entry Template
 
+            ```markdown
             ### OUTBOX-YYYY-MM-DD-001
+
+            - status: local_record
+            ```
+
+            ## OUTBOX-2026-05-03-001
 
             - status: local_record
             """,

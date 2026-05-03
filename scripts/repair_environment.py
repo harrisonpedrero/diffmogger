@@ -127,12 +127,26 @@ def inside_git_repo(target: Path) -> bool:
     return result.returncode == 0 and result.stdout.strip() == "true"
 
 
+def git_path(target: Path, path: str) -> Path:
+    result = git(target, "rev-parse", "--git-path", path)
+    raw = result.stdout.strip() if result.returncode == 0 else ""
+    if not raw:
+        return target / ".git" / path
+    resolved = Path(raw)
+    if not resolved.is_absolute():
+        resolved = target / resolved
+    return resolved
+
+
 def ensure_info_exclude(target: Path, patterns: list[str]) -> None:
     if not inside_git_repo(target):
         return
-    exclude = target / ".git" / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    exclude = git_path(target, "info/exclude")
+    try:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    except OSError:
+        return
     lines = existing.splitlines()
     changed = False
     for pattern in patterns:
@@ -140,7 +154,10 @@ def ensure_info_exclude(target: Path, patterns: list[str]) -> None:
             lines.append(pattern)
             changed = True
     if changed:
-        exclude.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        try:
+            exclude.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        except OSError:
+            return
 
 
 def git_ignores_path(target: Path, path: Path) -> bool:
@@ -546,6 +563,8 @@ def diagnose_and_repair(
             outcome.environment_failure = True
             outcome.blocked_reason = "Repair ran but the command still has an environment failure: " + summarize_diagnostics(final_diagnostics)
         elif rerun_result.exit_code != 0:
+            outcome.environment_failure = False
+        else:
             outcome.environment_failure = False
     return outcome
 
