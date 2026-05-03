@@ -124,7 +124,7 @@ Why: role run directories and logs are transient. Humans and future automation n
 
 Decision: the v1 multi-role schedule runs the planner hourly at minute `0`, while builder, hardener, and integrator run on staggered half-hour offsets.
 
-Why: implementation roles should execute against a stable plan through two implementation cycles, while still giving the planner regular chances to adapt to deferred work.
+Why: implementation roles should execute against a stable plan through two implementation cycles, while still giving the planner regular chances to adapt to deferred work. Continuous conveyor fast-follow after a planner patch is deferred or resolved is the narrow exception, so stale planning gets replaced from fresh `HEAD` without broadly preempting builder and hardener lanes.
 
 ## DR-022: Continuous Conveyor Is An Opt-In Scheduling Strategy
 
