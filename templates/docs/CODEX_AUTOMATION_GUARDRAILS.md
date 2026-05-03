@@ -42,6 +42,7 @@ Do not build unrelated apps or large unrelated systems.
 
 - Use worker agents only for bounded subtasks.
 - Make an explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` every run.
+- Make an explicit worker strategy decision every run: `READ_ONLY_REPORTS`, `WRITE_WORKERS`, `INTEGRATION_ONLY`, or `NO_WORKERS`.
 - Check `command -v codex` before using Codex CLI workers.
 - Prefer read-only worker reports.
 - Main agent owns integration.
@@ -49,6 +50,11 @@ Do not build unrelated apps or large unrelated systems.
 - Use local `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helpers when available; otherwise use equivalent bounded nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` commands from inside the scheduled parent run.
 - Do not create unbounded recursive agent loops.
 - Workers must not send SMS/WhatsApp messages, touch `.env`, handle credentials, spawn additional workers, or use network unless explicitly approved for that run.
+{{WRITE_WORKER_GUARDRAILS_POLICY}}
+
+## Multi-Role Automation Policy
+
+{{MULTI_ROLE_GUARDRAILS_POLICY}}
 
 ## Lock-File Policy
 

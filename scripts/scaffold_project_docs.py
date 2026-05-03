@@ -21,8 +21,26 @@ HUMAN_BRIDGE_FILES = {
     "docs/HUMAN_RESPONSES_ARCHIVE.md",
     "docs/HUMAN_BRIDGE_SETUP.md",
 }
+AUTOMATION_SIGNAL_FILES = {
+    "docs/AUTOMATION_SIGNALS.md",
+}
 VALID_HUMAN_BRIDGE_MODES = {"disabled", "file_only", "local_notifier"}
 VALID_PROJECT_MODES = {"fresh_project", "existing_project"}
+MAX_WRITE_WORKER_COUNT = 10
+DEFAULT_MAX_WRITE_WORKER_COUNT = 3
+VALID_ROLE_PROFILES = {"single_lane", "planner_builder_hardener_integrator"}
+VALID_SCHEDULE_STRATEGIES = {"single_lane_interval", "fixed_multi_role", "continuous_conveyor"}
+DEFAULT_MULTI_ROLE_CADENCE_MINUTES = 30
+MULTI_ROLE_FILES = {
+    ".agentic/roles/planner.md",
+    ".agentic/roles/builder.md",
+    ".agentic/roles/hardener.md",
+    ".agentic/roles/integrator.md",
+    "docs/MULTI_ROLE_PROGRESS.md",
+    "scripts/run_role_automation.sh",
+    "scripts/integrate_role_outputs.py",
+    "scripts/list_deferred_patches.py",
+}
 MANAGED_EXISTING_PROJECT_FILES = {
     "AGENTS.md": "AGENTS",
     "docs/DEVELOPMENT.md": "DEVELOPMENT",
@@ -56,6 +74,39 @@ HEADING_TO_KEY = {
     "human requested text responses": "human_requested_text_responses",
     "worker agents": "worker_agents_allowed",
     "codex cli workers": "codex_cli_workers_expected_on_broad_runs",
+    "write worker agents": "write_worker_agents_allowed",
+    "write-capable worker agents": "write_worker_agents_allowed",
+    "bounded write workers": "write_worker_agents_allowed",
+    "bounded write worker agents": "write_worker_agents_allowed",
+    "max write workers": "max_write_worker_count",
+    "maximum write workers": "max_write_worker_count",
+    "max write worker count": "max_write_worker_count",
+    "maximum write worker count": "max_write_worker_count",
+    "write worker guidance": "write_worker_guidance",
+    "write-worker guidance": "write_worker_guidance",
+    "multi-role automations": "multi_role_automations_allowed",
+    "multi role automations": "multi_role_automations_allowed",
+    "multi-role automation": "multi_role_automations_allowed",
+    "multi role automation": "multi_role_automations_allowed",
+    "automation role profile": "automation_role_profile",
+    "role profile": "automation_role_profile",
+    "automation checkpoint commits": "automation_checkpoint_commits",
+    "checkpoint commits": "automation_checkpoint_commits",
+    "multi-role base cadence": "multi_role_base_cadence_minutes",
+    "multi role base cadence": "multi_role_base_cadence_minutes",
+    "multi-role cadence": "multi_role_base_cadence_minutes",
+    "multi role cadence": "multi_role_base_cadence_minutes",
+    "automation schedule strategy": "automation_schedule_strategy",
+    "schedule strategy": "automation_schedule_strategy",
+    "scheduling strategy": "automation_schedule_strategy",
+    "multi-role allow remotes": "multi_role_allow_remotes",
+    "multi role allow remotes": "multi_role_allow_remotes",
+    "allow multi-role remotes": "multi_role_allow_remotes",
+    "allow multi role remotes": "multi_role_allow_remotes",
+    "automation signals": "automation_signals_enabled",
+    "automation pulse": "automation_signals_enabled",
+    "automation pulses": "automation_signals_enabled",
+    "automation signal system": "automation_signals_enabled",
     "meaningful deliverable": "meaningful_deliverable",
     "beyond mvp": "beyond_mvp",
     "assumptions": "assumptions",
@@ -91,6 +142,55 @@ def normalize_lines(value: Any, fallback: str) -> str:
         return "\n".join(f"- {item}" for item in value) or fallback
     text = str(value).strip()
     return text or fallback
+
+
+def normalize_int(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if value is None:
+        return default
+    match = re.search(r"-?\d+", str(value))
+    if not match:
+        return default
+    return int(match.group(0))
+
+
+def normalize_write_worker_count(value: Any, enabled: bool) -> int:
+    if not enabled:
+        return 0
+    count = normalize_int(value, DEFAULT_MAX_WRITE_WORKER_COUNT)
+    return max(1, min(MAX_WRITE_WORKER_COUNT, count))
+
+
+def normalize_role_profile(value: Any, multi_role_enabled: bool) -> str:
+    if not multi_role_enabled:
+        return "single_lane"
+    text = str(value or "planner_builder_hardener_integrator").strip().lower()
+    text = text.replace("-", "_").replace(" ", "_")
+    if text in VALID_ROLE_PROFILES:
+        return text
+    return "planner_builder_hardener_integrator"
+
+
+def normalize_multi_role_cadence(value: Any) -> int:
+    return max(30, normalize_int(value, DEFAULT_MULTI_ROLE_CADENCE_MINUTES))
+
+
+def normalize_schedule_strategy(value: Any, multi_role_enabled: bool) -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not text:
+        return "fixed_multi_role" if multi_role_enabled else "single_lane_interval"
+    if text in VALID_SCHEDULE_STRATEGIES:
+        return text
+    if any(term in text for term in ("conveyor", "continuous", "work_conserving", "workconserving")):
+        return "continuous_conveyor"
+    if any(term in text for term in ("fixed", "staggered", "calendar", "role")):
+        return "fixed_multi_role"
+    if any(term in text for term in ("single", "interval", "periodic", "cadence")):
+        return "single_lane_interval"
+    return "fixed_multi_role" if multi_role_enabled else "single_lane_interval"
 
 
 def normalize_mode(value: Any) -> str | None:
@@ -624,6 +724,317 @@ Human bridge mode: `{mode}`
     }
 
 
+def worker_values(data: dict[str, Any]) -> dict[str, str]:
+    workers_allowed = normalize_bool(data.get("worker_agents_allowed"), True)
+    codex_workers_expected = normalize_bool(
+        data.get("codex_cli_workers_expected_on_broad_runs"),
+        True,
+    )
+    write_workers_enabled = workers_allowed and normalize_bool(
+        data.get("write_worker_agents_allowed"),
+        False,
+    )
+    max_write_workers = normalize_write_worker_count(
+        data.get("max_write_worker_count"),
+        write_workers_enabled,
+    )
+    guidance = normalize_lines(
+        data.get("write_worker_guidance"),
+        (
+            "Write workers are optional and should be used only for large, well-planned "
+            "changes with disjoint file or module ownership. Prefer fewer workers when "
+            "the change can be done clearly by the main agent."
+        ),
+    )
+
+    if write_workers_enabled:
+        orchestration = f"""Write-worker guidance:
+
+{guidance}
+
+Write workers are optional, never mandatory. Use fewer than the maximum whenever that is enough; 2-4 write workers are usually better than 8-10. Integration-only runs with no workers are valid when the main agent can finish safely.
+
+At the beginning of every run, make an explicit strategy decision in addition to the Codex CLI availability decision:
+
+```text
+Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS
+Write-worker count planned: <0-{max_write_workers}>
+Reason: <one sentence>
+```
+
+Use read-only workers by default for exploration, review, risk checks, product polish, and test-gap analysis.
+
+Use write workers only when all of these are true:
+
+- the run is a large, well-planned change
+- the main agent has already chosen the milestone, architecture, and verification plan
+- contracts, interfaces, data shapes, or command boundaries are defined before implementation begins
+- each worker has disjoint file/module ownership
+- the write-worker count is at most {max_write_workers}
+- the main agent can review and integrate all changes before the run ends
+
+Before spawning write workers, write a short ownership plan in the task file or run notes:
+
+```text
+Write-worker ownership plan:
+- worker_<role_a>: owns <files/modules>; contract <interface/data shape>; must not touch <out of scope>
+- worker_<role_b>: owns <files/modules>; contract <interface/data shape>; must not touch <out of scope>
+Coordination protocol: <how shared interfaces, generated artifacts, or conflicts will be handled>
+```
+
+Example bounded write-worker helper:
+
+```bash
+bash scripts/spawn_worker_agent.sh \\
+  --mode write \\
+  --target . \\
+  --run-id "$CODEX_RUN_ID" \\
+  --role feature_a \\
+  --ownership "src/feature-a/** and tests/feature-a/** only" \\
+  --prompt "Implement the assigned slice using the agreed interface. List changed files and checks run."
+```
+
+Every write-worker assignment must tell the worker:
+
+- You are not alone in the codebase.
+- Modify only your assigned files/modules or scratch area.
+- Do not revert unrelated edits or changes made by others.
+- Adjust your implementation to documented contracts and other workers' outputs.
+- Do not spawn workers, use network, touch `.env`, handle credentials, send messages, or run destructive cleanup.
+- Stop after the bounded assignment and write `target/agent_runs/<run_id>/worker_<role>.md`.
+- List changed files, checks run, integration notes, and risks.
+
+After write workers finish, the main agent must:
+
+- inspect each worker report and changed-file list
+- review diffs rather than blindly accepting changes
+- resolve conflicts and contract mismatches
+- integrate the slices into one coherent change
+- run relevant verification
+- update `docs/CODEX_AUTOMATION_TASKS.md` with worker strategy, workers used, changed files, checks, accepted/rejected/deferred outputs, and final status"""
+        guardrails = f"""- Write-capable workers are enabled but optional; use them only for large, well-planned changes with disjoint ownership.
+- Spawn at most {max_write_workers} write workers in one run, and prefer fewer when the work does not need maximum parallelism.
+- Define contracts/interfaces and disjoint file/module ownership before write workers begin.
+- Do not allow overlapping write ownership unless an explicit coordination protocol is documented first.
+- Do not create unbounded recursive agent loops. Workers must not spawn workers.
+- Do not blindly accept worker changes; the main agent must review, integrate, resolve conflicts, and verify.
+- Do not use destructive cleanup, history rewrites, mass deletion, or broad formatting as a worker cleanup shortcut."""
+        task_notes = f"""Write-capable worker agents allowed: true
+
+- Max write worker count: {max_write_workers}
+- Write workers are optional and only for large, well-planned changes with disjoint ownership.
+- Read-only workers remain the default for exploration and review.
+- Integration-only runs with no workers are valid when safer.
+- The main agent must define ownership/contracts first, then review, integrate, verify, and update task state."""
+        development = f"""Write-capable worker agents allowed: true
+
+Max write worker count: {max_write_workers}
+
+Write workers are optional. Use them only for large, planned changes with disjoint ownership and a main-agent integration plan. The helper supports `--mode write`, but it does not replace code review or conflict resolution."""
+        bootstrap = f"""Worker agents allowed: {str(workers_allowed).lower()}
+
+Write-capable worker agents allowed: true
+
+Max write worker count: {max_write_workers}
+
+Recurring automation should use read-only worker reports by default, and may use bounded write workers only after the main agent defines a plan, ownership boundaries, contracts, verification, and integration responsibilities."""
+    else:
+        orchestration = """Write workers are disabled for this project. Do not spawn nested workers that modify source files or docs. Use read-only worker reports when useful, and let the main agent implement, integrate, verify, and update task state directly.
+
+Integration-only runs with no workers are valid."""
+        guardrails = """- Write-capable workers are disabled unless the project intake is explicitly updated to enable them.
+- Use read-only worker reports when workers are useful.
+- Do not spawn nested workers that modify source files or docs."""
+        task_notes = """Write-capable worker agents allowed: false
+
+- Max write worker count: 0
+- Read-only worker reports remain available when worker agents are allowed.
+- The main agent performs implementation, integration, verification, and task-state updates."""
+        development = """Write-capable worker agents allowed: false
+
+Use read-only worker reports first. The main agent owns implementation and integration unless the project intake is explicitly updated to enable bounded write workers."""
+        bootstrap = f"""Worker agents allowed: {str(workers_allowed).lower()}
+
+Write-capable worker agents allowed: false
+
+Generated automation should preserve read-only worker-report behavior and keep implementation responsibility with the main agent unless the intake is explicitly updated later."""
+
+    return {
+        "WORKER_AGENTS_ALLOWED": str(workers_allowed).lower(),
+        "CODEX_CLI_WORKERS_EXPECTED_ON_BROAD_RUNS": str(codex_workers_expected).lower(),
+        "WRITE_WORKER_AGENTS_ALLOWED": str(write_workers_enabled).lower(),
+        "MAX_WRITE_WORKER_COUNT": str(max_write_workers),
+        "WRITE_WORKER_GUIDANCE": guidance,
+        "WRITE_WORKER_ORCHESTRATION": orchestration.strip(),
+        "WRITE_WORKER_GUARDRAILS_POLICY": guardrails.strip(),
+        "WRITE_WORKER_TASK_NOTES": task_notes.strip(),
+        "WRITE_WORKER_DEVELOPMENT_SECTION": development.strip(),
+        "WORKER_BOOTSTRAP_SECTION": bootstrap.strip(),
+    }
+
+
+def multi_role_values(data: dict[str, Any]) -> dict[str, str]:
+    enabled = normalize_bool(data.get("multi_role_automations_allowed"), False)
+    profile = normalize_role_profile(data.get("automation_role_profile"), enabled)
+    checkpoint_commits = normalize_bool(data.get("automation_checkpoint_commits"), True)
+    cadence_minutes = normalize_multi_role_cadence(data.get("multi_role_base_cadence_minutes"))
+    schedule_strategy = normalize_schedule_strategy(data.get("automation_schedule_strategy"), enabled)
+    allow_remotes = normalize_bool(data.get("multi_role_allow_remotes"), False)
+
+    if enabled:
+        automation_section = f"""Multi-role automations allowed: true
+
+Role profile: `{profile}`
+
+Automation schedule strategy: `{schedule_strategy}`
+
+Planner cadence: hourly at minute `0`
+
+Builder cadence: minutes `10` and `40`
+
+Hardener cadence: minutes `20` and `50`
+
+Integrator cadence: minutes `25` and `55`
+
+The current single-lane automation remains valid for manual runs. Scheduled multi-role mode uses local role prompts under `.agentic/roles/`, isolated git worktrees under `target/automation_worktrees/`, queued patches under `target/automation_queue/`, and durable progress state in `docs/MULTI_ROLE_PROGRESS.md`.
+
+Dashboard scheduling can use the fixed multi-role cadence or the continuous conveyor. The conveyor is one local launchd job that chooses the next runnable lane from current state, prioritizing queued integration, due planning, hardening after integration, and builder momentum.
+
+Multi-role mode is local-only. Roles must never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run any git command that touches a remote. Local commits, local branches, local tags, and local worktrees are allowed. Any remote-touching attempt is a `CRITICAL_STOP`.
+
+Planner, builder, and hardener start from the latest main `HEAD` at run start. They may see partially integrated state from earlier patches in the same cycle; this is accepted. The integrator owns the main checkout, applies queued patches FIFO, verifies, creates local checkpoint commits, updates `docs/CODEX_AUTOMATION_TASKS.md`, updates `docs/MULTI_ROLE_PROGRESS.md`, and enforces retention."""
+        guardrails = """- Multi-role automation is enabled but optional; the single-lane wrapper remains valid.
+- Multi-role role runs require an initialized local git repo.
+- Multi-role mode is local-only: never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run git commands that touch a remote.
+- Role scripts must refuse to run when `git remote -v` is non-empty unless `MULTI_ROLE_ALLOW_REMOTES=1`.
+- Integrator owns main-checkout mutation, local checkpoint commits, FIFO patch application, verification, task-state updates, and `docs/MULTI_ROLE_PROGRESS.md`.
+- Planner, builder, and hardener must use isolated worktrees and queue patches instead of mutating the main checkout.
+- Integrator must checkpoint dirty main changes as-is before applying queued patches; do not revert or discard human changes.
+- Integrator must defer conflicting, stale, guardrail-violating, or verification-failing patches with machine-readable deferral reasons."""
+        task_notes = f"""Multi-role automations allowed: true
+
+- Role profile: `{profile}`
+- Automation schedule strategy: `{schedule_strategy}`
+- Planner runs hourly at minute `0`; builder, hardener, and integrator run on staggered half-hour offsets.
+- Continuous conveyor mode is available through `scripts/run_conveyor_automation.sh`; it chooses the next runnable lane instead of using exact role times.
+- Integrator maintains `docs/MULTI_ROLE_PROGRESS.md` and local checkpoint commits.
+- Deferred patches remain visible through `scripts/list_deferred_patches.py`.
+- Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""
+        development = f"""Multi-role automations allowed: true
+
+Role profile: `{profile}`
+
+Automation schedule strategy: `{schedule_strategy}`
+
+Use dashboard scheduling for staggered role jobs or the continuous conveyor. The conveyor keeps work moving by running the next useful lane as soon as the previous lane finishes:
+
+```bash
+bash scripts/run_conveyor_automation.sh --dry-run
+bash scripts/run_conveyor_automation.sh --once
+```
+
+You can still run a role manually:
+
+```bash
+bash scripts/run_role_automation.sh --role planner
+bash scripts/run_role_automation.sh --role builder
+bash scripts/run_role_automation.sh --role hardener
+bash scripts/run_role_automation.sh --role integrator
+```
+
+The target must be an initialized git repo. Multi-role mode creates local worktrees, local queue artifacts, and local commits only. It never pushes."""
+        bootstrap = f"""Multi-role automations allowed: true
+
+Role profile: `{profile}`
+
+Automation schedule strategy: `{schedule_strategy}`
+
+After bootstrap, ensure this target is an initialized git repo before enabling scheduled multi-role automation. The recurring role prompts, conveyor, and helpers are generated locally; no remote git operations are allowed."""
+    else:
+        automation_section = """Multi-role automations allowed: false
+
+This project uses the default single-lane automation wrapper unless the intake is explicitly updated to enable multi-role mode. The continuous conveyor wrapper is still available as an optional local scheduler; without multi-role files it falls back to the single-lane wrapper."""
+        guardrails = "- Multi-role automations are disabled unless the project intake explicitly enables them."
+        task_notes = """Multi-role automations allowed: false
+
+- Use the default single-lane scheduled automation."""
+        development = """Multi-role automations allowed: false
+
+Use the default `scripts/run_codex_automation.sh` schedule unless the project intake is explicitly updated."""
+        bootstrap = """Multi-role automations allowed: false
+
+Use the default single-lane automation after bootstrap."""
+
+    return {
+        "MULTI_ROLE_AUTOMATIONS_ALLOWED": str(enabled).lower(),
+        "AUTOMATION_ROLE_PROFILE": profile,
+        "AUTOMATION_CHECKPOINT_COMMITS": str(checkpoint_commits).lower(),
+        "MULTI_ROLE_BASE_CADENCE_MINUTES": str(cadence_minutes),
+        "AUTOMATION_SCHEDULE_STRATEGY": schedule_strategy,
+        "MULTI_ROLE_ALLOW_REMOTES": str(allow_remotes).lower(),
+        "MULTI_ROLE_AUTOMATION_SECTION": automation_section.strip(),
+        "MULTI_ROLE_GUARDRAILS_POLICY": guardrails.strip(),
+        "MULTI_ROLE_TASK_NOTES": task_notes.strip(),
+        "MULTI_ROLE_DEVELOPMENT_SECTION": development.strip(),
+        "MULTI_ROLE_BOOTSTRAP_SECTION": bootstrap.strip(),
+    }
+
+
+def automation_signal_values(data: dict[str, Any]) -> dict[str, str]:
+    enabled = normalize_bool(data.get("automation_signals_enabled"), False)
+    if enabled:
+        section = """Automation signals enabled: true
+
+At run start, refresh recurring signal state with:
+
+```bash
+python3 scripts/update_automation_signals.py . --refresh --summary
+```
+
+Signals are local nudges defined in `docs/AUTOMATION_SIGNALS.md` and tracked at runtime in `target/automation_signals.json`. They do not override guardrails or task state. When a role acts on a signal, it should mark it complete with `scripts/update_automation_signals.py --complete` and record the decision in its normal summary."""
+        development = """Automation signals enabled: true
+
+Signal definitions live in `docs/AUTOMATION_SIGNALS.md`; runtime state lives in `target/automation_signals.json`.
+
+```bash
+python3 scripts/update_automation_signals.py . --refresh --summary
+python3 scripts/update_automation_signals.py . --complete prompt-self-audit --role planner --note "Reviewed prompt scope."
+```"""
+        task_notes = """Automation signals enabled: true
+
+- Signal definitions: `docs/AUTOMATION_SIGNALS.md`
+- Runtime state: `target/automation_signals.json`
+- Signals are recurring nudges only; they never override guardrails, active human requests, or the current sprint."""
+        bootstrap = """Automation signals enabled: true
+
+Use `docs/AUTOMATION_SIGNALS.md` for recurring local review nudges such as prompt self-audits, validation sweeps, deferred-patch triage, and human inbox triage."""
+        file_reads = """docs/AUTOMATION_SIGNALS.md
+target/automation_signals.json"""
+    else:
+        section = """Automation signals enabled: false
+
+Use normal task-file and human-inbox state unless the project intake explicitly enables recurring automation signals."""
+        development = """Automation signals enabled: false
+
+The signal updater script is available for future opt-in, but no signal definitions are generated by default."""
+        task_notes = """Automation signals enabled: false
+
+- Use normal task-file state unless the intake explicitly enables signals."""
+        bootstrap = """Automation signals enabled: false
+
+Use normal task-file state unless the project intake explicitly enables recurring automation signals."""
+        file_reads = ""
+
+    return {
+        "AUTOMATION_SIGNALS_ENABLED": str(enabled).lower(),
+        "AUTOMATION_SIGNALS_SECTION": section.strip(),
+        "AUTOMATION_SIGNALS_DEVELOPMENT_SECTION": development.strip(),
+        "AUTOMATION_SIGNALS_TASK_NOTES": task_notes.strip(),
+        "AUTOMATION_SIGNALS_BOOTSTRAP_SECTION": bootstrap.strip(),
+        "AUTOMATION_SIGNAL_FILE_READS": file_reads,
+    }
+
+
 def parse_markdown_intake(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     data: dict[str, Any] = {}
@@ -644,8 +1055,9 @@ def parse_markdown_intake(path: Path) -> dict[str, Any]:
 
 
 def parse_intake(path: Path) -> dict[str, Any]:
-    if path.suffix.lower() == ".json":
-        return json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json" or text.lstrip().startswith(("{", "[")):
+        return json.loads(text)
     return parse_markdown_intake(path)
 
 
@@ -678,12 +1090,14 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
         "ADDITIONAL_CONTEXT_FILES": normalize_lines(data.get("additional_context_files"), "No additional context files provided."),
         "VERIFICATION_COMMANDS": verification,
         "CADENCE": normalize_lines(data.get("desired_cadence"), "every 60 minutes"),
-        "WORKER_AGENTS_ALLOWED": str(normalize_bool(data.get("worker_agents_allowed"), True)).lower(),
         "MEANINGFUL_DELIVERABLE": normalize_lines(data.get("meaningful_deliverable"), "A runnable, verified increment."),
         "BEYOND_MVP": normalize_lines(data.get("beyond_mvp"), "Continue improving core value, demo quality, integrations, and automation reliability."),
         "ASSUMPTIONS": normalize_lines(data.get("assumptions"), "Assumptions should be documented during bootstrap."),
         "CREATED_AT": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    values.update(worker_values(data))
+    values.update(multi_role_values(data))
+    values.update(automation_signal_values(data))
     values.update(bridge_values(bridge_mode, text_responses))
     return values
 
@@ -751,8 +1165,14 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
     for template_path in sorted(TEMPLATE_ROOT.rglob("*")):
         if template_path.is_dir():
             continue
+        if "__pycache__" in template_path.parts or template_path.suffix == ".pyc":
+            continue
         rel = template_path.relative_to(TEMPLATE_ROOT)
         if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel.as_posix() in HUMAN_BRIDGE_FILES:
+            continue
+        if values.get("AUTOMATION_SIGNALS_ENABLED") != "true" and rel.as_posix() in AUTOMATION_SIGNAL_FILES:
+            continue
+        if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and rel.as_posix() in MULTI_ROLE_FILES:
             continue
         dest = target / rel
         dest.parent.mkdir(parents=True, exist_ok=True)

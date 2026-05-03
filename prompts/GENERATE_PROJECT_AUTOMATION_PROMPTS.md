@@ -142,14 +142,52 @@ The generated automation prompt must make an explicit Codex CLI worker decision 
 
 ```text
 Codex CLI worker decision: USE / SKIP / UNAVAILABLE
+Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS
 Reason: <one sentence>
 ```
 
 It must check availability with `command -v codex` before using Codex CLI workers, record `UNAVAILABLE` if the command is missing, and continue the sprint. For broad or multi-module runs, Codex CLI worker usage should be expected unless skipped with a clear reason. Include the target repo's local `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helper pattern and a read-only nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox -C .` fallback pattern. Also ensure the scheduled wrapper runs the parent automation with `--add-dir "$HOME/.codex"` so nested Codex CLI workers can authenticate and start inside the parent sandbox.
 
+Preserve read-only worker-report behavior. Read-only workers are the default for exploration, review, risk checks, product polish, and test-gap analysis.
+
+Support optional bounded write workers only when the project intake explicitly enables `write_worker_agents_allowed`. The intake should also provide `max_write_worker_count`, capped at 10, and `write_worker_guidance`. Generated projects must remain conservative when that field is absent or false.
+
+When write workers are enabled, the generated automation prompt must teach the main agent to:
+
+- make an explicit worker strategy decision every run
+- use write workers only for large, well-planned changes
+- recommend fewer than the maximum when fewer are enough
+- define contracts, interfaces, data shapes, or command boundaries before implementation begins
+- define disjoint file/module ownership for each write worker
+- document any coordination protocol before overlapping ownership is allowed
+- tell workers they are not alone in the codebase and must not revert unrelated edits or changes made by others
+- require each worker to list changed files, checks run, integration notes, and risks
+- review worker diffs rather than blindly accepting them
+- integrate slices, resolve conflicts, run verification, and update task state itself
+- allow integration-only runs where no workers are spawned
+
+Generated guardrails must prohibit unbounded recursive agents, overlapping write ownership without an explicit coordination protocol, blind acceptance of worker changes, and destructive cleanup.
+
+If the target helper script supports write workers, keep read-only as the default mode and require an explicit write mode plus ownership scope for write-capable workers.
+
+Support optional multi-role automation only when the project intake explicitly enables `multi_role_automations_allowed`. The v1 supported profile is `planner_builder_hardener_integrator`; default generated projects must stay single-lane when that field is absent or false.
+
+Generated targets must include `scripts/run_conveyor_automation.sh`, `scripts/run_conveyor_automation.py`, and `scripts/update_automation_signals.py` as optional local automation helpers. When `automation_signals_enabled` is true, generate `docs/AUTOMATION_SIGNALS.md`. When multi-role mode is enabled, also generate `.agentic/roles/planner.md`, `.agentic/roles/builder.md`, `.agentic/roles/hardener.md`, `.agentic/roles/integrator.md`, `docs/MULTI_ROLE_PROGRESS.md`, `scripts/run_role_automation.sh`, `scripts/integrate_role_outputs.py`, and `scripts/list_deferred_patches.py`.
+
+Generated multi-role prompts must state that:
+
+- every role is local-only and must never push, fetch, pull, configure remotes, set upstream tracking, or run remote-affecting git commands
+- no-remote violations are `CRITICAL_STOP`
+- fixed cadence mode runs planner hourly at minute `0`; continuous conveyor mode may run planner when planning is due
+- builder and hardener start from latest main `HEAD` in isolated worktrees and may see partially integrated state from earlier patches in the cycle
+- integrator owns the main checkout, dirty-checkpoint commits, FIFO patch application, batched verification with individual fallback, local commits, task-state updates, progress updates, and retention
+- deferred patches must use machine-readable `deferral_reason` values
+
+Generated guardrails must prohibit recursive role spawning, unbounded write ownership, blind acceptance of role patches, destructive cleanup, remote git operations, and hook-based pushes.
+
 Lock-file instructions should reference the target repo's local `scripts/run_codex_automation.sh`, `scripts/acquire_codex_lock.sh`, and `scripts/release_codex_lock.sh` helpers, the default `target/codex_automation.lock` path, `CODEX_LOCK_PATH` overrides, stale-lock detection, `CODEX_RUN_ID` identity for safe release, and `CODEX_LOCK_ALREADY_ACQUIRED=true` for wrapper-owned scheduled runs.
 
-State-compaction instructions should reference `scripts/compact_agent_state.py --dry-run <target-project>`, preserve unresolved human requests, and archive concise rollups rather than silently deleting active state.
+State-compaction instructions should reference `scripts/compact_agent_state.py --dry-run <target-project>`, preserve unresolved human requests and deferred multi-role manifests, summarize transient multi-role artifacts, and archive concise rollups rather than silently deleting active state.
 
 ## Output
 

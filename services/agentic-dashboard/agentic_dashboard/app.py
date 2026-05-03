@@ -35,6 +35,27 @@ SCHEDULABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
 MIN_CADENCE_MINUTES = 30
 MAX_CADENCE_MINUTES = 10080
 DEFAULT_CADENCE_MINUTES = 60
+MAX_WRITE_WORKER_COUNT = 10
+DEFAULT_WRITE_WORKER_COUNT = 3
+DEFAULT_MULTI_ROLE_BASE_CADENCE_MINUTES = 30
+DEFAULT_AUTOMATION_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+MULTI_ROLE_PROFILE = "planner_builder_hardener_integrator"
+MULTI_ROLE_ROLES = ("planner", "builder", "hardener", "integrator")
+MULTI_ROLE_START_MINUTES = {
+    "planner": [0],
+    "builder": [10, 40],
+    "hardener": [20, 50],
+    "integrator": [25, 55],
+}
+SCHEDULE_STRATEGY_SINGLE = "single_lane_interval"
+SCHEDULE_STRATEGY_FIXED_MULTI_ROLE = "fixed_multi_role"
+SCHEDULE_STRATEGY_CONVEYOR = "continuous_conveyor"
+SCHEDULE_STRATEGY_LABELS = {
+    SCHEDULE_STRATEGY_SINGLE: "Periodic sprint",
+    SCHEDULE_STRATEGY_FIXED_MULTI_ROLE: "Fixed multi-role cadence",
+    SCHEDULE_STRATEGY_CONVEYOR: "Continuous conveyor",
+}
+SCHEDULE_STRATEGY_BY_LABEL = {label: key for key, label in SCHEDULE_STRATEGY_LABELS.items()}
 MAX_DASHBOARD_LOG_LINES = 1200
 MAX_DASHBOARD_LOG_LINE_CHARS = 4000
 DASHBOARD_STATE_FILE = ".agentic/dashboard_state.json"
@@ -43,6 +64,7 @@ CONTEXT_IMPORTS_END = "<!-- DIFFMOGGER:CONTEXT-IMPORTS:END -->"
 
 DOC_CHOICES = {
     "Automation Tasks": "docs/CODEX_AUTOMATION_TASKS.md",
+    "Multi-Role Progress": "docs/MULTI_ROLE_PROGRESS.md",
     "Project Context": "docs/PROJECT_CONTEXT.md",
     "Human Requests": "docs/HUMAN_REQUESTS.md",
     "Human Inbox": "docs/HUMAN_INBOX.md",
@@ -196,6 +218,37 @@ def cadence_minutes_from_text(value: Any) -> int:
     return min(MAX_CADENCE_MINUTES, max(MIN_CADENCE_MINUTES, minutes))
 
 
+def multi_role_cadence_minutes_from_text(value: Any) -> int:
+    if value is None or str(value).strip() == "":
+        return DEFAULT_MULTI_ROLE_BASE_CADENCE_MINUTES
+    return max(DEFAULT_MULTI_ROLE_BASE_CADENCE_MINUTES, cadence_minutes_from_text(value))
+
+
+def schedule_strategy_from_value(value: Any, *, multi_role_enabled: bool = False) -> str:
+    text = str(value or "").strip()
+    if text in SCHEDULE_STRATEGY_BY_LABEL:
+        return SCHEDULE_STRATEGY_BY_LABEL[text]
+    normalized = text.lower().replace("-", "_").replace(" ", "_")
+    if normalized in SCHEDULE_STRATEGY_LABELS:
+        return normalized
+    if any(term in normalized for term in ("conveyor", "continuous", "work_conserving", "workconserving")):
+        return SCHEDULE_STRATEGY_CONVEYOR
+    if any(term in normalized for term in ("fixed", "staggered", "calendar", "role")):
+        return SCHEDULE_STRATEGY_FIXED_MULTI_ROLE
+    if any(term in normalized for term in ("single", "periodic", "interval", "cadence")):
+        return SCHEDULE_STRATEGY_SINGLE
+    return SCHEDULE_STRATEGY_FIXED_MULTI_ROLE if multi_role_enabled else SCHEDULE_STRATEGY_SINGLE
+
+
+def write_worker_count_from_text(value: Any, *, enabled: bool) -> int:
+    if not enabled:
+        return 0
+    text = str(value or "").strip()
+    match = re.search(r"\d+", text)
+    count = int(match.group(0)) if match else DEFAULT_WRITE_WORKER_COUNT
+    return min(MAX_WRITE_WORKER_COUNT, max(1, count))
+
+
 def format_interval(seconds: int) -> str:
     minutes = max(1, seconds // 60)
     return f"every {minutes} minutes"
@@ -206,6 +259,14 @@ def launchd_label(target: Path) -> str:
     base = re.sub(r"[^a-z0-9]+", "-", target.name.lower()).strip("-") or "project"
     digest = hashlib.sha1(str(target).encode("utf-8")).hexdigest()[:10]
     return f"{LAUNCHD_LABEL_PREFIX}.{base}.{digest}"
+
+
+def launchd_role_label(target: Path, role: str) -> str:
+    return f"{launchd_label(target)}.{role}"
+
+
+def launchd_conveyor_label(target: Path) -> str:
+    return f"{launchd_label(target)}.conveyor"
 
 
 def launchd_plist_path(label: str) -> Path:
@@ -245,7 +306,77 @@ def write_launchd_plist(target: Path, cadence_seconds: int) -> tuple[str, Path]:
         "StandardErrorPath": str(log_dir / "stderr.log"),
         "EnvironmentVariables": {
             "TARGET": str(target),
+            "PATH": DEFAULT_AUTOMATION_PATH,
         },
+    }
+    plist_path.write_bytes(plistlib.dumps(plist, sort_keys=True))
+    return label, plist_path
+
+
+def write_role_launchd_plist(target: Path, role: str, *, allow_remotes: bool = False) -> tuple[str, Path]:
+    if role not in MULTI_ROLE_ROLES:
+        raise ValueError(f"Invalid multi-role automation role: {role}")
+    target = target.expanduser().resolve()
+    label = launchd_role_label(target, role)
+    plist_path = launchd_plist_path(label)
+    log_dir = launchd_log_dir(target)
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    minutes = MULTI_ROLE_START_MINUTES[role]
+    intervals: dict[str, int] | list[dict[str, int]]
+    if len(minutes) == 1:
+        intervals = {"Minute": minutes[0]}
+    else:
+        intervals = [{"Minute": minute} for minute in minutes]
+    environment = {
+        "TARGET": str(target),
+        "PATH": DEFAULT_AUTOMATION_PATH,
+    }
+    if allow_remotes:
+        environment["MULTI_ROLE_ALLOW_REMOTES"] = "1"
+    plist = {
+        "Label": label,
+        "ProgramArguments": [
+            "/bin/bash",
+            str(target / "scripts" / "run_role_automation.sh"),
+            "--role",
+            role,
+        ],
+        "WorkingDirectory": str(target),
+        "RunAtLoad": False,
+        "StartCalendarInterval": intervals,
+        "StandardOutPath": str(log_dir / f"{role}.stdout.log"),
+        "StandardErrorPath": str(log_dir / f"{role}.stderr.log"),
+        "EnvironmentVariables": environment,
+    }
+    plist_path.write_bytes(plistlib.dumps(plist, sort_keys=True))
+    return label, plist_path
+
+
+def write_conveyor_launchd_plist(target: Path, *, allow_remotes: bool = False) -> tuple[str, Path]:
+    target = target.expanduser().resolve()
+    label = launchd_conveyor_label(target)
+    plist_path = launchd_plist_path(label)
+    log_dir = launchd_log_dir(target)
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    environment = {
+        "TARGET": str(target),
+        "PATH": DEFAULT_AUTOMATION_PATH,
+    }
+    if allow_remotes:
+        environment["MULTI_ROLE_ALLOW_REMOTES"] = "1"
+    plist = {
+        "Label": label,
+        "ProgramArguments": [
+            "/bin/bash",
+            str(target / "scripts" / "run_conveyor_automation.sh"),
+        ],
+        "WorkingDirectory": str(target),
+        "RunAtLoad": True,
+        "StandardOutPath": str(log_dir / "conveyor.stdout.log"),
+        "StandardErrorPath": str(log_dir / "conveyor.stderr.log"),
+        "EnvironmentVariables": environment,
     }
     plist_path.write_bytes(plistlib.dumps(plist, sort_keys=True))
     return label, plist_path
@@ -566,9 +697,18 @@ if TK_AVAILABLE:
             self.bridge_mode_var = tk.StringVar(value="file_only")
             self.human_text_responses_var = tk.BooleanVar(value=True)
             self.cadence_var = tk.StringVar(value=str(DEFAULT_CADENCE_MINUTES))
+            self.schedule_strategy_var = tk.StringVar(value=SCHEDULE_STRATEGY_LABELS[SCHEDULE_STRATEGY_SINGLE])
             self.force_var = tk.BooleanVar(value=False)
             self.worker_agents_var = tk.BooleanVar(value=True)
             self.codex_workers_var = tk.BooleanVar(value=True)
+            self.write_worker_agents_var = tk.BooleanVar(value=False)
+            self.max_write_worker_count_var = tk.StringVar(value=str(DEFAULT_WRITE_WORKER_COUNT))
+            self.automation_signals_enabled_var = tk.BooleanVar(value=False)
+            self.multi_role_automations_var = tk.BooleanVar(value=False)
+            self.automation_role_profile_var = tk.StringVar(value="single_lane")
+            self.automation_checkpoint_commits_var = tk.BooleanVar(value=True)
+            self.multi_role_base_cadence_var = tk.StringVar(value=str(DEFAULT_MULTI_ROLE_BASE_CADENCE_MINUTES))
+            self.multi_role_allow_remotes_var = tk.BooleanVar(value=False)
             self.status_var = tk.StringVar(value="No target loaded.")
             self.schedule_status_var = tk.StringVar(value="Schedule: target not loaded.")
             self.doc_choice_var = tk.StringVar(value="Automation Tasks")
@@ -752,6 +892,24 @@ if TK_AVAILABLE:
                 self.cadence_var,
                 help_text="Number of minutes between launchd runs. Must be an integer greater than 30.",
             )
+            ttk.Label(automation, text="Scheduling Strategy", style="Section.TLabel").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=6)
+            strategy_frame = ttk.Frame(automation)
+            strategy_frame.grid(row=row, column=1, sticky="ew", pady=6)
+            strategy_combo = ttk.Combobox(
+                strategy_frame,
+                textvariable=self.schedule_strategy_var,
+                values=list(SCHEDULE_STRATEGY_LABELS.values()),
+                state="readonly",
+                width=32,
+            )
+            strategy_combo.pack(side="left")
+            strategy_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh_prerequisites())
+            ttk.Label(
+                strategy_frame,
+                text="Use continuous conveyor to keep the next runnable lane moving.",
+                style="Help.TLabel",
+            ).pack(side="left", padx=(8, 0))
+            row += 1
 
             bridge_enabled_frame = ttk.Frame(automation)
             bridge_enabled_frame.grid(row=row, column=1, sticky="w", pady=6)
@@ -796,9 +954,98 @@ if TK_AVAILABLE:
 
             checks = ttk.LabelFrame(automation, text="Worker Agents")
             checks.grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
-            ttk.Checkbutton(checks, text="Worker agents are allowed", variable=self.worker_agents_var).pack(side="left", padx=8, pady=8)
-            ttk.Checkbutton(checks, text="Codex CLI worker reports are expected on broad runs", variable=self.codex_workers_var).pack(side="left", padx=8, pady=8)
-            ttk.Checkbutton(checks, text="Overwrite existing scaffold files", variable=self.force_var).pack(side="left", padx=8, pady=8)
+            checks.columnconfigure(1, weight=1)
+            ttk.Checkbutton(checks, text="Worker agents are allowed", variable=self.worker_agents_var).grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+            ttk.Checkbutton(checks, text="Codex CLI worker reports are expected on broad runs", variable=self.codex_workers_var).grid(row=0, column=1, sticky="w", padx=8, pady=(8, 4))
+            ttk.Checkbutton(checks, text="Allow write-capable workers", variable=self.write_worker_agents_var).grid(row=1, column=0, sticky="w", padx=8, pady=4)
+            count_frame = ttk.Frame(checks)
+            count_frame.grid(row=1, column=1, sticky="w", padx=8, pady=4)
+            ttk.Label(count_frame, text="Max write workers").pack(side="left")
+            write_worker_spinbox_cls = getattr(ttk, "Spinbox", tk.Spinbox)
+            validate_write_workers = self.root.register(lambda value: value == "" or value.isdigit())
+            write_worker_spinbox = write_worker_spinbox_cls(
+                count_frame,
+                from_=1,
+                to=MAX_WRITE_WORKER_COUNT,
+                increment=1,
+                textvariable=self.max_write_worker_count_var,
+                width=4,
+                validate="key",
+                validatecommand=(validate_write_workers, "%P"),
+            )
+            write_worker_spinbox.pack(side="left", padx=(8, 0))
+            ttk.Checkbutton(checks, text="Overwrite existing scaffold files", variable=self.force_var).grid(row=2, column=0, sticky="w", padx=8, pady=(4, 8))
+            ttk.Label(
+                checks,
+                text="Write-capable workers are optional and only for large, planned changes with disjoint ownership. Generated projects keep them disabled unless this box is enabled.",
+                style="Help.TLabel",
+                wraplength=660,
+                justify="left",
+            ).grid(row=2, column=1, sticky="ew", padx=8, pady=(4, 8))
+            row += 1
+            ttk.Checkbutton(
+                automation,
+                text="Enable recurring local automation signals",
+                variable=self.automation_signals_enabled_var,
+            ).grid(row=row, column=1, sticky="w", pady=6)
+            ttk.Label(automation, text="Automation Signals", style="Section.TLabel").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=6)
+            row += 1
+            row = self._add_text(
+                automation,
+                row,
+                "Write Worker Guidance",
+                "Write workers are optional and should be used only for large, well-planned changes with disjoint file or module ownership. Prefer fewer workers when the change can be done clearly by the main agent.",
+                help_text="Optional project-specific guidance for write-capable workers. Keep it generic and focused on ownership boundaries, contracts, integration, and verification.",
+                height=3,
+            )
+            multi_role = ttk.LabelFrame(automation, text="Multi-Role Automation")
+            multi_role.grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
+            multi_role.columnconfigure(1, weight=1)
+            ttk.Checkbutton(
+                multi_role,
+                text="Enable planner, builder, hardener, and integrator role schedules",
+                variable=self.multi_role_automations_var,
+            ).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 4))
+            ttk.Label(multi_role, text="Role profile").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+            ttk.Combobox(
+                multi_role,
+                textvariable=self.automation_role_profile_var,
+                values=["single_lane", MULTI_ROLE_PROFILE],
+                state="readonly",
+                width=36,
+            ).grid(row=1, column=1, sticky="w", padx=8, pady=4)
+            ttk.Checkbutton(
+                multi_role,
+                text="Integrator may create local checkpoint commits for dirty main changes",
+                variable=self.automation_checkpoint_commits_var,
+            ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=4)
+            ttk.Checkbutton(
+                multi_role,
+                text="Allow local-only multi-role automation when this repo has git remotes",
+                variable=self.multi_role_allow_remotes_var,
+            ).grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=4)
+            cadence_frame = ttk.Frame(multi_role)
+            cadence_frame.grid(row=4, column=1, sticky="w", padx=8, pady=4)
+            ttk.Label(multi_role, text="Base cadence").grid(row=4, column=0, sticky="w", padx=8, pady=4)
+            multi_cadence_spinbox = getattr(ttk, "Spinbox", tk.Spinbox)(
+                cadence_frame,
+                from_=DEFAULT_MULTI_ROLE_BASE_CADENCE_MINUTES,
+                to=MAX_CADENCE_MINUTES,
+                increment=30,
+                textvariable=self.multi_role_base_cadence_var,
+                width=5,
+                validate="key",
+                validatecommand=(self.root.register(lambda value: value == "" or value.isdigit()), "%P"),
+            )
+            multi_cadence_spinbox.pack(side="left")
+            ttk.Label(cadence_frame, text="minutes; fixed cadence uses staggered role minutes", style="Help.TLabel").pack(side="left", padx=(8, 0))
+            ttk.Label(
+                multi_role,
+                text="Advanced opt-in. Multi-role mode is local-only, requires an initialized git repo, and can run as fixed role jobs or one continuous conveyor. The remote option only permits local automation in repos with remotes; it does not allow pushes, fetches, pulls, or remote configuration.",
+                style="Help.TLabel",
+                wraplength=680,
+                justify="left",
+            ).grid(row=5, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 8))
             row += 1
 
             row = 0
@@ -1352,6 +1599,7 @@ if TK_AVAILABLE:
             self._set_text_field("Meaningful Deliverable", intake.get("meaningful_deliverable", ""))
             self._set_text_field("Beyond MVP", intake.get("beyond_mvp", ""))
             self._set_text_field("Assumptions", intake.get("assumptions", []))
+            self._set_text_field("Write Worker Guidance", intake.get("write_worker_guidance", ""))
 
             mode = str(intake.get("human_bridge_mode") or "file_only")
             if mode not in {"file_only", "local_notifier", "disabled"}:
@@ -1362,6 +1610,25 @@ if TK_AVAILABLE:
             self.human_text_responses_var.set(bool(intake.get("human_requested_text_responses", True)))
             self.worker_agents_var.set(bool(intake.get("worker_agents_allowed", True)))
             self.codex_workers_var.set(bool(intake.get("codex_cli_workers_expected_on_broad_runs", True)))
+            self.automation_signals_enabled_var.set(bool(intake.get("automation_signals_enabled", False)))
+            write_workers_enabled = bool(intake.get("write_worker_agents_allowed", False))
+            self.write_worker_agents_var.set(write_workers_enabled)
+            self.max_write_worker_count_var.set(
+                str(write_worker_count_from_text(intake.get("max_write_worker_count"), enabled=write_workers_enabled))
+                if write_workers_enabled
+                else str(DEFAULT_WRITE_WORKER_COUNT)
+            )
+            multi_role_enabled = bool(intake.get("multi_role_automations_allowed", False))
+            profile = str(intake.get("automation_role_profile") or ("planner_builder_hardener_integrator" if multi_role_enabled else "single_lane"))
+            if profile not in {"single_lane", MULTI_ROLE_PROFILE}:
+                profile = MULTI_ROLE_PROFILE if multi_role_enabled else "single_lane"
+            self.multi_role_automations_var.set(multi_role_enabled)
+            self.automation_role_profile_var.set(profile)
+            self.automation_checkpoint_commits_var.set(bool(intake.get("automation_checkpoint_commits", True)))
+            self.multi_role_base_cadence_var.set(str(multi_role_cadence_minutes_from_text(intake.get("multi_role_base_cadence_minutes"))))
+            self.multi_role_allow_remotes_var.set(bool(intake.get("multi_role_allow_remotes", False)))
+            strategy = schedule_strategy_from_value(intake.get("automation_schedule_strategy"), multi_role_enabled=multi_role_enabled)
+            self.schedule_strategy_var.set(SCHEDULE_STRATEGY_LABELS[strategy])
             self.cadence_var.set(str(cadence_minutes_from_text(intake.get("desired_cadence"))))
 
         def _apply_dashboard_state(self, state: dict[str, Any]) -> None:
@@ -1370,6 +1637,30 @@ if TK_AVAILABLE:
                 self.cadence_var.set(str(cadence_minutes_from_text(cadence)))
             if "overwrite_existing_scaffold_files" in state:
                 self.force_var.set(bool(state.get("overwrite_existing_scaffold_files")))
+            if "write_worker_agents_allowed" in state:
+                write_workers_enabled = bool(state.get("write_worker_agents_allowed"))
+                self.write_worker_agents_var.set(write_workers_enabled)
+                self.max_write_worker_count_var.set(
+                    str(write_worker_count_from_text(state.get("max_write_worker_count"), enabled=write_workers_enabled))
+                    if write_workers_enabled
+                    else str(DEFAULT_WRITE_WORKER_COUNT)
+                )
+            if "automation_signals_enabled" in state:
+                self.automation_signals_enabled_var.set(bool(state.get("automation_signals_enabled")))
+            if "multi_role_automations_allowed" in state:
+                multi_role_enabled = bool(state.get("multi_role_automations_allowed"))
+                self.multi_role_automations_var.set(multi_role_enabled)
+                profile = str(state.get("automation_role_profile") or ("planner_builder_hardener_integrator" if multi_role_enabled else "single_lane"))
+                self.automation_role_profile_var.set(profile if profile in {"single_lane", MULTI_ROLE_PROFILE} else "single_lane")
+                self.automation_checkpoint_commits_var.set(bool(state.get("automation_checkpoint_commits", True)))
+                self.multi_role_base_cadence_var.set(str(multi_role_cadence_minutes_from_text(state.get("multi_role_base_cadence_minutes"))))
+                self.multi_role_allow_remotes_var.set(bool(state.get("multi_role_allow_remotes", False)))
+            if "automation_schedule_strategy" in state:
+                strategy = schedule_strategy_from_value(
+                    state.get("automation_schedule_strategy"),
+                    multi_role_enabled=bool(self.multi_role_automations_var.get()),
+                )
+                self.schedule_strategy_var.set(SCHEDULE_STRATEGY_LABELS[strategy])
 
         def _set_text_field(self, label: str, value: Any) -> None:
             if label not in self.text_fields:
@@ -1393,18 +1684,42 @@ if TK_AVAILABLE:
                 cadence_minutes = DEFAULT_CADENCE_MINUTES
             label = launchd_label(target)
             plist_path = launchd_plist_path(label)
+            multi_role_enabled = bool(self.multi_role_automations_var.get())
+            schedule_strategy = self.schedule_strategy()
             ready, reason = self._automation_ready(target)
+            role_schedule = {
+                role: {
+                    "launchd_label": launchd_role_label(target, role),
+                    "launchd_plist": str(launchd_plist_path(launchd_role_label(target, role))),
+                    "launchd_loaded": self._launchd_loaded(launchd_role_label(target, role)),
+                    "launchd_disabled": self._launchd_disabled(launchd_role_label(target, role)),
+                    "start_minutes": MULTI_ROLE_START_MINUTES[role],
+                }
+                for role in MULTI_ROLE_ROLES
+            }
             state = {
                 "schema_version": 1,
                 "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "project_name": self.project_name_var.get().strip() or "New Project",
                 "project_mode": "existing_project" if bool(self.existing_project_var.get()) else "fresh_project",
                 "cadence_minutes": cadence_minutes,
+                "automation_schedule_strategy": schedule_strategy,
                 "human_bridge_enabled": bool(self.human_bridge_enabled_var.get()),
                 "human_bridge_mode": self.bridge_mode_var.get(),
                 "human_requested_text_responses": bool(self.human_text_responses_var.get()),
                 "worker_agents_allowed": bool(self.worker_agents_var.get()),
                 "codex_cli_workers_expected_on_broad_runs": bool(self.codex_workers_var.get()),
+                "automation_signals_enabled": bool(self.automation_signals_enabled_var.get()),
+                "write_worker_agents_allowed": bool(self.write_worker_agents_var.get()) and bool(self.worker_agents_var.get()),
+                "max_write_worker_count": write_worker_count_from_text(
+                    self.max_write_worker_count_var.get(),
+                    enabled=bool(self.write_worker_agents_var.get()) and bool(self.worker_agents_var.get()),
+                ),
+                "multi_role_automations_allowed": multi_role_enabled,
+                "automation_role_profile": MULTI_ROLE_PROFILE if multi_role_enabled else "single_lane",
+                "automation_checkpoint_commits": bool(self.automation_checkpoint_commits_var.get()),
+                "multi_role_base_cadence_minutes": multi_role_cadence_minutes_from_text(self.multi_role_base_cadence_var.get()),
+                "multi_role_allow_remotes": bool(self.multi_role_allow_remotes_var.get()),
                 "overwrite_existing_scaffold_files": bool(self.force_var.get()),
                 "last_action": last_action,
                 "automation_ready": ready,
@@ -1413,6 +1728,13 @@ if TK_AVAILABLE:
                 "launchd_plist": str(plist_path),
                 "launchd_loaded": self._launchd_loaded(label),
                 "launchd_disabled": self._launchd_disabled(label),
+                "conveyor_schedule": {
+                    "launchd_label": launchd_conveyor_label(target),
+                    "launchd_plist": str(launchd_plist_path(launchd_conveyor_label(target))),
+                    "launchd_loaded": self._launchd_loaded(launchd_conveyor_label(target)),
+                    "launchd_disabled": self._launchd_disabled(launchd_conveyor_label(target)),
+                },
+                "multi_role_schedule": role_schedule,
             }
             path = dashboard_state_path(target)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1454,11 +1776,25 @@ if TK_AVAILABLE:
         def cadence_minutes(self) -> int:
             return parse_cadence_seconds(self.cadence_var.get()) // 60
 
+        def schedule_strategy(self) -> str:
+            return schedule_strategy_from_value(
+                self.schedule_strategy_var.get(),
+                multi_role_enabled=bool(self.multi_role_automations_var.get()),
+            )
+
         def collect_intake(self) -> dict[str, Any]:
             mode = self.bridge_mode_var.get()
             bridge_enabled = bool(self.human_bridge_enabled_var.get()) and mode != "disabled"
             context_names = [f"docs/context/{safe_context_filename(path.name)}" for path in self.context_files]
             cadence_minutes = self.cadence_minutes()
+            write_workers_enabled = bool(self.write_worker_agents_var.get()) and bool(self.worker_agents_var.get())
+            max_write_workers = write_worker_count_from_text(
+                self.max_write_worker_count_var.get(),
+                enabled=write_workers_enabled,
+            )
+            multi_role_enabled = bool(self.multi_role_automations_var.get())
+            multi_role_cadence = multi_role_cadence_minutes_from_text(self.multi_role_base_cadence_var.get())
+            schedule_strategy = self.schedule_strategy()
             return {
                 "project_name": self.project_name_var.get().strip() or "New Project",
                 "project_mode": "existing_project" if bool(self.existing_project_var.get()) else "fresh_project",
@@ -1477,6 +1813,16 @@ if TK_AVAILABLE:
                 "human_requested_text_responses": bool(self.human_text_responses_var.get()),
                 "worker_agents_allowed": bool(self.worker_agents_var.get()),
                 "codex_cli_workers_expected_on_broad_runs": bool(self.codex_workers_var.get()),
+                "automation_signals_enabled": bool(self.automation_signals_enabled_var.get()),
+                "write_worker_agents_allowed": write_workers_enabled,
+                "max_write_worker_count": max_write_workers,
+                "write_worker_guidance": self._text_value("Write Worker Guidance"),
+                "multi_role_automations_allowed": multi_role_enabled,
+                "automation_role_profile": MULTI_ROLE_PROFILE if multi_role_enabled else "single_lane",
+                "automation_checkpoint_commits": bool(self.automation_checkpoint_commits_var.get()),
+                "multi_role_base_cadence_minutes": multi_role_cadence,
+                "automation_schedule_strategy": schedule_strategy,
+                "multi_role_allow_remotes": bool(self.multi_role_allow_remotes_var.get()),
                 "meaningful_deliverable": self._text_value("Meaningful Deliverable"),
                 "beyond_mvp": self._text_value("Beyond MVP"),
                 "assumptions": split_lines(self._text_value("Assumptions")),
@@ -1631,6 +1977,10 @@ if TK_AVAILABLE:
                     intake["human_bridge_mode"],
                     str(target),
                 ]
+                if intake.get("write_worker_agents_allowed"):
+                    check_cmd.insert(-1, "--write-workers-enabled")
+                if intake.get("multi_role_automations_allowed"):
+                    check_cmd.insert(-1, "--multi-role-enabled")
                 check_code = self._run_command(check_cmd, cwd=KIT_ROOT)
                 if check_code != 0:
                     raise RuntimeError("Required-file check failed; bootstrap was not started.")
@@ -1839,9 +2189,31 @@ if TK_AVAILABLE:
                 target / "docs" / "CODEX_AUTOMATION_TASKS.md",
                 target / "scripts" / "run_codex_automation.sh",
             ]
+            if self._target_schedule_strategy(target) == SCHEDULE_STRATEGY_CONVEYOR:
+                required.extend(
+                    [
+                        target / "scripts" / "run_conveyor_automation.sh",
+                        target / "scripts" / "run_conveyor_automation.py",
+                    ]
+                )
+            if self._target_multi_role_enabled(target):
+                required.extend(
+                    [
+                        target / ".agentic" / "roles" / "planner.md",
+                        target / ".agentic" / "roles" / "builder.md",
+                        target / ".agentic" / "roles" / "hardener.md",
+                        target / ".agentic" / "roles" / "integrator.md",
+                        target / "docs" / "MULTI_ROLE_PROGRESS.md",
+                        target / "scripts" / "run_role_automation.sh",
+                        target / "scripts" / "integrate_role_outputs.py",
+                        target / "scripts" / "list_deferred_patches.py",
+                    ]
+                )
             missing = [path.relative_to(target).as_posix() for path in required if not path.exists()]
             if missing:
                 return False, "Missing " + ", ".join(missing)
+            if self._target_multi_role_enabled(target) and not self._target_is_git_repo(target):
+                return False, "Multi-role scheduling requires an initialized git repo and initial commit."
             task_text = (target / "docs" / "CODEX_AUTOMATION_TASKS.md").read_text(
                 encoding="utf-8",
                 errors="replace",
@@ -1893,6 +2265,115 @@ if TK_AVAILABLE:
                     pass
             return self.bridge_mode_var.get() if self.human_bridge_enabled_var.get() else "disabled"
 
+        def _target_multi_role_enabled(self, target: Path) -> bool:
+            intake_path = target / ".agentic" / "project_intake.json"
+            if intake_path.exists():
+                try:
+                    intake = json.loads(intake_path.read_text(encoding="utf-8"))
+                    return bool(intake.get("multi_role_automations_allowed", False))
+                except (OSError, json.JSONDecodeError):
+                    pass
+            state_path = dashboard_state_path(target)
+            if state_path.exists():
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    return bool(state.get("multi_role_automations_allowed", False))
+                except (OSError, json.JSONDecodeError):
+                    pass
+            for marker_path in [
+                target / ".agentic" / "automation_prompt.md",
+                target / "docs" / "CODEX_AUTOMATION_TASKS.md",
+            ]:
+                if marker_path.exists():
+                    text = marker_path.read_text(encoding="utf-8", errors="replace")
+                    if "Multi-role automations allowed: true" in text:
+                        return True
+                    if "Multi-role automations allowed: false" in text:
+                        return False
+            return bool(self.multi_role_automations_var.get())
+
+        def _target_schedule_strategy(self, target: Path) -> str:
+            state_path = dashboard_state_path(target)
+            if state_path.exists():
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    if "automation_schedule_strategy" in state:
+                        return schedule_strategy_from_value(
+                            state.get("automation_schedule_strategy"),
+                            multi_role_enabled=self._target_multi_role_enabled(target),
+                        )
+                except (OSError, json.JSONDecodeError):
+                    pass
+            intake_path = target / ".agentic" / "project_intake.json"
+            if intake_path.exists():
+                try:
+                    intake = json.loads(intake_path.read_text(encoding="utf-8"))
+                    if "automation_schedule_strategy" in intake:
+                        return schedule_strategy_from_value(
+                            intake.get("automation_schedule_strategy"),
+                            multi_role_enabled=self._target_multi_role_enabled(target),
+                        )
+                except (OSError, json.JSONDecodeError):
+                    pass
+            return self.schedule_strategy()
+
+        def _target_multi_role_allow_remotes(self, target: Path) -> bool:
+            state_path = dashboard_state_path(target)
+            if state_path.exists():
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    if "multi_role_allow_remotes" in state:
+                        return bool(state.get("multi_role_allow_remotes"))
+                except (OSError, json.JSONDecodeError):
+                    pass
+            intake_path = target / ".agentic" / "project_intake.json"
+            if intake_path.exists():
+                try:
+                    intake = json.loads(intake_path.read_text(encoding="utf-8"))
+                    if "multi_role_allow_remotes" in intake:
+                        return bool(intake.get("multi_role_allow_remotes"))
+                except (OSError, json.JSONDecodeError):
+                    pass
+            return bool(self.multi_role_allow_remotes_var.get())
+
+        def _target_is_git_repo(self, target: Path) -> bool:
+            result = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=str(target),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return result.returncode == 0 and result.stdout.strip() == "true"
+
+        def _target_git_remotes(self, target: Path) -> str:
+            result = subprocess.run(
+                ["git", "remote", "-v"],
+                cwd=str(target),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return (result.stdout or result.stderr).strip() if result.returncode == 0 else ""
+
+        def _schedule_labels(self, target: Path) -> list[str]:
+            strategy = self._target_schedule_strategy(target)
+            if strategy == SCHEDULE_STRATEGY_CONVEYOR:
+                return [launchd_conveyor_label(target)]
+            if strategy == SCHEDULE_STRATEGY_FIXED_MULTI_ROLE and self._target_multi_role_enabled(target):
+                return [launchd_role_label(target, role) for role in MULTI_ROLE_ROLES]
+            return [launchd_label(target)]
+
+        def _all_schedule_labels(self, target: Path) -> list[str]:
+            return [
+                launchd_label(target),
+                launchd_conveyor_label(target),
+                *[launchd_role_label(target, role) for role in MULTI_ROLE_ROLES],
+            ]
+
+        def _schedule_plists(self, target: Path) -> list[Path]:
+            return [launchd_plist_path(label) for label in self._schedule_labels(target)]
+
         def _schedule_prerequisites(self, target: Path) -> list[PrerequisiteItem]:
             items = check_prerequisites(target, self._target_human_bridge_mode(target))
             launchctl_path = shutil.which("launchctl") if sys.platform == "darwin" else None
@@ -1904,6 +2385,17 @@ if TK_AVAILABLE:
                     launchctl_path or "launchctl is required for dashboard-managed schedules on macOS.",
                 )
             )
+            strategy = self._target_schedule_strategy(target)
+            if self._target_multi_role_enabled(target) and strategy in {SCHEDULE_STRATEGY_FIXED_MULTI_ROLE, SCHEDULE_STRATEGY_CONVEYOR}:
+                git_repo = self._target_is_git_repo(target)
+                items.append(
+                    PrerequisiteItem(
+                        "Initialized git repo for multi-role automation",
+                        git_repo,
+                        True,
+                        "Target is inside a git work tree." if git_repo else "Run `git init` and create an initial commit before starting multi-role scheduling.",
+                    )
+                )
             return items
 
         def _set_run_automation_state(self) -> None:
@@ -1931,10 +2423,12 @@ if TK_AVAILABLE:
                 return
             target = Path(target_text).expanduser().resolve()
             ready, reason = self._automation_ready(target)
-            label = launchd_label(target)
-            plist_path = launchd_plist_path(label)
-            loaded = self._launchd_loaded(label)
-            disabled = self._launchd_disabled(label)
+            labels = self._all_schedule_labels(target)
+            plists = [launchd_plist_path(label) for label in labels]
+            loaded_labels = [label for label in labels if self._launchd_loaded(label)]
+            existing_plists = [path for path in plists if path.exists()]
+            disabled_labels = [label for label in labels if self._launchd_disabled(label)]
+            strategy = self._target_schedule_strategy(target)
             if sys.platform != "darwin":
                 self.run_automation_button.configure(state="disabled")
                 self.pause_automation_button.configure(state="disabled")
@@ -1942,16 +2436,26 @@ if TK_AVAILABLE:
                 self.schedule_status_var.set("Schedule: launchd scheduling is available on macOS only.")
                 return
             self.run_automation_button.configure(state="normal" if ready else "disabled")
-            self.pause_automation_button.configure(state="normal" if loaded or (plist_path.exists() and not disabled) else "disabled")
-            self.remove_schedule_button.configure(state="normal" if loaded or plist_path.exists() else "disabled")
-            if loaded:
-                self.schedule_status_var.set(f"Schedule: running via launchd ({label}).")
-            elif plist_path.exists() and disabled:
-                self.schedule_status_var.set(f"Schedule: paused and disabled ({label}). Remove Schedule deletes the LaunchAgent plist.")
-            elif plist_path.exists():
-                self.schedule_status_var.set(f"Schedule: installed but not loaded: {plist_path}.")
+            self.pause_automation_button.configure(state="normal" if loaded_labels or existing_plists else "disabled")
+            self.remove_schedule_button.configure(state="normal" if loaded_labels or existing_plists else "disabled")
+            if loaded_labels:
+                if any(label == launchd_conveyor_label(target) for label in loaded_labels):
+                    self.schedule_status_var.set(f"Schedule: running continuous conveyor ({launchd_conveyor_label(target)}).")
+                elif any(label.endswith(tuple(f".{role}" for role in MULTI_ROLE_ROLES)) for label in loaded_labels):
+                    self.schedule_status_var.set(f"Schedule: running multi-role launchd group ({len(loaded_labels)} role job(s) loaded).")
+                else:
+                    self.schedule_status_var.set(f"Schedule: running via launchd ({loaded_labels[0]}).")
+            elif existing_plists and disabled_labels:
+                if strategy == SCHEDULE_STRATEGY_CONVEYOR:
+                    self.schedule_status_var.set("Schedule: conveyor paused and disabled. Remove Schedule deletes the LaunchAgent plist.")
+                elif strategy == SCHEDULE_STRATEGY_FIXED_MULTI_ROLE:
+                    self.schedule_status_var.set("Schedule: multi-role group paused and disabled. Remove Schedule deletes the role LaunchAgent plists.")
+                else:
+                    self.schedule_status_var.set(f"Schedule: paused and disabled. Remove Schedule deletes the LaunchAgent plist.")
+            elif existing_plists:
+                self.schedule_status_var.set(f"Schedule: installed but not loaded: {', '.join(str(path) for path in existing_plists[:4])}.")
             elif ready:
-                self.schedule_status_var.set("Schedule: not installed. Start scheduled automation to load launchd.")
+                self.schedule_status_var.set(f"Schedule: not installed. Start scheduled automation to load launchd ({SCHEDULE_STRATEGY_LABELS[strategy]}).")
             else:
                 self.schedule_status_var.set(f"Schedule: not ready. {reason}")
 
@@ -1995,18 +2499,65 @@ if TK_AVAILABLE:
                 if not proceed:
                     return
             try:
-                interval = parse_cadence_seconds(self.cadence_var.get())
-                label, plist_path = write_launchd_plist(target, interval)
-                self._launchctl(["enable", launchd_service_target(label)], allow_failure=True)
-                if self._launchd_loaded(label):
-                    self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
-                    self._launchctl(["bootout", launchd_domain_target(), str(plist_path)], allow_failure=True)
-                self._launchctl(["bootstrap", launchd_domain_target(), str(plist_path)])
-                self._launchctl(["enable", launchd_service_target(label)])
-                self._append_log(
-                    f"Started scheduled automation: {label} ({format_interval(interval)})."
-                )
-                self._append_log(f"LaunchAgent: {plist_path}")
+                strategy = self.schedule_strategy()
+                allow_remotes = bool(self.multi_role_allow_remotes_var.get())
+                multi_role_enabled = self._target_multi_role_enabled(target)
+                remotes = self._target_git_remotes(target) if multi_role_enabled else ""
+                if remotes and strategy in {SCHEDULE_STRATEGY_FIXED_MULTI_ROLE, SCHEDULE_STRATEGY_CONVEYOR} and not allow_remotes:
+                    messagebox.showerror(
+                        "Multi-role remote opt-in required",
+                        "This repo has configured git remotes, so local-only multi-role automation is blocked by default.\n\n"
+                        + remotes
+                        + "\n\nEnable the advanced option \"Allow local-only multi-role automation when this repo has git remotes\" to set MULTI_ROLE_ALLOW_REMOTES=1 in the launchd job. This still does not allow pushes, fetches, pulls, or remote configuration.",
+                    )
+                    return
+                for label in self._all_schedule_labels(target):
+                    plist_path = launchd_plist_path(label)
+                    if self._launchd_loaded(label):
+                        result = self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
+                        if result.returncode != 0:
+                            self._launchctl(["bootout", launchd_domain_target(), str(plist_path)], allow_failure=True)
+                    if plist_path.exists():
+                        self._launchctl(["disable", launchd_service_target(label)], allow_failure=True)
+
+                if strategy == SCHEDULE_STRATEGY_CONVEYOR:
+                    label, plist_path = write_conveyor_launchd_plist(target, allow_remotes=allow_remotes)
+                    self._launchctl(["enable", launchd_service_target(label)], allow_failure=True)
+                    self._launchctl(["bootstrap", launchd_domain_target(), str(plist_path)])
+                    self._launchctl(["enable", launchd_service_target(label)])
+                    self._append_log(
+                        f"Started continuous conveyor automation: {label}. It will choose the next runnable lane from local state."
+                    )
+                    self._append_log(f"LaunchAgent: {plist_path}")
+                elif strategy == SCHEDULE_STRATEGY_FIXED_MULTI_ROLE and multi_role_enabled:
+                    if not self._target_is_git_repo(target):
+                        raise RuntimeError("Multi-role scheduling requires an initialized git repo with an initial commit.")
+                    loaded: list[str] = []
+                    for role in MULTI_ROLE_ROLES:
+                        label, plist_path = write_role_launchd_plist(target, role, allow_remotes=allow_remotes)
+                        self._launchctl(["enable", launchd_service_target(label)], allow_failure=True)
+                        self._launchctl(["bootstrap", launchd_domain_target(), str(plist_path)])
+                        self._launchctl(["enable", launchd_service_target(label)])
+                        loaded.append(label)
+                        self._append_log(f"LaunchAgent: {plist_path}")
+                    self._append_log(
+                        "Started scheduled multi-role automation: "
+                        + ", ".join(loaded)
+                        + " (planner :00; builder :10/:40; hardener :20/:50; integrator :25/:55)."
+                    )
+                else:
+                    interval = parse_cadence_seconds(self.cadence_var.get())
+                    label, plist_path = write_launchd_plist(target, interval)
+                    self._launchctl(["enable", launchd_service_target(label)], allow_failure=True)
+                    if self._launchd_loaded(label):
+                        self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
+                        self._launchctl(["bootout", launchd_domain_target(), str(plist_path)], allow_failure=True)
+                    self._launchctl(["bootstrap", launchd_domain_target(), str(plist_path)])
+                    self._launchctl(["enable", launchd_service_target(label)])
+                    self._append_log(
+                        f"Started scheduled automation: {label} ({format_interval(interval)})."
+                    )
+                    self._append_log(f"LaunchAgent: {plist_path}")
                 self._append_log(f"Logs: {launchd_log_dir(target)}")
                 self.write_dashboard_state(target, last_action="schedule_started")
                 self._set_run_automation_state()
@@ -2024,17 +2575,19 @@ if TK_AVAILABLE:
                 messagebox.showerror("Missing target", "Choose a target project directory first.")
                 return
             target = Path(target_text).expanduser().resolve()
-            label = launchd_label(target)
-            plist_path = launchd_plist_path(label)
             try:
-                if self._launchd_loaded(label):
-                    result = self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
-                    if result.returncode != 0:
-                        self._launchctl(["bootout", launchd_domain_target(), str(plist_path)])
-                if plist_path.exists():
-                    self._launchctl(["disable", launchd_service_target(label)])
-                    self._append_log(f"Paused and disabled scheduled automation: {label}.")
-                else:
+                found = False
+                for label in self._all_schedule_labels(target):
+                    plist_path = launchd_plist_path(label)
+                    if self._launchd_loaded(label):
+                        result = self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
+                        if result.returncode != 0:
+                            self._launchctl(["bootout", launchd_domain_target(), str(plist_path)], allow_failure=True)
+                    if plist_path.exists():
+                        self._launchctl(["disable", launchd_service_target(label)], allow_failure=True)
+                        self._append_log(f"Paused and disabled scheduled automation: {label}.")
+                        found = True
+                if not found:
                     self._append_log("Scheduled automation plist was not found.")
                 self.write_dashboard_state(target, last_action="schedule_paused")
                 self._set_run_automation_state()
@@ -2052,26 +2605,28 @@ if TK_AVAILABLE:
                 messagebox.showerror("Missing target", "Choose a target project directory first.")
                 return
             target = Path(target_text).expanduser().resolve()
-            label = launchd_label(target)
-            plist_path = launchd_plist_path(label)
             proceed = messagebox.askyesno(
                 "Remove schedule",
-                "Remove the dashboard-managed LaunchAgent for this target?\n\n"
-                "This stops future scheduled runs and deletes the plist. Generated project files are not deleted.",
+                "Remove the dashboard-managed LaunchAgent schedule for this target?\n\n"
+                "This stops future scheduled runs and deletes the plist(s). Generated project files are not deleted.",
             )
             if not proceed:
                 return
             try:
-                if self._launchd_loaded(label):
-                    result = self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
-                    if result.returncode != 0:
-                        self._launchctl(["bootout", launchd_domain_target(), str(plist_path)], allow_failure=True)
-                self._launchctl(["disable", launchd_service_target(label)], allow_failure=True)
-                self._launchctl(["enable", launchd_service_target(label)], allow_failure=True)
-                if plist_path.exists():
-                    plist_path.unlink()
-                    self._append_log(f"Removed scheduled automation LaunchAgent: {plist_path}")
-                else:
+                removed = False
+                for label in self._all_schedule_labels(target):
+                    plist_path = launchd_plist_path(label)
+                    if self._launchd_loaded(label):
+                        result = self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
+                        if result.returncode != 0:
+                            self._launchctl(["bootout", launchd_domain_target(), str(plist_path)], allow_failure=True)
+                    self._launchctl(["disable", launchd_service_target(label)], allow_failure=True)
+                    self._launchctl(["enable", launchd_service_target(label)], allow_failure=True)
+                    if plist_path.exists():
+                        plist_path.unlink()
+                        self._append_log(f"Removed scheduled automation LaunchAgent: {plist_path}")
+                        removed = True
+                if not removed:
                     self._append_log("Scheduled automation plist was not found.")
                 self.write_dashboard_state(target, last_action="schedule_removed")
                 self._set_run_automation_state()

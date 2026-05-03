@@ -12,6 +12,22 @@ Run once per hour.
 
 Good for substantial engineering sprints.
 
+Multi-role mode:
+
+```text
+Planner :00, builder :10/:40, hardener :20/:50, integrator :25/:55.
+```
+
+Good for opt-in high-throughput local automation after the target is an initialized git repo.
+
+Continuous conveyor:
+
+```text
+One local dispatcher chooses the next runnable lane as soon as the previous lane exits.
+```
+
+Good when you want work-conserving local automation instead of exact role times. The conveyor prioritizes queued integration, due planning, hardening after integration, and builder momentum. It records state in `target/automation_conveyor_state.json` and uses `target/automation_conveyor.lock` so only one dispatcher runs.
+
 45 minutes:
 
 ```text
@@ -46,11 +62,20 @@ The wrapper sets `CODEX_RUN_ID`, sets `CODEX_LOCK_PATH`, acquires the lock with 
 
 If a scheduler runs from another directory, call the absolute path to the target project's `scripts/run_codex_automation.sh` or set `TARGET=/absolute/path/to/target-project`.
 
+Generated targets also include an optional conveyor wrapper:
+
+```bash
+bash scripts/run_conveyor_automation.sh --dry-run
+bash scripts/run_conveyor_automation.sh --once
+```
+
+When multi-role files are present, the conveyor invokes `scripts/run_role_automation.sh --role <role>`. Without multi-role files, it falls back to `scripts/run_codex_automation.sh`.
+
 ## Dashboard LaunchAgent Controls
 
 On macOS, the dashboard can manage the recurring schedule directly after bootstrap:
 
-- **Start Scheduled Automation** writes a target-specific plist under `~/Library/LaunchAgents/`, clears any disabled state when possible, loads it with `launchctl bootstrap`, enables it with `launchctl enable`, sets `RunAtLoad`, and schedules the target wrapper with `StartInterval`.
+- **Start Scheduled Automation** writes target-specific plist(s) under `~/Library/LaunchAgents/`, clears any disabled state when possible, loads with `launchctl bootstrap`, enables with `launchctl enable`, and starts the selected scheduling strategy.
 - **Pause Scheduled Automation** unloads that LaunchAgent with `launchctl bootout` and disables it with `launchctl disable`, stopping future scheduled runs across login/reboot until the schedule is started again.
 - **Remove Schedule** unloads that LaunchAgent, clears its disabled state, and deletes the plist from `~/Library/LaunchAgents/`. It does not delete generated project files.
 - **Cancel Current Dashboard Run** only terminates a bootstrap/check process launched by the dashboard itself. It is not the launchd scheduler control.
@@ -61,11 +86,32 @@ Dashboard-managed jobs use labels shaped like:
 com.diffmogger.automation.<target-name>.<hash>
 ```
 
+Multi-role dashboard-managed jobs append the role:
+
+```text
+com.diffmogger.automation.<target-name>.<hash>.planner
+com.diffmogger.automation.<target-name>.<hash>.builder
+com.diffmogger.automation.<target-name>.<hash>.hardener
+com.diffmogger.automation.<target-name>.<hash>.integrator
+```
+
+Those jobs use `StartCalendarInterval`, not `StartInterval`, and point at `scripts/run_role_automation.sh --role <role>`.
+
+Continuous conveyor jobs use one LaunchAgent:
+
+```text
+com.diffmogger.automation.<target-name>.<hash>.conveyor
+```
+
+The job points at `scripts/run_conveyor_automation.sh`, sets `RunAtLoad`, and does not use `StartInterval` or `StartCalendarInterval` because the dispatcher stays running until paused, removed, blocked, or stopped by a critical status.
+
 Logs are written under the target repo:
 
 ```text
 target/automation_logs/stdout.log
 target/automation_logs/stderr.log
+target/automation_logs/<role>.stdout.log
+target/automation_logs/<role>.stderr.log
 ```
 
 The lock includes:

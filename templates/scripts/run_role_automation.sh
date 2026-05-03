@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="${CODEX_AUTOMATION_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/run_role_automation.sh --role planner|builder|hardener|integrator [--target PATH]
+
+Run one optional multi-role automation role. Planner, builder, and hardener run
+inside isolated git worktrees and queue patches. Integrator applies queued
+patches in the main checkout.
+
+Environment:
+  TARGET                    Target project directory. Default: current repo
+  CODEX_RUN_ID or RUN_ID    Run id. Generated if absent
+  MULTI_ROLE_ALLOW_REMOTES  Set 1 to allow configured git remotes
+EOF
+}
+
+target_dir="${TARGET:-$(cd "$(dirname "$0")/.." && pwd)}"
+role=""
+run_id="${CODEX_RUN_ID:-${RUN_ID:-}}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target)
+      target_dir="${2:?--target requires a path}"
+      shift 2
+      ;;
+    --role)
+      role="${2:?--role requires a value}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$role" ]]; then
+  echo "--role is required" >&2
+  usage >&2
+  exit 2
+fi
+
+case "$role" in
+  planner|builder|hardener|integrator)
+    ;;
+  *)
+    echo "Invalid role: $role" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "$run_id" ]]; then
+  run_id="$(date -u +%Y%m%dT%H%M%SZ)-$role"
+fi
+
+target_abs="$(cd "$target_dir" && pwd)"
+cd "$target_abs"
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "Multi-role automation requires an initialized git repo: $target_abs" >&2
+  exit 2
+fi
+
+remotes="$(git remote -v || true)"
+if [[ -n "$remotes" && "${MULTI_ROLE_ALLOW_REMOTES:-0}" != "1" ]]; then
+  echo "Multi-role automation is local-only and refuses to run with configured git remotes." >&2
+  echo "$remotes" >&2
+  echo "Set MULTI_ROLE_ALLOW_REMOTES=1 only if you intentionally allow local automation in a repo with remotes." >&2
+  exit 2
+fi
+
+mkdir -p .git/info
+touch .git/info/exclude
+for pattern in \
+  "/target/codex_automation.lock" \
+  "/target/automation_conveyor.lock" \
+  "/target/automation_conveyor_state.json" \
+  "/target/automation_queue/" \
+  "/target/automation_signals.json" \
+  "/target/automation_worktrees/" \
+  "/target/automation_logs/"; do
+  if ! grep -Fx "$pattern" .git/info/exclude >/dev/null 2>&1; then
+    printf '%s\n' "$pattern" >> .git/info/exclude
+  fi
+done
+
+prompt_path="$target_abs/.agentic/roles/$role.md"
+if [[ ! -f "$prompt_path" ]]; then
+  echo "Missing role prompt: $prompt_path" >&2
+  exit 2
+fi
+
+if [[ "$role" == "integrator" ]]; then
+  if [[ -f "$target_abs/scripts/update_automation_signals.py" && -f "$target_abs/docs/AUTOMATION_SIGNALS.md" ]]; then
+    python3 "$target_abs/scripts/update_automation_signals.py" "$target_abs" --refresh --role integrator --summary || true
+  fi
+  exec python3 scripts/integrate_role_outputs.py "$target_abs" --run-id "$run_id"
+fi
+
+base_commit="$(git rev-parse HEAD)"
+queue_dir="$target_abs/target/automation_queue/$role/$run_id"
+worktree_dir="$target_abs/target/automation_worktrees/$role/$run_id"
+log_dir="$target_abs/target/automation_logs"
+mkdir -p "$queue_dir" "$(dirname "$worktree_dir")" "$log_dir"
+
+summary_path="$queue_dir/summary.md"
+patch_path="$queue_dir/changes.patch"
+manifest_path="$queue_dir/manifest.json"
+raw_log="$queue_dir/codex.raw.log"
+stdout_log="$log_dir/$role.stdout.log"
+stderr_log="$log_dir/$role.stderr.log"
+run_stdout="$queue_dir/codex.stdout.log"
+run_stderr="$queue_dir/codex.stderr.log"
+
+git worktree add --detach "$worktree_dir" "$base_commit" >/dev/null
+
+if [[ -f "$target_abs/scripts/update_automation_signals.py" && -f "$target_abs/docs/AUTOMATION_SIGNALS.md" ]]; then
+  python3 "$target_abs/scripts/update_automation_signals.py" "$target_abs" --refresh --role "$role" --summary || true
+  if [[ -f "$target_abs/target/automation_signals.json" ]]; then
+    mkdir -p "$worktree_dir/target"
+    cp "$target_abs/target/automation_signals.json" "$worktree_dir/target/automation_signals.json"
+  fi
+fi
+
+set +e
+codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" -C "$worktree_dir" "$(cat "$prompt_path")" >"$run_stdout" 2>"$run_stderr"
+codex_status=$?
+set -e
+critical_stop_detected=0
+detect_critical_stop() {
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+try:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+except OSError:
+    raise SystemExit(1)
+
+seen = 0
+for raw in lines:
+    line = raw.strip()
+    if not line:
+        continue
+    cleaned = line.lstrip("#>*- `\t_").strip("*_` ")
+    if re.match(r"^CRITICAL_STOP(?:\b|[^\w])", cleaned):
+        raise SystemExit(0)
+    seen += 1
+    if seen >= 20:
+        break
+raise SystemExit(1)
+PY
+}
+if detect_critical_stop "$run_stdout" || detect_critical_stop "$run_stderr"; then
+  critical_stop_detected=1
+  if [[ "$codex_status" == "0" ]]; then
+    codex_status=90
+  fi
+fi
+
+if [[ -f "$target_abs/scripts/update_automation_signals.py" && -f "$worktree_dir/target/automation_signals.json" ]]; then
+  python3 "$target_abs/scripts/update_automation_signals.py" "$target_abs" --merge-state "$worktree_dir/target/automation_signals.json" --refresh --role "$role" --summary || true
+fi
+
+{
+  printf '\n=== %s role run %s started from %s ===\n' "$role" "$run_id" "$base_commit"
+  cat "$run_stdout"
+  if [[ "$critical_stop_detected" == "1" ]]; then
+    printf '\n=== %s role run %s detected CRITICAL_STOP; status=%s ===\n' "$role" "$run_id" "$codex_status"
+  fi
+  printf '\n=== %s role run %s exit=%s ===\n' "$role" "$run_id" "$codex_status"
+} >>"$stdout_log"
+{
+  printf '\n=== %s role run %s started from %s ===\n' "$role" "$run_id" "$base_commit"
+  cat "$run_stderr"
+  if [[ "$critical_stop_detected" == "1" ]]; then
+    printf '\n=== %s role run %s detected CRITICAL_STOP; status=%s ===\n' "$role" "$run_id" "$codex_status"
+  fi
+  printf '\n=== %s role run %s exit=%s ===\n' "$role" "$run_id" "$codex_status"
+} >>"$stderr_log"
+{
+  cat "$run_stdout"
+  cat "$run_stderr"
+} >"$raw_log"
+
+(
+  cd "$worktree_dir"
+  git ls-files --others --exclude-standard -z >"$queue_dir/untracked_files.z"
+  if [[ -s "$queue_dir/untracked_files.z" ]]; then
+    xargs -0 git add -N -- <"$queue_dir/untracked_files.z"
+  fi
+  git diff --binary "$base_commit" >"$patch_path"
+  git diff --name-only "$base_commit" >"$queue_dir/changed_files.txt"
+)
+
+if [[ ! -s "$summary_path" ]]; then
+  {
+    printf '# %s role run %s\n\n' "$role" "$run_id"
+    printf -- '- base_commit: %s\n' "$base_commit"
+    printf -- '- codex_exit_code: %s\n' "$codex_status"
+    printf -- '- patch: %s\n\n' "$patch_path"
+    printf 'Review `%s` for raw Codex output.\n' "$raw_log"
+  } >"$summary_path"
+fi
+
+python3 - "$manifest_path" "$role" "$run_id" "$base_commit" "$patch_path" "$summary_path" "$codex_status" "$queue_dir/changed_files.txt" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+role = sys.argv[2]
+run_id = sys.argv[3]
+base_commit = sys.argv[4]
+patch_path = Path(sys.argv[5])
+summary_path = Path(sys.argv[6])
+exit_code = int(sys.argv[7])
+changed_files_path = Path(sys.argv[8])
+changed_files = [
+    line.strip()
+    for line in changed_files_path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+] if changed_files_path.exists() else []
+summary = summary_path.read_text(encoding="utf-8", errors="replace")[:2000] if summary_path.exists() else ""
+manifest = {
+    "role": role,
+    "run_id": run_id,
+    "base_commit": base_commit,
+    "head_before_integration": None,
+    "status": "queued" if exit_code == 0 else "failed",
+    "deferral_reason": None,
+    "deferral_detail": "",
+    "patch_path": str(patch_path),
+    "changed_files": changed_files,
+    "checks_run": [],
+    "summary": summary,
+    "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    "integrated_at": None,
+    "checkpoint_commit": None,
+    "accepted_commit": None,
+}
+manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+printf 'ROLE_RUN role=%s run_id=%s status=%s manifest=%s\n' "$role" "$run_id" "$([[ "$codex_status" == "0" ]] && echo queued || echo failed)" "$manifest_path"
+exit "$codex_status"

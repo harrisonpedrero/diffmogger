@@ -53,10 +53,13 @@ It collects the same project intake fields supported by `schemas/project_intake.
 - additional context files
 - verification commands
 - cadence in whole minutes greater than 30
+- scheduling strategy: periodic sprint, fixed multi-role cadence, or continuous conveyor
 - whether the human bridge is enabled
 - human bridge mode
 - whether freeform human requests should receive SMS/WhatsApp responses when the notifier is available
-- worker-agent settings
+- worker-agent settings, including optional bounded write workers disabled by default
+- optional recurring local automation signals, disabled by default
+- advanced multi-role automation settings, disabled by default, including a local-only remote opt-in for repos that already have git remotes configured
 - meaningful deliverable
 - beyond-MVP direction
 - assumptions
@@ -125,7 +128,9 @@ After the scaffold/bootstrap pipeline completes and the target has the required 
 Start Scheduled Automation
 ```
 
-That button writes a macOS LaunchAgent plist under `~/Library/LaunchAgents/`, loads it with `launchctl`, and points it at the target project's own local wrapper:
+That button writes macOS LaunchAgent plist(s) under `~/Library/LaunchAgents/`, loads them with `launchctl`, and points them at the target project's own local wrappers.
+
+For periodic sprint mode, the job points at:
 
 ```bash
 bash scripts/run_codex_automation.sh
@@ -136,6 +141,29 @@ The launchd job uses the dashboard's **Automation Cadence Minutes** control as i
 ```text
 target/automation_logs/
 ```
+
+If the intake enables multi-role automation and the strategy is **Fixed multi-role cadence**, the same button writes one LaunchAgent per role instead of the single-lane job. The jobs point at:
+
+```bash
+bash scripts/run_role_automation.sh --role planner
+bash scripts/run_role_automation.sh --role builder
+bash scripts/run_role_automation.sh --role hardener
+bash scripts/run_role_automation.sh --role integrator
+```
+
+The fixed multi-role schedule uses `StartCalendarInterval`: planner at `:00`, builder at `:10` and `:40`, hardener at `:20` and `:50`, and integrator at `:25` and `:55`. The dashboard requires the target to be an initialized git repo before starting this schedule.
+
+If the strategy is **Continuous conveyor**, the dashboard writes one LaunchAgent that points at:
+
+```bash
+bash scripts/run_conveyor_automation.sh
+```
+
+The conveyor sets `RunAtLoad`, keeps running locally, and chooses the next runnable lane instead of using exact role times. It prioritizes queued integration, due planning, hardening after integration, and builder momentum. Conveyor state stays in `target/automation_conveyor_state.json`; its duplicate-dispatcher lock is `target/automation_conveyor.lock`.
+
+For multi-role jobs in repos with configured git remotes, the dashboard blocks scheduling unless the advanced **Allow local-only multi-role automation when this repo has git remotes** option is checked. When checked, LaunchAgents receive `MULTI_ROLE_ALLOW_REMOTES=1`; scripts still refuse pushes, fetches, pulls, remote configuration, and remote-touching git commands.
+
+Pause and remove controls manage all dashboard-owned jobs for that target: periodic, fixed-role, and conveyor.
 
 Use:
 

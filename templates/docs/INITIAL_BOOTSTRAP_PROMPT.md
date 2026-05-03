@@ -52,6 +52,18 @@ Desired first demo: {{DESIRED_FIRST_DEMO}}
 
 {{HUMAN_BOOTSTRAP_SECTION}}
 
+## Worker Agents
+
+{{WORKER_BOOTSTRAP_SECTION}}
+
+## Multi-Role Automation
+
+{{MULTI_ROLE_BOOTSTRAP_SECTION}}
+
+## Automation Signals
+
+{{AUTOMATION_SIGNALS_BOOTSTRAP_SECTION}}
+
 ## Build Requirements
 
 Create an initial local-first baseline with:

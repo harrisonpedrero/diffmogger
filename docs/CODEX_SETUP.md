@@ -73,6 +73,8 @@ python3 scripts/summarize_worker_outputs.py . --run-id "$CODEX_RUN_ID"
 
 If `command -v codex` fails, record `Codex CLI worker decision: UNAVAILABLE` in the task file and continue without blocking the sprint.
 
+Read-only worker reports are the default. Generated projects may enable bounded write workers through intake config, but only for large planned changes with disjoint ownership and main-agent integration.
+
 ## Automations
 
 Codex Automations run recurring tasks on a schedule. Good automation instructions are specific, repeatable, and easy to review. Local automations work best when the machine is awake and Codex is running.

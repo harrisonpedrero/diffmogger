@@ -30,7 +30,8 @@ Diffmogger splits recurring agent work into stable instructions and mutable stat
 - Dynamic task file: current state, checks, blockers, pending human requests, and next sprint.
 - Verification: tests, builds, demos, screenshots, reports, or an honest note about what could not run.
 - Lock files: reduce overlapping scheduled mutations of the same checkout.
-- Worker helpers: bounded reports by default, integrated by the main agent.
+- Worker helpers: bounded reports by default, optional bounded write workers only when explicitly enabled, integrated by the main agent.
+- Multi-role mode: optional local-only planner, builder, hardener, and integrator schedules with isolated worktrees and FIFO patch integration.
 - Human bridge: manual Markdown queues first, optional local notifier later.
 
 The operating model is:
@@ -76,6 +77,8 @@ The design choices that matter are:
 
 - Markdown-first state is the shared substrate: stable behavior is separated from mutable state, so the recurring prompt stays durable while `docs/CODEX_AUTOMATION_TASKS.md` carries current blockers, checks, human requests, horizon state, and the next sprint.
 - The run lifecycle is explicit: acquire a lock, read state, choose a sprint-sized milestone, decide whether workers are useful, implement, verify, update artifacts, rewrite state, and leave a clear continuation point.
+- Worker parallelism is bounded: read-only worker reports are the default, while write-capable workers require explicit intake opt-in, disjoint ownership, contract-first planning, and main-agent integration.
+- Multi-role automation is opt-in and local-only: role work happens in isolated git worktrees, the integrator owns the main checkout, and no generated role may push, fetch, pull, or configure remotes.
 - Decoupled human bridge behavior is asynchronous and operationalized. File-only queues work without credentials, while the optional notifier keeps SMS/WhatsApp credentials in a separate service and forces delivery failures to be recorded instead of hand-waved.
 - Explicit failure modes are part of the contract. `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP` let the automation keep working around partial blockers while still making hard stops visible.
 - Marker-enforced contracts keep the scaffold honest by checking load-bearing prompt, template, schema, and documentation expectations during local validation.
@@ -120,7 +123,12 @@ These are observations from private repositories that ran on Diffmogger. They ar
 - scaffold script
 - lock scripts: `scripts/acquire_codex_lock.sh`, `scripts/release_codex_lock.sh`
 - scheduled-run wrapper template: `scripts/run_codex_automation.sh`
+- continuous conveyor wrapper: `scripts/run_conveyor_automation.sh`, `scripts/run_conveyor_automation.py`
+- optional automation signal helper: `scripts/update_automation_signals.py`
 - worker helper scripts: `scripts/spawn_worker_agent.sh`, `scripts/summarize_worker_outputs.py`
+- optional multi-role prompts: `.agentic/roles/planner.md`, `builder.md`, `hardener.md`, `integrator.md`
+- optional multi-role scripts: `scripts/run_role_automation.sh`, `scripts/integrate_role_outputs.py`, `scripts/list_deferred_patches.py`
+- optional progress ledger: `docs/MULTI_ROLE_PROGRESS.md`
 - state compaction script: `scripts/compact_agent_state.py`
 - bundled local notifier service in `services/agentic-notifier/`
 - standalone dashboard in `services/agentic-dashboard/`
@@ -157,7 +165,7 @@ In the dashboard:
 4. Choose the target project directory.
 5. Click **Scaffold & Bootstrap**.
 
-The generated target includes local runtime scripts under `target/scripts/`. After the first bootstrap produces a runnable baseline, use the target repo's own `scripts/run_codex_automation.sh` for recurring Codex automation.
+The generated target includes local runtime scripts under `scripts/`. After the first bootstrap produces a runnable baseline, use the target repo's own `scripts/run_codex_automation.sh` for recurring Codex automation.
 
 For the manual CLI path, see `docs/FRESH_PROJECT_SETUP.md`.
 
@@ -174,6 +182,9 @@ It supports:
 - a configuration wizard backed by `schemas/project_intake.schema.json`
 - fresh-project and existing-project modes
 - the full project intake, including constraints, safety rules, automation prohibitions, human bridge choices, worker-agent settings, deliverable definition, and beyond-MVP direction
+- optional bounded write-worker settings with a capped count and guidance text
+- optional automation signals for recurring local review nudges
+- optional multi-role automation mode with fixed role-specific launchd jobs, continuous conveyor scheduling, and local-only git guards
 - optional context-file import into target `docs/context/`
 - generated `docs/PROJECT_CONTEXT.md`
 - a single `Scaffold & Bootstrap` pipeline
@@ -196,6 +207,7 @@ bash scripts/validate_starter_kit.sh
 ```
 
 Validation is intentionally marker- and smoke-test based. It checks that load-bearing files, markers, schemas, scaffold paths, and notifier tests are present and runnable. It does not prove semantic correctness, production safety, or that a generated automation will make good decisions.
+It also exercises the optional multi-role scaffold path, integrator remote guards, lock refusal, stale-patch deferral classification, and a small local integration smoke target.
 
 Run a scaffold smoke test:
 
@@ -229,6 +241,18 @@ Worker agents are bounded helpers. The main agent remains the integrator.
 
 Use workers for independent review, architecture checks, test-gap analysis, risk review, product polish review, or isolated prototypes. Prefer read-only reports first.
 
+Write-capable workers are disabled unless a generated target intake explicitly enables:
+
+```json
+{
+  "write_worker_agents_allowed": true,
+  "max_write_worker_count": 4,
+  "write_worker_guidance": "Use write workers only for large planned changes with disjoint ownership."
+}
+```
+
+The scaffold caps write workers at 10, and generated prompts still recommend fewer workers when fewer are enough. The main agent must choose a worker strategy each run, define ownership/contracts before spawning write workers, review worker diffs, integrate, verify, and update task state. Integration-only runs with no workers are valid.
+
 Outputs go under:
 
 ```text
@@ -251,11 +275,54 @@ python3 scripts/summarize_worker_outputs.py ../my-project --run-id "$CODEX_RUN_I
 
 The helpers use `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` for nested child workers, avoid network, tell workers not to spawn more workers, and fail gracefully if the Codex CLI is unavailable. Generated scheduled wrappers also grant the parent run access to `$HOME/.codex` so nested Codex CLI workers can authenticate and start inside the parent sandbox. The scary-looking bypass is for the nested child only; the scheduled parent remains the outer sandbox boundary. These helpers are optional convenience scripts, not mandatory magic.
 
+When write workers are enabled in a target, the helper requires explicit write mode and an ownership scope:
+
+```bash
+bash scripts/spawn_worker_agent.sh \
+  --mode write \
+  --target ../my-project \
+  --run-id "$CODEX_RUN_ID" \
+  --role feature_a \
+  --ownership "src/feature-a/** and tests/feature-a/** only" \
+  --prompt "Implement the assigned slice and report changed files/checks."
+```
+
 Codex CLI must be available for `codex exec` helpers:
 
 ```bash
 command -v codex
 ```
+
+## Multi-Role Automation
+
+Multi-role automation is an advanced, opt-in mode for target projects that need more throughput than one scheduled lane. The default remains the single-lane `scripts/run_codex_automation.sh` schedule.
+
+Enable it in intake:
+
+```json
+{
+  "multi_role_automations_allowed": true,
+  "automation_role_profile": "planner_builder_hardener_integrator",
+  "automation_checkpoint_commits": true,
+  "multi_role_base_cadence_minutes": 30,
+  "automation_schedule_strategy": "continuous_conveyor",
+  "multi_role_allow_remotes": false,
+  "automation_signals_enabled": true
+}
+```
+
+Generated targets then receive role prompts under `.agentic/roles/`, helper scripts under `scripts/`, and `docs/MULTI_ROLE_PROGRESS.md`. The dashboard can write four fixed launchd jobs:
+
+- planner: hourly at `:00`
+- builder: `:10` and `:40`
+- hardener: `:20` and `:50`
+- integrator: `:25` and `:55`
+
+Planner, builder, and hardener start from the latest main `HEAD` in isolated worktrees and queue patches. The integrator owns the main checkout, checkpoints dirty local changes as automation-authored local commits, runs `git apply --check`, batches verification, falls back to individual verification on failure, commits accepted patches locally, and updates task/progress docs.
+
+Alternatively, continuous conveyor scheduling writes one LaunchAgent that runs `scripts/run_conveyor_automation.sh`, records state under `target/automation_conveyor_state.json`, and chooses the next runnable lane as soon as the previous lane exits.
+
+Multi-role mode is local-only. Role prompts and scripts prohibit pushes, fetches, pulls, remote configuration, upstream tracking, and remote-affecting git commands. Scripts refuse to run with configured remotes unless `MULTI_ROLE_ALLOW_REMOTES=1` is set, and the integrator refuses executable git hooks containing `git push`.
 
 ## Human Bridge
 
@@ -351,16 +418,18 @@ It supports:
 - `docs/HUMAN_OUTBOX.md`
 - `docs/HUMAN_RESPONSES_ARCHIVE.md`
 - `docs/CODEX_AUTOMATION_TASKS.md`
+- `docs/MULTI_ROLE_PROGRESS.md`
 - `docs/AUTONOMY_EXPERIMENT_LOG.md`
 - `docs/DAILY_AUTOMATION_REVIEW.md`
 
-The script preserves unresolved human requests, keeps recent useful state, and archives concise rollups instead of silently deleting active data. Review the diff after compaction.
+The script preserves unresolved human requests and deferred multi-role manifests, keeps recent useful state, summarizes transient multi-role artifacts before cleanup, and archives concise rollups instead of silently deleting active data. Review the diff after compaction.
 
 ## Safety Defaults
 
 - no secrets in prompts, task files, inboxes, or examples
 - target automations should not read `.env`
 - no spending, public publishing, deployment, messaging real users, or external side effects without approval
+- multi-role automation is local-only by default and must not push, fetch, pull, configure remotes, or set upstream tracking
 - integrations mocked, optional, or dry-run by default
 - human bridge credentials stay in the notifier service, not product repos
 - review diffs before trusting autonomous changes

@@ -40,6 +40,34 @@ Use `human_bridge_mode: file_only` when you want manual Markdown communication. 
 
 Use `project_mode: existing_project` when scaffolding into a repo that already has app code, docs, or project-specific instructions.
 
+Write-capable worker agents are disabled unless the intake explicitly enables them. CLI intakes can use:
+
+```json
+{
+  "write_worker_agents_allowed": true,
+  "max_write_worker_count": 4,
+  "write_worker_guidance": "Use write workers only for large planned changes with disjoint ownership."
+}
+```
+
+The scaffold caps `max_write_worker_count` at 10. Read-only worker reports remain available separately through `worker_agents_allowed`.
+
+Multi-role automation is also disabled unless explicitly enabled. CLI intakes can use:
+
+```json
+{
+  "multi_role_automations_allowed": true,
+  "automation_role_profile": "planner_builder_hardener_integrator",
+  "automation_checkpoint_commits": true,
+  "multi_role_base_cadence_minutes": 30,
+  "automation_schedule_strategy": "continuous_conveyor",
+  "multi_role_allow_remotes": false,
+  "automation_signals_enabled": true
+}
+```
+
+Multi-role mode requires the target to be an initialized git repo with an initial commit before scheduling starts.
+
 ## 2. Validate The Scaffold
 
 ```bash
@@ -54,12 +82,25 @@ Generated target repos include local runtime helpers:
 scripts/acquire_codex_lock.sh
 scripts/release_codex_lock.sh
 scripts/run_codex_automation.sh
+scripts/run_conveyor_automation.py
+scripts/run_conveyor_automation.sh
+scripts/update_automation_signals.py
 scripts/spawn_worker_agent.sh
 scripts/summarize_worker_outputs.py
 scripts/compact_agent_state.py
 ```
 
+When multi-role mode is enabled, generated targets also include:
+
+```text
+scripts/run_role_automation.sh
+scripts/integrate_role_outputs.py
+scripts/list_deferred_patches.py
+```
+
 Scheduled target-project runs should use those local scripts, not scripts from the Diffmogger starter repo.
+
+When `automation_signals_enabled` is true, generated targets also include `docs/AUTOMATION_SIGNALS.md`. Runtime signal state is local and ignored under `target/automation_signals.json`.
 
 ## 3. Bootstrap The Product
 
@@ -73,12 +114,31 @@ Review the first run closely. Confirm the app or workflow is runnable and that `
 
 ## 4. Schedule Recurring Runs
 
-Recommended path: use the dashboard's **Start Scheduled Automation** button after bootstrap completes. It writes, enables, and loads a macOS LaunchAgent for the selected target project, using the **Automation Cadence Minutes** value as the launchd interval. The dashboard accepts only whole-minute cadences greater than 30. Use **Pause Scheduled Automation** to unload and disable the job, stopping future scheduled runs across login/reboot.
+Recommended path: use the dashboard's **Start Scheduled Automation** button after bootstrap completes. In periodic sprint mode it writes, enables, and loads one macOS LaunchAgent for the selected target project, using the **Automation Cadence Minutes** value as the launchd interval. The dashboard accepts only whole-minute cadences greater than 30. Use **Pause Scheduled Automation** to unload and disable the job, stopping future scheduled runs across login/reboot.
+
+If multi-role mode is enabled, the dashboard writes four role-specific LaunchAgents instead:
+
+- planner: minute `0`
+- builder: minutes `10` and `40`
+- hardener: minutes `20` and `50`
+- integrator: minutes `25` and `55`
+
+Pause and remove controls apply to the whole role group.
+
+If the scheduling strategy is continuous conveyor, the dashboard writes one LaunchAgent that runs:
+
+```bash
+bash scripts/run_conveyor_automation.sh
+```
+
+The conveyor keeps running locally, chooses the next runnable lane from current state, and records state in `target/automation_conveyor_state.json`. It falls back to `scripts/run_codex_automation.sh` when multi-role files are absent.
 
 The target wrapper can still be run manually for debugging:
 
 ```bash
 bash scripts/run_codex_automation.sh
+bash scripts/run_conveyor_automation.sh --dry-run
+bash scripts/run_conveyor_automation.sh --once
 ```
 
 The generated wrapper runs the parent automation with:
@@ -95,11 +155,24 @@ For manual macOS `launchd` setup, point the LaunchAgent at the target repo's wra
 /absolute/path/to/target-project/scripts/run_codex_automation.sh
 ```
 
+For a manual multi-role run, use:
+
+```bash
+bash scripts/run_role_automation.sh --role planner
+bash scripts/run_role_automation.sh --role builder
+bash scripts/run_role_automation.sh --role hardener
+bash scripts/run_role_automation.sh --role integrator
+```
+
 Write logs under:
 
 ```text
 target/automation_logs/stdout.log
 target/automation_logs/stderr.log
+target/automation_logs/conveyor.stdout.log
+target/automation_logs/conveyor.stderr.log
+target/automation_logs/<role>.stdout.log
+target/automation_logs/<role>.stderr.log
 ```
 
 If the repo lives under `~/Documents`, macOS privacy controls may block `launchd` jobs until `/bin/bash` and the Node executable used by Codex have Full Disk Access. A repo under `~/Developer` usually avoids that friction.
@@ -128,3 +201,17 @@ codex exec --disable plugins \
 ```
 
 The parent scheduled wrapper must also allow `$HOME/.codex` with `--add-dir`. `--ephemeral` reduces child session persistence, but the nested CLI may still touch Codex state and shell snapshot files during startup.
+
+Read-only worker reports are the default. When write workers are explicitly enabled in the intake, generated prompts allow bounded write mode for large planned changes:
+
+```bash
+bash scripts/spawn_worker_agent.sh \
+  --mode write \
+  --target . \
+  --run-id "$CODEX_RUN_ID" \
+  --role feature_a \
+  --ownership "src/feature-a/** and tests/feature-a/** only" \
+  --prompt "Implement the assigned slice and report changed files/checks."
+```
+
+The main automation agent still owns planning, disjoint ownership, contract definitions, integration, conflict resolution, verification, and final task-state updates. Integration-only runs with no workers are valid.

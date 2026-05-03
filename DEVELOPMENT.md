@@ -201,6 +201,8 @@ Use workers for bounded tasks that benefit from parallel review or exploration:
 - risk review
 - isolated implementation prototype
 
+Write-capable workers are optional and disabled in generated projects unless the intake explicitly enables them. Keep read-only reports as the default; use write workers only with disjoint ownership, a contract-first plan, and main-agent integration.
+
 Default output:
 
 ```text

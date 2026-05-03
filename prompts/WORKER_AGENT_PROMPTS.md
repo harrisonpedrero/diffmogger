@@ -6,6 +6,7 @@ Each automation run should record:
 
 ```text
 Codex CLI worker decision: USE / SKIP / UNAVAILABLE
+Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS
 Reason: <one sentence>
 ```
 
@@ -34,6 +35,14 @@ python3 scripts/summarize_worker_outputs.py /absolute/path/to/target-project --r
 
 These helpers default to read-only worker-report mode, avoid network, tell workers not to spawn more workers, and fail gracefully when `codex` is unavailable.
 
+When generated project intake explicitly enables write-capable workers, use explicit write mode and ownership:
+
+```bash
+bash scripts/spawn_worker_agent.sh --mode write --target /absolute/path/to/target-project --run-id "$CODEX_RUN_ID" --role feature_a --ownership "src/feature-a/** and tests/feature-a/** only" --prompt "Implement the assigned slice and write changed files/checks to the report."
+```
+
+Write workers are optional and only for large, well-planned changes. Use fewer than the configured maximum when fewer are enough. The main agent must define ownership, contracts, verification, and integration strategy before spawning them.
+
 Default Codex CLI shape:
 
 ```bash
@@ -50,6 +59,8 @@ codex exec --disable plugins \
 Use this bypass shape only for nested Codex CLI workers launched from inside a scheduled parent automation run. The parent scheduled wrapper should run the main automation with `--add-dir "$HOME/.codex"` so the nested `codex` process can authenticate and start inside the parent sandbox.
 
 Worker prompts should say: do not use network, do not spawn workers, do not send SMS/WhatsApp messages, do not touch `.env` or credentials, and stop after writing the assigned output.
+
+Write-worker prompts must also say: you are not alone in the codebase, modify only assigned files/modules, do not revert unrelated edits or changes made by others, list changed files and checks run, and leave integration to the main agent.
 
 ## Architecture Review Worker
 
@@ -144,4 +155,25 @@ Implement the assigned prototype, run the relevant checks you can, and write a r
 - what the main agent should do next
 
 Stop after the bounded prototype. The main agent owns integration.
+```
+
+## Bounded Write Worker
+
+```text
+You are a bounded write-capable worker.
+
+You are not alone in the codebase. Other agents or humans may be editing nearby files. Modify only this ownership scope: <files/modules>. Use the already-defined contract: <interface/data shape/command boundary>.
+
+Do not touch unrelated files. Do not revert unrelated edits or changes made by others. Do not use network unless explicitly approved. Do not spawn workers. Do not send SMS/WhatsApp messages. Do not touch `.env` or credentials. Do not run destructive cleanup.
+
+Implement the assigned slice, run the relevant checks you can, and write a report to target/agent_runs/<run_id>/worker_<role>.md with:
+- assignment
+- ownership scope
+- files changed
+- checks run
+- integration notes
+- risks
+- follow-up needed
+
+Stop after the bounded assignment. The main agent reviews, integrates, verifies, resolves conflicts, and updates task state.
 ```

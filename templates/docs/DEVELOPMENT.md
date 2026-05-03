@@ -56,6 +56,15 @@ bash scripts/run_codex_automation.sh
 
 The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto --skip-git-repo-check`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock when the run exits.
 
+Optional continuous conveyor scheduling uses:
+
+```bash
+bash scripts/run_conveyor_automation.sh --dry-run
+bash scripts/run_conveyor_automation.sh --once
+```
+
+The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers.
+
 ## Human Bridge
 
 {{HUMAN_DEVELOPMENT_SECTION}}
@@ -63,6 +72,8 @@ The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `
 ## Worker Agents
 
 Worker agents allowed: {{WORKER_AGENTS_ALLOWED}}
+
+{{WRITE_WORKER_DEVELOPMENT_SECTION}}
 
 Use read-only worker reports first and record outputs under `target/agent_runs/<run_id>/`.
 
@@ -79,6 +90,14 @@ Every automation run should record:
 Codex CLI worker decision: USE / SKIP / UNAVAILABLE
 Reason: <one sentence>
 ```
+
+## Multi-Role Automation
+
+{{MULTI_ROLE_DEVELOPMENT_SECTION}}
+
+## Automation Signals
+
+{{AUTOMATION_SIGNALS_DEVELOPMENT_SECTION}}
 
 ## State Compaction
 

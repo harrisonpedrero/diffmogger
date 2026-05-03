@@ -19,6 +19,9 @@ docs/DAILY_AUTOMATION_REVIEW.md
 scripts/acquire_codex_lock.sh
 scripts/release_codex_lock.sh
 scripts/run_codex_automation.sh
+scripts/run_conveyor_automation.py
+scripts/run_conveyor_automation.sh
+scripts/update_automation_signals.py
 scripts/spawn_worker_agent.sh
 scripts/summarize_worker_outputs.py
 scripts/compact_agent_state.py

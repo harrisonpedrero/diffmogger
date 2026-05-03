@@ -22,7 +22,10 @@ on a new project and review the diff after compaction.
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,9 +59,13 @@ STATE_FILES = [
     "docs/HUMAN_OUTBOX.md",
     "docs/HUMAN_RESPONSES_ARCHIVE.md",
     "docs/CODEX_AUTOMATION_TASKS.md",
+    "docs/MULTI_ROLE_PROGRESS.md",
     "docs/AUTONOMY_EXPERIMENT_LOG.md",
     "docs/DAILY_AUTOMATION_REVIEW.md",
 ]
+
+MULTI_ROLE_ROLES = ("planner", "builder", "hardener")
+MULTI_ROLE_PROGRESS_SOFT_FLOOR_BYTES = 20_000
 
 
 @dataclass(frozen=True)
@@ -280,6 +287,200 @@ def compact_task_file(path: Path, *, max_section_lines: int) -> str | None:
     return write_entries(path, header, compacted)
 
 
+def split_h3_entries(text: str) -> tuple[str, list[Entry]]:
+    matches = list(re.finditer(r"^###\s+.+$", text, re.MULTILINE))
+    if not matches:
+        return text.rstrip(), []
+    header = text[: matches[0].start()].rstrip()
+    entries: list[Entry] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        block = text[match.start() : end].rstrip()
+        lines = block.splitlines()
+        entries.append(Entry(heading=lines[0].strip(), body="\n".join(lines[1:]).strip()))
+    return header, entries
+
+
+def compact_multi_role_progress(
+    path: Path,
+    *,
+    keep_latest: int,
+    soft_floor_bytes: int,
+) -> str | None:
+    if not path.exists() or path.stat().st_size < soft_floor_bytes:
+        return None
+    original = path.read_text(encoding="utf-8")
+    header, sections = split_sections(original)
+    by_heading = {section.heading.replace("##", "", 1).strip(): section for section in sections}
+    recent = by_heading.get("Recent Activity Log")
+    historical = by_heading.get("Historical Summary")
+    if recent is None or historical is None:
+        return None
+    recent_header, entries = split_h3_entries(recent.body)
+    if len(entries) <= keep_latest:
+        return None
+    older = entries[: -keep_latest]
+    kept = entries[-keep_latest:]
+    range_start = older[0].heading.replace("###", "", 1).strip()
+    range_end = older[-1].heading.replace("###", "", 1).strip()
+    rollup = Entry(
+        heading=f"### COMPACTION-{now_id()} Multi-Role Recent Activity",
+        body="\n".join(
+            [
+                "- status: compacted",
+                f"- entries_summarized: {len(older)}",
+                f"- time_range: {range_start} to {range_end}",
+                "",
+                "#### Summaries",
+                "",
+                *[entry_summary(path, entry) for entry in older],
+            ]
+        ),
+    )
+    recent.body = ("\n\n".join([recent_header, *[entry.text.rstrip() for entry in kept]]).strip() or "- No recent activity.")
+    historical.body = (historical.body.rstrip() + "\n\n" + rollup.text.rstrip()).strip()
+    return write_entries(path, header, sections)
+
+
+def read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def append_multi_role_history(progress_path: Path, summaries: list[str], *, dry_run: bool) -> None:
+    if not summaries:
+        return
+    if progress_path.exists():
+        text = progress_path.read_text(encoding="utf-8")
+    else:
+        text = "# Multi-Role Progress\n\nDurable progress record for optional multi-role automation.\n\n## Historical Summary\n\n- No compacted multi-role history yet.\n"
+    header, sections = split_sections(text)
+    found = False
+    for section in sections:
+        label = section.heading.replace("##", "", 1).strip()
+        if label == "Historical Summary":
+            found = True
+            section.body = (
+                section.body.rstrip()
+                + "\n\n"
+                + f"### COMPACTION-{now_id()} Multi-Role Artifacts\n\n"
+                + "- status: compacted\n"
+                + f"- summaries_recorded: {len(summaries)}\n\n"
+                + "#### Summaries\n\n"
+                + "\n".join(summaries)
+            ).strip()
+            break
+    if not found:
+        sections.append(
+            Entry(
+                heading="## Historical Summary",
+                body="\n".join(
+                    [
+                        f"### COMPACTION-{now_id()} Multi-Role Artifacts",
+                        "",
+                        "- status: compacted",
+                        f"- summaries_recorded: {len(summaries)}",
+                        "",
+                        "#### Summaries",
+                        "",
+                        *summaries,
+                    ]
+                ),
+            )
+        )
+    if not dry_run:
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        progress_path.write_text(write_entries(progress_path, header, sections), encoding="utf-8")
+
+
+def compact_multi_role_artifacts(target: Path, *, dry_run: bool) -> list[str]:
+    now = datetime.now(timezone.utc).timestamp()
+    seven_days = 7 * 24 * 60 * 60
+    thirty_days = 30 * 24 * 60 * 60
+    queue_root = target / "target" / "automation_queue"
+    worktree_root = target / "target" / "automation_worktrees"
+    summaries: list[str] = []
+
+    for role in MULTI_ROLE_ROLES:
+        role_root = queue_root / role
+        if not role_root.exists():
+            continue
+        run_dirs = [path for path in role_root.iterdir() if path.is_dir()]
+        indexed: list[tuple[Path, dict, float]] = []
+        for run_dir in run_dirs:
+            indexed.append((run_dir, read_json(run_dir / "manifest.json"), run_dir.stat().st_mtime))
+        successful = [item for item in indexed if item[1].get("status") == "applied"]
+        successful.sort(key=lambda item: item[2], reverse=True)
+        keep_success = {item[0].name for item in successful[:5]}
+        keep_run_ids = set(keep_success)
+        deleted = 0
+        preserved_deferred = 0
+        for run_dir, manifest, mtime in indexed:
+            status = manifest.get("status")
+            recent = now - mtime < seven_days
+            if status == "deferred":
+                preserved_deferred += 1
+                keep_run_ids.add(run_dir.name)
+                continue
+            if recent or status == "queued" or run_dir.name in keep_success:
+                keep_run_ids.add(run_dir.name)
+                continue
+            summary = f"- {role} `{run_dir.name}` status={status or 'unknown'} summarized before artifact cleanup."
+            summaries.append(summary)
+            if not dry_run:
+                shutil.rmtree(run_dir)
+            deleted += 1
+        if deleted or preserved_deferred:
+            summaries.append(
+                f"- {role}: deleted {deleted} transient run dirs; preserved {preserved_deferred} deferred run dirs."
+            )
+
+        wt_role_root = worktree_root / role
+        if not wt_role_root.exists():
+            continue
+        deleted_worktrees = 0
+        for worktree in wt_role_root.iterdir():
+            if not worktree.is_dir():
+                continue
+            recent = now - worktree.stat().st_mtime < seven_days
+            if recent or worktree.name in keep_run_ids:
+                continue
+            if not dry_run:
+                result = subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(worktree)],
+                    cwd=target,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode != 0 and worktree.exists():
+                    shutil.rmtree(worktree)
+            deleted_worktrees += 1
+        if deleted_worktrees:
+            summaries.append(f"- {role}: deleted {deleted_worktrees} transient worktrees.")
+
+    log_root = target / "target" / "automation_logs"
+    if log_root.exists():
+        deleted_logs = 0
+        for log_path in log_root.glob("*.log"):
+            if now - log_path.stat().st_mtime < thirty_days:
+                continue
+            summaries.append(f"- log `{log_path.relative_to(target)}` summarized before deletion.")
+            if not dry_run:
+                log_path.unlink(missing_ok=True)
+            deleted_logs += 1
+        if deleted_logs:
+            summaries.append(f"- deleted {deleted_logs} role logs older than 30 days.")
+
+    if summaries:
+        append_multi_role_history(target / "docs" / "MULTI_ROLE_PROGRESS.md", summaries, dry_run=dry_run)
+    if not dry_run and (target / ".git").exists():
+        subprocess.run(["git", "worktree", "prune"], cwd=target, capture_output=True, text=True, check=False)
+    return summaries
+
+
 def maybe_write(path: Path, new_text: str | None, *, dry_run: bool) -> bool:
     if new_text is None:
         return False
@@ -301,6 +502,12 @@ def main() -> int:
         type=int,
         default=80,
         help="Trim oversized task-file sections above this many nonblank lines",
+    )
+    parser.add_argument(
+        "--multi-role-progress-soft-floor-bytes",
+        type=int,
+        default=MULTI_ROLE_PROGRESS_SOFT_FLOOR_BYTES,
+        help="Do not compact docs/MULTI_ROLE_PROGRESS.md recent activity below this size.",
     )
     parser.add_argument(
         "--list-files",
@@ -350,6 +557,22 @@ def main() -> int:
         path = docs / rel
         if maybe_write(path, compact_log(path, keep_latest=args.keep_latest), dry_run=args.dry_run):
             changes.append(f"compacted {path.relative_to(target)}")
+
+    progress_path = docs / "MULTI_ROLE_PROGRESS.md"
+    if maybe_write(
+        progress_path,
+        compact_multi_role_progress(
+            progress_path,
+            keep_latest=args.keep_latest,
+            soft_floor_bytes=args.multi_role_progress_soft_floor_bytes,
+        ),
+        dry_run=args.dry_run,
+    ):
+        changes.append(f"compacted {progress_path.relative_to(target)} recent activity")
+
+    multi_role_summaries = compact_multi_role_artifacts(target, dry_run=args.dry_run)
+    if multi_role_summaries:
+        changes.append(f"processed multi-role transient artifacts ({len(multi_role_summaries)} summaries)")
 
     task_path = docs / "CODEX_AUTOMATION_TASKS.md"
     if maybe_write(

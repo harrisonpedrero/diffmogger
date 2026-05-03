@@ -84,6 +84,54 @@ Decision: worker helper scripts and generated prompts use `codex exec --disable 
 
 Why: nested Codex workers launched from inside a scheduled automation sandbox may touch `~/.codex/state_5.sqlite`, `~/.codex/shell_snapshots`, and `~/.codex/sessions` during startup even when the child worker uses `--ephemeral`. After startup, macOS can reject a second child workspace sandbox with `sandbox-exec: sandbox_apply: Operation not permitted`. The scheduled parent remains the outer sandbox boundary, so the nested child bypass avoids the second sandbox layer while preserving the bounded worker-report pattern.
 
+## DR-015: Write-Capable Workers Are Explicitly Opt-In And Main-Agent Integrated
+
+Decision: generated target projects support optional bounded write-capable workers only when the intake explicitly enables `write_worker_agents_allowed`, with `max_write_worker_count` capped at 10 and read-only worker reports preserved as the default.
+
+Why: high-throughput implementation can help large, planned changes, but overlapping autonomous writes are risky. The main agent must choose a strategy each run, define ownership and contracts before spawning write workers, tell workers they are not alone in the codebase, review and integrate diffs, run verification, and update task state. Integration-only runs with no workers remain valid.
+
+## DR-016: Multi-Role Worktree Orchestration Is Opt-In
+
+Decision: generated target projects may opt into `multi_role_automations_allowed` with the v1 `planner_builder_hardener_integrator` profile. Planner, builder, and hardener run in isolated local worktrees from current main `HEAD`; the integrator owns the main checkout and processes queued patches FIFO.
+
+Why: separate roles can increase useful autonomous throughput without making every target adopt that complexity. Fresh-HEAD role runs minimize stale work, while integrator-side `git apply --check` preserves correctness.
+
+## DR-017: Dirty Main Changes Become Local Checkpoint Commits
+
+Decision: when multi-role integrator runs find a dirty main checkout, they commit those pre-existing changes as-is with an automation-identifying author before applying queued role patches.
+
+Why: human changes should never stall autonomous progress. A local checkpoint commit preserves the bytes and gives the human a reset point if they prefer to restore an uncommitted working state.
+
+## DR-018: Batch Verification Falls Back To Individual Verification
+
+Decision: the integrator batch-applies queued patches that pass `git apply --check`, runs verification once, and commits accepted patches separately. If batch verification fails, it resets to the pre-batch head and verifies patches individually, deferring failures and continuing.
+
+Why: the common path should be fast, but failure attribution must stay clean enough for the planner and human to understand which patch broke verification.
+
+## DR-019: No-Push Enforcement Is Layered
+
+Decision: generated role prompts prohibit pushes, fetches, pulls, remote configuration, upstream tracking, and remote-affecting git commands as `CRITICAL_STOP` conditions. Runtime scripts also refuse configured remotes unless `MULTI_ROLE_ALLOW_REMOTES=1` is set, and the integrator refuses executable hooks containing `git push`.
+
+Why: prompts guide agent intent, while script guards catch mistakes and environment drift. Multi-role automation is local-only by default.
+
+## DR-020: Multi-Role Progress Is Durable Markdown State
+
+Decision: generated multi-role targets include `docs/MULTI_ROLE_PROGRESS.md` as the durable progress record for project state, cumulative metrics, recent activity, historical summaries, deferred backlog, architectural decisions, and role health.
+
+Why: role run directories and logs are transient. Humans and future automation need a compact weeks-long record that survives compaction.
+
+## DR-021: Planner Runs Hourly For Stable Execution
+
+Decision: the v1 multi-role schedule runs the planner hourly at minute `0`, while builder, hardener, and integrator run on staggered half-hour offsets.
+
+Why: implementation roles should execute against a stable plan through two implementation cycles, while still giving the planner regular chances to adapt to deferred work.
+
+## DR-022: Continuous Conveyor Is An Opt-In Scheduling Strategy
+
+Decision: generated targets include `scripts/run_conveyor_automation.sh` and `scripts/run_conveyor_automation.py`. Dashboard-managed schedules can use one conveyor LaunchAgent instead of exact periodic role jobs.
+
+Why: work-conserving automation should keep useful local work moving when prior lanes finish early or role timing would otherwise leave gaps. The conveyor records reviewable local state, uses its own dispatcher lock, delegates mutation to existing wrappers, and prioritizes queued integration, due planning, hardening after integration, and builder momentum.
+
 ## Source Summary From References
 
 Local playbook PDF:

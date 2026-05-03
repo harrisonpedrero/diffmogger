@@ -15,7 +15,7 @@ It opens a native desktop window using Python's standard-library Tkinter runtime
 - collects a project intake
 - splits intake into Basics, Product, Rules, Run Config, Progression, and Context steps instead of a long scroll
 - supports fresh-project and existing-project integration modes
-- covers constraints, safety rules, automation prohibitions, human bridge choices, worker settings, deliverable definition, and beyond-MVP direction
+- covers constraints, safety rules, automation prohibitions, human bridge choices, worker settings, optional bounded write-worker settings, optional automation signals, optional multi-role automation, deliverable definition, and beyond-MVP direction
 - copies optional context files into `docs/context/`
 - writes `docs/PROJECT_CONTEXT.md`
 - scaffolds Diffmogger target-project files
@@ -24,9 +24,9 @@ It opens a native desktop window using Python's standard-library Tkinter runtime
 - persists dashboard state in the selected target at `.agentic/dashboard_state.json`
 - reopens Diffmogger-managed targets through `Open Diffmogger Project`
 - enables `Start Scheduled Automation` only after the target appears bootstrapped
-- installs and loads a macOS launchd LaunchAgent that runs the target wrapper on the requested cadence
-- pauses scheduled automation by unloading and disabling that LaunchAgent
-- removes dashboard-managed schedules by deleting the target LaunchAgent plist
+- installs and loads macOS launchd jobs for periodic sprint, fixed multi-role cadence, or continuous conveyor scheduling
+- pauses scheduled automation by unloading and disabling dashboard-managed LaunchAgent jobs
+- removes dashboard-managed schedules by deleting the target LaunchAgent plist(s)
 - renders selected automation Markdown files
 - lets a human send file-only messages to the next automation run when SMS/WhatsApp is disabled or unavailable
 - displays prerequisites as readiness checks instead of raw command output
@@ -46,5 +46,7 @@ Before starting automation, the dashboard checks for:
 - Codex home availability for nested workers
 - macOS Full Disk Access advisory when the target lives under `~/Documents`
 - optional local notifier health when `local_notifier` mode is selected
+- initialized git repo before starting multi-role scheduling
+- explicit local-only remote opt-in before multi-role or conveyor scheduling in repos with configured git remotes
 
 The dashboard keeps notifier credentials out of target projects. In local-notifier mode, use `services/agentic-notifier/` for Twilio configuration.

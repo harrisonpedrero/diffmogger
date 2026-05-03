@@ -33,10 +33,16 @@ required_files=(
   "prompts/WORKER_AGENT_PROMPTS.md"
   "templates/AGENTS.md"
   "templates/.agentic/automation_prompt.md"
+  "templates/.agentic/roles/planner.md"
+  "templates/.agentic/roles/builder.md"
+  "templates/.agentic/roles/hardener.md"
+  "templates/.agentic/roles/integrator.md"
   "templates/docs/INITIAL_BOOTSTRAP_PROMPT.md"
   "templates/docs/PROJECT_CONTEXT.md"
   "templates/docs/CODEX_AUTOMATION_TASKS.md"
   "templates/docs/CODEX_AUTOMATION_GUARDRAILS.md"
+  "templates/docs/MULTI_ROLE_PROGRESS.md"
+  "templates/docs/AUTOMATION_SIGNALS.md"
   "templates/docs/AUTONOMY_EXPERIMENT_LOG.md"
   "templates/docs/DAILY_AUTOMATION_REVIEW.md"
   "templates/docs/HUMAN_REQUESTS.md"
@@ -48,6 +54,12 @@ required_files=(
   "templates/scripts/acquire_codex_lock.sh"
   "templates/scripts/release_codex_lock.sh"
   "templates/scripts/run_codex_automation.sh"
+  "templates/scripts/run_conveyor_automation.py"
+  "templates/scripts/run_conveyor_automation.sh"
+  "templates/scripts/update_automation_signals.py"
+  "templates/scripts/run_role_automation.sh"
+  "templates/scripts/integrate_role_outputs.py"
+  "templates/scripts/list_deferred_patches.py"
   "templates/scripts/spawn_worker_agent.sh"
   "templates/scripts/summarize_worker_outputs.py"
   "templates/scripts/compact_agent_state.py"
@@ -56,6 +68,7 @@ required_files=(
   "examples/trendlab-signal-intelligence/project_intake.md"
   "examples/trendlab-signal-intelligence/expected_generated_files.md"
   "schemas/project_intake.schema.json"
+  "schemas/automation_signals.schema.json"
   "schemas/human_request.schema.json"
   "schemas/human_response.schema.json"
   "schemas/automation_task_file.schema.json"
@@ -64,6 +77,12 @@ required_files=(
   "scripts/run_dashboard.py"
   "scripts/acquire_codex_lock.sh"
   "scripts/release_codex_lock.sh"
+  "scripts/run_conveyor_automation.py"
+  "scripts/run_conveyor_automation.sh"
+  "scripts/update_automation_signals.py"
+  "scripts/run_role_automation.sh"
+  "scripts/integrate_role_outputs.py"
+  "scripts/list_deferred_patches.py"
   "scripts/spawn_worker_agent.sh"
   "scripts/summarize_worker_outputs.py"
   "scripts/compact_agent_state.py"
@@ -118,6 +137,26 @@ for path in sorted(Path("schemas").glob("*.json")):
         print(f"Invalid JSON schema {path}: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
+project_schema = Path("schemas/project_intake.schema.json").read_text(encoding="utf-8")
+for marker in [
+    "write_worker_agents_allowed",
+    "max_write_worker_count",
+    "write_worker_guidance",
+    "\"maximum\": 10",
+    "multi_role_automations_allowed",
+    "automation_role_profile",
+    "planner_builder_hardener_integrator",
+    "automation_checkpoint_commits",
+    "multi_role_base_cadence_minutes",
+    "automation_schedule_strategy",
+    "continuous_conveyor",
+    "multi_role_allow_remotes",
+    "automation_signals_enabled",
+]:
+    if marker not in project_schema:
+        print(f"Project intake schema missing write-worker marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
 stale_terms = [
     "Signal" + "Forge",
     "signal" + "forge",
@@ -125,11 +164,30 @@ stale_terms = [
     "/User" + "s/",
     "parent lab work" + "space",
 ]
+
+
+def skip_stale_reference_scan(path: Path) -> bool:
+    runtime_parts = {
+        ".git",
+        ".pytest_cache",
+        ".venv",
+        "__pycache__",
+        "target",
+    }
+    if any(part in runtime_parts for part in path.parts):
+        return True
+    if path == Path(".agentic/dashboard_state.json"):
+        return True
+    if path.name == ".env" or path.name.startswith(".env."):
+        return True
+    return False
+
+
 stale_hits = []
 for path in sorted(Path(".").rglob("*")):
     if not path.is_file():
         continue
-    if ".git" in path.parts or ".venv" in path.parts or "__pycache__" in path.parts:
+    if skip_stale_reference_scan(path):
         continue
     try:
         text = path.read_text(encoding="utf-8")
@@ -162,6 +220,8 @@ automation_sections = [
     "## Autonomy",
     "## Product Horizons",
     "## Worker-Agent Orchestration",
+    "## Multi-Role Automation",
+    "## Automation Signals",
     "## Human-Intervention Protocol",
     "## Lock-File Behavior",
     "## Verification",
@@ -184,6 +244,7 @@ task_markers = [
     "## Completed Last Run",
     "## Checks From Last Run",
     "## Worker-Agent Activity",
+    "Worker strategy:",
     "## Known Issues",
     "## Pending Human Requests",
     "## Human Messages Sent",
@@ -211,6 +272,9 @@ guardrail_markers = [
     "## External Side Effects Policy",
     "## Quality Policy",
     "## Worker-Agent Policy",
+    "{{WRITE_WORKER_GUARDRAILS_POLICY}}",
+    "## Multi-Role Automation Policy",
+    "{{MULTI_ROLE_GUARDRAILS_POLICY}}",
     "## Lock-File Policy",
     "## Human-Intervention Policy",
     "## Status Policy",
@@ -245,9 +309,14 @@ for marker in [
     "scripts/spawn_worker_agent.sh",
     "scripts/summarize_worker_outputs.py",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
+    "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS",
+    "Write-capable worker agents allowed:",
+    "Max write worker count:",
     "command -v codex",
     "--dangerously-bypass-approvals-and-sandbox",
     "{{HUMAN_PROTOCOL}}",
+    "{{WRITE_WORKER_ORCHESTRATION}}",
+    "{{MULTI_ROLE_AUTOMATION_SECTION}}",
     "advancement decision: `stay`, `advance`, or `defer`",
     "## Product Horizon State",
     "## Horizon Transition Log",
@@ -263,6 +332,7 @@ for marker in [
     "--add-dir",
     "codex exec --full-auto",
     "--skip-git-repo-check",
+    "update_automation_signals.py",
     "child_pid",
     "forward_signal",
 ]:
@@ -270,18 +340,108 @@ for marker in [
         print(f"Scheduled runner template missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
+conveyor = Path("templates/scripts/run_conveyor_automation.py").read_text(encoding="utf-8")
+for marker in [
+    "automation_conveyor.lock",
+    "automation_conveyor_state.json",
+    "queued role patch",
+    "run_role_automation.sh",
+    "run_codex_automation.sh",
+    "MULTI_ROLE_ALLOW_REMOTES",
+]:
+    if marker not in conveyor:
+        print(f"Conveyor runner template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+signals = Path("templates/scripts/update_automation_signals.py").read_text(encoding="utf-8")
+for marker in [
+    "docs/AUTOMATION_SIGNALS.md",
+    "target/automation_signals.json",
+    "--complete",
+    "--merge-state",
+]:
+    if marker not in signals:
+        print(f"Automation signals helper template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
 worker_helper = Path("templates/scripts/spawn_worker_agent.sh").read_text(encoding="utf-8")
 for marker in [
     "--disable plugins",
     "--ephemeral",
     "--dangerously-bypass-approvals-and-sandbox",
+    "--mode",
+    "--ownership",
     "-C \"$target_abs\"",
 ]:
     if marker not in worker_helper:
         print(f"Worker helper template missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
+for role in ["planner", "builder", "hardener", "integrator"]:
+    role_prompt = Path(f"templates/.agentic/roles/{role}.md").read_text(encoding="utf-8")
+    for marker in [
+        "NEVER push to a remote",
+        "NEVER configure a remote",
+        "NEVER set up upstream tracking",
+        "CRITICAL_STOP",
+        "docs/MULTI_ROLE_PROGRESS.md",
+    ]:
+        if marker not in role_prompt:
+            print(f"Role prompt template {role} missing marker: {marker}", file=sys.stderr)
+            raise SystemExit(1)
+
+run_role = Path("templates/scripts/run_role_automation.sh").read_text(encoding="utf-8")
+for marker in [
+    "--role",
+    "planner|builder|hardener|integrator",
+    "MULTI_ROLE_ALLOW_REMOTES",
+    "git remote -v",
+    "git worktree add",
+    "git ls-files --others --exclude-standard -z",
+    "git add -N",
+    "CRITICAL_STOP",
+    "update_automation_signals.py",
+    "automation_queue",
+    "automation_worktrees",
+    "manifest.json",
+]:
+    if marker not in run_role:
+        print(f"Role runner template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+integrator = Path("templates/scripts/integrate_role_outputs.py").read_text(encoding="utf-8")
+for marker in [
+    "git apply --check",
+    "deferral_reason",
+    "staleness",
+    "verification_failure",
+    "MULTI_ROLE_ALLOW_REMOTES",
+    "checkpoint pre-existing local changes",
+    "git push",
+    "worktree",
+    "prune",
+]:
+    if marker not in integrator:
+        print(f"Integrator template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+progress = Path("templates/docs/MULTI_ROLE_PROGRESS.md").read_text(encoding="utf-8")
+for marker in [
+    "## Project State At Last Integration",
+    "## Cumulative Metrics",
+    "## Recent Activity Log",
+    "## Historical Summary",
+    "## Deferred-Patch Backlog",
+    "## Architectural Decisions",
+    "## Role Health",
+]:
+    if marker not in progress:
+        print(f"Multi-role progress template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
 for path in [
+    Path("scripts/run_conveyor_automation.py"),
+    Path("templates/scripts/run_conveyor_automation.py"),
     Path("scripts/run_dashboard.py"),
     Path("services/agentic-dashboard/agentic_dashboard/app.py"),
 ]:
@@ -294,6 +454,20 @@ dashboard_app = Path("services/agentic-dashboard/agentic_dashboard/app.py").read
 for marker in [
     "DASHBOARD_STATE_FILE",
     "Open Diffmogger Project",
+    "write_worker_agents_allowed",
+    "max_write_worker_count",
+    "multi_role_automations_allowed",
+    "automation_schedule_strategy",
+    "continuous_conveyor",
+    "multi_role_allow_remotes",
+    "automation_signals_enabled",
+    "planner_builder_hardener_integrator",
+    "write_role_launchd_plist",
+    "write_conveyor_launchd_plist",
+    "run_conveyor_automation.sh",
+    "DEFAULT_AUTOMATION_PATH",
+    "StartCalendarInterval",
+    "run_role_automation.sh",
     "start_new_session=True",
     "MAX_DASHBOARD_LOG_LINES",
     "os.killpg",
@@ -367,6 +541,7 @@ for marker in [
     "A2P 10DLC",
     "scripts/acquire_codex_lock.sh",
     "scripts/spawn_worker_agent.sh",
+    "write_worker_agents_allowed",
     "scripts/compact_agent_state.py",
     "scripts/run_dashboard.py",
     "services/agentic-dashboard",
@@ -429,7 +604,250 @@ fi
 rm -rf "$tmp_dir"
 
 tmp_dir="$(mktemp -d)"
-tmp_intake="$(mktemp /tmp/Diffmogger-local-notifier.XXXXXX.json)"
+tmp_intake="$(mktemp /tmp/Diffmogger-write-workers.XXXXXX)"
+cat >"$tmp_intake" <<'JSON'
+{
+  "project_name": "Write Worker Smoke",
+  "product_goal": "Build a write-worker scaffold smoke target.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "Generated docs only.",
+  "human_bridge_enabled": false,
+  "human_bridge_mode": "disabled",
+  "worker_agents_allowed": true,
+  "write_worker_agents_allowed": true,
+  "max_write_worker_count": 25,
+  "write_worker_guidance": "Use write workers only for planned disjoint modules.",
+  "verification_commands": ["npm test"]
+}
+JSON
+python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-write-workers.log
+python3 scripts/check_required_files.py --human-bridge-mode disabled --write-workers-enabled "$tmp_dir" >/tmp/Diffmogger-check-write-workers.log
+for marker in \
+    "Write-capable worker agents allowed: true" \
+    "Max write worker count: 10" \
+    "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS" \
+    "--mode write" \
+    "not alone in the codebase" \
+    "blindly accepting changes"; do
+    if ! grep -R -- "$marker" "$tmp_dir/.agentic" "$tmp_dir/docs" "$tmp_dir/scripts/spawn_worker_agent.sh" >/tmp/Diffmogger-write-worker-grep.log 2>&1; then
+        echo "Write-worker scaffold missing marker: $marker" >&2
+        rm -rf "$tmp_dir" "$tmp_intake"
+        exit 1
+    fi
+done
+rm -rf "$tmp_dir" "$tmp_intake"
+
+tmp_dir="$(mktemp -d)"
+tmp_intake="$(mktemp /tmp/Diffmogger-multi-role.XXXXXX)"
+cat >"$tmp_intake" <<'JSON'
+{
+  "project_name": "Multi Role Smoke",
+  "product_goal": "Build a multi-role scaffold smoke target.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "Generated docs only.",
+  "human_bridge_enabled": false,
+  "human_bridge_mode": "disabled",
+  "multi_role_automations_allowed": true,
+  "automation_role_profile": "planner_builder_hardener_integrator",
+  "automation_checkpoint_commits": true,
+  "multi_role_base_cadence_minutes": 30,
+  "automation_signals_enabled": true,
+  "verification_commands": ["test -f accepted.txt"]
+}
+JSON
+python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-multi-role.log
+python3 scripts/check_required_files.py --human-bridge-mode disabled --multi-role-enabled --automation-signals-enabled "$tmp_dir" >/tmp/Diffmogger-check-multi-role.log
+python3 "$tmp_dir/scripts/update_automation_signals.py" "$tmp_dir" --refresh --role planner --summary >/tmp/Diffmogger-signals-refresh.log
+if ! grep "AUTOMATION_SIGNALS active=" /tmp/Diffmogger-signals-refresh.log >/tmp/Diffmogger-signals-active.log; then
+    echo "Automation signals refresh did not print active signal summary" >&2
+    cat /tmp/Diffmogger-signals-refresh.log >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+python3 "$tmp_dir/scripts/update_automation_signals.py" "$tmp_dir" --complete prompt-self-audit --role planner --note "validation smoke" >/tmp/Diffmogger-signals-complete.log
+if ! grep '"last_completed_by": "planner"' "$tmp_dir/target/automation_signals.json" >/tmp/Diffmogger-signals-completed-by.log; then
+    echo "Automation signals completion smoke failed" >&2
+    cat "$tmp_dir/target/automation_signals.json" >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+if find "$tmp_dir/docs" -maxdepth 1 -name 'HUMAN*' | grep . >/tmp/Diffmogger-multi-role-human-files.log; then
+    echo "Disabled human bridge multi-role scaffold unexpectedly generated human bridge files" >&2
+    cat /tmp/Diffmogger-multi-role-human-files.log >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+(
+  cd "$tmp_dir"
+  git init >/tmp/Diffmogger-multi-role-git-init.log
+  git config user.name "Diffmogger Validation"
+  git config user.email "diffmogger-validation@example.invalid"
+  git add .
+  git commit -m "initial smoke target" >/tmp/Diffmogger-multi-role-initial-commit.log
+  printf 'tracked base\n' > tracked_role_export.txt
+  git add tracked_role_export.txt
+  git commit -m "add role export smoke base" >/tmp/Diffmogger-role-export-base-commit.log
+)
+role_export_base="$(git -C "$tmp_dir" rev-parse HEAD)"
+role_export_untracked="$(mktemp /tmp/Diffmogger-role-export-untracked.XXXXXX)"
+(
+  cd "$tmp_dir"
+  printf 'tracked changed\n' > tracked_role_export.txt
+  mkdir -p generated
+  printf 'new generated file\n' > generated/role_export_new.txt
+  git ls-files --others --exclude-standard -z > "$role_export_untracked"
+  if [[ -s "$role_export_untracked" ]]; then
+    xargs -0 git add -N -- < "$role_export_untracked"
+  fi
+  git diff --binary "$role_export_base" > role_export.patch
+  git diff --name-only "$role_export_base" > role_export.changed
+  git reset -q -- tracked_role_export.txt generated/role_export_new.txt >/dev/null
+  git checkout -- tracked_role_export.txt
+  rm -rf generated
+)
+rm -f "$role_export_untracked"
+if ! grep -q "diff --git a/generated/role_export_new.txt b/generated/role_export_new.txt" "$tmp_dir/role_export.patch"; then
+    echo "Role patch export smoke omitted untracked new file from patch" >&2
+    rm -rf "$tmp_dir" "$tmp_intake" "$role_export_untracked"
+    exit 1
+fi
+if ! grep -q "new file mode" "$tmp_dir/role_export.patch"; then
+    echo "Role patch export smoke did not render new file mode" >&2
+    rm -rf "$tmp_dir" "$tmp_intake" "$role_export_untracked"
+    exit 1
+fi
+if ! grep -Fx "generated/role_export_new.txt" "$tmp_dir/role_export.changed" >/tmp/Diffmogger-role-export-new-file.log; then
+    echo "Role patch export smoke omitted untracked new file from changed-files list" >&2
+    rm -rf "$tmp_dir" "$tmp_intake" "$role_export_untracked"
+    exit 1
+fi
+if ! grep -Fx "tracked_role_export.txt" "$tmp_dir/role_export.changed" >/tmp/Diffmogger-role-export-tracked-file.log; then
+    echo "Role patch export smoke omitted tracked file from changed-files list" >&2
+    rm -rf "$tmp_dir" "$tmp_intake" "$role_export_untracked"
+    exit 1
+fi
+rm -f "$tmp_dir/role_export.patch" "$tmp_dir/role_export.changed"
+(
+  cd "$tmp_dir"
+  printf 'accepted\n' > accepted.txt
+  git add -N accepted.txt
+  git diff --binary HEAD > target_patch.diff
+  git reset -- accepted.txt >/dev/null
+  rm accepted.txt
+)
+mkdir -p "$tmp_dir/target/automation_queue/builder/run-001"
+mv "$tmp_dir/target_patch.diff" "$tmp_dir/target/automation_queue/builder/run-001/changes.patch"
+base_commit="$(git -C "$tmp_dir" rev-parse HEAD)"
+cat >"$tmp_dir/target/automation_queue/builder/run-001/manifest.json" <<JSON
+{
+  "role": "builder",
+  "run_id": "run-001",
+  "base_commit": "$base_commit",
+  "head_before_integration": null,
+  "status": "queued",
+  "deferral_reason": null,
+  "deferral_detail": "",
+  "patch_path": "target/automation_queue/builder/run-001/changes.patch",
+  "changed_files": ["accepted.txt"],
+  "checks_run": [],
+  "summary": "Create accepted smoke file.",
+  "created_at": "2026-05-02T00:00:00+00:00",
+  "integrated_at": null,
+  "checkpoint_commit": null,
+  "accepted_commit": null
+}
+JSON
+python3 scripts/integrate_role_outputs.py "$tmp_dir" --run-id validation-integrator >/tmp/Diffmogger-integrator-smoke.log
+if ! git -C "$tmp_dir" log --oneline --all | grep "codex/integrator: accept builder patch run-001" >/tmp/Diffmogger-integrator-log.log; then
+    echo "Integrator smoke did not create accepted patch commit" >&2
+    cat /tmp/Diffmogger-integrator-smoke.log >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+stale_base="$(git -C "$tmp_dir" rev-parse HEAD)"
+(
+  cd "$tmp_dir"
+  printf 'stale patch version\n' > stale.txt
+  git add -N stale.txt
+  git diff --binary HEAD > stale_patch.diff
+  git reset -- stale.txt >/dev/null
+  rm stale.txt
+  printf 'main version\n' > stale.txt
+  git add stale.txt
+  git commit -m "advance main for stale patch smoke" >/tmp/Diffmogger-stale-main-commit.log
+)
+mkdir -p "$tmp_dir/target/automation_queue/builder/run-stale"
+mv "$tmp_dir/stale_patch.diff" "$tmp_dir/target/automation_queue/builder/run-stale/changes.patch"
+cat >"$tmp_dir/target/automation_queue/builder/run-stale/manifest.json" <<JSON
+{
+  "role": "builder",
+  "run_id": "run-stale",
+  "base_commit": "$stale_base",
+  "head_before_integration": null,
+  "status": "queued",
+  "deferral_reason": null,
+  "deferral_detail": "",
+  "patch_path": "target/automation_queue/builder/run-stale/changes.patch",
+  "changed_files": ["stale.txt"],
+  "checks_run": [],
+  "summary": "Stale patch smoke.",
+  "created_at": "2026-05-02T00:01:00+00:00",
+  "integrated_at": null,
+  "checkpoint_commit": null,
+  "accepted_commit": null
+}
+JSON
+python3 scripts/integrate_role_outputs.py "$tmp_dir" --run-id validation-stale >/tmp/Diffmogger-stale-integrator.log
+if ! grep '"deferral_reason": "staleness"' "$tmp_dir/target/automation_queue/builder/run-stale/manifest.json" >/tmp/Diffmogger-stale-reason.log; then
+    echo "Integrator stale patch smoke did not classify staleness" >&2
+    cat "$tmp_dir/target/automation_queue/builder/run-stale/manifest.json" >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+python3 scripts/list_deferred_patches.py "$tmp_dir" --pretty >/tmp/Diffmogger-deferred-list.log
+CODEX_LOCK_PATH="$tmp_dir/target/codex_automation.lock" \
+CODEX_RUN_ID="held-lock" \
+bash "$tmp_dir/scripts/acquire_codex_lock.sh" "validation held lock" >/tmp/Diffmogger-integrator-held-lock-acquire.log
+if python3 scripts/integrate_role_outputs.py "$tmp_dir" --run-id blocked-by-lock >/tmp/Diffmogger-integrator-lock-refusal.log 2>&1; then
+    echo "Integrator lock guard failed: run unexpectedly succeeded while lock was held" >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+CODEX_LOCK_PATH="$tmp_dir/target/codex_automation.lock" \
+CODEX_RUN_ID="held-lock" \
+bash "$tmp_dir/scripts/release_codex_lock.sh" >/tmp/Diffmogger-integrator-held-lock-release.log
+real_git="$(command -v git)"
+fake_git_dir="$(mktemp -d)"
+cat >"$fake_git_dir/git" <<SH
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "remote" && "\${2:-}" == "-v" ]]; then
+  printf 'origin\thttps://example.invalid/repo.git (fetch)\n'
+  printf 'origin\thttps://example.invalid/repo.git (push)\n'
+  exit 0
+fi
+exec "$real_git" "\$@"
+SH
+chmod +x "$fake_git_dir/git"
+if PATH="$fake_git_dir:$PATH" python3 scripts/integrate_role_outputs.py "$tmp_dir" --dry-run >/tmp/Diffmogger-remote-guard.log 2>&1; then
+    echo "Integrator remote guard failed: run unexpectedly succeeded with remote configured" >&2
+    rm -rf "$tmp_dir" "$tmp_intake" "$fake_git_dir"
+    exit 1
+fi
+PATH="$fake_git_dir:$PATH" MULTI_ROLE_ALLOW_REMOTES=1 python3 scripts/integrate_role_outputs.py "$tmp_dir" --dry-run >/tmp/Diffmogger-remote-opt-in.log
+cat >"$tmp_dir/.git/hooks/pre-commit" <<'SH'
+#!/usr/bin/env sh
+git push
+SH
+chmod +x "$tmp_dir/.git/hooks/pre-commit"
+if PATH="$fake_git_dir:$PATH" MULTI_ROLE_ALLOW_REMOTES=1 python3 scripts/integrate_role_outputs.py "$tmp_dir" --dry-run >/tmp/Diffmogger-hook-guard.log 2>&1; then
+    echo "Integrator hook guard failed: run unexpectedly succeeded with a push hook" >&2
+    rm -rf "$tmp_dir" "$tmp_intake" "$fake_git_dir"
+    exit 1
+fi
+rm -rf "$tmp_dir" "$tmp_intake" "$fake_git_dir"
+
+tmp_dir="$(mktemp -d)"
+tmp_intake="$(mktemp /tmp/Diffmogger-local-notifier.XXXXXX)"
 cat >"$tmp_intake" <<'JSON'
 {
   "project_name": "Notifier Smoke",
@@ -446,7 +864,7 @@ python3 scripts/check_required_files.py --human-bridge-mode local_notifier "$tmp
 rm -rf "$tmp_dir" "$tmp_intake"
 
 tmp_dir="$(mktemp -d)"
-tmp_intake="$(mktemp /tmp/Diffmogger-disabled.XXXXXX.json)"
+tmp_intake="$(mktemp /tmp/Diffmogger-disabled.XXXXXX)"
 cat >"$tmp_intake" <<'JSON'
 {
   "project_name": "Disabled Bridge Smoke",

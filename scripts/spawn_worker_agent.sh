@@ -12,6 +12,10 @@ Options:
   --target PATH              Target project directory. Default: current directory
   --run-id RUN_ID            Run id. Default: CODEX_RUN_ID, RUN_ID, or UTC timestamp
   --role ROLE                Worker role slug. Default: review
+  --mode MODE                read-only or write. Default: read-only
+  --read-only                Shortcut for --mode read-only
+  --write                    Shortcut for --mode write
+  --ownership TEXT           Required ownership scope for --mode write
   --prompt TEXT              Worker assignment
   --prompt-file PATH         Read worker assignment from a file
   --max-prompt-chars N       Bound assignment text. Default: 12000
@@ -29,6 +33,8 @@ EOF
 target_dir="."
 run_id="${CODEX_RUN_ID:-${RUN_ID:-}}"
 role="review"
+mode="${CODEX_WORKER_MODE:-read-only}"
+ownership_scope=""
 prompt_text=""
 prompt_file=""
 max_prompt_chars="${CODEX_WORKER_MAX_PROMPT_CHARS:-12000}"
@@ -45,6 +51,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --role)
       role="${2:?--role requires a value}"
+      shift 2
+      ;;
+    --mode)
+      mode="${2:?--mode requires read-only or write}"
+      shift 2
+      ;;
+    --read-only)
+      mode="read-only"
+      shift
+      ;;
+    --write)
+      mode="write"
+      shift
+      ;;
+    --ownership)
+      ownership_scope="${2:?--ownership requires a scope description}"
       shift 2
       ;;
     --prompt)
@@ -76,6 +98,25 @@ if ! [[ "$max_prompt_chars" =~ ^[0-9]+$ ]] || [[ "$max_prompt_chars" -lt 200 ]];
   exit 2
 fi
 
+case "$mode" in
+  read-only|readonly|read_only|report)
+    mode="read-only"
+    ;;
+  write|write-worker|write_worker|implementation)
+    mode="write"
+    ;;
+  *)
+    echo "Invalid --mode value: $mode" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$mode" == "write" && -z "$ownership_scope" ]]; then
+  echo "--mode write requires --ownership with disjoint file/module scope" >&2
+  exit 2
+fi
+
 if [[ -z "$run_id" ]]; then
   run_id="$(date -u +%Y%m%dT%H%M%SZ)"
 fi
@@ -100,7 +141,11 @@ if [[ -n "$prompt_file" ]]; then
 fi
 
 if [[ -z "$prompt_text" ]]; then
-  prompt_text="Inspect the target project for the current automation sprint. Produce a concise read-only report with findings, risks, recommended next steps, and verification suggestions."
+  if [[ "$mode" == "write" ]]; then
+    prompt_text="Implement the bounded assignment inside the ownership scope, run relevant checks you can, and write a concise integration report."
+  else
+    prompt_text="Inspect the target project for the current automation sprint. Produce a concise read-only report with findings, risks, recommended next steps, and verification suggestions."
+  fi
 fi
 
 prompt_chars="$(printf '%s' "$prompt_text" | wc -c | tr -d ' ')"
@@ -110,12 +155,53 @@ if [[ "$prompt_chars" -gt "$max_prompt_chars" ]]; then
   truncated_notice="The assignment was truncated to ${max_prompt_chars} characters by spawn_worker_agent.sh."
 fi
 
-worker_prompt="$(cat <<EOF
+if [[ "$mode" == "write" ]]; then
+  worker_prompt=$(cat <<EOF
+You are a bounded write-capable worker for a recurring Codex automation run.
+
+Target project: $target_abs
+Run id: $run_id
+Worker role: $role_slug
+Mode: write
+Owned scope: $ownership_scope
+Output report: $output_path
+
+Rules:
+- You are not alone in the codebase.
+- Modify only the owned files/modules/scratch area described above, plus the output report path.
+- Do not touch unrelated files.
+- Do not revert unrelated edits or changes made by other agents or humans.
+- Adjust your implementation to documented contracts and outputs from other workers when visible.
+- Do not read .env files or print secrets.
+- Do not use network.
+- Do not send SMS, WhatsApp, email, or other external messages.
+- Do not spawn subagents, do not call codex exec, and do not call spawn_worker_agent.sh.
+- Do not run destructive cleanup, history rewrites, mass deletion, or broad formatting outside your owned scope.
+- Stop after the bounded assignment and report.
+
+Report format:
+- assignment
+- ownership scope
+- files changed
+- checks run
+- integration notes
+- risks
+- follow-up needed
+
+Assignment:
+$prompt_text
+
+$truncated_notice
+EOF
+)
+else
+  worker_prompt=$(cat <<EOF
 You are a bounded read-only worker for a recurring Codex automation run.
 
 Target project: $target_abs
 Run id: $run_id
 Worker role: $role_slug
+Mode: read-only
 Output report: $output_path
 
 Rules:
@@ -141,7 +227,8 @@ $prompt_text
 
 $truncated_notice
 EOF
-)"
+)
+fi
 
 write_unavailable_report() {
   local reason="$1"
@@ -150,8 +237,10 @@ write_unavailable_report() {
 
 - run_id: $run_id
 - role: $role_slug
+- mode: $mode
 - status: UNAVAILABLE
 - output_path: $output_path
+$(if [[ "$mode" == "write" ]]; then printf '%s\n' "- ownership_scope: $ownership_scope"; fi)
 
 ## Assignment
 
@@ -190,9 +279,11 @@ if [[ "$status" -ne 0 ]]; then
 
 - run_id: $run_id
 - role: $role_slug
+- mode: $mode
 - status: FAILED
 - exit_code: $status
 - raw_log: $raw_log
+$(if [[ "$mode" == "write" ]]; then printf '%s\n' "- ownership_scope: $ownership_scope"; fi)
 
 ## Assignment
 
@@ -212,8 +303,10 @@ if [[ ! -s "$output_path" ]]; then
 
 - run_id: $run_id
 - role: $role_slug
+- mode: $mode
 - status: COMPLETED_WITHOUT_REPORT
 - raw_log: $raw_log
+$(if [[ "$mode" == "write" ]]; then printf '%s\n' "- ownership_scope: $ownership_scope"; fi)
 
 ## Assignment
 
@@ -225,4 +318,4 @@ The Codex CLI worker exited successfully but did not write the assigned report f
 EOF
 fi
 
-printf 'WORKER_REPORT path=%s run_id=%s role=%s\n' "$output_path" "$run_id" "$role_slug"
+printf 'WORKER_REPORT path=%s run_id=%s role=%s mode=%s\n' "$output_path" "$run_id" "$role_slug" "$mode"

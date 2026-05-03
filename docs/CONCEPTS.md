@@ -63,7 +63,7 @@ Workers are helpers, not owners. They inspect, review, or prototype bounded area
 
 Every recurring run should record whether Codex CLI workers were used, skipped, or unavailable.
 
-Generated target repos include helper scripts for read-only worker reports, but the main agent remains the integrator.
+Generated target repos include helper scripts for read-only worker reports. Optional write-capable workers are disabled unless the intake explicitly enables them, and they require disjoint ownership, contract-first planning, and main-agent review/integration.
 
 ## Lock Files
 

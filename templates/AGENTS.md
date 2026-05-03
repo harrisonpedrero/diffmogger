@@ -30,6 +30,9 @@ docs/CODEX_AUTOMATION_GUARDRAILS.md
 - Do not read `.env` files or handle secrets.
 - Do not spend money, deploy publicly, or trigger real-world side effects without explicit approval.
 - Use worker agents only for bounded work and record their outputs.
+- Write-capable worker agents allowed: {{WRITE_WORKER_AGENTS_ALLOWED}}; max write workers: {{MAX_WRITE_WORKER_COUNT}}.
+- Use read-only worker reports by default. Use write-capable workers only when explicitly enabled, the change is large and planned, ownership is disjoint, and the main agent will integrate and verify.
+- Multi-role automations allowed: {{MULTI_ROLE_AUTOMATIONS_ALLOWED}}; role profile: {{AUTOMATION_ROLE_PROFILE}}.
 {{HUMAN_AGENTS_RULES}}
 - Record `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` every automation run.
 - Update `docs/CODEX_AUTOMATION_TASKS.md` at the end of every automation run.

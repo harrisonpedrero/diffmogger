@@ -11,6 +11,7 @@ AGENTS.md
 docs/CODEX_AUTOMATION_TASKS.md
 docs/CODEX_AUTOMATION_GUARDRAILS.md
 docs/PROJECT_CONTEXT.md
+{{AUTOMATION_SIGNAL_FILE_READS}}
 {{HUMAN_FILE_READS}}
 docs/AUTONOMY_EXPERIMENT_LOG.md
 ```
@@ -99,12 +100,15 @@ Beyond MVP direction: {{BEYOND_MVP}}
 
 Worker agents allowed: {{WORKER_AGENTS_ALLOWED}}
 
-You may use Codex subagents or Codex CLI child agents when doing so would materially improve speed, coverage, or quality.
+Codex CLI worker reports expected on broad runs: {{CODEX_CLI_WORKERS_EXPECTED_ON_BROAD_RUNS}}
 
-For broad or multi-module runs, Codex CLI worker usage is expected, not merely allowed. At the beginning of every run, make an explicit worker decision:
+You may use Codex subagents or Codex CLI child agents when doing so would materially improve speed, coverage, or quality and worker agents are allowed.
+
+At the beginning of every run, make an explicit worker decision:
 
 ```text
 Codex CLI worker decision: USE / SKIP / UNAVAILABLE
+Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS
 Reason: <one sentence>
 ```
 
@@ -139,7 +143,7 @@ Reason: `codex` command not found in this environment.
 
 Do not block the sprint solely because Codex CLI is unavailable.
 
-Prefer using 1-3 Codex CLI workers when the run involves a multi-module feature, broad UX/reporting improvement, nontrivial architecture decision, major test/coverage review, synthesis into implementation tasks, difficult debugging issue, review of recent automation behavior, or a run expected to use most of the automation window.
+When `Codex CLI worker reports expected on broad runs` is true, prefer using 1-3 read-only Codex CLI workers when the run involves a multi-module feature, broad UX/reporting improvement, nontrivial architecture decision, major test/coverage review, synthesis into implementation tasks, difficult debugging issue, review of recent automation behavior, or a run expected to use most of the automation window.
 
 Skip workers when the task is a tiny targeted fix, the repo is in a fragile merge/conflict state, Codex CLI is unavailable, spawning workers would take longer than the task itself, or lock-file/environment state makes child-agent execution risky. If you skip workers on a broad task, briefly explain why in the task file.
 
@@ -162,6 +166,12 @@ codex exec --disable plugins \
 
 Use `--disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` only for nested child workers launched from inside the scheduled parent Codex run. The scheduled parent remains the outer sandbox boundary. The scheduled wrapper should grant the parent run access to `$HOME/.codex` with `--add-dir`; nested Codex startup may touch `state_5.sqlite`, `shell_snapshots`, and `sessions` even when the child command uses `--ephemeral`.
 
+Write-capable worker agents allowed: {{WRITE_WORKER_AGENTS_ALLOWED}}
+
+Max write worker count: {{MAX_WRITE_WORKER_COUNT}}
+
+{{WRITE_WORKER_ORCHESTRATION}}
+
 Rules:
 
 - Main automation agent remains responsible for integration.
@@ -179,8 +189,15 @@ target/agent_runs/<run_id>/worker_<role>.md
 
 - Continue with normal implementation only after reading and consolidating worker findings.
 - Record worker activity in `docs/CODEX_AUTOMATION_TASKS.md`.
+- For implementation workers, use isolated branches, worktrees, or scratch directories if there is any chance of file conflicts. Otherwise, keep workers read-only and let the main agent implement.
 
-For implementation workers, use isolated branches, worktrees, or scratch directories if there is any chance of file conflicts. Otherwise, keep workers read-only and let the main agent implement.
+## Multi-Role Automation
+
+{{MULTI_ROLE_AUTOMATION_SECTION}}
+
+## Automation Signals
+
+{{AUTOMATION_SIGNALS_SECTION}}
 
 ## Human-Intervention Protocol
 
@@ -188,7 +205,7 @@ For implementation workers, use isolated branches, worktrees, or scratch directo
 
 ## Lock-File Behavior
 
-Scheduled runs are expected to be launched by the target repo's local `scripts/run_codex_automation.sh`. That wrapper owns lock acquisition and release.
+Scheduled single-lane runs are expected to be launched by the target repo's local `scripts/run_codex_automation.sh`. Continuous conveyor scheduling uses `scripts/run_conveyor_automation.sh`, which chooses the next runnable lane and delegates to target-local wrappers. The wrapper for a mutating Codex run still owns lock acquisition and release.
 
 This target project must keep relevant automation runtime scripts in its own `scripts/` directory. During normal scheduled runs, do not import, call, or depend on scripts from the Diffmogger starter repo.
 

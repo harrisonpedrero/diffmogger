@@ -30,9 +30,13 @@ Create or confirm the first runnable product baseline and install the automation
 - Create or update human bridge docs if enabled.
 - Create or update `docs/AUTONOMY_EXPERIMENT_LOG.md`.
 - Create or update `docs/DAILY_AUTOMATION_REVIEW.md`.
-- Create or update local automation helper scripts under `scripts/`: `run_codex_automation.sh`, `acquire_codex_lock.sh`, `release_codex_lock.sh`, `spawn_worker_agent.sh`, `summarize_worker_outputs.py`, and `compact_agent_state.py`.
+- Create or update local automation helper scripts under `scripts/`: `run_codex_automation.sh`, `run_conveyor_automation.sh`, `run_conveyor_automation.py`, `update_automation_signals.py`, `acquire_codex_lock.sh`, `release_codex_lock.sh`, `spawn_worker_agent.sh`, `summarize_worker_outputs.py`, and `compact_agent_state.py`. If multi-role mode is enabled, also create or update `run_role_automation.sh`, `integrate_role_outputs.py`, and `list_deferred_patches.py`.
+- If automation signals are enabled, create or update `docs/AUTOMATION_SIGNALS.md`.
+- If multi-role mode is enabled, create or update `.agentic/roles/planner.md`, `.agentic/roles/builder.md`, `.agentic/roles/hardener.md`, `.agentic/roles/integrator.md`, and `docs/MULTI_ROLE_PROGRESS.md`.
 - Add a one-command local verification or demo path when practical.
-- Ensure `.agentic/automation_prompt.md` explains the configured human bridge mode, local lock helpers, wrapper-owned lock behavior with `CODEX_LOCK_ALREADY_ACQUIRED=true`, state compaction, nested child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` worker usage, parent wrapper `--add-dir "$HOME/.codex"` behavior for nested CLI startup, and explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` records.
+- Ensure `.agentic/automation_prompt.md` explains the configured human bridge mode, local lock helpers, wrapper-owned lock behavior with `CODEX_LOCK_ALREADY_ACQUIRED=true`, state compaction, nested child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` worker usage, parent wrapper `--add-dir "$HOME/.codex"` behavior for nested CLI startup, explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` records, and explicit worker strategy decisions.
+- Preserve read-only worker reports as the default. If the intake explicitly enables write-capable workers, document the capped maximum, disjoint ownership rules, contract-first planning, main-agent integration/review/verification duties, and the option to run integration-only with no workers.
+- Preserve single-lane automation as the default. If the intake explicitly enables multi-role automation, document the local-only no-remote rule, fixed staggered role jobs, continuous conveyor option, worktree queue paths, integrator ownership, checkpoint commits, batched verification fallback, deferred-patch schema, and `docs/MULTI_ROLE_PROGRESS.md` responsibilities.
 
 ## Behavior
 

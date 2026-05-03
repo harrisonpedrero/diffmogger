@@ -96,6 +96,61 @@
       "type": "boolean",
       "default": true
     },
+    "write_worker_agents_allowed": {
+      "type": "boolean",
+      "description": "Whether the main automation agent may optionally spawn bounded write-capable worker agents for large, well-planned changes with disjoint ownership.",
+      "default": false
+    },
+    "max_write_worker_count": {
+      "type": "integer",
+      "description": "Maximum number of write-capable worker agents the main agent may spawn in one run. Values are capped at 10 by the scaffold.",
+      "minimum": 0,
+      "maximum": 10,
+      "default": 0
+    },
+    "write_worker_guidance": {
+      "type": "string",
+      "description": "Project-specific guidance for optional write workers. Keep this generic, bounded, and focused on disjoint ownership and main-agent integration.",
+      "default": "Write workers are optional and should be used only for large, well-planned changes with disjoint file or module ownership. Prefer fewer workers when the change can be done clearly by the main agent."
+    },
+    "multi_role_automations_allowed": {
+      "type": "boolean",
+      "description": "Whether the generated target project may use optional planner/builder/hardener/integrator automations in isolated local git worktrees.",
+      "default": false
+    },
+    "automation_role_profile": {
+      "type": "string",
+      "description": "Role profile for multi-role automation. V1 supports a single explicit multi-role profile.",
+      "enum": ["single_lane", "planner_builder_hardener_integrator"],
+      "default": "single_lane"
+    },
+    "automation_checkpoint_commits": {
+      "type": "boolean",
+      "description": "Whether the integrator may create local automation-authored checkpoint commits before applying queued role patches.",
+      "default": true
+    },
+    "multi_role_base_cadence_minutes": {
+      "type": "integer",
+      "description": "Base cadence for multi-role schedules. Planner runs hourly; builder, hardener, and integrator run twice hourly on staggered offsets.",
+      "minimum": 30,
+      "default": 30
+    },
+    "automation_schedule_strategy": {
+      "type": "string",
+      "description": "Scheduling strategy for dashboard-managed automation.",
+      "enum": ["single_lane_interval", "fixed_multi_role", "continuous_conveyor"],
+      "default": "single_lane_interval"
+    },
+    "multi_role_allow_remotes": {
+      "type": "boolean",
+      "description": "Whether dashboard-managed local-only multi-role or conveyor jobs may set MULTI_ROLE_ALLOW_REMOTES=1 when the repo has configured git remotes. This does not permit pushes, fetches, pulls, or remote configuration.",
+      "default": false
+    },
+    "automation_signals_enabled": {
+      "type": "boolean",
+      "description": "Whether generated projects include optional recurring automation signal definitions for local role-owned nudges.",
+      "default": false
+    },
     "meaningful_deliverable": {
       "type": "string",
       "default": "A runnable, verified change that improves the product or developer workflow."

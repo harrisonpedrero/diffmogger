@@ -40,7 +40,7 @@ trap release_lock EXIT
 trap 'forward_signal TERM 143' TERM
 trap 'forward_signal INT 130' INT
 
-bash scripts/acquire_codex_lock.sh "{{PROJECT_NAME}} scheduled sprint" || exit 0
+bash scripts/acquire_codex_lock.sh "Diffmogger Self Improvement scheduled sprint" || exit 0
 export CODEX_LOCK_ALREADY_ACQUIRED="true"
 
 if [ -f "scripts/update_automation_signals.py" ] && [ -f "docs/AUTOMATION_SIGNALS.md" ]; then

@@ -54,16 +54,24 @@ Last updated: {{CREATED_AT}}
 ## Worker-Agent Activity
 
 - Codex CLI worker decision: SKIP
+- Worker strategy: NO_WORKERS
 - Reason: Initial scaffold only; no sprint has run yet.
 - Workers used: none yet.
 - Worker outputs consumed: none yet.
 - Local helpers: `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` can write and consolidate reports under `target/agent_runs/<run_id>/`.
+
+{{WRITE_WORKER_TASK_NOTES}}
+
+{{MULTI_ROLE_TASK_NOTES}}
+
+{{AUTOMATION_SIGNALS_TASK_NOTES}}
 
 ## Known Issues
 
 - Product baseline still needs to be created or inspected.
 - Verification commands may need adjustment after bootstrap.
 - Scheduled runs should use `scripts/run_codex_automation.sh`, which wraps local lock acquire/release before code mutation.
+- Optional continuous conveyor scheduling should use `scripts/run_conveyor_automation.sh`, which records local scheduler state and delegates to the target-local wrappers.
 
 ## Pending Human Requests
 

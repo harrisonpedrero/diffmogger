@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/Diffmogger/automation_signals.schema.json",
+  "title": "Automation Signals",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "signals"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["id", "owner_role", "cadence", "priority", "instructions"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "owner_role": {
+            "type": "string",
+            "enum": ["planner", "builder", "hardener", "integrator", "any"]
+          },
+          "cadence": { "type": "string", "minLength": 1 },
+          "priority": {
+            "type": "string",
+            "enum": ["low", "medium", "high"]
+          },
+          "instructions": { "type": "string", "minLength": 1 },
+          "active": { "type": "boolean" },
+          "last_activated_at": { "type": ["string", "null"] },
+          "last_completed_at": { "type": ["string", "null"] },
+          "last_completed_by": { "type": ["string", "null"] },
+          "last_completion_note": { "type": ["string", "null"] },
+          "next_due_at": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}
