@@ -180,6 +180,25 @@ def count_section_matches(path: Path, heading: str, pattern: str) -> int:
     return len(re.findall(pattern, section, re.MULTILINE | re.IGNORECASE))
 
 
+def count_section_records_with_status(
+    path: Path,
+    heading: str,
+    record_heading_pattern: str,
+    active_statuses: set[str],
+) -> int:
+    section = markdown_section(read_text(path), heading)
+    matches = list(re.finditer(record_heading_pattern, section, re.MULTILINE | re.IGNORECASE))
+    count = 0
+    for index, match in enumerate(matches):
+        next_start = matches[index + 1].start() if index + 1 < len(matches) else len(section)
+        record = section[match.end() : next_start]
+        status_match = re.search(r"^-\s*status:\s*([A-Za-z0-9_-]+)", record, re.MULTILINE | re.IGNORECASE)
+        status = status_match.group(1).lower() if status_match else ""
+        if status in active_statuses:
+            count += 1
+    return count
+
+
 def parse_task_state(target: Path) -> dict[str, Any]:
     text = read_text(target / "docs" / "CODEX_AUTOMATION_TASKS.md")
     status = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", text, re.MULTILINE)
@@ -503,7 +522,12 @@ def build_snapshot(target: Path) -> dict[str, Any]:
     progress_text = read_text(target / "docs" / "MULTI_ROLE_PROGRESS.md", limit=40_000)
     progress = progress_snapshot(progress_text)
     human = {
-        "pending_requests": count_section_matches(target / "docs" / "HUMAN_REQUESTS.md", "Active Requests", r"^###\s+HR-"),
+        "pending_requests": count_section_records_with_status(
+            target / "docs" / "HUMAN_REQUESTS.md",
+            "Active Requests",
+            r"^###\s+HR-",
+            {"awaiting_user"},
+        ),
         "unhandled_inbox": count_section_matches(target / "docs" / "HUMAN_INBOX.md", "Active Inbound Messages", r"status:\s*unhandled"),
         "outbound_records": count_section_matches(target / "docs" / "HUMAN_OUTBOX.md", "Outbound Records", r"^###\s+OUTBOX-"),
     }

@@ -95,6 +95,10 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
             - status: awaiting_user
 
+            ### HR-2026-05-03-002
+
+            - status: resolved
+
             ## Request Template
 
             ### HR-YYYY-MM-DD-001
@@ -232,7 +236,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
             },
         )
 
-    def test_build_snapshot_ignores_human_bridge_templates(self) -> None:
+    def test_build_snapshot_counts_active_human_bridge_records(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
