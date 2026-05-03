@@ -28,7 +28,7 @@ It opens a native desktop window using Python's standard-library Tkinter runtime
 - pauses scheduled automation by unloading and disabling dashboard-managed LaunchAgent jobs
 - removes dashboard-managed schedules by deleting the target LaunchAgent plist(s)
 - renders selected automation Markdown files
-- launches an optional local browser observatory for conveyor health, active roles, queued/deferred patches, recent outcomes, and timeline events
+- launches an optional local browser observatory for active signal nudges, conveyor health, active roles, queued/deferred patches, recent outcomes, and timeline events
 - lets a human send file-only messages to the next automation run when SMS/WhatsApp is disabled or unavailable
 - displays prerequisites as readiness checks instead of raw command output
 

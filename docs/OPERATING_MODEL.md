@@ -40,7 +40,7 @@ Multi-role mode is local-only. Role prompts prohibit pushes, fetches, pulls, rem
 - `.agentic/automation_prompt.md`: recurring automation behavior.
 - `.agentic/roles/*.md`: optional static role prompts for multi-role mode.
 - `scripts/run_conveyor_automation.py`: optional work-conserving local scheduler.
-- `scripts/run_observatory.py`: optional local browser observatory for conveyor, queue, log, and progress state.
+- `scripts/run_observatory.py`: optional local browser observatory for signal, conveyor, queue, log, and progress state.
 - `scripts/repair_environment.py`: local environment diagnosis and safe repair helper.
 - `scripts/update_automation_signals.py`: optional recurring signal refresher and completion helper.
 - `docs/CODEX_AUTOMATION_GUARDRAILS.md`: static boundaries.

@@ -146,9 +146,9 @@ python3 scripts/run_observatory.py --open
 
 The observatory is a local browser page for demos and live monitoring. It reads
 target-local state, including `target/automation_conveyor_state.json`,
-`target/automation_queue/`, automation logs, and progress docs, then shows the
-active conveyor role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline
-events without requiring external services.
+`target/automation_signals.json`, `target/automation_queue/`, automation logs, and progress docs,
+then shows active signal nudges, the active conveyor role, upcoming lanes, queued/deferred
+patches, recent outcomes, and timeline events without requiring external services.
 
 The generated wrapper runs the parent automation with:
 

@@ -187,7 +187,7 @@ It supports:
 - optional bounded write-worker settings with a capped count and guidance text
 - optional automation signals for recurring local review nudges
 - optional multi-role automation mode with fixed role-specific launchd jobs, continuous conveyor scheduling, and local-only git guards
-- optional local observatory launch for a browser-based demo view of conveyor state, active role runs, queued patches, and recent automation timeline
+- optional local observatory launch for a browser-based demo view of active signal nudges, conveyor state, active role runs, queued patches, and recent automation timeline
 - optional context-file import into target `docs/context/`
 - generated `docs/PROJECT_CONTEXT.md`
 - a single `Scaffold & Bootstrap` pipeline
@@ -323,7 +323,7 @@ Generated targets then receive role prompts under `.agentic/roles/`, helper scri
 
 Planner, builder, and hardener start from the latest main `HEAD` in isolated worktrees and queue patches. The integrator owns the main checkout, checkpoints dirty local changes as automation-authored local commits, runs `git apply --check`, batches verification, falls back to individual verification on failure, commits accepted patches locally, and updates task/progress docs.
 
-Alternatively, continuous conveyor scheduling writes one LaunchAgent that runs `scripts/run_conveyor_automation.sh`, records state under `target/automation_conveyor_state.json`, and chooses the next runnable lane as soon as the previous lane exits. It prioritizes queued integration first, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state includes the active role run and a small future decision queue so `scripts/run_observatory.py` and the dashboard-launched observatory can show what is running now and what is likely next.
+Alternatively, continuous conveyor scheduling writes one LaunchAgent that runs `scripts/run_conveyor_automation.sh`, records state under `target/automation_conveyor_state.json`, and chooses the next runnable lane as soon as the previous lane exits. It prioritizes queued integration first, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state includes the active role run and a small future decision queue; `scripts/run_observatory.py` also reads `target/automation_signals.json` so the dashboard-launched observatory can show what is running now, what signal nudges are due, and what is likely next.
 
 Multi-role mode is local-only. Role prompts and scripts prohibit pushes, fetches, pulls, remote configuration, upstream tracking, and remote-affecting git commands. Scripts refuse to run with configured remotes unless `MULTI_ROLE_ALLOW_REMOTES=1` is set, and the integrator refuses executable git hooks containing `git push`.
 

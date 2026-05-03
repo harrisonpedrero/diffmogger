@@ -113,9 +113,11 @@ CONVEYOR_REQUIRED_STRINGS = [
 OBSERVATORY_REQUIRED_STRINGS = [
     "Diffmogger Observatory",
     "automation_conveyor_state.json",
+    "automation_signals.json",
     "automation_queue",
     "ThreadingHTTPServer",
     "--open",
+    "Active Signals",
 ]
 
 SIGNAL_HELPER_REQUIRED_STRINGS = [

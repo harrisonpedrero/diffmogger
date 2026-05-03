@@ -167,7 +167,7 @@ The monitor tab can also launch:
 Launch Observatory
 ```
 
-This opens a local browser page backed by `scripts/run_observatory.py`. The page is meant for live demos and reviews: it shows conveyor health, the active role, upcoming lanes, queued and deferred patches, recent outcomes, progress pulse, and bounded log tails. It reads only target-local files and does not require external services.
+This opens a local browser page backed by `scripts/run_observatory.py`. The page is meant for live demos and reviews: it shows active signal nudges, conveyor health, the active role, upcoming lanes, queued and deferred patches, recent outcomes, progress pulse, and bounded log tails. It reads only target-local files and does not require external services.
 
 For multi-role jobs in repos with configured git remotes, the dashboard blocks scheduling unless the advanced **Allow local-only multi-role automation when this repo has git remotes** option is checked. When checked, LaunchAgents receive `MULTI_ROLE_ALLOW_REMOTES=1`; scripts still refuse pushes, fetches, pulls, remote configuration, and remote-touching git commands.
 

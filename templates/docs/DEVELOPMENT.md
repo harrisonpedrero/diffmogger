@@ -64,7 +64,7 @@ bash scripts/run_conveyor_automation.sh --once
 python3 scripts/run_observatory.py --open
 ```
 
-The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state to show conveyor health, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
+The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_signals.json` to show active signal nudges, conveyor health, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
 
 ## Human Bridge
 

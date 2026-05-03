@@ -26,6 +26,7 @@ MAX_OUTCOMES = 12
 MAX_HISTORY = 14
 MAX_LOG_FILES = 8
 MAX_LOG_LINE_CHARS = 220
+MAX_SIGNALS = 8
 
 
 def utc_now() -> str:
@@ -85,18 +86,27 @@ def clean_text(value: Any, *, limit: int = 240) -> str:
 
 
 def first_nonempty_section_line(text: str, heading: str) -> str:
+    section = markdown_section(text, heading)
+    for raw in section.splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            return clean_text(re.sub(r"^[-*]\s+", "", line), limit=220)
+    return ""
+
+
+def markdown_section(text: str, heading: str) -> str:
     pattern = re.compile(rf"^##\s+{re.escape(heading)}\s*$", re.MULTILINE)
     match = pattern.search(text)
     if not match:
         return ""
     next_heading = re.search(r"^##\s+", text[match.end() :], re.MULTILINE)
     end = match.end() + next_heading.start() if next_heading else len(text)
-    section = text[match.end() : end]
-    for raw in section.splitlines():
-        line = raw.strip()
-        if line and not line.startswith("#"):
-            return clean_text(re.sub(r"^[-*]\s+", "", line), limit=220)
-    return ""
+    return text[match.end() : end]
+
+
+def count_section_matches(path: Path, heading: str, pattern: str) -> int:
+    section = markdown_section(read_text(path), heading)
+    return len(re.findall(pattern, section, re.MULTILINE | re.IGNORECASE))
 
 
 def parse_task_state(target: Path) -> dict[str, Any]:
@@ -114,11 +124,6 @@ def parse_task_state(target: Path) -> dict[str, Any]:
         "suggested_next_task": first_nonempty_section_line(text, "Suggested Next Sprint-Sized Task") or "No sprint task recorded yet.",
         "known_issue": first_nonempty_section_line(text, "Known Issues") or "No active issue summary.",
     }
-
-
-def count_matches(path: Path, pattern: str) -> int:
-    text = read_text(path)
-    return len(re.findall(pattern, text, re.MULTILINE | re.IGNORECASE))
 
 
 def queue_snapshot(target: Path) -> dict[str, Any]:
@@ -226,6 +231,47 @@ def log_snapshot(target: Path) -> list[dict[str, Any]]:
     return items
 
 
+def signals_snapshot(target: Path) -> dict[str, Any]:
+    data = read_json(target / "target" / "automation_signals.json")
+    raw_signals = data.get("signals") if isinstance(data.get("signals"), list) else []
+    priority_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    active: list[dict[str, Any]] = []
+    recent_completed: list[dict[str, Any]] = []
+
+    for raw in raw_signals:
+        if not isinstance(raw, dict):
+            continue
+        item = {
+            "id": clean_text(raw.get("id") or "unknown", limit=80),
+            "owner_role": clean_text(raw.get("owner_role") or "unknown", limit=40),
+            "priority": clean_text(raw.get("priority") or "medium", limit=40),
+            "cadence": clean_text(raw.get("cadence") or "unknown", limit=60),
+            "instructions": clean_text(raw.get("instructions") or "No instructions recorded.", limit=180),
+            "next_due_at": clean_text(raw.get("next_due_at") or "", limit=80),
+            "last_completed_at": clean_text(raw.get("last_completed_at") or "", limit=80),
+            "last_completed_by": clean_text(raw.get("last_completed_by") or "", limit=40),
+        }
+        if raw.get("active"):
+            active.append(item)
+        if raw.get("last_completed_at"):
+            recent_completed.append(item)
+
+    active.sort(
+        key=lambda item: (
+            priority_rank.get(str(item.get("priority")).lower(), 4),
+            str(item.get("next_due_at") or ""),
+            str(item.get("id") or ""),
+        )
+    )
+    recent_completed.sort(key=lambda item: str(item.get("last_completed_at") or ""), reverse=True)
+    return {
+        "active_count": len(active),
+        "active": active[:MAX_SIGNALS],
+        "recent_completed": recent_completed[:MAX_SIGNALS],
+        "updated_at": clean_text(data.get("updated_at") or "never", limit=80),
+    }
+
+
 def decision_queue(conveyor: dict[str, Any], queue: dict[str, Any]) -> list[dict[str, Any]]:
     raw = conveyor.get("decision_queue")
     if isinstance(raw, list) and raw:
@@ -299,9 +345,9 @@ def build_snapshot(target: Path) -> dict[str, Any]:
     progress_text = read_text(target / "docs" / "MULTI_ROLE_PROGRESS.md", limit=40_000)
     progress_recent = first_nonempty_section_line(progress_text, "Recent Activity Log") or "No multi-role activity recorded yet."
     human = {
-        "pending_requests": count_matches(target / "docs" / "HUMAN_REQUESTS.md", r"^##\s+HR-"),
-        "unhandled_inbox": count_matches(target / "docs" / "HUMAN_INBOX.md", r"status:\s*unhandled"),
-        "outbound_records": count_matches(target / "docs" / "HUMAN_OUTBOX.md", r"^##\s+OUTBOX-"),
+        "pending_requests": count_section_matches(target / "docs" / "HUMAN_REQUESTS.md", "Active Requests", r"^###\s+HR-"),
+        "unhandled_inbox": count_section_matches(target / "docs" / "HUMAN_INBOX.md", "Active Inbound Messages", r"status:\s*unhandled"),
+        "outbound_records": count_section_matches(target / "docs" / "HUMAN_OUTBOX.md", "Outbound Records", r"^###\s+OUTBOX-"),
     }
     return {
         "schema_version": 1,
@@ -311,6 +357,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "human": human,
         "git": git_snapshot(target),
         "queue": queue,
+        "signals": signals_snapshot(target),
         "conveyor": {
             "cycles": int(conveyor.get("cycles", 0) or 0),
             "updated_at": clean_text(conveyor.get("updated_at") or "never", limit=80),
@@ -572,6 +619,16 @@ HTML_TEMPLATE = r"""<!doctype html>
       color: var(--muted);
       min-height: 72px;
     }
+    .signal-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .signal-meta {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
     @media (max-width: 1180px) {
       main { grid-template-columns: 1fr; }
       .belt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -607,6 +664,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <h2>Signals</h2>
           <div class="content">
             <div class="metric-grid" id="metrics"></div>
+            <div class="signal-list" id="signalsList"></div>
           </div>
         </section>
         <section>
@@ -738,10 +796,27 @@ HTML_TEMPLATE = r"""<!doctype html>
 
       const metrics = document.getElementById("metrics");
       clear(metrics);
+      const signalState = data.signals || {};
+      const activeSignalCount = Number(signalState.active_count || ((signalState.active || []).length) || 0);
+      metrics.appendChild(renderMetric("Active Signals", activeSignalCount));
       metrics.appendChild(renderMetric("Queued patches", data.queue.totals.queued || 0));
       metrics.appendChild(renderMetric("Deferred patches", data.queue.totals.deferred || 0));
-      metrics.appendChild(renderMetric("Conveyor cycles", data.conveyor.cycles || 0));
       metrics.appendChild(renderMetric("Unhandled inbox", data.human.unhandled_inbox || 0));
+
+      const signalsList = document.getElementById("signalsList");
+      clear(signalsList);
+      (signalState.active || []).forEach(item => {
+        const row = el("div", "item");
+        const title = el("div", "item-title");
+        title.appendChild(el("span", "", item.id || "signal"));
+        const priorityClass = item.priority === "high" ? "deferred" : (item.priority === "critical" ? "failed" : "queued");
+        title.appendChild(el("span", "chip " + priorityClass, item.priority || "medium"));
+        row.appendChild(title);
+        row.appendChild(el("div", "", item.instructions || "No instructions recorded."));
+        row.appendChild(el("div", "signal-meta", "owner: " + (item.owner_role || "unknown") + " | cadence: " + (item.cadence || "unknown") + " | due: " + (item.next_due_at || "unknown")));
+        signalsList.appendChild(row);
+      });
+      if (!signalsList.children.length) signalsList.appendChild(el("div", "item muted", "No active automation signals."));
 
       const active = data.conveyor.active_role_run || {};
       const visibleDecisionQueue = (data.conveyor.decision_queue || []).filter(item => !(active.status === "running" && item.role === active.role));
@@ -853,7 +928,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
         render(await response.json());
       } catch (error) {
-        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, conveyor: {decision_queue: [], history: []}, logs: []};
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, logs: []};
         fallback.progress_recent = "Observatory refresh failed: " + error;
         render(fallback);
       }

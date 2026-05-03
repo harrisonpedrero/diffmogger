@@ -380,9 +380,11 @@ observatory = Path("templates/scripts/run_observatory.py").read_text(encoding="u
 for marker in [
     "Diffmogger Observatory",
     "automation_conveyor_state.json",
+	    "automation_signals.json",
 	    "automation_queue",
 	    "ThreadingHTTPServer",
 	    "--open",
+	    "Active Signals",
 	    "Conveyor Health",
 	    "Recent Outcomes",
 	]:
@@ -1288,7 +1290,33 @@ target = Path(sys.argv[1])
 	            ],
 	        },
 	        indent=2,
-	    )
+    )
+    + "\n",
+    encoding="utf-8",
+)
+(target / "target/automation_signals.json").write_text(
+    json.dumps(
+        {
+            "schema_version": 1,
+            "updated_at": "2026-05-03T00:00:00+00:00",
+            "signals": [
+                {
+                    "id": "prompt-self-audit",
+                    "owner_role": "planner",
+                    "priority": "high",
+                    "cadence": "weekly",
+                    "instructions": "Review whether the recurring automation prompt still matches current project needs.",
+                    "active": True,
+                    "last_activated_at": "2026-05-03T00:00:00+00:00",
+                    "last_completed_at": None,
+                    "last_completed_by": None,
+                    "last_completion_note": None,
+                    "next_due_at": "2026-05-03T00:00:00+00:00",
+                }
+            ],
+        },
+        indent=2,
+    )
     + "\n",
     encoding="utf-8",
 )
@@ -1321,7 +1349,7 @@ target = Path(sys.argv[1])
 )
 PY
 python3 scripts/run_observatory.py --target "$tmp_dir" --once --output "$tmp_dir/target/observatory/index.html" >/tmp/Diffmogger-observatory-render.log
-for marker in "Diffmogger Observatory" "Conveyor Belt" "run-observe" "builder" "Conveyor Health" "Recent Outcomes" "run-skipped" "skipped" "hardener/integrator churn"; do
+for marker in "Diffmogger Observatory" "Conveyor Belt" "Active Signals" "prompt-self-audit" "run-observe" "builder" "Conveyor Health" "Recent Outcomes" "run-skipped" "skipped" "hardener/integrator churn"; do
     if ! grep -q "$marker" "$tmp_dir/target/observatory/index.html"; then
         echo "Observatory render smoke missing marker: $marker" >&2
         rm -rf "$tmp_dir"
