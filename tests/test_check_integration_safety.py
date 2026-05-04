@@ -165,6 +165,19 @@ class DashboardIntegrationSafetyAffordanceTests(unittest.TestCase):
 
             self.assertEqual(str(ROOT), command[2])
 
+    def test_review_bundle_command_exports_standard_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+
+            command = self.module.review_bundle_command(target)
+
+            self.assertEqual(sys.executable, command[0])
+            self.assertEqual(str(self.module.OBSERVATORY_SCRIPT), command[1])
+            self.assertIn("--target", command)
+            self.assertIn(str(target.resolve()), command)
+            self.assertIn("--review-dir", command)
+            self.assertIn("/tmp/Diffmogger-review", command)
+
 
 if __name__ == "__main__":
     unittest.main()

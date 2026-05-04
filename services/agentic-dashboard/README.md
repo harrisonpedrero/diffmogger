@@ -42,7 +42,7 @@ Use the dashboard Monitor tab to tie the local review together:
 1. Run `bash scripts/validate_starter_kit.sh` from the Diffmogger starter-kit source.
 2. Open the target with **Open Diffmogger Project**.
 3. Click **Run Safety Check** and review the dashboard log.
-4. Launch the observatory or export `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
+4. Click **Export Review Bundle** or export `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
 5. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
 6. Check first-review readiness, safety status, validation state, active role or queue, known issues, and the next-lane action plan in the observatory or Markdown export.
 

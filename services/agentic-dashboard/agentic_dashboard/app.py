@@ -32,6 +32,7 @@ SCAFFOLD_SCRIPT = SCRIPTS_DIR / "scaffold_project_docs.py"
 CHECK_REQUIRED_SCRIPT = SCRIPTS_DIR / "check_required_files.py"
 OBSERVATORY_SCRIPT = SCRIPTS_DIR / "run_observatory.py"
 INTEGRATION_SAFETY_SCRIPT = SCRIPTS_DIR / "check_integration_safety.py"
+DEFAULT_REVIEW_BUNDLE_DIR = Path("/tmp/Diffmogger-review")
 LAUNCHD_LABEL_PREFIX = "com.diffmogger.automation"
 SCHEDULABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
 MIN_CADENCE_MINUTES = 30
@@ -566,6 +567,17 @@ def integration_safety_command(target: Path) -> list[str]:
         sys.executable,
         str(INTEGRATION_SAFETY_SCRIPT),
         str(resolve_integration_safety_target(target)),
+    ]
+
+
+def review_bundle_command(target: Path, review_dir: Path = DEFAULT_REVIEW_BUNDLE_DIR) -> list[str]:
+    return [
+        sys.executable,
+        str(OBSERVATORY_SCRIPT),
+        "--target",
+        str(target.expanduser().resolve()),
+        "--review-dir",
+        str(review_dir),
     ]
 
 
@@ -1233,12 +1245,18 @@ if TK_AVAILABLE:
             ttk.Button(target_row, text="Browse", command=self.browse_target).grid(row=0, column=2, padx=8)
             ttk.Button(target_row, text="Refresh", command=self.refresh_all).grid(row=0, column=3)
             ttk.Button(target_row, text="Launch Observatory", command=self.launch_observatory).grid(row=0, column=4, padx=(8, 0))
+            self.review_bundle_button = ttk.Button(
+                target_row,
+                text="Export Review Bundle",
+                command=self.export_review_bundle,
+            )
+            self.review_bundle_button.grid(row=0, column=5, padx=(8, 0))
             self.integration_safety_button = ttk.Button(
                 target_row,
                 text="Run Safety Check",
                 command=self.run_integration_safety_check,
             )
-            self.integration_safety_button.grid(row=0, column=5, padx=(8, 0))
+            self.integration_safety_button.grid(row=0, column=6, padx=(8, 0))
 
             summary = ttk.LabelFrame(self.monitor_tab, text="Status")
             summary.grid(row=1, column=0, sticky="ew", pady=10)
@@ -2261,6 +2279,51 @@ if TK_AVAILABLE:
             self.observatory_processes.append(process)
             self._append_log("Launched local observatory page for the selected target.")
 
+        def export_review_bundle(self) -> None:
+            if self.running:
+                messagebox.showinfo("Process running", "A dashboard-launched process is already running.")
+                return
+            if not OBSERVATORY_SCRIPT.exists():
+                messagebox.showerror("Review export unavailable", f"Missing observatory helper:\n\n{OBSERVATORY_SCRIPT}")
+                return
+            target_text = self.target_var.get().strip()
+            selected_target = Path(target_text).expanduser() if target_text else KIT_ROOT
+            if not selected_target.exists():
+                messagebox.showerror("Missing target", f"Target directory does not exist:\n\n{selected_target}")
+                return
+            review_dir = DEFAULT_REVIEW_BUNDLE_DIR
+            self.running = True
+            self.open_project_button.configure(state="disabled")
+            self.scaffold_button.configure(state="disabled")
+            self.run_automation_button.configure(state="disabled")
+            self.pause_automation_button.configure(state="disabled")
+            self.remove_schedule_button.configure(state="disabled")
+            self.review_bundle_button.configure(state="disabled")
+            self.integration_safety_button.configure(state="disabled")
+            self.cancel_button.configure(state="normal")
+            self._append_log(f"Exporting first-review bundle for {selected_target.resolve()} to {review_dir}.")
+            thread = threading.Thread(
+                target=self._review_bundle_worker,
+                args=(selected_target.resolve(), review_dir),
+                daemon=True,
+            )
+            thread.start()
+
+        def _review_bundle_worker(self, target: Path, review_dir: Path) -> None:
+            try:
+                code = self._run_command(review_bundle_command(target, review_dir), cwd=KIT_ROOT)
+                if code == 0:
+                    self._thread_log(f"Review bundle exported to {review_dir}.")
+                    self._thread_log(f"Open {review_dir / 'Diffmogger-observatory.html'} and inspect {review_dir / 'Diffmogger-self-review.md'}.")
+                else:
+                    self._thread_log(f"Review bundle export failed with code {code}.")
+            except Exception as exc:
+                self._thread_log(f"ERROR: {exc}")
+            finally:
+                self.current_process = None
+                self.events.put(("refresh", None))
+                self.events.put(("done", None))
+
         def run_integration_safety_check(self) -> None:
             if self.running:
                 messagebox.showinfo("Process running", "A dashboard-launched process is already running.")
@@ -2284,6 +2347,7 @@ if TK_AVAILABLE:
             self.run_automation_button.configure(state="disabled")
             self.pause_automation_button.configure(state="disabled")
             self.remove_schedule_button.configure(state="disabled")
+            self.review_bundle_button.configure(state="disabled")
             self.integration_safety_button.configure(state="disabled")
             self.cancel_button.configure(state="normal")
             self._append_log(f"Starting integration safety check for {check_target}.")
@@ -2544,6 +2608,8 @@ if TK_AVAILABLE:
             if self.running:
                 if hasattr(self, "open_project_button"):
                     self.open_project_button.configure(state="disabled")
+                if hasattr(self, "review_bundle_button"):
+                    self.review_bundle_button.configure(state="disabled")
                 if hasattr(self, "integration_safety_button"):
                     self.integration_safety_button.configure(state="disabled")
                 self.run_automation_button.configure(state="disabled")
@@ -2552,6 +2618,8 @@ if TK_AVAILABLE:
                 return
             if hasattr(self, "open_project_button"):
                 self.open_project_button.configure(state="normal")
+            if hasattr(self, "review_bundle_button"):
+                self.review_bundle_button.configure(state="normal" if OBSERVATORY_SCRIPT.exists() else "disabled")
             if hasattr(self, "integration_safety_button"):
                 self.integration_safety_button.configure(state="normal" if INTEGRATION_SAFETY_SCRIPT.exists() else "disabled")
             target_text = self.target_var.get().strip()
@@ -2904,6 +2972,8 @@ def smoke_check() -> int:
     for path in [SCAFFOLD_SCRIPT, CHECK_REQUIRED_SCRIPT, OBSERVATORY_SCRIPT, INTEGRATION_SAFETY_SCRIPT]:
         if not path.exists():
             problems.append(f"Missing required script: {path}")
+    if "--review-dir" not in " ".join(review_bundle_command(KIT_ROOT)):
+        problems.append("Review bundle command is not wired to --review-dir.")
     if problems:
         for problem in problems:
             print(problem, file=sys.stderr)

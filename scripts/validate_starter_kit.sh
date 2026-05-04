@@ -549,6 +549,7 @@ for marker in [
     "OBSERVATORY_SCRIPT",
     "INTEGRATION_SAFETY_SCRIPT",
     "Launch Observatory",
+    "Export Review Bundle",
     "Run Safety Check",
     "check_integration_safety.py",
     "run_observatory.py",
@@ -573,6 +574,7 @@ for marker in [
     "docs/context/",
     "docs/PROJECT_CONTEXT.md",
     "Codex CLI installed and signed in",
+    "Export Review Bundle",
     "Run Safety Check",
 ]:
     if marker not in dashboard_readme:
@@ -583,6 +585,7 @@ first_review_markers = {
     Path("README.md"): [
         "First Review Checklist",
         "bash scripts/validate_starter_kit.sh",
+        "Export Review Bundle",
         "Run Safety Check",
         "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
@@ -591,6 +594,7 @@ first_review_markers = {
     Path("docs/DASHBOARD.md"): [
         "First Review Checklist",
         "Open Diffmogger Project",
+        "Export Review Bundle",
         "Run Safety Check",
         "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
@@ -599,6 +603,7 @@ first_review_markers = {
     Path("docs/FRESH_PROJECT_SETUP.md"): [
         "First Review Checklist",
         "bash scripts/validate_starter_kit.sh",
+        "Export Review Bundle",
         "Run Safety Check",
         "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
@@ -607,6 +612,7 @@ first_review_markers = {
     Path("templates/docs/DEVELOPMENT.md"): [
         "First Review Checklist",
         "bash scripts/validate_starter_kit.sh",
+        "Export Review Bundle",
         "Run Safety Check",
         "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
@@ -615,6 +621,7 @@ first_review_markers = {
     Path("services/agentic-dashboard/README.md"): [
         "First Review Checklist",
         "bash scripts/validate_starter_kit.sh",
+        "Export Review Bundle",
         "Run Safety Check",
         "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",

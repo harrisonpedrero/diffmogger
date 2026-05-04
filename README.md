@@ -173,7 +173,7 @@ After bootstrap or before a demo, use one local review path instead of hunting t
 
 1. From the Diffmogger starter-kit source, run `bash scripts/validate_starter_kit.sh`.
 2. Launch `python3 scripts/run_dashboard.py`, open the target, and use Monitor tab **Run Safety Check**.
-3. From the repo being reviewed, export both first-review artifacts: `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
+3. Click **Export Review Bundle** or, from the repo being reviewed, run `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
 4. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
 5. Review the first-review readiness, safety status, validation state, active role or queue, known issues, and next sprint recommendation in the observatory or Markdown export.
 
