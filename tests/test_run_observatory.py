@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import tempfile
 import textwrap
@@ -32,6 +33,20 @@ class ObservatorySnapshotTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.modules = [(path, load_observatory(path)) for path in OBSERVATORY_PATHS]
+
+    def test_source_and_template_observatory_scripts_stay_identical(self) -> None:
+        source_path, template_path = OBSERVATORY_PATHS
+        source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        template_hash = hashlib.sha256(template_path.read_bytes()).hexdigest()
+
+        self.assertEqual(
+            source_hash,
+            template_hash,
+            (
+                "scripts/run_observatory.py and templates/scripts/run_observatory.py "
+                "must stay byte-identical; run cmp -s to inspect drift."
+            ),
+        )
 
     def write_text(self, root: Path, relative: str, content: str) -> Path:
         path = root / relative
