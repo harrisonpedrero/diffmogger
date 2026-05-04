@@ -244,6 +244,13 @@ class ObservatorySnapshotTests(unittest.TestCase):
                 "decision_queue": [
                     {"role": "integrator", "state": "ready", "reason": "queued patch needs integration"}
                 ],
+                "integrator_no_progress": {
+                    "active": True,
+                    "streak": 2,
+                    "threshold": 2,
+                    "reason": "integrator accepted 0 patches; deferred queue stayed blocked for staleness:no_detail",
+                    "planner_requested_at": None,
+                },
                 "history": [],
             },
         )
@@ -334,6 +341,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("1 pass, 1 fail", snapshot["task"]["validation"]["summary"])
                     self.assertIn("human-inbox-triage", review_items["Signals"])
                     self.assertIn("1 queued", review_items["Queue and conveyor"])
+                    self.assertIn("No-progress circuit breaker active", review_items["Queue and conveyor"])
 
     def test_review_markdown_export_summarizes_local_state(self) -> None:
         for path, module in self.modules:
@@ -361,6 +369,8 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("FAIL:", report)
                     self.assertIn("`human-inbox-triage`", report)
                     self.assertIn("queued_patches: 1", report)
+                    self.assertIn("no_progress_circuit: active after 2/2", report)
+                    self.assertIn("staleness:no_detail", report)
                     self.assertIn("pending_requests: 1", report)
                     self.assertIn("System python lacks pytest", report)
                     self.assertIn("Add a local validation fixture", report)

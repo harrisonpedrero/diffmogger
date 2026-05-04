@@ -471,6 +471,22 @@ def conveyor_health(conveyor: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def no_progress_summary(no_progress: dict[str, Any]) -> str:
+    if not no_progress.get("active"):
+        return ""
+    streak = int(no_progress.get("streak", 0) or 0)
+    threshold = int(no_progress.get("threshold", 0) or 0)
+    reason = clean_text(no_progress.get("reason") or "integrator made no patch progress", limit=260)
+    if threshold:
+        summary = f"No-progress circuit breaker active after {streak}/{threshold} integrator no-progress cycle(s): {reason}"
+    else:
+        summary = f"No-progress circuit breaker active after {streak} integrator no-progress cycle(s): {reason}"
+    planner_requested = clean_text(no_progress.get("planner_requested_at") or "", limit=80)
+    if planner_requested:
+        summary += f"; planner handoff requested at {planner_requested}"
+    return summary
+
+
 def progress_snapshot(progress_text: str) -> dict[str, Any]:
     deferred_depth = 0
     match = re.search(r"^-\s*Current deferred queue depth:\s*(\d+)", progress_text, re.MULTILINE)
@@ -503,6 +519,8 @@ def self_review_snapshot(
     else:
         queue_summary = EMPTY_STATES["patch_queue"]
 
+    no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
+    no_progress_note = no_progress_summary(no_progress)
     active_signals = signals.get("active") if isinstance(signals.get("active"), list) else []
     if active_signals:
         names = [
@@ -526,6 +544,8 @@ def self_review_snapshot(
             conveyor_summary = f"Next lane: {first.get('role', 'idle')} ({first.get('state', 'planned')}) - {reason}."
         else:
             conveyor_summary = "No conveyor decision recorded yet."
+    if no_progress_note:
+        conveyor_summary = f"{conveyor_summary} {no_progress_note}."
 
     pending_human = int(human.get("pending_requests", 0) or 0)
     inbox = int(human.get("unhandled_inbox", 0) or 0)
@@ -1135,6 +1155,18 @@ HTML_TEMPLATE = r"""<!doctype html>
       healthNode.appendChild(el("div", "", healthData.summary || "builder-first conveyor policy active."));
       if ((healthData.recent_roles || []).length) healthNode.appendChild(el("div", "muted", "recent roles: " + healthData.recent_roles.join(" -> ")));
       health.appendChild(healthNode);
+      const noProgress = ((data.conveyor || {}).no_progress) || {};
+      if (noProgress.active) {
+        const noProgressNode = el("div", "health warning");
+        noProgressNode.appendChild(el("strong", "", "NO-PROGRESS CIRCUIT"));
+        const streak = Number(noProgress.streak || 0);
+        const threshold = Number(noProgress.threshold || 0);
+        const countText = threshold ? streak + "/" + threshold : String(streak);
+        noProgressNode.appendChild(el("div", "", "No-progress circuit breaker active after " + countText + " integrator cycle(s)."));
+        noProgressNode.appendChild(el("div", "muted", noProgress.reason || "Integrator made no patch progress."));
+        if (noProgress.planner_requested_at) noProgressNode.appendChild(el("div", "muted", "planner handoff requested at " + noProgress.planner_requested_at));
+        health.appendChild(noProgressNode);
+      }
 
       const nextUp = document.getElementById("nextUp");
       clear(nextUp);
@@ -1251,6 +1283,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     progress = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {}
     empty_states = snapshot.get("empty_states") if isinstance(snapshot.get("empty_states"), dict) else {}
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
+    no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
 
     lines = [
         "# Diffmogger Self-Review Snapshot",
@@ -1315,6 +1348,19 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
         )
     health = conveyor.get("health") if isinstance(conveyor.get("health"), dict) else {}
     lines.append(f"- conveyor_health: {clean_text(health.get('summary') or 'No conveyor health recorded.', limit=420)}")
+    if no_progress.get("active"):
+        streak = int(no_progress.get("streak", 0) or 0)
+        threshold = int(no_progress.get("threshold", 0) or 0)
+        count_text = f"{streak}/{threshold}" if threshold else str(streak)
+        lines.append(
+            f"- no_progress_circuit: active after {count_text} integrator cycle(s) - "
+            f"{clean_text(no_progress.get('reason') or 'integrator made no patch progress', limit=360)}"
+        )
+        planner_requested = clean_text(no_progress.get("planner_requested_at") or "", limit=80)
+        if planner_requested:
+            lines.append(f"- no_progress_planner_handoff: {planner_requested}")
+    else:
+        lines.append("- no_progress_circuit: inactive")
     decisions = [item for item in list(conveyor.get("decision_queue") or []) if isinstance(item, dict)]
     if decisions:
         first = decisions[0]

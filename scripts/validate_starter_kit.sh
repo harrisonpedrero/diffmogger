@@ -391,6 +391,7 @@ for marker in [
 	    "--open",
 	    "--review-output",
 	    "Self Review",
+	    "no_progress_circuit",
 	    "Active Signals",
 	    "Conveyor Health",
 	    "Recent Outcomes",
@@ -1323,6 +1324,13 @@ target = Path(sys.argv[1])
                 {"role": "builder", "state": "next", "reason": "builder lane is next"},
                 {"role": "integrator", "state": "ready", "reason": "queued patch needs integration"},
             ],
+            "integrator_no_progress": {
+                "active": True,
+                "streak": 2,
+                "threshold": 2,
+                "reason": "integrator accepted 0 patches; deferred queue stayed blocked for staleness:no_detail",
+                "planner_requested_at": None,
+            },
 	            "history": [
 	                {
 	                    "role": "hardener",
@@ -1416,7 +1424,7 @@ target = Path(sys.argv[1])
 )
 PY
 python3 scripts/run_observatory.py --target "$tmp_dir" --once --output "$tmp_dir/target/observatory/index.html" >/tmp/Diffmogger-observatory-render.log
-for marker in "Diffmogger Observatory" "Conveyor Belt" "Active Signals" "prompt-self-audit" "run-observe" "builder" "Conveyor Health" "Recent Outcomes" "run-skipped" "skipped" "hardener/integrator churn"; do
+for marker in "Diffmogger Observatory" "Conveyor Belt" "Active Signals" "prompt-self-audit" "run-observe" "builder" "Conveyor Health" "NO-PROGRESS CIRCUIT" "staleness:no_detail" "Recent Outcomes" "run-skipped" "skipped" "hardener/integrator churn"; do
     if ! grep -q "$marker" "$tmp_dir/target/observatory/index.html"; then
         echo "Observatory render smoke missing marker: $marker" >&2
         rm -rf "$tmp_dir"
