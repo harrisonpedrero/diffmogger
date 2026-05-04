@@ -99,6 +99,29 @@ class ListDeferredPatchTests(unittest.TestCase):
                         "target/automation_queue/builder/run-new/manifest.json",
                     )
 
+    def test_non_object_manifest_is_ignored_without_crashing(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    bad_manifest = target / "target" / "automation_queue" / "planner" / "run-bad" / "manifest.json"
+                    bad_manifest.parent.mkdir(parents=True, exist_ok=True)
+                    bad_manifest.write_text("[]\n", encoding="utf-8")
+                    self.write_manifest(
+                        target,
+                        role="builder",
+                        run_id="run-good",
+                        deferral_reason="staleness",
+                    )
+
+                    records = module.deferred_manifests(target)
+                    report = module.render_markdown(records, target)
+
+                    self.assertEqual([record["run_id"] for record in records], ["run-good"])
+                    self.assertIn("- deferred_count: 1", report)
+                    self.assertIn("builder `run-good`", report)
+                    self.assertNotIn("run-bad", report)
+
     def test_markdown_report_groups_actions_and_scrubs_local_paths(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
