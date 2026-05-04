@@ -45,6 +45,41 @@ RUNTIME_STATE_WHITELIST = {
     "docs/MULTI_ROLE_PROGRESS.md",
     "target/automation_signals.json",
 }
+RUNTIME_STATE_ALLOWED_PREFIXES = (".agentic/", "docs/")
+RUNTIME_STATE_DENY_PARTS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    "automation_queue",
+    "automation_worktrees",
+    "automation_logs",
+    "automation_venvs",
+}
+RUNTIME_STATE_DENY_NAMES = {".DS_Store", "codex_automation.lock", "automation_conveyor.lock"}
+RUNTIME_STATE_DENY_SUFFIXES = (
+    ".7z",
+    ".db",
+    ".gif",
+    ".gz",
+    ".jpeg",
+    ".jpg",
+    ".lock",
+    ".log",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".pyo",
+    ".sqlite",
+    ".tar",
+    ".tgz",
+    ".zip",
+)
+RUNTIME_STATE_MAX_BYTES = 1024 * 1024
 RUNTIME_STATE_BLOCKING_STATUSES = {"blocked", "conflict", "error", "rejected"}
 PROGRESS_SECTIONS = [
     "Project State At Last Integration",
@@ -288,7 +323,43 @@ def resolve_runtime_state_actions_path(target: Path, manifest: dict[str, Any]) -
     return target / path
 
 
-def normalize_runtime_state_path(raw: Any) -> tuple[str | None, str]:
+def runtime_state_path_safe(rel_text: str) -> tuple[bool, str]:
+    rel = Path(rel_text)
+    parts = rel.parts
+    if any(part in {"", ".", ".."} for part in parts):
+        return False, "runtime-state path may not contain empty, '.', or '..' segments"
+    lowered_parts = {part.lower() for part in parts}
+    if lowered_parts & {"secrets", ".ssh"}:
+        return False, "runtime-state path may not reference secret-bearing paths"
+    if any(part in RUNTIME_STATE_DENY_PARTS for part in parts):
+        return False, "runtime-state path references denied runtime artifacts"
+    name = rel.name
+    if name == ".env" or name.startswith(".env."):
+        return False, "runtime-state path may not reference environment files"
+    if name in RUNTIME_STATE_DENY_NAMES or name.endswith(RUNTIME_STATE_DENY_SUFFIXES):
+        return False, "runtime-state path references a denied file type"
+    return True, ""
+
+
+def runtime_state_path_is_ignored(target: Path, rel_text: str) -> bool:
+    result = git(target, "check-ignore", "-q", "--", rel_text)
+    return result.returncode == 0
+
+
+def runtime_state_path_allowed(target: Path, rel_text: str) -> tuple[bool, str]:
+    ok, detail = runtime_state_path_safe(rel_text)
+    if not ok:
+        return False, detail
+    if rel_text in RUNTIME_STATE_WHITELIST:
+        return True, ""
+    if not rel_text.startswith(RUNTIME_STATE_ALLOWED_PREFIXES):
+        return False, "runtime-state path is outside ignored automation state roots"
+    if not runtime_state_path_is_ignored(target, rel_text):
+        return False, "runtime-state path is not git-ignored in the target checkout"
+    return True, ""
+
+
+def normalize_runtime_state_path(target: Path, raw: Any) -> tuple[str | None, str]:
     if not isinstance(raw, str) or not raw.strip():
         return None, "runtime-state path is missing or not a string"
     if "\x00" in raw:
@@ -296,14 +367,10 @@ def normalize_runtime_state_path(raw: Any) -> tuple[str | None, str]:
     rel = Path(raw)
     if rel.is_absolute():
         return None, "runtime-state path must be relative"
-    parts = rel.parts
-    if any(part in {"", ".", ".."} for part in parts):
-        return None, "runtime-state path may not contain empty, '.', or '..' segments"
-    if any(part == ".env" or part.startswith(".env.") for part in parts):
-        return None, "runtime-state path may not reference environment files"
     rel_text = rel.as_posix()
-    if rel_text not in RUNTIME_STATE_WHITELIST:
-        return None, f"runtime-state path is not whitelisted: {rel_text}"
+    allowed, detail = runtime_state_path_allowed(target, rel_text)
+    if not allowed:
+        return None, detail
     return rel_text, ""
 
 
@@ -431,7 +498,7 @@ def apply_runtime_state_actions(target: Path, manifest: dict[str, Any], *, dry_r
             results.append(result)
             continue
 
-        rel_path, path_error = normalize_runtime_state_path(action.get("path"))
+        rel_path, path_error = normalize_runtime_state_path(target, action.get("path"))
         if rel_path is None:
             result.update({"status": "rejected", "detail": path_error})
             results.append(result)
@@ -459,6 +526,10 @@ def apply_runtime_state_actions(target: Path, manifest: dict[str, Any], *, dry_r
             results.append(result)
             continue
         content_bytes = content.encode("utf-8")
+        if len(content_bytes) > RUNTIME_STATE_MAX_BYTES:
+            result.update({"status": "rejected", "detail": "runtime-state content exceeds size limit"})
+            results.append(result)
+            continue
         actual_end_hash = sha256_bytes(content_bytes)
         if actual_end_hash != end_hash:
             result.update(

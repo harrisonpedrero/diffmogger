@@ -150,27 +150,162 @@ context_paths=(
   "target/automation_signals.json"
 )
 
-runtime_state_paths=(
-  ".agentic/automation_prompt.md"
-  ".agentic/verification_commands.txt"
-  ".agentic/roles/planner.md"
-  ".agentic/roles/builder.md"
-  ".agentic/roles/hardener.md"
-  ".agentic/roles/integrator.md"
-  "docs/HUMAN_INBOX.md"
-  "docs/HUMAN_RESPONSES_ARCHIVE.md"
-  "docs/HUMAN_REQUESTS.md"
-  "docs/HUMAN_OUTBOX.md"
-  "docs/CODEX_AUTOMATION_TASKS.md"
-  "docs/MULTI_ROLE_PROGRESS.md"
-  "target/automation_signals.json"
-)
+runtime_state_paths_path="$queue_dir/runtime_state_paths.txt"
 runtime_state_start_path="$queue_dir/runtime_state_start.json"
 runtime_state_actions_path="$queue_dir/runtime_state_actions.json"
 runtime_state_changed_files_path="$queue_dir/runtime_state_changed_files.txt"
 
+python3 - "$target_abs" "$runtime_state_paths_path" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+output = Path(sys.argv[2])
+max_bytes = int(os.environ.get("RUNTIME_STATE_MAX_BYTES", "1048576"))
+explicit_paths = [
+    ".agentic/automation_prompt.md",
+    ".agentic/verification_commands.txt",
+    ".agentic/roles/planner.md",
+    ".agentic/roles/builder.md",
+    ".agentic/roles/hardener.md",
+    ".agentic/roles/integrator.md",
+    "docs/HUMAN_INBOX.md",
+    "docs/HUMAN_RESPONSES_ARCHIVE.md",
+    "docs/HUMAN_REQUESTS.md",
+    "docs/HUMAN_OUTBOX.md",
+    "docs/CODEX_AUTOMATION_TASKS.md",
+    "docs/MULTI_ROLE_PROGRESS.md",
+    "target/automation_signals.json",
+]
+scan_roots = [".agentic", "docs"]
+allowed_prefixes = (".agentic/", "docs/")
+deny_parts = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    "automation_queue",
+    "automation_worktrees",
+    "automation_logs",
+    "automation_venvs",
+}
+deny_names = {".DS_Store", "codex_automation.lock", "automation_conveyor.lock"}
+deny_suffixes = (
+    ".7z",
+    ".db",
+    ".gif",
+    ".gz",
+    ".jpeg",
+    ".jpg",
+    ".lock",
+    ".log",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".pyo",
+    ".sqlite",
+    ".tar",
+    ".tgz",
+    ".zip",
+)
+
+def git_ignored(rel):
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "--", rel],
+        cwd=target,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+def safe_rel(rel):
+    rel_path = Path(rel)
+    if rel_path.is_absolute():
+        return False
+    parts = rel_path.parts
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    lowered_parts = {part.lower() for part in parts}
+    if lowered_parts & {"secrets", ".ssh"}:
+        return False
+    if any(part in deny_parts for part in parts):
+        return False
+    name = rel_path.name
+    if name == ".env" or name.startswith(".env."):
+        return False
+    if name in deny_names or name.endswith(deny_suffixes):
+        return False
+    return True
+
+def text_file(path):
+    if not path.exists() or not path.is_file() or path.is_symlink():
+        return False
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    if len(data) > max_bytes:
+        return False
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+def allowed_runtime_path(rel):
+    if not safe_rel(rel):
+        return False
+    if rel in explicit_paths:
+        return True
+    if not rel.startswith(allowed_prefixes):
+        return False
+    return git_ignored(rel)
+
+seen = set()
+paths = []
+
+def add(rel):
+    if rel in seen or not allowed_runtime_path(rel):
+        return
+    if not text_file(target / rel):
+        return
+    seen.add(rel)
+    paths.append(rel)
+
+for rel in explicit_paths:
+    add(rel)
+
+for root in scan_roots:
+    root_path = target / root
+    if not root_path.exists():
+        continue
+    for current, dirs, files in os.walk(root_path):
+        dirs[:] = [item for item in dirs if item not in deny_parts and item.lower() not in {"secrets", ".ssh"}]
+        for name in files:
+            rel = (Path(current) / name).relative_to(target).as_posix()
+            add(rel)
+
+output.write_text("\n".join(paths) + ("\n" if paths else ""), encoding="utf-8")
+PY
+
+runtime_state_paths=()
+while IFS= read -r rel; do
+  if [[ -n "$rel" ]]; then
+    runtime_state_paths+=("$rel")
+  fi
+done <"$runtime_state_paths_path"
+
 context_excludes=()
 for rel in "${context_paths[@]}"; do
+  context_excludes+=(":(exclude)$rel")
+done
+for rel in "${runtime_state_paths[@]}"; do
   context_excludes+=(":(exclude)$rel")
 done
 
@@ -191,6 +326,9 @@ seed_context_path() {
 }
 
 for rel in "${context_paths[@]}"; do
+  seed_context_path "$rel"
+done
+for rel in "${runtime_state_paths[@]}"; do
   seed_context_path "$rel"
 done
 

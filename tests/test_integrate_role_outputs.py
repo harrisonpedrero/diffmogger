@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -101,6 +102,48 @@ class RuntimeStateActionTests(unittest.TestCase):
                     self.assertEqual(prompt.read_text(encoding="utf-8"), "new builder prompt\n")
                     self.assertEqual(manifest["runtime_state_status"], "applied")
                     self.assertEqual(results[0]["status"], "applied")
+
+    def test_runtime_state_applies_arbitrary_ignored_docs_file(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    subprocess.run(["git", "init"], cwd=target, check=True, stdout=subprocess.DEVNULL)
+                    (target / ".gitignore").write_text("docs/LOCAL_RUNTIME.md\n", encoding="utf-8")
+                    runtime_doc = target / "docs" / "LOCAL_RUNTIME.md"
+                    runtime_doc.parent.mkdir(parents=True)
+                    runtime_doc.write_text("old runtime doc\n", encoding="utf-8")
+                    manifest = self.write_actions(
+                        target,
+                        [
+                            self.replace_action(
+                                "docs/LOCAL_RUNTIME.md",
+                                "old runtime doc\n",
+                                "new runtime doc\n",
+                            )
+                        ],
+                    )
+
+                    results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
+
+                    self.assertEqual(runtime_doc.read_text(encoding="utf-8"), "new runtime doc\n")
+                    self.assertEqual(manifest["runtime_state_status"], "applied")
+                    self.assertEqual(results[0]["status"], "applied")
+
+    def test_runtime_state_rejects_env_file_even_when_ignored(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    subprocess.run(["git", "init"], cwd=target, check=True, stdout=subprocess.DEVNULL)
+                    (target / ".gitignore").write_text(".env\n", encoding="utf-8")
+                    manifest = self.write_actions(target, [self.replace_action(".env", None, "SECRET=value\n")])
+
+                    results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
+
+                    self.assertFalse((target / ".env").exists())
+                    self.assertEqual(manifest["runtime_state_status"], "deferred")
+                    self.assertEqual(results[0]["status"], "rejected")
 
     def test_runtime_state_conflict_defers_without_overwrite(self) -> None:
         for path, module in self.modules:

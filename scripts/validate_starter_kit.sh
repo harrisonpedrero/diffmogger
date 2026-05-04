@@ -459,6 +459,8 @@ for marker in [
     "runtime_state_actions.json",
     "runtime_state_changed_files",
     "runtime_state_status",
+    "runtime_state_paths.txt",
+    "allowed_runtime_path",
     ".agentic/automation_prompt.md",
     ".agentic/roles/builder.md",
 ]:
@@ -481,6 +483,8 @@ for marker in [
     "RUNTIME_STATE_WHITELIST",
     "apply_runtime_state_actions",
     "runtime_state_results",
+    "RUNTIME_STATE_ALLOWED_PREFIXES",
+    "RUNTIME_STATE_DENY_PARTS",
     ".agentic/automation_prompt.md",
     ".agentic/roles/builder.md",
 ]:
