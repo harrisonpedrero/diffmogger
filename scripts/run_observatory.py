@@ -671,6 +671,183 @@ def role_count_summary(counts: dict[str, int], *, empty: str) -> str:
     return ", ".join(parts) if parts else empty
 
 
+def infer_recommended_lane(text: Any, *, fallback: str = "") -> str:
+    lower = clean_text(text, limit=700).lower()
+    if not lower:
+        return clean_text(fallback, limit=40)
+    if any(marker in lower for marker in ("human input", "awaiting user", "blocked on user", "request human")):
+        return "human"
+    if any(marker in lower for marker in ("integrator", "integration", "deferred", "queued patch", "patch triage")):
+        return "integrator"
+    if any(marker in lower for marker in ("validation", "validate", "failing check", "pytest", "unittest", "py_compile", "hardener", "repair")):
+        return "hardener"
+    if any(marker in lower for marker in ("builder", "build", "implement", "add ", "dashboard", "observatory", "increment", "scaffold")):
+        return "builder"
+    if any(marker in lower for marker in ("planner", "planning", "plan ", "prompt", "roadmap", "backlog", "inbox")):
+        return "planner"
+    return clean_text(fallback, limit=40)
+
+
+def latest_observed_lane_result(queue: dict[str, Any], conveyor: dict[str, Any]) -> dict[str, Any]:
+    active = conveyor.get("active_role_run") if isinstance(conveyor.get("active_role_run"), dict) else {}
+    if active.get("role") and active.get("status") == "running":
+        role = clean_text(active.get("role") or "unknown", limit=40)
+        return {
+            "source": "active_role_run",
+            "lane": role,
+            "result": f"{role} running",
+            "detail": clean_text(active.get("reason") or "Active role run is still in progress.", limit=360),
+            "timestamp": clean_text(active.get("started_at") or "", limit=80),
+            "completed": False,
+        }
+
+    history = [item for item in list(conveyor.get("history") or []) if isinstance(item, dict)]
+    if history:
+        entry = history[-1]
+        role = clean_text(entry.get("role") or "unknown", limit=40)
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        progress_success = entry.get("progress_success")
+        exit_code = entry.get("exit_code")
+        if progress_success is True:
+            result = f"{role} completed with progress"
+        elif progress_success is False:
+            result = f"{role} completed with no progress"
+        elif exit_code not in (None, "", 0, "0"):
+            result = f"{role} exited with code {clean_text(exit_code, limit=20)}"
+        else:
+            result = f"{role} completed"
+        detail_parts = []
+        if role == "integrator":
+            accepted = role_count_summary(
+                metadata.get("accepted_by_role") if isinstance(metadata.get("accepted_by_role"), dict) else {},
+                empty="",
+            )
+            deferred_delta = role_count_summary(
+                metadata.get("deferred_delta_by_role") if isinstance(metadata.get("deferred_delta_by_role"), dict) else {},
+                empty="",
+            )
+            if accepted:
+                detail_parts.append(f"accepted {accepted}")
+            if deferred_delta:
+                detail_parts.append(f"deferred delta {deferred_delta}")
+        reason = clean_text(entry.get("reason") or "", limit=360)
+        if reason:
+            detail_parts.append(reason)
+        return {
+            "source": "conveyor_history",
+            "lane": role,
+            "result": result,
+            "detail": "; ".join(detail_parts) if detail_parts else "No outcome detail recorded.",
+            "timestamp": clean_text(entry.get("finished_at") or entry.get("started_at") or "", limit=80),
+            "completed": True,
+        }
+
+    outcomes = [item for item in list(queue.get("recent_outcomes") or []) if isinstance(item, dict)]
+    if outcomes:
+        item = outcomes[0]
+        role = clean_text(item.get("role") or "unknown", limit=40)
+        status = clean_text(item.get("status") or "outcome", limit=40)
+        run_id = clean_text(item.get("run_id") or "unknown", limit=80)
+        return {
+            "source": "queue_outcome",
+            "lane": role,
+            "result": f"{status} `{run_id}`",
+            "detail": clean_text(item.get("summary") or "No queue outcome summary recorded.", limit=360),
+            "timestamp": clean_text(item.get("timestamp") or item.get("created_at") or "", limit=80),
+            "completed": True,
+        }
+
+    decisions = [item for item in list(conveyor.get("decision_queue") or []) if isinstance(item, dict)]
+    if decisions:
+        first = decisions[0]
+        role = clean_text(first.get("role") or "idle", limit=40)
+        state = clean_text(first.get("state") or "planned", limit=40)
+        return {
+            "source": "decision_queue",
+            "lane": role,
+            "result": f"{role} {state}",
+            "detail": clean_text(first.get("reason") or "No conveyor reason recorded.", limit=360),
+            "timestamp": "",
+            "completed": False,
+        }
+
+    return {
+        "source": "none",
+        "lane": "none",
+        "result": "No conveyor or queue outcome recorded yet.",
+        "detail": "The previous recommendation is still waiting for a visible local outcome.",
+        "timestamp": "",
+        "completed": False,
+    }
+
+
+def action_plan_follow_through(
+    task: dict[str, Any],
+    queue: dict[str, Any],
+    conveyor: dict[str, Any],
+    progress: dict[str, Any],
+    action_plan: dict[str, Any],
+) -> dict[str, Any]:
+    previous = clean_text(
+        task.get("suggested_next_task")
+        or task.get("best_next_milestone")
+        or action_plan.get("recommendation")
+        or "",
+        limit=500,
+    )
+    current_lane = clean_text(action_plan.get("lane") or "local", limit=40)
+    expected_lane = infer_recommended_lane(previous, fallback=current_lane) or "unknown"
+    observed = latest_observed_lane_result(queue, conveyor)
+    observed_lane = clean_text(observed.get("lane") or "none", limit=40)
+    priority = clean_text(action_plan.get("priority") or "normal", limit=40).lower()
+    completed = bool(observed.get("completed"))
+    high_priority = priority in {"critical", "high", "blocked"}
+
+    if completed and expected_lane != "unknown" and observed_lane == expected_lane:
+        status = "followed"
+        reason = "The latest completed local outcome matches the lane inferred from the previous recommendation."
+    elif completed and expected_lane != "unknown" and observed_lane != expected_lane:
+        status = "superseded"
+        reason = "A different completed local lane ran after the previous recommendation."
+    elif expected_lane != "unknown" and high_priority and current_lane != expected_lane:
+        status = "superseded"
+        reason = "The current action plan has a higher-priority lane than the previous recommendation."
+    else:
+        status = "still_pending"
+        reason = "No completed local outcome for the inferred lane has been observed yet."
+
+    return {
+        "status": status,
+        "previous_recommendation": previous or "No previous recommendation recorded.",
+        "expected_lane": expected_lane,
+        "observed_lane": observed_lane,
+        "observed_result": clean_text(observed.get("result") or "No observed result recorded.", limit=220),
+        "observed_detail": clean_text(observed.get("detail") or "", limit=420),
+        "observed_source": clean_text(observed.get("source") or "none", limit=80),
+        "observed_at": clean_text(observed.get("timestamp") or "", limit=80),
+        "current_recommendation": clean_text(action_plan.get("recommendation") or "No current action plan recorded.", limit=500),
+        "current_lane": current_lane,
+        "status_reason": reason,
+        "accepted_total": int(progress.get("accepted_total", 0) or 0),
+        "deferred_queue_depth": int(progress.get("deferred_queue_depth", 0) or 0),
+    }
+
+
+def follow_through_summary(follow_through: dict[str, Any]) -> str:
+    if not follow_through:
+        return "No action-plan follow-through state recorded yet."
+    status = clean_text(follow_through.get("status") or "still_pending", limit=40).replace("_", " ")
+    previous = clean_text(follow_through.get("previous_recommendation") or "No previous recommendation recorded.", limit=260)
+    expected = clean_text(follow_through.get("expected_lane") or "unknown", limit=40)
+    observed_lane = clean_text(follow_through.get("observed_lane") or "none", limit=40)
+    observed_result = clean_text(follow_through.get("observed_result") or "No observed result recorded.", limit=180)
+    reason = clean_text(follow_through.get("status_reason") or "", limit=260)
+    return (
+        f"{status}: previous recommendation was `{previous}`. "
+        f"Expected `{expected}`; observed `{observed_lane}` as {observed_result}. {reason}"
+    )
+
+
 def scorecard_action_plan(
     task: dict[str, Any],
     queue: dict[str, Any],
@@ -925,6 +1102,7 @@ def self_review_snapshot(
     conveyor: dict[str, Any],
     human: dict[str, int],
     progress: dict[str, Any],
+    follow_through: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     queued = int(totals.get("queued", 0) or 0)
@@ -993,6 +1171,7 @@ def self_review_snapshot(
             {"label": "Queue and conveyor", "body": f"{queue_summary} {conveyor_summary}"},
             {"label": "Human bridge", "body": human_summary},
             {"label": "Action plan", "body": f"{action_plan['recommendation']} {action_plan['why']}"},
+            {"label": "Action follow-through", "body": follow_through_summary(follow_through or {})},
             {"label": "Deferred triage", "body": f"{deferred_summary} {deferred_action}"},
             {"label": "Next sprint", "body": task.get("suggested_next_task") or "No sprint task recorded yet."},
         ],
@@ -1033,6 +1212,23 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "no_progress": conveyor.get("integrator_no_progress") if isinstance(conveyor.get("integrator_no_progress"), dict) else {},
         "history": list(conveyor.get("history") or [])[-MAX_HISTORY:] if isinstance(conveyor.get("history"), list) else [],
     }
+    scorecard = scorecard_snapshot(task, queue, signals, conveyor_state, human, progress)
+    follow_through = action_plan_follow_through(
+        task,
+        queue,
+        conveyor_state,
+        progress,
+        scorecard.get("action_plan") if isinstance(scorecard.get("action_plan"), dict) else {},
+    )
+    review = self_review_snapshot(
+        task,
+        queue,
+        signals,
+        conveyor_state,
+        human,
+        progress,
+        follow_through=follow_through,
+    )
     return {
         "schema_version": 1,
         "generated_at": utc_now(),
@@ -1044,8 +1240,9 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "signals": signals,
         "conveyor": conveyor_state,
         "progress": progress,
-        "scorecard": scorecard_snapshot(task, queue, signals, conveyor_state, human, progress),
-        "review": self_review_snapshot(task, queue, signals, conveyor_state, human, progress),
+        "scorecard": scorecard,
+        "follow_through": follow_through,
+        "review": review,
         "empty_states": dict(EMPTY_STATES),
         "progress_recent": progress.get("recent_activity") or "No multi-role activity recorded yet.",
         "logs": log_snapshot(target),
@@ -1516,6 +1713,13 @@ HTML_TEMPLATE = r"""<!doctype html>
       return "skipped";
     }
 
+    function followStatusClass(status) {
+      if (status === "followed") return "applied";
+      if (status === "superseded") return "deferred";
+      if (status === "still_pending") return "queued";
+      return "skipped";
+    }
+
     function render(data) {
       document.getElementById("generated").textContent = "Updated " + (data.generated_at || "now");
       document.getElementById("targetName").textContent = data.target_name || "target";
@@ -1598,6 +1802,18 @@ HTML_TEMPLATE = r"""<!doctype html>
         actionPlan.appendChild(row);
       } else {
         actionPlan.appendChild(el("div", "item muted", "No action plan recorded yet."));
+      }
+      const follow = data.follow_through || {};
+      if (follow.status) {
+        const row = el("div", "item");
+        const title = el("div", "item-title");
+        title.appendChild(el("span", "", "Action Follow-Through"));
+        title.appendChild(el("span", "chip " + followStatusClass(follow.status), String(follow.status || "still_pending").replace("_", " ")));
+        row.appendChild(title);
+        row.appendChild(el("div", "", follow.previous_recommendation || "No previous recommendation recorded."));
+        row.appendChild(el("div", "muted", "expected " + (follow.expected_lane || "unknown") + "; observed " + (follow.observed_lane || "none") + " - " + (follow.observed_result || "No observed result recorded.")));
+        if (follow.status_reason) row.appendChild(el("div", "muted", follow.status_reason));
+        actionPlan.appendChild(row);
       }
       const scorecard = document.getElementById("scorecard");
       clear(scorecard);
@@ -1757,7 +1973,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
         render(await response.json());
       } catch (error) {
-        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, follow_through: {}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
         fallback.progress_recent = "Observatory refresh failed: " + error;
         render(fallback);
       }
@@ -1797,6 +2013,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     conveyor = snapshot.get("conveyor") if isinstance(snapshot.get("conveyor"), dict) else {}
     human = snapshot.get("human") if isinstance(snapshot.get("human"), dict) else {}
     progress = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {}
+    follow_through = snapshot.get("follow_through") if isinstance(snapshot.get("follow_through"), dict) else {}
     empty_states = snapshot.get("empty_states") if isinstance(snapshot.get("empty_states"), dict) else {}
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
@@ -1842,6 +2059,33 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
                 lines.append(f"  - {clean_text(step, limit=420)}")
     else:
         lines.append("- No action plan recorded yet.")
+
+    lines.extend(["", "## Action Follow-Through", ""])
+    if follow_through:
+        status = clean_text(follow_through.get("status") or "still_pending", limit=40).replace("_", " ")
+        lines.append(f"- status: {status}")
+        lines.append(
+            f"- previous_recommendation: {clean_text(follow_through.get('previous_recommendation') or 'No previous recommendation recorded.', limit=500)}"
+        )
+        lines.append(f"- expected_lane: `{clean_text(follow_through.get('expected_lane') or 'unknown', limit=80)}`")
+        lines.append(f"- observed_lane: `{clean_text(follow_through.get('observed_lane') or 'none', limit=80)}`")
+        lines.append(
+            f"- observed_result: {clean_text(follow_through.get('observed_result') or 'No observed result recorded.', limit=420)}"
+        )
+        detail = clean_text(follow_through.get("observed_detail") or "", limit=420)
+        if detail:
+            lines.append(f"- observed_detail: {detail}")
+        source = clean_text(follow_through.get("observed_source") or "none", limit=80)
+        timestamp = clean_text(follow_through.get("observed_at") or "", limit=80)
+        lines.append(f"- observed_source: `{source}`" + (f" at {timestamp}" if timestamp else ""))
+        lines.append(
+            f"- current_recommendation: {clean_text(follow_through.get('current_recommendation') or 'No current action plan recorded.', limit=500)}"
+        )
+        lines.append(
+            f"- status_reason: {clean_text(follow_through.get('status_reason') or 'No follow-through reason recorded.', limit=500)}"
+        )
+    else:
+        lines.append("- No action-plan follow-through state recorded yet.")
 
     lines.extend(["", "## Scorecard", ""])
     lines.append(f"- status: {clean_text(scorecard.get('status') or 'unknown', limit=80)}")

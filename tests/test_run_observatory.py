@@ -430,6 +430,83 @@ class ObservatorySnapshotTests(unittest.TestCase):
                 },
             )
 
+    def seed_follow_through_target(self, root: Path) -> None:
+        self.write_text(
+            root,
+            "docs/CODEX_AUTOMATION_TASKS.md",
+            """
+            # Codex Automation Tasks
+
+            AUTOMATION_STATUS: ACTIVE
+
+            Last updated: 2026-05-03T23:00:00+00:00
+
+            ## Current Project State
+
+            - Current assessment: Follow-through reporting fixture is ready.
+
+            ## Product Horizon State
+
+            - Current horizon: H4 Evaluation/reporting/comparison layer
+            - Advancement decision: stay
+
+            ## Checks From Last Run
+
+            - PASS: `bash scripts/validate_starter_kit.sh`
+
+            ## Suggested Next Sprint-Sized Task
+
+            Continue builder momentum with the next scoped local increment.
+            """,
+        )
+        self.write_text(
+            root,
+            "docs/MULTI_ROLE_PROGRESS.md",
+            """
+            # Multi-Role Progress
+
+            ## Cumulative Metrics
+
+            - Total integrator runs: 2
+            - Accepted patches by role:
+              - planner: 0
+              - builder: 1
+              - hardener: 0
+            - Deferred patches by role:
+              - planner: 0
+              - builder: 0
+              - hardener: 0
+            - Current deferred queue depth: 0
+
+            ## Recent Activity Log
+
+            - builder completed a local reporting increment.
+
+            ## Deferred-Patch Backlog
+
+            None.
+            """,
+        )
+        self.write_json(
+            root,
+            "target/automation_conveyor_state.json",
+            {
+                "schema_version": 1,
+                "cycles": 3,
+                "updated_at": "2026-05-03T23:00:00+00:00",
+                "history": [
+                    {
+                        "role": "builder",
+                        "reason": "builder momentum was available",
+                        "exit_code": 0,
+                        "started_at": "2026-05-03T22:58:00+00:00",
+                        "finished_at": "2026-05-03T23:00:00+00:00",
+                        "progress_success": True,
+                    }
+                ],
+            },
+        )
+
     def test_build_snapshot_counts_active_human_bridge_records(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
@@ -509,6 +586,9 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("## Action Plan", report)
                     self.assertIn("recommendation: Process 1 unhandled human inbox message(s) before role work.", report)
                     self.assertIn("lane: `planner`", report)
+                    self.assertIn("## Action Follow-Through", report)
+                    self.assertIn("status: superseded", report)
+                    self.assertIn("expected_lane: `hardener`", report)
                     self.assertIn("## Scorecard", report)
                     self.assertIn("Accepted patches: 13", report)
                     self.assertIn("Deferred pressure: 1/1", report)
@@ -556,6 +636,31 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("First role patch manifests", report)
                     self.assertIn("No deferred patch backlog recorded", report)
 
+    def test_action_plan_follow_through_marks_followed_completed_lane(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_follow_through_target(target)
+
+                    snapshot = module.build_snapshot(target)
+                    follow = snapshot["follow_through"]
+                    review_items = {item["label"]: item["body"] for item in snapshot["review"]["items"]}
+                    report = module.render_review_markdown(snapshot)
+                    html = module.render_html(snapshot, live=False)
+
+                    self.assertEqual(follow["status"], "followed")
+                    self.assertEqual(follow["expected_lane"], "builder")
+                    self.assertEqual(follow["observed_lane"], "builder")
+                    self.assertIn("builder completed with progress", follow["observed_result"])
+                    self.assertIn("followed", review_items["Action follow-through"])
+                    self.assertIn("## Action Follow-Through", report)
+                    self.assertIn("status: followed", report)
+                    self.assertIn("observed_lane: `builder`", report)
+                    self.assertIn("builder completed with progress", report)
+                    self.assertIn("Action Follow-Through", html)
+                    self.assertIn("followed", html)
+
     def test_deferred_pressure_action_plan_outranks_validation_failures(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
@@ -570,6 +675,8 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(action_plan["lane"], "integrator")
                     self.assertIn("1 deferred backlog item", action_plan["recommendation"])
                     self.assertIn("verification_failure", action_plan["why"])
+                    self.assertEqual(snapshot["follow_through"]["status"], "superseded")
+                    self.assertEqual(snapshot["follow_through"]["expected_lane"], "hardener")
 
     def test_validation_action_plan_outranks_signal_and_builder_momentum(self) -> None:
         for path, module in self.modules:
