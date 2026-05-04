@@ -483,6 +483,7 @@ for marker in [
     "## Deferred-Patch Backlog",
     "## Architectural Decisions",
     "## Role Health",
+    "fast-follow replanning",
 ]:
     if marker not in progress:
         print(f"Multi-role progress template missing marker: {marker}", file=sys.stderr)

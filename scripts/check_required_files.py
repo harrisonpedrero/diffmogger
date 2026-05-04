@@ -202,6 +202,7 @@ MULTI_ROLE_PROGRESS_REQUIRED_STRINGS = [
     "## Deferred-Patch Backlog",
     "## Architectural Decisions",
     "## Role Health",
+    "fast-follow replanning",
 ]
 
 ROLE_PROMPT_REQUIRED_STRINGS = [
