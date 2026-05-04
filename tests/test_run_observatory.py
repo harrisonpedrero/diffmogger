@@ -185,7 +185,9 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
             ## Deferred-Patch Backlog
 
-            - planner stale patch awaiting triage.
+            - planner `planner-stale`: staleness; Patch base no longer matches HEAD.
+            - builder `builder-conflict`: conflict; docs/CODEX_AUTOMATION_TASKS.md changed since role start.
+            - builder `builder-verify`: verification_failure; $ bash scripts/validate_starter_kit.sh
             """,
         )
         self.write_json(
@@ -331,6 +333,14 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(snapshot["human"]["outbound_records"], 1)
                     self.assertEqual(snapshot["queue"]["totals"]["queued"], 1)
                     self.assertEqual(snapshot["progress"]["deferred_queue_depth"], 1)
+                    self.assertEqual(len(snapshot["progress"]["deferred_backlog"]), 3)
+                    triage_groups = {
+                        item["reason"]: item
+                        for item in snapshot["progress"]["deferred_triage"]["groups"]
+                    }
+                    self.assertEqual(triage_groups["staleness"]["count"], 1)
+                    self.assertEqual(triage_groups["conflict"]["count"], 1)
+                    self.assertEqual(triage_groups["verification_failure"]["count"], 1)
 
     def test_signal_and_validation_snapshots_feed_self_review(self) -> None:
         for path, module in self.modules:
@@ -351,11 +361,14 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("human-inbox-triage", review_items["Signals"])
                     self.assertIn("1 queued", review_items["Queue and conveyor"])
                     self.assertIn("No-progress circuit breaker active", review_items["Queue and conveyor"])
+                    self.assertIn("3 deferred backlog item", review_items["Deferred triage"])
+                    self.assertIn("Start with `staleness`", review_items["Deferred triage"])
                     self.assertEqual(snapshot["scorecard"]["status"], "attention")
                     scorecard_items = {item["label"]: item for item in snapshot["scorecard"]["items"]}
                     self.assertEqual(scorecard_items["Accepted patches"]["value"], 13)
                     self.assertIn("builder 6", scorecard_items["Accepted patches"]["detail"])
                     self.assertEqual(scorecard_items["Deferred pressure"]["value"], "1/1")
+                    self.assertIn("1 staleness", scorecard_items["Deferred pressure"]["detail"])
                     self.assertEqual(scorecard_items["Validation"]["value"], "1/1")
 
     def test_review_markdown_export_summarizes_local_state(self) -> None:
@@ -389,6 +402,11 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("queued_patches: 1", report)
                     self.assertIn("no_progress_circuit: active after 2/2", report)
                     self.assertIn("staleness:no_detail", report)
+                    self.assertIn("## Deferred Patch Triage", report)
+                    self.assertIn("summary: 3 deferred backlog item(s): 1 staleness, 1 conflict, 1 verification_failure.", report)
+                    self.assertIn("recommended_next_action: Start with `staleness`", report)
+                    self.assertIn("conflict: 1 item(s); roles: builder 1", report)
+                    self.assertIn("verification_failure: 1 item(s); roles: builder 1", report)
                     self.assertIn("pending_requests: 1", report)
                     self.assertIn("System python lacks pytest", report)
                     self.assertIn("Add a local validation fixture", report)
@@ -414,6 +432,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("Scorecard", html)
                     self.assertIn("first_run_queue_state:", report)
                     self.assertIn("First role patch manifests", report)
+                    self.assertIn("No deferred patch backlog recorded", report)
 
 
 if __name__ == "__main__":

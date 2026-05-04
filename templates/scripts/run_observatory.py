@@ -30,6 +30,21 @@ MAX_SIGNALS = 8
 MAX_REVIEW_ITEMS = 6
 MAX_CHECK_ITEMS = 8
 MAX_SCORECARD_ITEMS = 8
+DEFERRAL_REASON_ACTIONS = {
+    "staleness": "Refresh or recreate the patch from current HEAD, then retry only if the change still matters.",
+    "conflict": "Inspect the listed files and replace the patch with a freshly reconciled local change.",
+    "verification_failure": "Re-run the failing command locally, fix the source or test issue, then submit a new verified patch.",
+    "verification_environment_failure": "Repair project-local tooling or fixtures first, then rerun verification before retrying.",
+    "guardrail_violation": "Do not apply as-is; replace it with a guardrail-compliant local patch or archive it.",
+    "other": "Inspect the manifest and summary, then choose retry, replacement, archival, or documentation.",
+}
+DEFERRAL_REASON_ORDER = tuple(DEFERRAL_REASON_ACTIONS)
+EMPTY_DEFERRED_BACKLOG_MARKERS = {
+    "none",
+    "none.",
+    "no deferred backlog recorded",
+    "no deferred backlog recorded.",
+}
 EMPTY_STATES = {
     "next_up": "No conveyor decision yet. After the first conveyor cycle, the next local role lane and reason will appear here.",
     "patch_queue": "No queued or deferred patches yet. First role patch manifests will appear here after builder, hardener, or planner lanes write local queue outputs.",
@@ -488,6 +503,121 @@ def no_progress_summary(no_progress: dict[str, Any]) -> str:
     return summary
 
 
+def normalized_deferral_reason(value: Any) -> str:
+    reason = clean_text(value, limit=120).lower().replace("-", "_")
+    if reason in {"stale", "staleness"}:
+        return "staleness"
+    if reason in DEFERRAL_REASON_ACTIONS:
+        return reason
+    if "environment" in reason and ("verification" in reason or "validation" in reason):
+        return "verification_environment_failure"
+    if "verification" in reason or "validation" in reason:
+        return "verification_failure"
+    if "conflict" in reason:
+        return "conflict"
+    if "stale" in reason:
+        return "staleness"
+    if "guardrail" in reason or "unsafe" in reason:
+        return "guardrail_violation"
+    return "other"
+
+
+def deferred_backlog_items(progress_text: str) -> list[str]:
+    items: list[str] = []
+    for item in section_bullets(progress_text, "Deferred-Patch Backlog", limit=MAX_REVIEW_ITEMS):
+        if clean_text(item, limit=120).lower() in EMPTY_DEFERRED_BACKLOG_MARKERS:
+            continue
+        items.append(item)
+    return items
+
+
+def parse_deferred_backlog_item(item: str) -> dict[str, str]:
+    text = clean_text(item, limit=520)
+    structured = re.match(
+        r"^(?P<role>[A-Za-z0-9_-]+)\s+`(?P<run_id>[^`]+)`:\s*(?P<reason>[A-Za-z0-9_-]+)\s*;\s*(?P<detail>.+)$",
+        text,
+    )
+    if structured:
+        role = structured.group("role")
+        run_id = structured.group("run_id")
+        raw_reason = structured.group("reason")
+        detail = structured.group("detail")
+    else:
+        role_match = re.match(r"^(?P<role>[A-Za-z0-9_-]+)\b", text)
+        role = role_match.group("role") if role_match and role_match.group("role") in ROLES else "unknown"
+        run_match = re.search(r"`([^`]+)`", text)
+        run_id = run_match.group(1) if run_match else "unknown"
+        raw_reason = text
+        detail = text
+    reason = normalized_deferral_reason(raw_reason)
+    return {
+        "role": clean_text(role, limit=40),
+        "run_id": clean_text(run_id, limit=80),
+        "reason": reason,
+        "raw_reason": clean_text(raw_reason, limit=80),
+        "detail": clean_text(detail, limit=320),
+        "raw": text,
+    }
+
+
+def compact_counts(counts: dict[str, int], *, empty: str) -> str:
+    parts = [f"{name} {count}" for name, count in sorted(counts.items()) if count]
+    return ", ".join(parts) if parts else empty
+
+
+def deferred_backlog_triage(backlog_items: list[str]) -> dict[str, Any]:
+    entries = [parse_deferred_backlog_item(item) for item in backlog_items]
+    if not entries:
+        return {
+            "summary": "No deferred patch backlog recorded.",
+            "recommended_next_action": "No local deferred-patch triage action is needed.",
+            "groups": [],
+            "items": [],
+        }
+
+    buckets: dict[str, list[dict[str, str]]] = {}
+    for entry in entries:
+        buckets.setdefault(entry["reason"], []).append(entry)
+
+    def reason_sort_key(reason: str) -> tuple[int, str]:
+        try:
+            return DEFERRAL_REASON_ORDER.index(reason), reason
+        except ValueError:
+            return len(DEFERRAL_REASON_ORDER), reason
+
+    groups: list[dict[str, Any]] = []
+    for reason in sorted(buckets, key=reason_sort_key):
+        reason_entries = buckets[reason]
+        role_counts: dict[str, int] = {}
+        for entry in reason_entries:
+            role_counts[entry["role"]] = role_counts.get(entry["role"], 0) + 1
+        examples = [
+            f"{entry['role']} `{entry['run_id']}`: {entry['detail']}"
+            for entry in reason_entries[:2]
+        ]
+        groups.append(
+            {
+                "reason": reason,
+                "count": len(reason_entries),
+                "roles": compact_counts(role_counts, empty="unknown"),
+                "action": DEFERRAL_REASON_ACTIONS.get(reason, DEFERRAL_REASON_ACTIONS["other"]),
+                "examples": examples,
+            }
+        )
+
+    summary = f"{len(entries)} deferred backlog item(s): " + ", ".join(
+        f"{group['count']} {group['reason']}" for group in groups
+    ) + "."
+    top = groups[0]
+    recommended = f"Start with `{top['reason']}` ({top['count']} item(s)): {top['action']}"
+    return {
+        "summary": summary,
+        "recommended_next_action": recommended,
+        "groups": groups,
+        "items": entries,
+    }
+
+
 def progress_snapshot(progress_text: str) -> dict[str, Any]:
     accepted_by_role = cumulative_role_counts(progress_text, "Accepted patches by role")
     deferred_by_role = cumulative_role_counts(progress_text, "Deferred patches by role")
@@ -495,6 +625,7 @@ def progress_snapshot(progress_text: str) -> dict[str, Any]:
     match = re.search(r"^-\s*Current deferred queue depth:\s*(\d+)", progress_text, re.MULTILINE)
     if match:
         deferred_depth = int(match.group(1))
+    backlog = deferred_backlog_items(progress_text)
     return {
         "recent_activity": first_nonempty_section_line(progress_text, "Recent Activity Log") or "No multi-role activity recorded yet.",
         "integrator_runs": cumulative_metric_int(progress_text, "Total integrator runs"),
@@ -503,7 +634,8 @@ def progress_snapshot(progress_text: str) -> dict[str, Any]:
         "deferred_by_role": deferred_by_role,
         "deferred_total": sum(deferred_by_role.values()),
         "deferred_queue_depth": deferred_depth,
-        "deferred_backlog": section_bullets(progress_text, "Deferred-Patch Backlog", limit=MAX_REVIEW_ITEMS),
+        "deferred_backlog": backlog,
+        "deferred_triage": deferred_backlog_triage(backlog),
     }
 
 
@@ -552,6 +684,7 @@ def scorecard_snapshot(
     validation_counts = validation.get("counts") if isinstance(validation.get("counts"), dict) else {}
     accepted_by_role = progress.get("accepted_by_role") if isinstance(progress.get("accepted_by_role"), dict) else {}
     deferred_by_role = progress.get("deferred_by_role") if isinstance(progress.get("deferred_by_role"), dict) else {}
+    deferred_triage = progress.get("deferred_triage") if isinstance(progress.get("deferred_triage"), dict) else {}
     accepted_total = int(progress.get("accepted_total", 0) or 0)
     cumulative_deferred = int(progress.get("deferred_total", 0) or 0)
     queued = int(totals.get("queued", 0) or 0)
@@ -582,6 +715,8 @@ def scorecard_snapshot(
         if queued or deferred_pressure or cumulative_deferred
         else "No queued or deferred patch pressure recorded."
     )
+    if deferred_pressure and deferred_triage.get("summary"):
+        queue_detail = f"{queue_detail} {deferred_triage['summary']}"
     validation_detail = (
         f"{pass_count} pass, {fail_count} fail from the last recorded run."
         if pass_count or fail_count
@@ -699,6 +834,15 @@ def self_review_snapshot(
     )
 
     validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
+    deferred_triage = progress.get("deferred_triage") if isinstance(progress.get("deferred_triage"), dict) else {}
+    deferred_summary = clean_text(
+        deferred_triage.get("summary") or "No deferred patch backlog recorded.",
+        limit=300,
+    )
+    deferred_action = clean_text(
+        deferred_triage.get("recommended_next_action") or "No local deferred-patch triage action is needed.",
+        limit=360,
+    )
     return {
         "items": [
             {"label": "Current assessment", "body": task.get("current_assessment") or "No current assessment recorded yet."},
@@ -706,6 +850,7 @@ def self_review_snapshot(
             {"label": "Signals", "body": signal_summary},
             {"label": "Queue and conveyor", "body": f"{queue_summary} {conveyor_summary}"},
             {"label": "Human bridge", "body": human_summary},
+            {"label": "Deferred triage", "body": f"{deferred_summary} {deferred_action}"},
             {"label": "Next sprint", "body": task.get("suggested_next_task") or "No sprint task recorded yet."},
         ],
         "checks": list(validation.get("items") or [])[:MAX_CHECK_ITEMS],
@@ -1479,6 +1624,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     empty_states = snapshot.get("empty_states") if isinstance(snapshot.get("empty_states"), dict) else {}
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
+    deferred_triage = progress.get("deferred_triage") if isinstance(progress.get("deferred_triage"), dict) else {}
 
     lines = [
         "# Diffmogger Self-Review Snapshot",
@@ -1578,6 +1724,28 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
         lines.append(f"- next_lane: `{role}` ({state}) - {reason}")
     else:
         lines.append("- next_lane: No conveyor decision recorded yet.")
+
+    lines.extend(["", "## Deferred Patch Triage", ""])
+    lines.append(
+        f"- summary: {clean_text(deferred_triage.get('summary') or 'No deferred patch backlog recorded.', limit=500)}"
+    )
+    lines.append(
+        f"- recommended_next_action: {clean_text(deferred_triage.get('recommended_next_action') or 'No local deferred-patch triage action is needed.', limit=500)}"
+    )
+    triage_groups = [item for item in list(deferred_triage.get("groups") or []) if isinstance(item, dict)]
+    if triage_groups:
+        for group in triage_groups[:MAX_REVIEW_ITEMS]:
+            reason = clean_text(group.get("reason") or "other", limit=80)
+            count = int(group.get("count", 0) or 0)
+            roles = clean_text(group.get("roles") or "unknown", limit=160)
+            action = clean_text(group.get("action") or DEFERRAL_REASON_ACTIONS["other"], limit=420)
+            lines.append(f"- {reason}: {count} item(s); roles: {roles}; action: {action}")
+            examples = [item for item in list(group.get("examples") or []) if item]
+            if examples:
+                lines.append(f"- example: {clean_text(examples[0], limit=420)}")
+    else:
+        lines.append("- No deferred backlog groups.")
+    lines.extend(["", "### Raw Deferred Backlog", ""])
     append_markdown_bullets(
         lines,
         list(progress.get("deferred_backlog") or [])[:MAX_REVIEW_ITEMS],
