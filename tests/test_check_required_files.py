@@ -81,6 +81,27 @@ class RequiredFilesCheckTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("docs/DEVELOPMENT.md: missing marker 'Run Safety Check'", result.stderr)
 
+    def test_observatory_first_review_marker_regression_fails_required_files_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+            observatory = target / "scripts" / "run_observatory.py"
+            observatory.write_text(
+                observatory.read_text(encoding="utf-8").replace(
+                    "First Review Readiness",
+                    "Review Readiness",
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_check(target)
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn(
+                "scripts/run_observatory.py: missing marker 'First Review Readiness'",
+                result.stderr,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

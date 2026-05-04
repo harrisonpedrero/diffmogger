@@ -129,6 +129,10 @@ OBSERVATORY_REQUIRED_STRINGS = [
     "--open",
     "--review-output",
     "Self Review",
+    "Scorecard",
+    "Action Plan",
+    "Integration Safety",
+    "First Review Readiness",
     "Active Signals",
 ]
 
