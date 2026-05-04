@@ -32,6 +32,19 @@ MAX_CHECK_ITEMS = 8
 MAX_SCORECARD_ITEMS = 8
 MAX_RECOMMENDATION_HISTORY = 5
 ACTION_PLAN_HISTORY_RELATIVE = Path("target/action_plan_history.json")
+FIRST_REVIEW_MARKERS = (
+    ("starter validation", "bash scripts/validate_starter_kit.sh"),
+    ("dashboard safety", "Run Safety Check"),
+    ("observatory HTML", "Diffmogger-observatory.html"),
+    ("Markdown self-review", "Diffmogger-self-review.md"),
+)
+FIRST_REVIEW_DOC_CANDIDATES = (
+    "docs/DEVELOPMENT.md",
+    "README.md",
+    "docs/DASHBOARD.md",
+    "docs/FRESH_PROJECT_SETUP.md",
+    "services/agentic-dashboard/README.md",
+)
 DEFERRAL_REASON_ACTIONS = {
     "staleness": "Refresh or recreate the patch from current HEAD, then retry only if the change still matters.",
     "conflict": "Inspect the listed files and replace the patch with a freshly reconciled local change.",
@@ -305,6 +318,107 @@ def parse_task_state(target: Path) -> dict[str, Any]:
         "known_issues": section_bullets(text, "Known Issues", limit=MAX_REVIEW_ITEMS),
         "validation": validation,
         "integration_safety": integration_safety_snapshot(validation),
+    }
+
+
+def first_review_doc_coverage(target: Path) -> dict[str, Any]:
+    docs: list[dict[str, Any]] = []
+    marker_total = len(FIRST_REVIEW_MARKERS)
+    for relative in FIRST_REVIEW_DOC_CANDIDATES:
+        text = read_text(target / relative)
+        if not text or "First Review Checklist" not in text:
+            continue
+        present = [label for label, marker in FIRST_REVIEW_MARKERS if marker in text]
+        missing = [label for label, marker in FIRST_REVIEW_MARKERS if marker not in text]
+        docs.append(
+            {
+                "path": relative,
+                "present": present,
+                "missing": missing,
+                "present_count": len(present),
+            }
+        )
+
+    complete = [item for item in docs if not item["missing"]]
+    if complete:
+        paths = ", ".join(item["path"] for item in complete[:3])
+        if len(complete) > 3:
+            paths += f", +{len(complete) - 3} more"
+        return {
+            "status": "pass",
+            "detail": f"{len(complete)} first-review checklist doc(s) cover all {marker_total} markers: {paths}.",
+            "docs": docs,
+            "missing": [],
+        }
+
+    if docs:
+        best = sorted(docs, key=lambda item: int(item["present_count"]), reverse=True)[0]
+        missing = [clean_text(item, limit=80) for item in best["missing"]]
+        return {
+            "status": "warn",
+            "detail": (
+                f"{best['path']} covers {best['present_count']}/{marker_total} first-review markers; "
+                f"missing {', '.join(missing)}."
+            ),
+            "docs": docs,
+            "missing": missing,
+        }
+
+    return {
+        "status": "fail",
+        "detail": "No first-review checklist doc was found in the target-local docs.",
+        "docs": [],
+        "missing": [label for label, _marker in FIRST_REVIEW_MARKERS],
+    }
+
+
+def first_review_snapshot(target: Path, task: dict[str, Any]) -> dict[str, Any]:
+    validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
+    validation_counts = validation.get("counts") if isinstance(validation.get("counts"), dict) else {}
+    pass_count = int(validation_counts.get("pass", 0) or 0)
+    fail_count = int(validation_counts.get("fail", 0) or 0)
+    integration_safety = task.get("integration_safety") if isinstance(task.get("integration_safety"), dict) else {}
+    integration_status = clean_text(integration_safety.get("status") or "not_recorded", limit=40)
+    docs = first_review_doc_coverage(target)
+
+    if fail_count:
+        validation_status = "fail"
+        validation_detail = validation.get("summary") or f"{fail_count} validation issue(s) recorded."
+    elif pass_count:
+        validation_status = "pass"
+        validation_detail = validation.get("summary") or f"{pass_count} passing check(s) recorded."
+    else:
+        validation_status = "warn"
+        validation_detail = "No passing validation run is recorded in the task file yet."
+
+    safety_status = "pass" if integration_status == "pass" else ("fail" if integration_status == "fail" else "warn")
+    safety_detail = integration_safety.get("summary") or "No integration-safety check result is recorded yet."
+
+    items = [
+        {"label": "Checklist docs", "status": docs["status"], "detail": docs["detail"]},
+        {"label": "Validation", "status": validation_status, "detail": validation_detail},
+        {"label": "Run Safety Check", "status": safety_status, "detail": safety_detail},
+    ]
+    missing_actions: list[str] = []
+    if docs["status"] != "pass":
+        missing_actions.append("Update a first-review checklist doc with the validation, safety, observatory, and Markdown export steps.")
+    if validation_status != "pass":
+        missing_actions.append("Record a passing `bash scripts/validate_starter_kit.sh` run.")
+    if safety_status != "pass":
+        missing_actions.append("Run dashboard **Run Safety Check** or `python3 scripts/check_integration_safety.py` and record the result.")
+
+    status = "ready" if not missing_actions else "attention"
+    if status == "ready":
+        summary = "First-review path is ready: checklist docs, validation, and integration safety are all recorded."
+    else:
+        summary = f"First-review path needs attention on {len(missing_actions)} item(s)."
+
+    return {
+        "status": status,
+        "summary": summary,
+        "items": items,
+        "missing_actions": missing_actions,
+        "docs": docs.get("docs", []),
     }
 
 
@@ -1200,6 +1314,7 @@ def scorecard_snapshot(
     conveyor: dict[str, Any],
     human: dict[str, int],
     progress: dict[str, Any],
+    first_review: dict[str, Any],
 ) -> dict[str, Any]:
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
@@ -1220,6 +1335,7 @@ def scorecard_snapshot(
     fail_count = int(validation_counts.get("fail", 0) or 0)
     no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
     no_progress_active = bool(no_progress.get("active"))
+    first_review_status = clean_text(first_review.get("status") or "unknown", limit=40)
 
     attention_count = sum(
         1
@@ -1229,6 +1345,7 @@ def scorecard_snapshot(
             bool(queued or deferred_pressure),
             bool(pending_human),
             no_progress_active,
+            first_review_status != "ready",
         ]
         if flag
     )
@@ -1252,12 +1369,14 @@ def scorecard_snapshot(
         "warn": "warn",
         "pending": "warn",
     }.get(integration_status, "info")
+    first_review_kind = "good" if first_review_status == "ready" else "warn"
     summary_parts = [
         f"{accepted_total} accepted patch(es)",
         f"{queued} queued / {deferred_pressure} deferred",
         f"{active_signals} active signal(s)",
         f"{fail_count} validation issue(s)",
         f"integration safety {integration_status.replace('_', ' ')}",
+        f"first review {first_review_status.replace('_', ' ')}",
     ]
     if pending_human:
         summary_parts.append(f"{pending_human} human bridge item(s)")
@@ -1294,6 +1413,12 @@ def scorecard_snapshot(
                 "kind": integration_kind,
             },
             {
+                "label": "First review",
+                "value": first_review_status.replace("_", " "),
+                "detail": first_review.get("summary") or "No first-review readiness state recorded yet.",
+                "kind": first_review_kind,
+            },
+            {
                 "label": "Signals due",
                 "value": active_signals,
                 "detail": f"{active_signals} active recurring automation nudge(s).",
@@ -1322,6 +1447,7 @@ def self_review_snapshot(
     conveyor: dict[str, Any],
     human: dict[str, int],
     progress: dict[str, Any],
+    first_review: dict[str, Any],
     follow_through: dict[str, Any] | None = None,
     recommendation_history: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1396,6 +1522,7 @@ def self_review_snapshot(
     return {
         "items": [
             {"label": "Current assessment", "body": task.get("current_assessment") or "No current assessment recorded yet."},
+            {"label": "First review", "body": first_review.get("summary") or "No first-review readiness state recorded yet."},
             {"label": "Validation", "body": validation.get("summary") or "No validation results recorded yet."},
             {"label": "Integration safety", "body": integration_safety.get("summary") or "No integration-safety check result recorded yet."},
             {"label": "Signals", "body": signal_summary},
@@ -1445,7 +1572,8 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "no_progress": conveyor.get("integrator_no_progress") if isinstance(conveyor.get("integrator_no_progress"), dict) else {},
         "history": list(conveyor.get("history") or [])[-MAX_HISTORY:] if isinstance(conveyor.get("history"), list) else [],
     }
-    scorecard = scorecard_snapshot(task, queue, signals, conveyor_state, human, progress)
+    first_review = first_review_snapshot(target, task)
+    scorecard = scorecard_snapshot(task, queue, signals, conveyor_state, human, progress, first_review)
     follow_through = action_plan_follow_through(
         task,
         queue,
@@ -1461,6 +1589,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         conveyor_state,
         human,
         progress,
+        first_review,
         follow_through=follow_through,
         recommendation_history=recommendation_history,
     )
@@ -1476,6 +1605,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "conveyor": conveyor_state,
         "progress": progress,
         "scorecard": scorecard,
+        "first_review": first_review,
         "follow_through": follow_through,
         "recommendation_history": recommendation_history,
         "review": review,
@@ -2226,7 +2356,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
         render(await response.json());
       } catch (error) {
-        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, follow_through: {}, recommendation_history: {records: []}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, first_review: {}, follow_through: {}, recommendation_history: {records: []}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
         fallback.progress_recent = "Observatory refresh failed: " + error;
         render(fallback);
       }
@@ -2267,6 +2397,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     human = snapshot.get("human") if isinstance(snapshot.get("human"), dict) else {}
     progress = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {}
     follow_through = snapshot.get("follow_through") if isinstance(snapshot.get("follow_through"), dict) else {}
+    first_review = snapshot.get("first_review") if isinstance(snapshot.get("first_review"), dict) else {}
     integration_safety = task.get("integration_safety") if isinstance(task.get("integration_safety"), dict) else {}
     recommendation_history = (
         snapshot.get("recommendation_history")
@@ -2415,6 +2546,24 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     recorded_text = clean_text(integration_safety.get("recorded_text") or "", limit=420)
     if recorded_text:
         lines.append(f"- recorded_check: {recorded_text}")
+
+    lines.extend(["", "## First Review Readiness", ""])
+    lines.append(f"- status: {clean_text(first_review.get('status') or 'unknown', limit=80)}")
+    lines.append(f"- summary: {clean_text(first_review.get('summary') or 'No first-review readiness state recorded yet.', limit=500)}")
+    first_review_items = [item for item in list(first_review.get("items") or []) if isinstance(item, dict)]
+    if first_review_items:
+        for item in first_review_items[:MAX_REVIEW_ITEMS]:
+            label = clean_text(item.get("label") or "Checklist item", limit=80)
+            status = clean_text(item.get("status") or "info", limit=40)
+            detail = clean_text(item.get("detail") or "No detail recorded.", limit=420)
+            lines.append(f"- {label}: {status} - {detail}")
+    else:
+        lines.append("- No first-review checklist items recorded.")
+    missing_actions = [item for item in list(first_review.get("missing_actions") or []) if item]
+    if missing_actions:
+        lines.append("- missing_actions:")
+        for action in missing_actions[:MAX_REVIEW_ITEMS]:
+            lines.append(f"  - {clean_text(action, limit=420)}")
 
     lines.extend(["", "## Active Signals", ""])
     active_signals = [item for item in list(signals.get("active") or []) if isinstance(item, dict)]

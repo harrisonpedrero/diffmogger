@@ -267,6 +267,70 @@ class ObservatorySnapshotTests(unittest.TestCase):
             },
         )
 
+    def seed_first_review_ready_target(self, root: Path) -> None:
+        self.write_text(
+            root,
+            "docs/CODEX_AUTOMATION_TASKS.md",
+            """
+            # Codex Automation Tasks
+
+            AUTOMATION_STATUS: ACTIVE
+
+            Last updated: 2026-05-04T03:45:00+00:00
+
+            ## Current Project State
+
+            - Current assessment: First-review path is ready for a local demo.
+
+            ## Product Horizon State
+
+            - Current horizon: H6 Showcase quality
+            - Advancement decision: stay
+
+            ## Checks From Last Run
+
+            - PASS: `bash scripts/validate_starter_kit.sh`
+            - PASS: `python3 scripts/check_integration_safety.py`
+
+            ## Known Issues
+
+            None.
+
+            ## Suggested Next Sprint-Sized Task
+
+            Continue builder momentum.
+            """,
+        )
+        self.write_text(
+            root,
+            "docs/DEVELOPMENT.md",
+            """
+            # Development
+
+            ### First Review Checklist
+
+            1. Run `bash scripts/validate_starter_kit.sh`.
+            2. Click **Run Safety Check**.
+            3. Render `Diffmogger-observatory.html`.
+            4. Export `Diffmogger-self-review.md`.
+            """,
+        )
+        self.write_text(
+            root,
+            "docs/MULTI_ROLE_PROGRESS.md",
+            """
+            # Multi-Role Progress
+
+            ## Recent Activity Log
+
+            No multi-role activity recorded yet.
+
+            ## Deferred-Patch Backlog
+
+            None.
+            """,
+        )
+
     def seed_first_run_target(self, root: Path) -> None:
         self.write_text(
             root,
@@ -674,6 +738,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("check_integration_safety.py", snapshot["task"]["integration_safety"]["summary"])
                     self.assertIn("human-inbox-triage", review_items["Signals"])
                     self.assertIn("Latest recorded integration-safety check passed", review_items["Integration safety"])
+                    self.assertIn("First-review path needs attention", review_items["First review"])
                     self.assertIn("1 queued", review_items["Queue and conveyor"])
                     self.assertIn("No-progress circuit breaker active", review_items["Queue and conveyor"])
                     self.assertIn("Process 1 unhandled human inbox", review_items["Action plan"])
@@ -690,6 +755,42 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(scorecard_items["Validation"]["value"], "2/1")
                     self.assertEqual(scorecard_items["Integration safety"]["value"], "pass")
                     self.assertEqual(scorecard_items["Integration safety"]["kind"], "good")
+                    self.assertEqual(scorecard_items["First review"]["value"], "attention")
+                    self.assertEqual(scorecard_items["First review"]["kind"], "warn")
+                    first_review_items = {item["label"]: item for item in snapshot["first_review"]["items"]}
+                    self.assertEqual(first_review_items["Checklist docs"]["status"], "fail")
+                    self.assertEqual(first_review_items["Validation"]["status"], "fail")
+                    self.assertEqual(first_review_items["Run Safety Check"]["status"], "pass")
+
+    def test_first_review_readiness_appears_in_snapshot_html_and_markdown(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_first_review_ready_target(target)
+
+                    snapshot = module.build_snapshot(target)
+                    first_review = snapshot["first_review"]
+                    first_review_items = {item["label"]: item for item in first_review["items"]}
+                    review_items = {item["label"]: item["body"] for item in snapshot["review"]["items"]}
+                    scorecard_items = {item["label"]: item for item in snapshot["scorecard"]["items"]}
+                    html = module.render_html(snapshot, live=False)
+                    report = module.render_review_markdown(snapshot)
+
+                    self.assertEqual(first_review["status"], "ready")
+                    self.assertIn("First-review path is ready", first_review["summary"])
+                    self.assertEqual(first_review_items["Checklist docs"]["status"], "pass")
+                    self.assertIn("docs/DEVELOPMENT.md", first_review_items["Checklist docs"]["detail"])
+                    self.assertEqual(first_review_items["Validation"]["status"], "pass")
+                    self.assertEqual(first_review_items["Run Safety Check"]["status"], "pass")
+                    self.assertIn("First-review path is ready", review_items["First review"])
+                    self.assertEqual(scorecard_items["First review"]["value"], "ready")
+                    self.assertEqual(scorecard_items["First review"]["kind"], "good")
+                    self.assertIn("First review", html)
+                    self.assertIn("## First Review Readiness", report)
+                    self.assertIn("status: ready", report)
+                    self.assertIn("Checklist docs: pass", report)
+                    self.assertIn("Run Safety Check: pass", report)
 
     def test_review_markdown_export_summarizes_local_state(self) -> None:
         for path, module in self.modules:

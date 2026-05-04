@@ -171,7 +171,7 @@ After the first bootstrap, use one local review path:
 2. Open the dashboard with `python3 /path/to/Diffmogger/scripts/run_dashboard.py`, reopen the target, and click **Run Safety Check** in the Monitor tab.
 3. From the target repo, render the observatory with `python3 scripts/run_observatory.py --target . --once --output /tmp/Diffmogger-observatory.html`.
 4. Export the Markdown self-review with `python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md`.
-5. Confirm the review shows safety status, validation state, active role or queue, known issues, and the next sprint recommendation.
+5. Confirm the review shows first-review readiness, safety status, validation state, active role or queue, known issues, and the next sprint recommendation.
 
 The generated wrapper runs the parent automation with:
 

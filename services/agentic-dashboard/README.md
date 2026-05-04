@@ -44,6 +44,7 @@ Use the dashboard Monitor tab to tie the local review together:
 3. Click **Run Safety Check** and review the dashboard log.
 4. Launch the observatory or run `python3 scripts/run_observatory.py --target . --once --output /tmp/Diffmogger-observatory.html`.
 5. Export `python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md` for a durable Markdown self-review.
+6. Check first-review readiness, safety status, validation state, active role or queue, known issues, and the next-lane action plan in the observatory or Markdown export.
 
 ## Prerequisites
 
