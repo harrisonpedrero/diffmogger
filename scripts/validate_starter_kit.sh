@@ -575,6 +575,50 @@ for marker in [
         print(f"Dashboard README missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
+first_review_markers = {
+    Path("README.md"): [
+        "First Review Checklist",
+        "bash scripts/validate_starter_kit.sh",
+        "Run Safety Check",
+        "Diffmogger-observatory.html",
+        "Diffmogger-self-review.md",
+    ],
+    Path("docs/DASHBOARD.md"): [
+        "First Review Checklist",
+        "Open Diffmogger Project",
+        "Run Safety Check",
+        "Diffmogger-observatory.html",
+        "Diffmogger-self-review.md",
+    ],
+    Path("docs/FRESH_PROJECT_SETUP.md"): [
+        "First Review Checklist",
+        "bash scripts/validate_starter_kit.sh",
+        "Run Safety Check",
+        "Diffmogger-observatory.html",
+        "Diffmogger-self-review.md",
+    ],
+    Path("templates/docs/DEVELOPMENT.md"): [
+        "First Review Checklist",
+        "bash scripts/validate_starter_kit.sh",
+        "Run Safety Check",
+        "Diffmogger-observatory.html",
+        "Diffmogger-self-review.md",
+    ],
+    Path("services/agentic-dashboard/README.md"): [
+        "First Review Checklist",
+        "bash scripts/validate_starter_kit.sh",
+        "Run Safety Check",
+        "Diffmogger-observatory.html",
+        "Diffmogger-self-review.md",
+    ],
+}
+for path, markers in first_review_markers.items():
+    text = path.read_text(encoding="utf-8")
+    missing = [marker for marker in markers if marker not in text]
+    if missing:
+        print(f"{path} missing first-review markers: {missing}", file=sys.stderr)
+        raise SystemExit(1)
+
 notifier_readme = Path("services/agentic-notifier/README.md").read_text(encoding="utf-8")
 for marker in [
     "POST http://127.0.0.1:8765/api/notify",

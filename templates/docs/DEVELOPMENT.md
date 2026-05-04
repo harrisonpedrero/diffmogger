@@ -74,6 +74,16 @@ python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-se
 
 Markdown review exports update `target/action_plan_history.json` so repeated recommendations and follow-through outcomes remain visible across local conveyor cycles.
 
+### First Review Checklist
+
+After the first bootstrap, use one local review path:
+
+1. In the Diffmogger starter-kit source, run `bash scripts/validate_starter_kit.sh` when reviewing kit or scaffold behavior.
+2. Open the dashboard with `python3 /path/to/Diffmogger/scripts/run_dashboard.py`, reopen this target, and click **Run Safety Check** in the Monitor tab.
+3. From this target repo, render the observatory with `python3 scripts/run_observatory.py --target . --once --output /tmp/Diffmogger-observatory.html`.
+4. Export the Markdown self-review with `python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md`.
+5. Confirm the review shows safety status, validation state, active role or queue, known issues, and the next sprint recommendation.
+
 ## Human Bridge
 
 {{HUMAN_DEVELOPMENT_SECTION}}

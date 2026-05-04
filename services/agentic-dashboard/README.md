@@ -35,6 +35,16 @@ It opens a native desktop window using Python's standard-library Tkinter runtime
 
 In existing-project mode, pre-existing `AGENTS.md` and `docs/DEVELOPMENT.md` files receive a managed Diffmogger automation section instead of being replaced wholesale.
 
+## First Review Checklist
+
+Use the dashboard Monitor tab to tie the local review together:
+
+1. Run `bash scripts/validate_starter_kit.sh` from the Diffmogger starter-kit source.
+2. Open the target with **Open Diffmogger Project**.
+3. Click **Run Safety Check** and review the dashboard log.
+4. Launch the observatory or run `python3 scripts/run_observatory.py --target . --once --output /tmp/Diffmogger-observatory.html`.
+5. Export `python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md` for a durable Markdown self-review.
+
 ## Prerequisites
 
 Before starting automation, the dashboard checks for:

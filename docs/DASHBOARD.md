@@ -187,6 +187,17 @@ Run Safety Check
 
 This runs `scripts/check_integration_safety.py` and streams the result into the dashboard run log. When the selected target is not the Diffmogger starter-kit source tree, the dashboard checks the kit source instead so generated target projects are not expected to contain notifier and dashboard service files.
 
+### First Review Checklist
+
+Use the Monitor tab as the center of the first review:
+
+1. Run `bash scripts/validate_starter_kit.sh` from the Diffmogger starter-kit source.
+2. Open the target with **Open Diffmogger Project**.
+3. Click **Run Safety Check** and confirm the dashboard log reports the local integration-safety result.
+4. Click **Launch Observatory** or render it with `python3 scripts/run_observatory.py --target . --once --output /tmp/Diffmogger-observatory.html`.
+5. Export the durable review with `python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md`.
+6. Check the observatory or Markdown export for safety status, validation state, active role or queue, known issues, and the next-lane action plan.
+
 For multi-role jobs in repos with configured git remotes, the dashboard blocks scheduling unless the advanced **Allow local-only multi-role automation when this repo has git remotes** option is checked. When checked, LaunchAgents receive `MULTI_ROLE_ALLOW_REMOTES=1`; scripts still refuse pushes, fetches, pulls, remote configuration, and remote-touching git commands.
 
 Pause and remove controls manage all dashboard-owned jobs for that target: periodic, fixed-role, and conveyor.
