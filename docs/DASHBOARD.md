@@ -204,8 +204,11 @@ observatory and shows the next-run worker recommendation. When the recommendatio
 - one bounded write worker through `scripts/spawn_worker_agent.sh --write` after you enter an explicit ownership scope
 - one local integrator lane through `scripts/run_role_automation.sh --role integrator`
 
-These controls are local helpers for the current target. Write workers still require disjoint ownership,
-and the main agent remains responsible for reviewing, integrating, verifying, and updating durable state.
+Dashboard-launched worker runs also call `scripts/summarize_worker_outputs.py` for that run id,
+then surface the latest `target/agent_runs/<run_id>/summary.md` in the Monitor tab so review starts
+from the consolidated worker result instead of raw report hunting. These controls are local helpers
+for the current target. Write workers still require disjoint ownership, and the main agent remains
+responsible for reviewing, integrating, verifying, and updating durable state.
 
 ### First Review Checklist
 

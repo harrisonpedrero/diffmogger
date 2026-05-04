@@ -30,7 +30,7 @@ It opens a native desktop window using Python's standard-library Tkinter runtime
 - renders selected automation Markdown files
 - launches an optional local browser observatory for active signal nudges, conveyor health, active roles, queued/deferred patches, the latest recorded integration-safety result, recent outcomes, and timeline events
 - runs `scripts/check_integration_safety.py` from the Monitor tab with **Run Safety Check** and shows the output in the bounded dashboard log
-- shows **Worker Strategy Controls** from the observatory's next-run recommendation and can launch one bounded read-only worker, one explicitly owned write worker, or one local integrator lane when that strategy recommends it
+- shows **Worker Strategy Controls** from the observatory's next-run recommendation and can launch one bounded read-only worker, one explicitly owned write worker, or one local integrator lane when that strategy recommends it; dashboard-launched workers are summarized into `target/agent_runs/<run_id>/summary.md` and the latest summary can be loaded from the Monitor tab
 - lets a human send file-only messages to the next automation run when SMS/WhatsApp is disabled or unavailable
 - displays prerequisites as readiness checks instead of raw command output
 

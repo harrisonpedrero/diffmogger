@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -210,6 +211,54 @@ class DashboardIntegrationSafetyAffordanceTests(unittest.TestCase):
 
         self.assertIn("WRITE_WORKERS / budget 2 / lane builder", summary)
         self.assertIn("Use up to two bounded write workers", summary)
+
+    def test_worker_summary_command_uses_target_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+
+            command = self.module.worker_summary_command(target, "dashboard-worker-run")
+
+            self.assertEqual(sys.executable, command[0])
+            self.assertEqual(str(target.resolve() / "scripts" / "summarize_worker_outputs.py"), command[1])
+            self.assertIn(str(target.resolve()), command)
+            self.assertEqual("dashboard-worker-run", command[-1])
+
+    def test_latest_worker_result_surfaces_ready_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            run_dir = target / "target" / "agent_runs" / "run-001"
+            run_dir.mkdir(parents=True)
+            (run_dir / "worker_review.md").write_text("# Worker Report\n", encoding="utf-8")
+            summary = run_dir / "summary.md"
+            summary.write_text("# Worker Output Summary\n", encoding="utf-8")
+
+            result = self.module.latest_worker_result(target)
+
+            self.assertEqual("run-001", result["run_id"])
+            self.assertEqual(1, result["report_count"])
+            self.assertTrue(result["summary_exists"])
+            self.assertEqual(str(summary.resolve()), result["summary_path"])
+            self.assertIn("summary ready", result["label"])
+
+    def test_latest_worker_result_uses_newest_worker_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            old_run = target / "target" / "agent_runs" / "old-run"
+            new_run = target / "target" / "agent_runs" / "new-run"
+            old_run.mkdir(parents=True)
+            new_run.mkdir(parents=True)
+            old_report = old_run / "worker_review.md"
+            new_report = new_run / "worker_builder.md"
+            old_report.write_text("# old\n", encoding="utf-8")
+            new_report.write_text("# new\n", encoding="utf-8")
+            os.utime(old_report, (1, 1))
+            os.utime(new_report, (2, 2))
+
+            result = self.module.latest_worker_result(target)
+
+            self.assertEqual("new-run", result["run_id"])
+            self.assertFalse(result["summary_exists"])
+            self.assertIn("summary not generated yet", result["label"])
 
     def test_read_only_worker_command_uses_target_helper_and_strategy_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

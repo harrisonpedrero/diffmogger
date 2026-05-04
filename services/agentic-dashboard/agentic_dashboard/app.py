@@ -675,6 +675,75 @@ def worker_strategy_summary(strategy: dict[str, Any]) -> str:
     return f"Next worker strategy: {name} / budget {budget} / lane {lane}. {summary}"
 
 
+def worker_summary_command(target: Path, run_id: str) -> list[str]:
+    target = target.expanduser().resolve()
+    return [
+        sys.executable,
+        str(target / "scripts" / "summarize_worker_outputs.py"),
+        str(target),
+        "--run-id",
+        run_id,
+    ]
+
+
+def latest_worker_result(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    runs_dir = target / "target" / "agent_runs"
+    result: dict[str, Any] = {
+        "label": "Latest worker result: none yet.",
+        "run_id": None,
+        "report_count": 0,
+        "summary_path": None,
+        "summary_exists": False,
+    }
+    if not runs_dir.exists():
+        return result
+
+    run_dirs = [
+        path
+        for path in runs_dir.iterdir()
+        if path.is_dir()
+        and any(
+            child.name.startswith("worker_")
+            and child.name != "worker_summary.md"
+            and child.suffix == ".md"
+            for child in path.iterdir()
+        )
+    ]
+    if not run_dirs:
+        return result
+
+    def newest_child_mtime(path: Path) -> float:
+        children = [child for child in path.iterdir() if child.is_file()]
+        if not children:
+            return path.stat().st_mtime
+        return max(child.stat().st_mtime for child in children)
+
+    latest = max(run_dirs, key=newest_child_mtime)
+    reports = sorted(
+        path
+        for path in latest.glob("worker_*.md")
+        if path.name != "worker_summary.md"
+    )
+    summary_path = latest / "summary.md"
+    report_word = "report" if len(reports) == 1 else "reports"
+    if summary_path.exists():
+        result["label"] = (
+            f"Latest worker result: {latest.name} / {len(reports)} {report_word} / "
+            f"summary ready at {summary_path.relative_to(target)}."
+        )
+        result["summary_path"] = str(summary_path)
+        result["summary_exists"] = True
+    else:
+        result["label"] = (
+            f"Latest worker result: {latest.name} / {len(reports)} {report_word} / "
+            "summary not generated yet."
+        )
+    result["run_id"] = latest.name
+    result["report_count"] = len(reports)
+    return result
+
+
 def worker_role_from_strategy(strategy: dict[str, Any]) -> str:
     lane = compact_dashboard_text(strategy.get("action_lane") or "review", limit=40).lower()
     if lane in {"planner", "builder", "hardener", "integrator"}:
@@ -958,6 +1027,7 @@ if TK_AVAILABLE:
             self.status_var = tk.StringVar(value="No target loaded.")
             self.schedule_status_var = tk.StringVar(value="Schedule: target not loaded.")
             self.worker_strategy_var = tk.StringVar(value="Next worker strategy: not loaded.")
+            self.worker_results_var = tk.StringVar(value="Latest worker result: none yet.")
             self.write_worker_ownership_var = tk.StringVar(value="")
             self.doc_choice_var = tk.StringVar(value="Automation Tasks")
             self.human_doc_choice_var = tk.StringVar(value="Requests From Automation")
@@ -967,6 +1037,7 @@ if TK_AVAILABLE:
             self.text_fields: dict[str, Any] = {}
             self.entry_fields: dict[str, Any] = {}
             self.current_worker_strategy: dict[str, Any] = {}
+            self.latest_worker_summary_path: Path | None = None
 
             self._build_ui()
             self.root.protocol("WM_DELETE_WINDOW", self.close_dashboard)
@@ -1501,6 +1572,12 @@ if TK_AVAILABLE:
                 command=self.run_integration_only_lane,
                 state="disabled",
             )
+            self.worker_summary_button = ttk.Button(
+                worker_controls,
+                text="Load Worker Summary",
+                command=self.load_worker_summary,
+                state="disabled",
+            )
             self.read_only_worker_button.grid(row=1, column=0, sticky="ew", padx=8, pady=(4, 8))
             self.write_worker_button.grid(row=1, column=1, sticky="ew", padx=8, pady=(4, 8))
             self.integration_only_button.grid(row=1, column=2, sticky="ew", padx=8, pady=(4, 8))
@@ -1519,6 +1596,13 @@ if TK_AVAILABLE:
                 pady=(4, 8),
             )
             worker_controls.columnconfigure(4, weight=1)
+            ttk.Label(
+                worker_controls,
+                textvariable=self.worker_results_var,
+                justify="left",
+                wraplength=760,
+            ).grid(row=2, column=0, columnspan=4, sticky="ew", padx=8, pady=(0, 8))
+            self.worker_summary_button.grid(row=2, column=4, sticky="e", padx=8, pady=(0, 8))
 
             viewer_frame = ttk.LabelFrame(self.monitor_tab, text="Markdown Viewer")
             viewer_frame.grid(row=3, column=0, sticky="nsew")
@@ -2460,7 +2544,9 @@ if TK_AVAILABLE:
             if not task_path.exists():
                 self.status_var.set("No generated automation task file found for the selected target.")
                 self.current_worker_strategy = {}
+                self.latest_worker_summary_path = None
                 self.worker_strategy_var.set("Next worker strategy: unavailable because no automation task file was found.")
+                self.worker_results_var.set("Latest worker result: none yet.")
                 self._set_worker_action_state()
                 self._set_run_automation_state()
                 return
@@ -2483,6 +2569,10 @@ if TK_AVAILABLE:
                 self.current_worker_strategy = {}
                 worker_summary = f"Next worker strategy: unavailable ({compact_dashboard_text(exc, limit=180)})."
             self.worker_strategy_var.set(worker_summary)
+            worker_result = latest_worker_result(target)
+            self.worker_results_var.set(str(worker_result["label"]))
+            summary_path = worker_result.get("summary_path")
+            self.latest_worker_summary_path = Path(str(summary_path)) if summary_path else None
             parts = [
                 f"Status: {status.group(1) if status else 'unknown'}",
                 f"Horizon: {horizon.group(1) if horizon else 'unknown'}",
@@ -2491,7 +2581,7 @@ if TK_AVAILABLE:
                 f"Pending request headings: {request_count}",
                 f"Unhandled inbox entries: {inbox_count}",
                 f"Outbound records: {outbox_count}",
-                f"Worker reports: {len(worker_reports)}",
+                f"Worker reports: {worker_result.get('report_count') or len(worker_reports)} latest / {len(worker_reports)} total",
                 f"Worker strategy: {compact_dashboard_text(self.current_worker_strategy.get('strategy') or 'unknown', limit=80)}",
             ]
             self.status_var.set("  |  ".join(parts))
@@ -2511,6 +2601,7 @@ if TK_AVAILABLE:
                 self.read_only_worker_button,
                 self.write_worker_button,
                 self.integration_only_button,
+                self.worker_summary_button,
             ]
             if self.running:
                 for button in buttons:
@@ -2540,6 +2631,22 @@ if TK_AVAILABLE:
             self.integration_only_button.configure(
                 state="normal" if integrator_helper_exists and strategy == "INTEGRATION_ONLY" else "disabled"
             )
+            self.worker_summary_button.configure(
+                state="normal"
+                if self.latest_worker_summary_path and self.latest_worker_summary_path.exists()
+                else "disabled"
+            )
+
+        def load_worker_summary(self) -> None:
+            summary_path = self.latest_worker_summary_path
+            if not summary_path or not summary_path.exists():
+                messagebox.showinfo(
+                    "Worker summary unavailable",
+                    "No worker summary has been generated for the selected target yet.",
+                )
+                return
+            self._load_markdown_file(self.markdown_text, summary_path)
+            self._append_log(f"Loaded worker summary: {summary_path}")
 
         def run_read_only_worker_report(self) -> None:
             if self.running:
@@ -2554,12 +2661,14 @@ if TK_AVAILABLE:
                     f"The current next-run worker strategy is {name}. Refresh the target or use the observatory before spawning a worker report.",
                 )
                 return
+            run_id = dashboard_run_id("dashboard-worker-report")
             self._start_monitor_command(
-                read_only_worker_command(target, strategy),
+                read_only_worker_command(target, strategy, run_id=run_id),
                 cwd=target,
                 start_message="Starting a bounded read-only worker report from the dashboard recommendation.",
                 success_message="Read-only worker report completed.",
                 failure_message="Read-only worker report failed",
+                worker_summary_run_id=run_id,
             )
 
         def run_write_worker_lane(self) -> None:
@@ -2582,12 +2691,14 @@ if TK_AVAILABLE:
                     "Enter a disjoint file or module ownership scope before launching a write worker.",
                 )
                 return
+            run_id = dashboard_run_id("dashboard-write-worker")
             self._start_monitor_command(
-                write_worker_command(target, strategy, ownership),
+                write_worker_command(target, strategy, ownership, run_id=run_id),
                 cwd=target,
                 start_message="Starting one bounded write worker from the dashboard recommendation.",
                 success_message="Write worker completed. Review its changed files and report before integrating anything.",
                 failure_message="Write worker failed",
+                worker_summary_run_id=run_id,
             )
 
         def run_integration_only_lane(self) -> None:
@@ -2619,14 +2730,16 @@ if TK_AVAILABLE:
             start_message: str,
             success_message: str,
             failure_message: str,
+            worker_summary_run_id: str | None = None,
         ) -> None:
             self.running = True
             self._set_run_automation_state()
+            self._set_worker_action_state()
             self.cancel_button.configure(state="normal")
             self._append_log(start_message)
             thread = threading.Thread(
                 target=self._monitor_command_worker,
-                args=(command, cwd, success_message, failure_message),
+                args=(command, cwd, success_message, failure_message, worker_summary_run_id),
                 daemon=True,
             )
             thread.start()
@@ -2637,19 +2750,48 @@ if TK_AVAILABLE:
             cwd: Path,
             success_message: str,
             failure_message: str,
+            worker_summary_run_id: str | None,
         ) -> None:
             try:
                 code = self._run_command(command, cwd=cwd)
+                summary_path = (
+                    self._summarize_worker_run(cwd, worker_summary_run_id)
+                    if worker_summary_run_id
+                    else None
+                )
                 if code == 0:
                     self._thread_log(success_message)
+                    if summary_path:
+                        self._thread_log(f"Worker summary ready: {summary_path}")
                 else:
                     self._thread_log(f"{failure_message} with code {code}.")
+                    if summary_path:
+                        self._thread_log(f"Worker failure summary ready: {summary_path}")
             except Exception as exc:
                 self._thread_log(f"ERROR: {exc}")
             finally:
                 self.current_process = None
                 self.events.put(("refresh", None))
                 self.events.put(("done", None))
+
+        def _summarize_worker_run(self, target: Path, run_id: str) -> Path | None:
+            script = target / "scripts" / "summarize_worker_outputs.py"
+            run_dir = target / "target" / "agent_runs" / run_id
+            if not script.exists():
+                self._thread_log(f"Worker summary helper is missing: {script}")
+                return None
+            if not run_dir.exists():
+                self._thread_log(f"Worker run directory was not created: {run_dir}")
+                return None
+            code = self._run_command(worker_summary_command(target, run_id), cwd=target)
+            if code != 0:
+                self._thread_log(f"Worker summary generation failed with code {code}.")
+                return None
+            summary_path = run_dir / "summary.md"
+            if not summary_path.exists():
+                self._thread_log(f"Worker summary command completed but did not write {summary_path}.")
+                return None
+            return summary_path
 
         def load_selected_doc(self) -> None:
             target = Path(self.target_var.get().strip() or ".").expanduser()
@@ -3414,6 +3556,8 @@ def smoke_check() -> int:
         problems.append("Dashboard read-only worker command is not wired to --read-only.")
     if "--write" not in write_worker_command(KIT_ROOT, {"strategy": "WRITE_WORKERS", "action_lane": "builder"}, "docs/** only", run_id="dashboard-smoke"):
         problems.append("Dashboard write-worker command is not wired to --write.")
+    if "summarize_worker_outputs.py" not in " ".join(worker_summary_command(KIT_ROOT, "dashboard-smoke")):
+        problems.append("Dashboard worker summary command is not wired to summarize_worker_outputs.py.")
     if "--role" not in integration_only_command(KIT_ROOT, run_id="dashboard-smoke"):
         problems.append("Dashboard integration-only command is not wired to run_role_automation.sh.")
     if problems:

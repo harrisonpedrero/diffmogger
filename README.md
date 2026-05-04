@@ -203,7 +203,7 @@ It supports:
 - optional multi-role automation mode with fixed role-specific launchd jobs, continuous conveyor scheduling, and local-only git guards
 - optional local observatory launch and Markdown self-review export for active signal nudges, conveyor state, active role runs, queued patches, validation state, the latest recorded integration-safety result, and recent automation timeline
 - a Monitor tab **Run Safety Check** action that runs `scripts/check_integration_safety.py` and shows the local result in the dashboard log
-- **Worker Strategy Controls** that mirror the observatory's next-run recommendation and can launch a bounded read-only report, explicitly owned write worker, or local integrator lane when appropriate
+- **Worker Strategy Controls** that mirror the observatory's next-run recommendation, can launch a bounded read-only report, explicitly owned write worker, or local integrator lane when appropriate, and load the latest consolidated worker summary
 - optional context-file import into target `docs/context/`
 - generated `docs/PROJECT_CONTEXT.md`
 - a single `Scaffold & Bootstrap` pipeline
