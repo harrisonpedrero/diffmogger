@@ -171,13 +171,17 @@ This opens a local browser page backed by `scripts/run_observatory.py`. The page
 
 The observatory also includes a compact self-review panel and scorecard that pull from local task state, role progress metrics, signal state, queue manifests, conveyor circuit-breaker state, and human bridge files. Use it as the first stop in a local review: it summarizes the current assessment, validation results, the latest recorded integration-safety check result, accepted and deferred patch pressure, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, recent recommendation-history records, active nudges, queue/conveyor state, known issues, and next sprint recommendation without requiring a tour through every Markdown file.
 
-For a durable local review artifact, render the same state to Markdown:
+For a durable local first-review bundle, render the same state to HTML and Markdown:
 
 ```bash
-python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md
+python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review
 ```
 
-Each Markdown review export also updates `target/action_plan_history.json` with the latest bounded action-plan follow-through record so later reviews can show repeated recommendations, no-progress warnings, and accepted/deferred follow-through across cycles.
+This writes `/tmp/Diffmogger-review/Diffmogger-observatory.html` and
+`/tmp/Diffmogger-review/Diffmogger-self-review.md`. Each Markdown review export also updates
+`target/action_plan_history.json` with the latest bounded action-plan follow-through record so
+later reviews can show repeated recommendations, no-progress warnings, and accepted/deferred
+follow-through across cycles.
 
 The Monitor tab also includes:
 
@@ -194,8 +198,8 @@ Use the Monitor tab as the center of the first review:
 1. Run `bash scripts/validate_starter_kit.sh` from the Diffmogger starter-kit source.
 2. Open the target with **Open Diffmogger Project**.
 3. Click **Run Safety Check** and confirm the dashboard log reports the local integration-safety result.
-4. Click **Launch Observatory** or render it with `python3 scripts/run_observatory.py --target . --once --output /tmp/Diffmogger-observatory.html`.
-5. Export the durable review with `python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md`.
+4. Click **Launch Observatory** or export `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
+5. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
 6. Check the observatory or Markdown export for first-review readiness, safety status, validation state, active role or queue, known issues, and the next-lane action plan.
 
 For multi-role jobs in repos with configured git remotes, the dashboard blocks scheduling unless the advanced **Allow local-only multi-role automation when this repo has git remotes** option is checked. When checked, LaunchAgents receive `MULTI_ROLE_ALLOW_REMOTES=1`; scripts still refuse pushes, fetches, pulls, remote configuration, and remote-touching git commands.

@@ -128,6 +128,7 @@ OBSERVATORY_REQUIRED_STRINGS = [
     "ThreadingHTTPServer",
     "--open",
     "--review-output",
+    "--review-dir",
     "Self Review",
     "Scorecard",
     "Action Plan",

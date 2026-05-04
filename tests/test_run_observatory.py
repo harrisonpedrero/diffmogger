@@ -849,6 +849,37 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("System python lacks pytest", report)
                     self.assertIn("Add a local validation fixture", report)
 
+    def test_review_dir_export_writes_named_html_and_markdown_artifacts(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_first_review_ready_target(target)
+                    output_dir = target / "target" / "first-review"
+
+                    exit_code = module.main(
+                        [
+                            "--target",
+                            str(target),
+                            "--review-dir",
+                            str(output_dir),
+                        ]
+                    )
+
+                    html_path = output_dir / module.FIRST_REVIEW_OBSERVATORY_FILENAME
+                    report_path = output_dir / module.FIRST_REVIEW_SELF_REVIEW_FILENAME
+                    history_path = target / "target" / "action_plan_history.json"
+                    html = html_path.read_text(encoding="utf-8")
+                    report = report_path.read_text(encoding="utf-8")
+
+                    self.assertEqual(exit_code, 0)
+                    self.assertIn("Diffmogger Observatory", html)
+                    self.assertIn("First review", html)
+                    self.assertIn("# Diffmogger Self-Review Snapshot", report)
+                    self.assertIn("## First Review Readiness", report)
+                    self.assertIn("status: ready", report)
+                    self.assertTrue(history_path.exists())
+
     def test_first_run_empty_states_explain_future_queue_outputs(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):

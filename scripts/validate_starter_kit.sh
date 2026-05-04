@@ -394,6 +394,7 @@ for marker in [
 	    "ThreadingHTTPServer",
 	    "--open",
 	    "--review-output",
+	    "--review-dir",
 	    "Self Review",
 	    "First Review Readiness",
 	    "Scorecard",

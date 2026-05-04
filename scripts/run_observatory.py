@@ -32,11 +32,13 @@ MAX_CHECK_ITEMS = 8
 MAX_SCORECARD_ITEMS = 8
 MAX_RECOMMENDATION_HISTORY = 5
 ACTION_PLAN_HISTORY_RELATIVE = Path("target/action_plan_history.json")
+FIRST_REVIEW_OBSERVATORY_FILENAME = "Diffmogger-observatory.html"
+FIRST_REVIEW_SELF_REVIEW_FILENAME = "Diffmogger-self-review.md"
 FIRST_REVIEW_MARKERS = (
     ("starter validation", "bash scripts/validate_starter_kit.sh"),
     ("dashboard safety", "Run Safety Check"),
-    ("observatory HTML", "Diffmogger-observatory.html"),
-    ("Markdown self-review", "Diffmogger-self-review.md"),
+    ("observatory HTML", FIRST_REVIEW_OBSERVATORY_FILENAME),
+    ("Markdown self-review", FIRST_REVIEW_SELF_REVIEW_FILENAME),
 )
 FIRST_REVIEW_DOC_CANDIDATES = (
     "docs/DEVELOPMENT.md",
@@ -2674,6 +2676,21 @@ def write_output_file(path_value: str, body: str, *, label: str) -> None:
     print(f"Wrote {label}: {output}")
 
 
+def write_review_bundle(path_value: str, snapshot: dict[str, Any]) -> None:
+    output_dir = Path(path_value).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_output_file(
+        str(output_dir / FIRST_REVIEW_OBSERVATORY_FILENAME),
+        render_html(snapshot, live=False),
+        label="observatory snapshot",
+    )
+    write_output_file(
+        str(output_dir / FIRST_REVIEW_SELF_REVIEW_FILENAME),
+        render_review_markdown(snapshot),
+        label="self-review report",
+    )
+
+
 class ObservatoryHandler(BaseHTTPRequestHandler):
     target: Path
 
@@ -2733,14 +2750,30 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Write a compact Markdown self-review report; use '-' for stdout",
     )
+    parser.add_argument(
+        "--review-dir",
+        default="",
+        help=(
+            "Write first-review HTML and Markdown artifacts to this directory "
+            f"as {FIRST_REVIEW_OBSERVATORY_FILENAME} and {FIRST_REVIEW_SELF_REVIEW_FILENAME}"
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.review_dir:
+        if args.review_dir.strip() == "-":
+            parser.error("--review-dir requires a directory path")
+        if args.once or args.output or args.review_output:
+            parser.error("--review-dir cannot be combined with --once, --output, or --review-output")
     if args.once and not args.output and args.review_output == "-":
         parser.error("--review-output - cannot be combined with --once unless --output is also set")
 
     target = Path(args.target).expanduser().resolve()
     snapshot = build_snapshot(target)
-    if args.review_output and args.review_output != "-":
+    if args.review_dir or (args.review_output and args.review_output != "-"):
         snapshot = persist_recommendation_history(target, snapshot)
+    if args.review_dir:
+        write_review_bundle(args.review_dir, snapshot)
+        return 0
     if args.once:
         body = render_html(snapshot, live=False)
         if args.output:

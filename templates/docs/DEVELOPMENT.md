@@ -66,13 +66,16 @@ python3 scripts/run_observatory.py --open
 
 The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_signals.json` to show active signal nudges, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
 
-For a durable first-run self-review artifact, render the same local state to Markdown:
+For a durable first-run review bundle, render the same local state to HTML and Markdown:
 
 ```bash
-python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md
+python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review
 ```
 
-Markdown review exports update `target/action_plan_history.json` so repeated recommendations and follow-through outcomes remain visible across local conveyor cycles.
+This writes `/tmp/Diffmogger-review/Diffmogger-observatory.html` and
+`/tmp/Diffmogger-review/Diffmogger-self-review.md`. Markdown review exports update
+`target/action_plan_history.json` so repeated recommendations and follow-through outcomes
+remain visible across local conveyor cycles.
 
 ### First Review Checklist
 
@@ -80,8 +83,8 @@ After the first bootstrap, use one local review path:
 
 1. In the Diffmogger starter-kit source, run `bash scripts/validate_starter_kit.sh` when reviewing kit or scaffold behavior.
 2. Open the dashboard with `python3 /path/to/Diffmogger/scripts/run_dashboard.py`, reopen this target, and click **Run Safety Check** in the Monitor tab.
-3. From this target repo, render the observatory with `python3 scripts/run_observatory.py --target . --once --output /tmp/Diffmogger-observatory.html`.
-4. Export the Markdown self-review with `python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md`.
+3. From this target repo, export the review bundle with `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
+4. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
 5. Confirm the review shows first-review readiness, safety status, validation state, active role or queue, known issues, and the next sprint recommendation.
 
 ## Human Bridge
