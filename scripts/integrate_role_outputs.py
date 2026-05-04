@@ -666,11 +666,8 @@ def checkpoint_dirty_main(target: Path, run_id: str, *, dry_run: bool) -> tuple[
             "GIT_COMMITTER_EMAIL": "diffmogger-integrator@example.invalid",
         }
     )
-    result = run(
-        ["git", "commit", "-m", f"codex/integrator: checkpoint pre-existing local changes {run_id}"],
-        cwd=target,
-        env=env,
-    )
+    message = f"chore(integrator): checkpoint dirty main before {run_id}"
+    result = run(["git", "commit", "-m", message], cwd=target, env=env)
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         raise SystemExit(1)
@@ -1082,7 +1079,7 @@ def commit_current_patch(target: Path, manifest: dict[str, Any], run_id: str, *,
     role = str(manifest.get("role") or "role")
     patch_run_id = str(manifest.get("run_id") or "unknown")
     summary = first_summary_line(str(manifest.get("summary") or ""))
-    message = f"codex/integrator: accept {role} patch {patch_run_id}"
+    message = semantic_commit_message(manifest, target, patch_run_id)
     if summary:
         message += f"\n\n{summary}"
     env = os.environ.copy()
@@ -1127,11 +1124,7 @@ def commit_automation_state(target: Path, run_id: str, *, dry_run: bool) -> str 
             "GIT_COMMITTER_EMAIL": "diffmogger-integrator@example.invalid",
         }
     )
-    result = run(
-        ["git", "commit", "-m", f"codex/integrator: update multi-role state {run_id}"],
-        cwd=target,
-        env=env,
-    )
+    result = run(["git", "commit", "-m", f"chore(integrator): update multi-role state {run_id}"], cwd=target, env=env)
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         raise SystemExit(1)
@@ -1141,9 +1134,85 @@ def commit_automation_state(target: Path, run_id: str, *, dry_run: bool) -> str 
 def first_summary_line(text: str) -> str:
     for raw in text.splitlines():
         line = raw.strip(" #-\t")
-        if line and not line.startswith("base_commit") and not line.startswith("codex_exit_code"):
+        if (
+            line
+            and not line.startswith("base_commit")
+            and not line.startswith("codex_exit_code")
+            and " role run " not in line
+        ):
             return line[:200]
     return ""
+
+
+def semantic_commit_message(manifest: dict[str, Any], target: Path, patch_run_id: str) -> str:
+    role = str(manifest.get("role") or "role").strip().lower() or "role"
+    changed_files = [str(path) for path in manifest.get("changed_files") or [] if isinstance(path, str)]
+    commit_type = semantic_commit_type(changed_files)
+    scope = semantic_commit_scope(changed_files, role)
+    action = semantic_commit_action(changed_files, role)
+    return f"{commit_type}({scope}): {action}\n\nRole: {role}\nPatch-run: {patch_run_id}"
+
+
+def semantic_commit_type(changed_files: list[str]) -> str:
+    if not changed_files:
+        return "chore"
+    if all(path.startswith("docs/") or path.endswith(".md") for path in changed_files):
+        return "docs"
+    if any(path.startswith("tests/") for path in changed_files):
+        if any(path.startswith(("scripts/", "templates/", "services/")) for path in changed_files):
+            return "feat"
+        return "test"
+    if any(path.startswith("services/") for path in changed_files):
+        return "feat"
+    if any(path.startswith(("scripts/", "templates/")) for path in changed_files):
+        return "feat"
+    return "chore"
+
+
+def semantic_commit_scope(changed_files: list[str], role: str) -> str:
+    joined = "\n".join(changed_files)
+    if "run_observatory.py" in joined:
+        return "observatory"
+    if "run_conveyor_automation.py" in joined:
+        return "conveyor"
+    if "integrate_role_outputs.py" in joined:
+        return "integrator"
+    if "run_role_automation.sh" in joined:
+        return "role-runner"
+    if "check_integration_safety.py" in joined:
+        return "safety"
+    if "check_required_files.py" in joined:
+        return "scaffold"
+    if "validate_starter_kit.sh" in joined:
+        return "validation"
+    if "agentic-dashboard" in joined:
+        return "dashboard"
+    if "agentic-notifier" in joined:
+        return "notifier"
+    if any(path.startswith("docs/") or path.endswith(".md") for path in changed_files):
+        return "docs"
+    return role or "automation"
+
+
+def semantic_commit_action(changed_files: list[str], role: str) -> str:
+    joined = "\n".join(changed_files)
+    if "check_required_files.py" in joined:
+        return "enforce generated target contracts"
+    if "check_integration_safety.py" in joined:
+        return "enforce local integration safety"
+    if "integrate_role_outputs.py" in joined and "run_role_automation.sh" in joined:
+        return "propagate ignored runtime state"
+    if "run_observatory.py" in joined:
+        return "surface automation progress details"
+    if "run_conveyor_automation.py" in joined:
+        return "improve conveyor scheduling"
+    if "agentic-dashboard" in joined:
+        return "improve dashboard automation controls"
+    if "validate_starter_kit.sh" in joined:
+        return "strengthen starter kit validation"
+    if all(path.startswith("docs/") or path.endswith(".md") for path in changed_files):
+        return "document automation progress"
+    return f"integrate {role} work"
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")

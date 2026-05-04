@@ -481,7 +481,8 @@ for marker in [
     "staleness",
     "verification_failure",
     "MULTI_ROLE_ALLOW_REMOTES",
-    "checkpoint pre-existing local changes",
+    "semantic_commit_message",
+    "chore(integrator): checkpoint dirty main",
     "repair_environment.py",
     "git push",
     "worktree",
@@ -900,7 +901,7 @@ cat >"$tmp_dir/target/automation_queue/builder/run-001/manifest.json" <<JSON
 }
 JSON
 python3 scripts/integrate_role_outputs.py "$tmp_dir" --run-id validation-integrator >/tmp/Diffmogger-integrator-smoke.log
-if ! git -C "$tmp_dir" log --oneline --all | grep "codex/integrator: accept builder patch run-001" >/tmp/Diffmogger-integrator-log.log; then
+if ! git -C "$tmp_dir" log --oneline --all | grep "chore(builder): integrate builder work" >/tmp/Diffmogger-integrator-log.log; then
     echo "Integrator smoke did not create accepted patch commit" >&2
     cat /tmp/Diffmogger-integrator-smoke.log >&2
     rm -rf "$tmp_dir" "$tmp_intake"

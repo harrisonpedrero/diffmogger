@@ -199,6 +199,57 @@ class RuntimeStateActionTests(unittest.TestCase):
                     self.assertEqual(manifest["runtime_state_status"], "already_applied")
                     self.assertEqual(results[0]["status"], "already_applied")
 
+    def test_semantic_commit_message_describes_observatory_patch(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                manifest = {
+                    "role": "builder",
+                    "changed_files": [
+                        "scripts/run_observatory.py",
+                        "templates/scripts/run_observatory.py",
+                        "tests/test_run_observatory.py",
+                    ],
+                }
+
+                message = module.semantic_commit_message(manifest, ROOT, "run-observe")
+
+                self.assertEqual(
+                    message,
+                    "feat(observatory): surface automation progress details\n\n"
+                    "Role: builder\n"
+                    "Patch-run: run-observe",
+                )
+
+    def test_semantic_commit_message_describes_docs_only_patch(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                manifest = {
+                    "role": "planner",
+                    "changed_files": ["docs/DASHBOARD.md", "README.md"],
+                }
+
+                message = module.semantic_commit_message(manifest, ROOT, "run-docs")
+
+                self.assertEqual(
+                    message,
+                    "docs(docs): document automation progress\n\n"
+                    "Role: planner\n"
+                    "Patch-run: run-docs",
+                )
+
+    def test_first_summary_line_skips_wrapper_heading(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                summary = """# builder role run run-001
+
+- base_commit: abc
+- codex_exit_code: 0
+
+Implemented the useful thing.
+"""
+
+                self.assertEqual(module.first_summary_line(summary), "Implemented the useful thing.")
+
 
 if __name__ == "__main__":
     unittest.main()
