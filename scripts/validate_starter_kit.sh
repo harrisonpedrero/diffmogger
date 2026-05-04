@@ -555,8 +555,17 @@ for marker in [
     "Launch Observatory",
     "Export Review Bundle",
     "Run Safety Check",
+    "Worker Strategy Controls",
+    "Run Read-Only Worker",
+    "Run Write Worker",
+    "Run Integrator",
+    "dashboard_worker_strategy",
+    "read_only_worker_command",
+    "write_worker_command",
+    "integration_only_command",
     "check_integration_safety.py",
     "run_observatory.py",
+    "spawn_worker_agent.sh",
     "run_conveyor_automation.sh",
     "DEFAULT_AUTOMATION_PATH",
     "StartCalendarInterval",
@@ -580,6 +589,7 @@ for marker in [
     "Codex CLI installed and signed in",
     "Export Review Bundle",
     "Run Safety Check",
+    "Worker Strategy Controls",
 ]:
     if marker not in dashboard_readme:
         print(f"Dashboard README missing marker: {marker}", file=sys.stderr)

@@ -198,6 +198,72 @@ class DashboardIntegrationSafetyAffordanceTests(unittest.TestCase):
             self.assertIn("--review-dir", command)
             self.assertIn("/tmp/Diffmogger-review", command)
 
+    def test_worker_strategy_summary_formats_dashboard_state(self) -> None:
+        strategy = {
+            "strategy": "WRITE_WORKERS",
+            "parallelism_budget": 2,
+            "action_lane": "builder",
+            "summary": "Use up to two bounded write workers when the work splits cleanly.",
+        }
+
+        summary = self.module.worker_strategy_summary(strategy)
+
+        self.assertIn("WRITE_WORKERS / budget 2 / lane builder", summary)
+        self.assertIn("Use up to two bounded write workers", summary)
+
+    def test_read_only_worker_command_uses_target_helper_and_strategy_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            strategy = {
+                "strategy": "READ_ONLY_REPORTS",
+                "parallelism_budget": 1,
+                "action_lane": "hardener",
+                "summary": "Use one read-only worker report for broad hardener review.",
+                "next_steps": ["Inspect validation gaps."],
+            }
+
+            command = self.module.read_only_worker_command(target, strategy, run_id="dashboard-test")
+
+            self.assertEqual("bash", command[0])
+            self.assertEqual(str(target.resolve() / "scripts" / "spawn_worker_agent.sh"), command[1])
+            self.assertIn("--read-only", command)
+            self.assertIn("hardener_strategy", command)
+            self.assertIn("dashboard-test", command)
+            self.assertIn("Inspect validation gaps.", command[-1])
+
+    def test_write_worker_command_requires_explicit_ownership_argument(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            strategy = {
+                "strategy": "WRITE_WORKERS",
+                "parallelism_budget": 2,
+                "action_lane": "builder",
+            }
+
+            command = self.module.write_worker_command(
+                target,
+                strategy,
+                "services/example/** and tests/example/** only",
+                run_id="dashboard-write-test",
+            )
+
+            self.assertEqual(str(target.resolve() / "scripts" / "spawn_worker_agent.sh"), command[1])
+            self.assertIn("--write", command)
+            self.assertIn("--ownership", command)
+            self.assertIn("services/example/** and tests/example/** only", command)
+            self.assertIn("dashboard-write-test", command)
+
+    def test_integration_only_command_runs_target_local_integrator_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+
+            command = self.module.integration_only_command(target, run_id="dashboard-integrator-test")
+
+            self.assertEqual("env", command[0])
+            self.assertIn("CODEX_RUN_ID=dashboard-integrator-test", command)
+            self.assertIn(str(target.resolve() / "scripts" / "run_role_automation.sh"), command)
+            self.assertEqual("integrator", command[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

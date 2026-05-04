@@ -66,6 +66,8 @@ MAX_DASHBOARD_LOG_LINE_CHARS = 4000
 DASHBOARD_STATE_FILE = ".agentic/dashboard_state.json"
 CONTEXT_IMPORTS_START = "<!-- DIFFMOGGER:CONTEXT-IMPORTS:START -->"
 CONTEXT_IMPORTS_END = "<!-- DIFFMOGGER:CONTEXT-IMPORTS:END -->"
+WORKER_STRATEGY_NAMES = {"NO_WORKERS", "READ_ONLY_REPORTS", "WRITE_WORKERS", "INTEGRATION_ONLY"}
+WORKER_REPORT_STRATEGIES = {"READ_ONLY_REPORTS", "WRITE_WORKERS"}
 
 DOC_CHOICES = {
     "Automation Tasks": "docs/CODEX_AUTOMATION_TASKS.md",
@@ -132,6 +134,15 @@ def load_scaffold_module() -> Any:
     spec = importlib.util.spec_from_file_location("diffmogger_scaffold", SCAFFOLD_SCRIPT)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load scaffold script at {SCAFFOLD_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_observatory_module() -> Any:
+    spec = importlib.util.spec_from_file_location("diffmogger_observatory", OBSERVATORY_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load observatory script at {OBSERVATORY_SCRIPT}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -623,6 +634,153 @@ def review_bundle_command(target: Path, review_dir: Path = DEFAULT_REVIEW_BUNDLE
     ]
 
 
+def compact_dashboard_text(value: Any, *, limit: int = 220) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def dashboard_run_id(prefix: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", prefix.lower()).strip("-") or "dashboard"
+    return f"{slug}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+
+
+def dashboard_worker_strategy(target: Path) -> dict[str, Any]:
+    module = load_observatory_module()
+    snapshot = module.build_snapshot(target.expanduser().resolve())
+    strategy = snapshot.get("worker_strategy") if isinstance(snapshot, dict) else {}
+    if not isinstance(strategy, dict):
+        return {}
+    name = compact_dashboard_text(strategy.get("strategy") or "NO_WORKERS", limit=80)
+    if name not in WORKER_STRATEGY_NAMES:
+        strategy = dict(strategy)
+        strategy["strategy"] = "NO_WORKERS"
+    return strategy
+
+
+def worker_strategy_summary(strategy: dict[str, Any]) -> str:
+    if not strategy:
+        return "Next worker strategy: unavailable until the observatory can read target state."
+    name = compact_dashboard_text(strategy.get("strategy") or "NO_WORKERS", limit=80)
+    try:
+        budget = int(strategy.get("parallelism_budget") or 0)
+    except (TypeError, ValueError):
+        budget = 0
+    lane = compact_dashboard_text(strategy.get("action_lane") or "local", limit=80)
+    summary = compact_dashboard_text(
+        strategy.get("summary") or "No next-run worker strategy summary recorded.",
+        limit=360,
+    )
+    return f"Next worker strategy: {name} / budget {budget} / lane {lane}. {summary}"
+
+
+def worker_role_from_strategy(strategy: dict[str, Any]) -> str:
+    lane = compact_dashboard_text(strategy.get("action_lane") or "review", limit=40).lower()
+    if lane in {"planner", "builder", "hardener", "integrator"}:
+        return f"{lane}_strategy"
+    name = compact_dashboard_text(strategy.get("strategy") or "review", limit=40).lower()
+    return f"{name}_strategy"
+
+
+def worker_assignment_prompt(strategy: dict[str, Any], *, mode: str) -> str:
+    summary = compact_dashboard_text(strategy.get("summary") or "", limit=600)
+    reasons = [
+        compact_dashboard_text(item, limit=300)
+        for item in list(strategy.get("reasons") or [])
+        if item
+    ][:4]
+    next_steps = [
+        compact_dashboard_text(item, limit=360)
+        for item in list(strategy.get("next_steps") or [])
+        if item
+    ][:5]
+    lines = [
+        f"Use the dashboard-observed next-run worker strategy `{compact_dashboard_text(strategy.get('strategy') or 'NO_WORKERS', limit=80)}`.",
+        f"Action lane: `{compact_dashboard_text(strategy.get('action_lane') or 'local', limit=80)}`.",
+    ]
+    if summary:
+        lines.append(f"Strategy summary: {summary}")
+    if reasons:
+        lines.append("Reasons:")
+        lines.extend(f"- {reason}" for reason in reasons)
+    if next_steps:
+        lines.append("Suggested next steps:")
+        lines.extend(f"- {step}" for step in next_steps)
+    if mode == "write":
+        lines.extend(
+            [
+                "",
+                "Implement exactly one bounded slice inside the supplied ownership scope.",
+                "Keep the main agent responsible for reviewing, integrating, and verifying your output.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Produce a concise read-only report that helps the next main automation run decide whether to follow this strategy, narrow it, or avoid it.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def read_only_worker_command(target: Path, strategy: dict[str, Any], *, run_id: str | None = None) -> list[str]:
+    target = target.expanduser().resolve()
+    return [
+        "bash",
+        str(target / "scripts" / "spawn_worker_agent.sh"),
+        "--target",
+        str(target),
+        "--run-id",
+        run_id or dashboard_run_id("dashboard-worker-report"),
+        "--role",
+        worker_role_from_strategy(strategy),
+        "--read-only",
+        "--prompt",
+        worker_assignment_prompt(strategy, mode="read-only"),
+    ]
+
+
+def write_worker_command(
+    target: Path,
+    strategy: dict[str, Any],
+    ownership_scope: str,
+    *,
+    run_id: str | None = None,
+) -> list[str]:
+    target = target.expanduser().resolve()
+    return [
+        "bash",
+        str(target / "scripts" / "spawn_worker_agent.sh"),
+        "--target",
+        str(target),
+        "--run-id",
+        run_id or dashboard_run_id("dashboard-write-worker"),
+        "--role",
+        worker_role_from_strategy(strategy),
+        "--write",
+        "--ownership",
+        ownership_scope,
+        "--prompt",
+        worker_assignment_prompt(strategy, mode="write"),
+    ]
+
+
+def integration_only_command(target: Path, *, run_id: str | None = None) -> list[str]:
+    target = target.expanduser().resolve()
+    return [
+        "env",
+        f"CODEX_RUN_ID={run_id or dashboard_run_id('dashboard-integrator')}",
+        "bash",
+        str(target / "scripts" / "run_role_automation.sh"),
+        "--target",
+        str(target),
+        "--role",
+        "integrator",
+    ]
+
+
 def safe_context_filename(name: str) -> str:
     source = Path(name)
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", source.stem).strip(".-") or "context"
@@ -791,6 +949,8 @@ if TK_AVAILABLE:
             self.multi_role_allow_remotes_var = tk.BooleanVar(value=False)
             self.status_var = tk.StringVar(value="No target loaded.")
             self.schedule_status_var = tk.StringVar(value="Schedule: target not loaded.")
+            self.worker_strategy_var = tk.StringVar(value="Next worker strategy: not loaded.")
+            self.write_worker_ownership_var = tk.StringVar(value="")
             self.doc_choice_var = tk.StringVar(value="Automation Tasks")
             self.human_doc_choice_var = tk.StringVar(value="Requests From Automation")
             self.intent_var = tk.StringVar(value="General note")
@@ -798,6 +958,7 @@ if TK_AVAILABLE:
 
             self.text_fields: dict[str, Any] = {}
             self.entry_fields: dict[str, Any] = {}
+            self.current_worker_strategy: dict[str, Any] = {}
 
             self._build_ui()
             self.root.protocol("WM_DELETE_WINDOW", self.close_dashboard)
@@ -1277,7 +1438,7 @@ if TK_AVAILABLE:
 
         def _build_monitor_tab(self) -> None:
             self.monitor_tab.columnconfigure(0, weight=1)
-            self.monitor_tab.rowconfigure(2, weight=1)
+            self.monitor_tab.rowconfigure(3, weight=1)
 
             target_row = ttk.Frame(self.monitor_tab)
             target_row.grid(row=0, column=0, sticky="ew")
@@ -1305,8 +1466,54 @@ if TK_AVAILABLE:
             summary.columnconfigure(0, weight=1)
             ttk.Label(summary, textvariable=self.status_var, justify="left", wraplength=980).grid(row=0, column=0, sticky="w", padx=8, pady=8)
 
+            worker_controls = ttk.LabelFrame(self.monitor_tab, text="Worker Strategy Controls")
+            worker_controls.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+            worker_controls.columnconfigure(0, weight=1)
+            ttk.Label(
+                worker_controls,
+                textvariable=self.worker_strategy_var,
+                justify="left",
+                wraplength=980,
+            ).grid(row=0, column=0, columnspan=5, sticky="ew", padx=8, pady=(8, 4))
+            self.read_only_worker_button = ttk.Button(
+                worker_controls,
+                text="Run Read-Only Worker",
+                command=self.run_read_only_worker_report,
+                state="disabled",
+            )
+            self.write_worker_button = ttk.Button(
+                worker_controls,
+                text="Run Write Worker",
+                command=self.run_write_worker_lane,
+                state="disabled",
+            )
+            self.integration_only_button = ttk.Button(
+                worker_controls,
+                text="Run Integrator",
+                command=self.run_integration_only_lane,
+                state="disabled",
+            )
+            self.read_only_worker_button.grid(row=1, column=0, sticky="ew", padx=8, pady=(4, 8))
+            self.write_worker_button.grid(row=1, column=1, sticky="ew", padx=8, pady=(4, 8))
+            self.integration_only_button.grid(row=1, column=2, sticky="ew", padx=8, pady=(4, 8))
+            ttk.Label(worker_controls, text="Write ownership", style="Help.TLabel").grid(
+                row=1,
+                column=3,
+                sticky="e",
+                padx=(8, 4),
+                pady=(4, 8),
+            )
+            ttk.Entry(worker_controls, textvariable=self.write_worker_ownership_var, width=36).grid(
+                row=1,
+                column=4,
+                sticky="ew",
+                padx=(4, 8),
+                pady=(4, 8),
+            )
+            worker_controls.columnconfigure(4, weight=1)
+
             viewer_frame = ttk.LabelFrame(self.monitor_tab, text="Markdown Viewer")
-            viewer_frame.grid(row=2, column=0, sticky="nsew")
+            viewer_frame.grid(row=3, column=0, sticky="nsew")
             viewer_frame.rowconfigure(1, weight=1)
             viewer_frame.columnconfigure(0, weight=1)
             doc_row = ttk.Frame(viewer_frame)
@@ -2029,6 +2236,7 @@ if TK_AVAILABLE:
             self.pause_automation_button.configure(state="disabled")
             self.remove_schedule_button.configure(state="disabled")
             self.cancel_button.configure(state="normal")
+            self._set_worker_action_state()
             self._append_log("Starting combined scaffold/bootstrap pipeline.")
             thread = threading.Thread(
                 target=self._scaffold_bootstrap_worker,
@@ -2243,6 +2451,9 @@ if TK_AVAILABLE:
             task_path = target / "docs" / "CODEX_AUTOMATION_TASKS.md"
             if not task_path.exists():
                 self.status_var.set("No generated automation task file found for the selected target.")
+                self.current_worker_strategy = {}
+                self.worker_strategy_var.set("Next worker strategy: unavailable because no automation task file was found.")
+                self._set_worker_action_state()
                 self._set_run_automation_state()
                 return
             text = task_path.read_text(encoding="utf-8", errors="replace")
@@ -2257,6 +2468,13 @@ if TK_AVAILABLE:
             inbox_count = self._count_marker(inbox_path, r"status:\s*unhandled")
             outbox_count = self._count_marker(outbox_path, r"^##\s+OUTBOX-")
             worker_reports = sorted((target / "target" / "agent_runs").glob("*/worker_*.md")) if (target / "target" / "agent_runs").exists() else []
+            try:
+                self.current_worker_strategy = dashboard_worker_strategy(target)
+                worker_summary = worker_strategy_summary(self.current_worker_strategy)
+            except Exception as exc:
+                self.current_worker_strategy = {}
+                worker_summary = f"Next worker strategy: unavailable ({compact_dashboard_text(exc, limit=180)})."
+            self.worker_strategy_var.set(worker_summary)
             parts = [
                 f"Status: {status.group(1) if status else 'unknown'}",
                 f"Horizon: {horizon.group(1) if horizon else 'unknown'}",
@@ -2266,8 +2484,10 @@ if TK_AVAILABLE:
                 f"Unhandled inbox entries: {inbox_count}",
                 f"Outbound records: {outbox_count}",
                 f"Worker reports: {len(worker_reports)}",
+                f"Worker strategy: {compact_dashboard_text(self.current_worker_strategy.get('strategy') or 'unknown', limit=80)}",
             ]
             self.status_var.set("  |  ".join(parts))
+            self._set_worker_action_state()
             self._set_run_automation_state()
 
         def _count_marker(self, path: Path, pattern: str) -> int:
@@ -2275,6 +2495,153 @@ if TK_AVAILABLE:
                 return 0
             text = path.read_text(encoding="utf-8", errors="replace")
             return len(re.findall(pattern, text, re.MULTILINE))
+
+        def _set_worker_action_state(self) -> None:
+            if not hasattr(self, "read_only_worker_button"):
+                return
+            buttons = [
+                self.read_only_worker_button,
+                self.write_worker_button,
+                self.integration_only_button,
+            ]
+            if self.running:
+                for button in buttons:
+                    button.configure(state="disabled")
+                return
+            target_text = self.target_var.get().strip()
+            if not target_text:
+                for button in buttons:
+                    button.configure(state="disabled")
+                return
+            target = Path(target_text).expanduser().resolve()
+            strategy = compact_dashboard_text(
+                self.current_worker_strategy.get("strategy") or "NO_WORKERS",
+                limit=80,
+            )
+            worker_helper_exists = (target / "scripts" / "spawn_worker_agent.sh").exists()
+            integrator_helper_exists = (
+                (target / "scripts" / "run_role_automation.sh").exists()
+                and (target / ".agentic" / "roles" / "integrator.md").exists()
+            )
+            self.read_only_worker_button.configure(
+                state="normal" if worker_helper_exists and strategy in WORKER_REPORT_STRATEGIES else "disabled"
+            )
+            self.write_worker_button.configure(
+                state="normal" if worker_helper_exists and strategy == "WRITE_WORKERS" else "disabled"
+            )
+            self.integration_only_button.configure(
+                state="normal" if integrator_helper_exists and strategy == "INTEGRATION_ONLY" else "disabled"
+            )
+
+        def run_read_only_worker_report(self) -> None:
+            if self.running:
+                messagebox.showinfo("Process running", "A dashboard-launched process is already running.")
+                return
+            target = Path(self.target_var.get().strip() or ".").expanduser().resolve()
+            strategy = self.current_worker_strategy or dashboard_worker_strategy(target)
+            name = compact_dashboard_text(strategy.get("strategy") or "NO_WORKERS", limit=80)
+            if name not in WORKER_REPORT_STRATEGIES:
+                messagebox.showinfo(
+                    "Worker report not recommended",
+                    f"The current next-run worker strategy is {name}. Refresh the target or use the observatory before spawning a worker report.",
+                )
+                return
+            self._start_monitor_command(
+                read_only_worker_command(target, strategy),
+                cwd=target,
+                start_message="Starting a bounded read-only worker report from the dashboard recommendation.",
+                success_message="Read-only worker report completed.",
+                failure_message="Read-only worker report failed",
+            )
+
+        def run_write_worker_lane(self) -> None:
+            if self.running:
+                messagebox.showinfo("Process running", "A dashboard-launched process is already running.")
+                return
+            target = Path(self.target_var.get().strip() or ".").expanduser().resolve()
+            strategy = self.current_worker_strategy or dashboard_worker_strategy(target)
+            name = compact_dashboard_text(strategy.get("strategy") or "NO_WORKERS", limit=80)
+            if name != "WRITE_WORKERS":
+                messagebox.showinfo(
+                    "Write worker not recommended",
+                    f"The current next-run worker strategy is {name}. Write workers are enabled only when the observatory recommends WRITE_WORKERS.",
+                )
+                return
+            ownership = self.write_worker_ownership_var.get().strip()
+            if not ownership:
+                messagebox.showerror(
+                    "Missing ownership scope",
+                    "Enter a disjoint file or module ownership scope before launching a write worker.",
+                )
+                return
+            self._start_monitor_command(
+                write_worker_command(target, strategy, ownership),
+                cwd=target,
+                start_message="Starting one bounded write worker from the dashboard recommendation.",
+                success_message="Write worker completed. Review its changed files and report before integrating anything.",
+                failure_message="Write worker failed",
+            )
+
+        def run_integration_only_lane(self) -> None:
+            if self.running:
+                messagebox.showinfo("Process running", "A dashboard-launched process is already running.")
+                return
+            target = Path(self.target_var.get().strip() or ".").expanduser().resolve()
+            strategy = self.current_worker_strategy or dashboard_worker_strategy(target)
+            name = compact_dashboard_text(strategy.get("strategy") or "NO_WORKERS", limit=80)
+            if name != "INTEGRATION_ONLY":
+                messagebox.showinfo(
+                    "Integrator not recommended",
+                    f"The current next-run worker strategy is {name}. Use this control when the observatory recommends INTEGRATION_ONLY.",
+                )
+                return
+            self._start_monitor_command(
+                integration_only_command(target),
+                cwd=target,
+                start_message="Starting one local integrator lane from the dashboard recommendation.",
+                success_message="Integrator lane completed.",
+                failure_message="Integrator lane failed",
+            )
+
+        def _start_monitor_command(
+            self,
+            command: list[str],
+            *,
+            cwd: Path,
+            start_message: str,
+            success_message: str,
+            failure_message: str,
+        ) -> None:
+            self.running = True
+            self._set_run_automation_state()
+            self.cancel_button.configure(state="normal")
+            self._append_log(start_message)
+            thread = threading.Thread(
+                target=self._monitor_command_worker,
+                args=(command, cwd, success_message, failure_message),
+                daemon=True,
+            )
+            thread.start()
+
+        def _monitor_command_worker(
+            self,
+            command: list[str],
+            cwd: Path,
+            success_message: str,
+            failure_message: str,
+        ) -> None:
+            try:
+                code = self._run_command(command, cwd=cwd)
+                if code == 0:
+                    self._thread_log(success_message)
+                else:
+                    self._thread_log(f"{failure_message} with code {code}.")
+            except Exception as exc:
+                self._thread_log(f"ERROR: {exc}")
+            finally:
+                self.current_process = None
+                self.events.put(("refresh", None))
+                self.events.put(("done", None))
 
         def load_selected_doc(self) -> None:
             target = Path(self.target_var.get().strip() or ".").expanduser()
@@ -2343,6 +2710,7 @@ if TK_AVAILABLE:
             self.review_bundle_button.configure(state="disabled")
             self.integration_safety_button.configure(state="disabled")
             self.cancel_button.configure(state="normal")
+            self._set_worker_action_state()
             self._append_log(f"Exporting first-review bundle for {selected_target.resolve()} to {review_dir}.")
             thread = threading.Thread(
                 target=self._review_bundle_worker,
@@ -2393,6 +2761,7 @@ if TK_AVAILABLE:
             self.review_bundle_button.configure(state="disabled")
             self.integration_safety_button.configure(state="disabled")
             self.cancel_button.configure(state="normal")
+            self._set_worker_action_state()
             self._append_log(f"Starting integration safety check for {check_target}.")
             thread = threading.Thread(
                 target=self._integration_safety_worker,
@@ -2669,6 +3038,7 @@ if TK_AVAILABLE:
                 self.run_automation_button.configure(state="disabled")
                 self.pause_automation_button.configure(state="disabled")
                 self.remove_schedule_button.configure(state="disabled")
+                self._set_worker_action_state()
                 return
             if hasattr(self, "open_project_button"):
                 self.open_project_button.configure(state="normal")
@@ -2682,6 +3052,7 @@ if TK_AVAILABLE:
                 self.pause_automation_button.configure(state="disabled")
                 self.remove_schedule_button.configure(state="disabled")
                 self.schedule_status_var.set("Schedule: target not loaded.")
+                self._set_worker_action_state()
                 return
             target = Path(target_text).expanduser().resolve()
             ready, reason = self._automation_ready(target)
@@ -2696,6 +3067,7 @@ if TK_AVAILABLE:
                 self.pause_automation_button.configure(state="disabled")
                 self.remove_schedule_button.configure(state="disabled")
                 self.schedule_status_var.set("Schedule: launchd scheduling is available on macOS only.")
+                self._set_worker_action_state()
                 return
             self.run_automation_button.configure(state="normal" if ready else "disabled")
             self.pause_automation_button.configure(state="normal" if loaded_labels or existing_plists else "disabled")
@@ -2720,6 +3092,7 @@ if TK_AVAILABLE:
                 self.schedule_status_var.set(f"Schedule: not installed. Start scheduled automation to load launchd ({SCHEDULE_STRATEGY_LABELS[strategy]}).")
             else:
                 self.schedule_status_var.set(f"Schedule: not ready. {reason}")
+            self._set_worker_action_state()
 
         def start_scheduled_automation(self) -> None:
             if self.running:
@@ -3028,6 +3401,13 @@ def smoke_check() -> int:
             problems.append(f"Missing required script: {path}")
     if "--review-dir" not in " ".join(review_bundle_command(KIT_ROOT)):
         problems.append("Review bundle command is not wired to --review-dir.")
+    smoke_strategy = {"strategy": "READ_ONLY_REPORTS", "parallelism_budget": 1, "action_lane": "builder"}
+    if "--read-only" not in read_only_worker_command(KIT_ROOT, smoke_strategy, run_id="dashboard-smoke"):
+        problems.append("Dashboard read-only worker command is not wired to --read-only.")
+    if "--write" not in write_worker_command(KIT_ROOT, {"strategy": "WRITE_WORKERS", "action_lane": "builder"}, "docs/** only", run_id="dashboard-smoke"):
+        problems.append("Dashboard write-worker command is not wired to --write.")
+    if "--role" not in integration_only_command(KIT_ROOT, run_id="dashboard-smoke"):
+        problems.append("Dashboard integration-only command is not wired to run_role_automation.sh.")
     if problems:
         for problem in problems:
             print(problem, file=sys.stderr)

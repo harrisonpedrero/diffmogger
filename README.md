@@ -175,7 +175,7 @@ After bootstrap or before a demo, use one local review path instead of hunting t
 2. Launch `python3 scripts/run_dashboard.py`, open the target, and use Monitor tab **Run Safety Check**.
 3. Click **Export Review Bundle** or, from the repo being reviewed, run `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
 4. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
-5. Review the first-review readiness, safety status, validation state, active role or queue, known issues, next sprint recommendation, and next-run worker strategy in the observatory or Markdown export.
+5. Review the first-review readiness, safety status, validation state, active role or queue, known issues, next sprint recommendation, and next-run worker strategy in the observatory, Markdown export, or dashboard **Worker Strategy Controls** panel.
 
 The generated target includes local runtime scripts under `scripts/`. After the first bootstrap produces a runnable baseline, use the target repo's own `scripts/run_codex_automation.sh` for recurring Codex automation.
 
@@ -203,6 +203,7 @@ It supports:
 - optional multi-role automation mode with fixed role-specific launchd jobs, continuous conveyor scheduling, and local-only git guards
 - optional local observatory launch and Markdown self-review export for active signal nudges, conveyor state, active role runs, queued patches, validation state, the latest recorded integration-safety result, and recent automation timeline
 - a Monitor tab **Run Safety Check** action that runs `scripts/check_integration_safety.py` and shows the local result in the dashboard log
+- **Worker Strategy Controls** that mirror the observatory's next-run recommendation and can launch a bounded read-only report, explicitly owned write worker, or local integrator lane when appropriate
 - optional context-file import into target `docs/context/`
 - generated `docs/PROJECT_CONTEXT.md`
 - a single `Scaffold & Bootstrap` pipeline

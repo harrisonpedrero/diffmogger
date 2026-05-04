@@ -197,6 +197,16 @@ The result is also recorded in the selected target's gitignored
 HTML and Markdown review can show the latest dashboard safety status even when the selected target
 does not include `scripts/check_integration_safety.py`.
 
+The Monitor tab's **Worker Strategy Controls** panel reads the same target-local state as the
+observatory and shows the next-run worker recommendation. When the recommendation fits, it can run:
+
+- one bounded read-only worker report through `scripts/spawn_worker_agent.sh`
+- one bounded write worker through `scripts/spawn_worker_agent.sh --write` after you enter an explicit ownership scope
+- one local integrator lane through `scripts/run_role_automation.sh --role integrator`
+
+These controls are local helpers for the current target. Write workers still require disjoint ownership,
+and the main agent remains responsible for reviewing, integrating, verifying, and updating durable state.
+
 ### First Review Checklist
 
 Use the Monitor tab as the center of the first review:
@@ -206,7 +216,7 @@ Use the Monitor tab as the center of the first review:
 3. Click **Run Safety Check** and confirm the dashboard log reports the local integration-safety result.
 4. Click **Export Review Bundle** or export `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
 5. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
-6. Check the observatory or Markdown export for first-review readiness, safety status, validation state, active role or queue, known issues, the next-lane action plan, and the next-run worker strategy.
+6. Check the observatory, Markdown export, or **Worker Strategy Controls** panel for first-review readiness, safety status, validation state, active role or queue, known issues, the next-lane action plan, and the next-run worker strategy.
 
 For multi-role jobs in repos with configured git remotes, the dashboard blocks scheduling unless the advanced **Allow local-only multi-role automation when this repo has git remotes** option is checked. When checked, LaunchAgents receive `MULTI_ROLE_ALLOW_REMOTES=1`; scripts still refuse pushes, fetches, pulls, remote configuration, and remote-touching git commands.
 
