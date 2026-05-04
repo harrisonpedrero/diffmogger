@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -152,6 +153,50 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertEqual(queue[0]["role"], "planner")
                     self.assertEqual(queue[0]["state"], "next")
                     self.assertIn("planner deferred patch resolved", queue[0]["reason"])
+
+
+class GitHeadPreflightTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = [(path, load_conveyor(path)) for path in CONVEYOR_PATHS]
+
+    def test_missing_directory_is_not_a_repo(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                status, detail = module.git_head_status(Path("/nonexistent/diffmogger/target/xyz"))
+                self.assertEqual(status, "not_a_repo")
+                self.assertIn("does not exist", detail)
+
+    def test_non_git_directory(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    status, _ = module.git_head_status(Path(tmp))
+                    self.assertEqual(status, "not_a_repo")
+
+    def test_repo_without_commits(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    subprocess.run(["git", "init", "-q"], cwd=tmp, check=True)
+                    status, detail = module.git_head_status(Path(tmp))
+                    self.assertEqual(status, "no_commits")
+                    self.assertIn("no commits", detail)
+
+    def test_repo_with_commit(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    subprocess.run(["git", "init", "-q"], cwd=tmp, check=True)
+                    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp, check=True)
+                    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp, check=True)
+                    subprocess.run(
+                        ["git", "commit", "--allow-empty", "-m", "init", "-q"],
+                        cwd=tmp,
+                        check=True,
+                    )
+                    status, _ = module.git_head_status(Path(tmp))
+                    self.assertEqual(status, "ok")
 
 
 if __name__ == "__main__":

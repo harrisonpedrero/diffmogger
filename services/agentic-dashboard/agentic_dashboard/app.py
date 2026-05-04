@@ -398,6 +398,20 @@ def write_conveyor_launchd_plist(target: Path, *, allow_remotes: bool = False) -
     return label, plist_path
 
 
+def target_has_initial_commit(target: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def context_record_line(record: ContextRecord) -> str:
     return f"- `{record.rel_path}` ({record.original_name}, {record.size_bytes} bytes)"
 
@@ -2955,6 +2969,7 @@ if TK_AVAILABLE:
 
         def _automation_ready(self, target: Path) -> tuple[bool, str]:
             target = target.expanduser().resolve()
+            schedule_strategy = self._target_schedule_strategy(target)
             required = [
                 target / ".agentic" / "project_intake.json",
                 target / ".agentic" / "automation_prompt.md",
@@ -2962,7 +2977,7 @@ if TK_AVAILABLE:
                 target / "docs" / "CODEX_AUTOMATION_TASKS.md",
                 target / "scripts" / "run_codex_automation.sh",
             ]
-            if self._target_schedule_strategy(target) == SCHEDULE_STRATEGY_CONVEYOR:
+            if schedule_strategy == SCHEDULE_STRATEGY_CONVEYOR:
                 required.extend(
                     [
                         target / "scripts" / "run_conveyor_automation.sh",
@@ -2985,8 +3000,12 @@ if TK_AVAILABLE:
             missing = [path.relative_to(target).as_posix() for path in required if not path.exists()]
             if missing:
                 return False, "Missing " + ", ".join(missing)
-            if self._target_multi_role_enabled(target) and not self._target_is_git_repo(target):
-                return False, "Multi-role scheduling requires an initialized git repo and initial commit."
+            requires_initial_commit = (
+                self._target_multi_role_enabled(target)
+                or schedule_strategy == SCHEDULE_STRATEGY_CONVEYOR
+            )
+            if requires_initial_commit and not self._target_has_initial_commit(target):
+                return False, "Multi-role or conveyor scheduling requires an initialized git repo with an initial commit."
             task_text = (target / "docs" / "CODEX_AUTOMATION_TASKS.md").read_text(
                 encoding="utf-8",
                 errors="replace",
@@ -3119,6 +3138,9 @@ if TK_AVAILABLE:
             )
             return result.returncode == 0 and result.stdout.strip() == "true"
 
+        def _target_has_initial_commit(self, target: Path) -> bool:
+            return target_has_initial_commit(target)
+
         def _target_git_remotes(self, target: Path) -> str:
             result = subprocess.run(
                 ["git", "remote", "-v"],
@@ -3159,14 +3181,18 @@ if TK_AVAILABLE:
                 )
             )
             strategy = self._target_schedule_strategy(target)
-            if self._target_multi_role_enabled(target) and strategy in {SCHEDULE_STRATEGY_FIXED_MULTI_ROLE, SCHEDULE_STRATEGY_CONVEYOR}:
-                git_repo = self._target_is_git_repo(target)
+            requires_initial_commit = (
+                self._target_multi_role_enabled(target)
+                or strategy == SCHEDULE_STRATEGY_CONVEYOR
+            )
+            if requires_initial_commit:
+                has_initial_commit = self._target_has_initial_commit(target)
                 items.append(
                     PrerequisiteItem(
-                        "Initialized git repo for multi-role automation",
-                        git_repo,
+                        "Initial git commit for scheduled automation",
+                        has_initial_commit,
                         True,
-                        "Target is inside a git work tree." if git_repo else "Run `git init` and create an initial commit before starting multi-role scheduling.",
+                        "Target has an initial git commit." if has_initial_commit else "Run `git init`, `git add .`, and `git commit -m 'chore: initial commit'` before starting multi-role or conveyor scheduling.",
                     )
                 )
             return items
@@ -3315,7 +3341,7 @@ if TK_AVAILABLE:
                     )
                     self._append_log(f"LaunchAgent: {plist_path}")
                 elif strategy == SCHEDULE_STRATEGY_FIXED_MULTI_ROLE and multi_role_enabled:
-                    if not self._target_is_git_repo(target):
+                    if not self._target_has_initial_commit(target):
                         raise RuntimeError("Multi-role scheduling requires an initialized git repo with an initial commit.")
                     loaded: list[str] = []
                     for role in MULTI_ROLE_ROLES:

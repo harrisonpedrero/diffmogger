@@ -18,7 +18,7 @@ Multi-role mode:
 Planner :00, builder :10/:40, hardener :20/:50, integrator :25/:55.
 ```
 
-Good for opt-in high-throughput local automation after the target is an initialized git repo.
+Good for opt-in high-throughput local automation after the target is an initialized git repo with an initial commit.
 
 Continuous conveyor:
 
@@ -26,7 +26,7 @@ Continuous conveyor:
 One local dispatcher chooses the next runnable lane as soon as the previous lane exits.
 ```
 
-Good when you want work-conserving local automation instead of exact role times. The conveyor prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It records state in `target/automation_conveyor_state.json`, including the active role run and next decision queue, and uses `target/automation_conveyor.lock` so only one dispatcher runs.
+Good when you want work-conserving local automation instead of exact role times after the target has an initial git commit. The conveyor prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It records state in `target/automation_conveyor_state.json`, including the active role run and next decision queue, and uses `target/automation_conveyor.lock` so only one dispatcher runs.
 
 45 minutes:
 

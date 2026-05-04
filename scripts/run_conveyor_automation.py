@@ -648,6 +648,27 @@ def terminate_child() -> None:
             child.terminate()
 
 
+def kill_child() -> None:
+    global CHILD
+    child = CHILD
+    if child and child.poll() is None:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            child.kill()
+
+
+def sleep_interruptibly(seconds: int) -> None:
+    deadline = time.monotonic() + seconds
+    while not TERMINATE_REQUESTED:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 1.0))
+
+
 def handle_signal(signum: int, _frame: Any) -> None:
     global TERMINATE_REQUESTED
     TERMINATE_REQUESTED = True
@@ -695,7 +716,18 @@ def run_role(
         }
         write_state(state_path, state)
     try:
-        return CHILD.wait()
+        while True:
+            if TERMINATE_REQUESTED:
+                terminate_child()
+                try:
+                    return CHILD.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    kill_child()
+                    return CHILD.wait(timeout=1)
+            try:
+                return CHILD.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                continue
     finally:
         CHILD = None
 
@@ -766,6 +798,48 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def git_head_status(target: Path) -> tuple[str, str]:
+    if not target.exists():
+        return ("not_a_repo", f"{target} does not exist")
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=target,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return ("error", "git executable not found on PATH")
+    if proc.returncode == 0:
+        return ("ok", "")
+    stderr = (proc.stderr or "").strip()
+    if "not a git repository" in stderr.lower():
+        return ("not_a_repo", f"{target} is not a git repository")
+    if "ambiguous argument 'head'" in stderr.lower() or "unknown revision" in stderr.lower():
+        return ("no_commits", "git repository has no commits yet")
+    return ("error", stderr or f"git rev-parse exited {proc.returncode}")
+
+
+def report_preflight_failure(status: str, detail: str, target: Path) -> None:
+    lines = [
+        f"CONVEYOR_PREFLIGHT_FAILED status={status} target={target}",
+        f"  reason: {detail}",
+    ]
+    if status == "no_commits":
+        lines.append(
+            "  fix: run `git add . && git commit -m 'chore: initial commit'` in the target."
+        )
+        lines.append(
+            "  the conveyor needs a HEAD commit to branch role worktrees from."
+        )
+    elif status == "not_a_repo":
+        lines.append(
+            "  fix: run `git init && git add . && git commit -m 'chore: initial commit'` in the target."
+        )
+    print("\n".join(lines), file=sys.stderr, flush=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default=os.environ.get("TARGET", "."), help="Target project directory")
@@ -782,6 +856,12 @@ def main() -> int:
     args = parser.parse_args()
 
     target = Path(args.target).expanduser().resolve()
+
+    head_status, head_detail = git_head_status(target)
+    if head_status != "ok":
+        report_preflight_failure(head_status, head_detail, target)
+        return 2
+
     state_path = target / "target" / "automation_conveyor_state.json"
     lock_path = target / "target" / "automation_conveyor.lock"
     state = load_state(state_path)
@@ -844,7 +924,7 @@ def main() -> int:
             if role is None:
                 if args.once:
                     return 0
-                time.sleep(args.idle_sleep_seconds)
+                sleep_interruptibly(args.idle_sleep_seconds)
                 continue
 
             started_at = utc_now()
@@ -897,9 +977,9 @@ def main() -> int:
             if TERMINATE_REQUESTED:
                 return 143
             if exit_code != 0:
-                time.sleep(args.error_sleep_seconds)
+                sleep_interruptibly(args.error_sleep_seconds)
             elif args.cycle_cooldown_seconds:
-                time.sleep(args.cycle_cooldown_seconds)
+                sleep_interruptibly(args.cycle_cooldown_seconds)
         return 143
     finally:
         terminate_child()

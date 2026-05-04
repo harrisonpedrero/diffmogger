@@ -64,6 +64,8 @@ bash scripts/run_conveyor_automation.sh --once
 python3 scripts/run_observatory.py --open
 ```
 
+Continuous conveyor scheduling requires this target to be an initialized git repo with an initial commit.
+
 The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_signals.json` to show active signal nudges, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
 
 For a durable first-run review bundle, render the same local state to HTML and Markdown:

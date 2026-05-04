@@ -66,7 +66,7 @@ Multi-role automation is also disabled unless explicitly enabled. CLI intakes ca
 }
 ```
 
-Multi-role mode requires the target to be an initialized git repo with an initial commit before scheduling starts.
+Multi-role and continuous conveyor scheduling require the target to be an initialized git repo with an initial commit before scheduling starts.
 
 ## 2. Validate The Scaffold
 

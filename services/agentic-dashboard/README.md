@@ -64,7 +64,7 @@ Before starting automation, the dashboard checks for:
 - Codex home availability for nested workers
 - macOS Full Disk Access advisory when the target lives under `~/Documents`
 - optional local notifier health when `local_notifier` mode is selected
-- initialized git repo before starting multi-role scheduling
+- initialized git repo with an initial commit before starting multi-role or conveyor scheduling
 - explicit local-only remote opt-in before multi-role or conveyor scheduling in repos with configured git remotes
 
 The dashboard keeps notifier credentials out of target projects. In local-notifier mode, use `services/agentic-notifier/` for Twilio configuration.

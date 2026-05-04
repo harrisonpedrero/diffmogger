@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -145,8 +146,87 @@ class DashboardIntegrationSafetyAffordanceTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = load_dashboard()
 
+    def seed_multi_role_target(self, target: Path, *, schedule_strategy: str = "continuous_conveyor") -> None:
+        (target / ".agentic" / "roles").mkdir(parents=True)
+        (target / "docs").mkdir()
+        (target / "scripts").mkdir()
+        (target / ".agentic" / "project_intake.json").write_text(
+            json.dumps(
+                {
+                    "automation_schedule_strategy": schedule_strategy,
+                    "multi_role_automations_allowed": True,
+                    "human_bridge_enabled": False,
+                    "human_bridge_mode": "disabled",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (target / ".agentic" / "automation_prompt.md").write_text("prompt", encoding="utf-8")
+        for role in ("planner", "builder", "hardener", "integrator"):
+            (target / ".agentic" / "roles" / f"{role}.md").write_text(role, encoding="utf-8")
+        (target / "docs" / "INITIAL_BOOTSTRAP_PROMPT.md").write_text("bootstrap", encoding="utf-8")
+        (target / "docs" / "CODEX_AUTOMATION_TASKS.md").write_text("AUTOMATION_STATUS: ACTIVE\n", encoding="utf-8")
+        (target / "docs" / "MULTI_ROLE_PROGRESS.md").write_text("# Multi-Role Progress\n", encoding="utf-8")
+        for script in (
+            "run_codex_automation.sh",
+            "run_conveyor_automation.sh",
+            "run_conveyor_automation.py",
+            "run_role_automation.sh",
+            "integrate_role_outputs.py",
+            "list_deferred_patches.py",
+        ):
+            (target / "scripts" / script).write_text("# placeholder\n", encoding="utf-8")
+
     def test_dashboard_smoke_check_requires_integration_safety_script(self) -> None:
         self.assertEqual(0, self.module.smoke_check())
+
+    def test_target_has_initial_commit_rejects_unborn_git_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+
+            self.assertFalse(self.module.target_has_initial_commit(target))
+
+    def test_target_has_initial_commit_accepts_repo_with_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+            subprocess.run(["git", "config", "user.email", "t@example.test"], cwd=target, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=target, check=True)
+            subprocess.run(["git", "commit", "--allow-empty", "-m", "chore: initial commit", "-q"], cwd=target, check=True)
+
+            self.assertTrue(self.module.target_has_initial_commit(target))
+
+    def test_automation_ready_rejects_conveyor_target_without_initial_commit(self) -> None:
+        if not hasattr(self.module, "DiffmoggerDashboard"):
+            self.skipTest("Tk dashboard class is unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.seed_multi_role_target(target, schedule_strategy="continuous_conveyor")
+            subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+            dashboard = object.__new__(self.module.DiffmoggerDashboard)
+
+            ready, reason = dashboard._automation_ready(target)
+
+            self.assertFalse(ready)
+            self.assertIn("initial commit", reason)
+
+    def test_automation_ready_accepts_conveyor_target_with_initial_commit(self) -> None:
+        if not hasattr(self.module, "DiffmoggerDashboard"):
+            self.skipTest("Tk dashboard class is unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.seed_multi_role_target(target, schedule_strategy="continuous_conveyor")
+            subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+            subprocess.run(["git", "config", "user.email", "t@example.test"], cwd=target, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=target, check=True)
+            subprocess.run(["git", "commit", "--allow-empty", "-m", "chore: initial commit", "-q"], cwd=target, check=True)
+            dashboard = object.__new__(self.module.DiffmoggerDashboard)
+
+            ready, reason = dashboard._automation_ready(target)
+
+            self.assertTrue(ready)
+            self.assertEqual("Ready.", reason)
 
     def test_integration_safety_command_uses_selected_kit_like_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

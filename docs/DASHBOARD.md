@@ -151,7 +151,7 @@ bash scripts/run_role_automation.sh --role hardener
 bash scripts/run_role_automation.sh --role integrator
 ```
 
-The fixed multi-role schedule uses `StartCalendarInterval`: planner at `:00`, builder at `:10` and `:40`, hardener at `:20` and `:50`, and integrator at `:25` and `:55`. The dashboard requires the target to be an initialized git repo before starting this schedule.
+The fixed multi-role schedule uses `StartCalendarInterval`: planner at `:00`, builder at `:10` and `:40`, hardener at `:20` and `:50`, and integrator at `:25` and `:55`. The dashboard requires the target to be an initialized git repo with an initial commit before starting this schedule.
 
 If the strategy is **Continuous conveyor**, the dashboard writes one LaunchAgent that points at:
 
@@ -159,7 +159,7 @@ If the strategy is **Continuous conveyor**, the dashboard writes one LaunchAgent
 bash scripts/run_conveyor_automation.sh
 ```
 
-The conveyor sets `RunAtLoad`, keeps running locally, and chooses the next runnable lane instead of using exact role times. It prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state stays in `target/automation_conveyor_state.json`; its duplicate-dispatcher lock is `target/automation_conveyor.lock`.
+The conveyor sets `RunAtLoad`, keeps running locally, and chooses the next runnable lane instead of using exact role times. It requires an initialized git repo with an initial commit because role worktrees and conveyor preflight need `HEAD`. It prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state stays in `target/automation_conveyor_state.json`; its duplicate-dispatcher lock is `target/automation_conveyor.lock`.
 
 The monitor tab can also launch:
 
