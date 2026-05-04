@@ -160,6 +160,8 @@ class ListDeferredPatchTests(unittest.TestCase):
                     self.assertIn("recommended_next_action: Start with `staleness`", report)
                     self.assertLess(report.index("## staleness"), report.index("## conflict"))
                     self.assertIn("Refresh or recreate the patch from current HEAD", report)
+                    self.assertIn("- recommended_decision: replace_from_current_head", report)
+                    self.assertIn("triage_decision: pending; recommendation=replace_from_current_head", report)
                     self.assertIn("builder `run-conflict`", report)
                     self.assertIn("docs/HUMAN_INBOX.md, docs/CODEX_AUTOMATION_TASKS.md", report)
                     self.assertIn("+1 more", report)
@@ -178,6 +180,43 @@ class ListDeferredPatchTests(unittest.TestCase):
                     self.assertEqual(exit_code, 0)
                     self.assertIn("- deferred_count: 0", output.getvalue())
                     self.assertIn("No deferred patches found.", output.getvalue())
+
+    def test_decision_template_cli_renders_per_manifest_fields(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    resolved_target = target.resolve()
+                    self.write_manifest(
+                        target,
+                        role="builder",
+                        run_id="run-conflict",
+                        deferral_reason="conflict",
+                        deferral_detail=f"Runtime state conflict under {resolved_target}/docs/MULTI_ROLE_PROGRESS.md",
+                    )
+
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        exit_code = module.main([tmp, "--decision-template"])
+
+                    worksheet = output.getvalue()
+                    self.assertEqual(exit_code, 0)
+                    self.assertIn("# Deferred Patch Decision Worksheet", worksheet)
+                    self.assertIn(
+                        "decision_options: archive, replace_from_current_head, retry_after_fix, "
+                        "retry_after_environment_repair, retry_as_is, keep_deferred",
+                        worksheet,
+                    )
+                    self.assertIn("### builder `run-conflict`", worksheet)
+                    self.assertIn(
+                        "- manifest_path: target/automation_queue/builder/run-conflict/manifest.json",
+                        worksheet,
+                    )
+                    self.assertIn("- recommended_decision: replace_from_current_head", worksheet)
+                    self.assertIn("- decision: pending", worksheet)
+                    self.assertIn("- decision_rationale:", worksheet)
+                    self.assertIn("<target>/docs/MULTI_ROLE_PROGRESS.md", worksheet)
+                    self.assertNotIn(str(target), worksheet)
 
 
 if __name__ == "__main__":

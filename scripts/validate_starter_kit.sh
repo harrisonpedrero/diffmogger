@@ -974,9 +974,16 @@ if ! grep '"deferral_reason": "staleness"' "$tmp_dir/target/automation_queue/bui
 fi
 python3 scripts/list_deferred_patches.py "$tmp_dir" --pretty >/tmp/Diffmogger-deferred-list.log
 python3 scripts/list_deferred_patches.py "$tmp_dir" --markdown >/tmp/Diffmogger-deferred-list.md
+python3 scripts/list_deferred_patches.py "$tmp_dir" --decision-template >/tmp/Diffmogger-deferred-decision-template.md
 if ! grep 'recommended_next_action: Start with `staleness`' /tmp/Diffmogger-deferred-list.md >/tmp/Diffmogger-deferred-markdown.log; then
     echo "Deferred patch Markdown triage smoke did not recommend staleness first" >&2
     cat /tmp/Diffmogger-deferred-list.md >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+if ! grep 'recommended_decision: replace_from_current_head' /tmp/Diffmogger-deferred-decision-template.md >/tmp/Diffmogger-deferred-decision-template.log; then
+    echo "Deferred patch decision-template smoke did not recommend replacement from current HEAD" >&2
+    cat /tmp/Diffmogger-deferred-decision-template.md >&2
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
 fi

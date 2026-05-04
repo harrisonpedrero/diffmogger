@@ -19,7 +19,23 @@ DEFERRAL_REASON_ACTIONS = {
     "guardrail_violation": "Do not apply as-is; replace it with a guardrail-compliant local patch or archive it.",
     "other": "Inspect the manifest and summary, then choose retry, replacement, archival, or documentation.",
 }
+DEFERRAL_REASON_DECISIONS = {
+    "staleness": "replace_from_current_head",
+    "conflict": "replace_from_current_head",
+    "verification_failure": "retry_after_fix",
+    "verification_environment_failure": "retry_after_environment_repair",
+    "guardrail_violation": "archive",
+    "other": "keep_deferred",
+}
 DEFERRAL_REASON_ORDER = tuple(DEFERRAL_REASON_ACTIONS)
+DECISION_OPTIONS = (
+    "archive",
+    "replace_from_current_head",
+    "retry_after_fix",
+    "retry_after_environment_repair",
+    "retry_as_is",
+    "keep_deferred",
+)
 LOCAL_PATH_MARKERS = ("/User" + "s/", "/private/var/", "/var/folders/", "/tmp/")
 
 
@@ -106,6 +122,10 @@ def reason_sort_key(reason: str) -> tuple[int, str]:
         return len(DEFERRAL_REASON_ORDER), reason
 
 
+def recommended_decision(reason: str) -> str:
+    return DEFERRAL_REASON_DECISIONS.get(reason, DEFERRAL_REASON_DECISIONS["other"])
+
+
 def triage_groups(records: list[dict[str, Any]], target: Path) -> list[dict[str, Any]]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     for record in records:
@@ -132,12 +152,14 @@ def triage_groups(records: list[dict[str, Any]], target: Path) -> list[dict[str,
                 "count": len(manifests),
                 "roles": ", ".join(f"{role} {count}" for role, count in sorted(role_counts.items())),
                 "action": DEFERRAL_REASON_ACTIONS.get(reason, DEFERRAL_REASON_ACTIONS["other"]),
+                "recommended_decision": recommended_decision(reason),
                 "manifests": [
                     {
                         "role": clean_text(manifest.get("role") or "unknown", limit=40),
                         "run_id": clean_text(manifest.get("run_id") or "unknown", limit=80),
                         "manifest_path": clean_text(manifest.get("manifest_path") or "", limit=180),
                         "changed_files": summarize_changed_files(manifest),
+                        "recommended_decision": recommended_decision(reason),
                         "detail": scrub_local_references(
                             manifest.get("deferral_detail")
                             or manifest.get("summary")
@@ -185,6 +207,7 @@ def render_markdown(records: list[dict[str, Any]], target: Path) -> str:
                 f"- count: {group['count']}",
                 f"- roles: {group['roles']}",
                 f"- action: {group['action']}",
+                f"- recommended_decision: {group['recommended_decision']}",
                 "- manifests:",
             ]
         )
@@ -193,10 +216,54 @@ def render_markdown(records: list[dict[str, Any]], target: Path) -> str:
                 [
                     f"  - {manifest['role']} `{manifest['run_id']}`: {manifest['manifest_path']}",
                     f"    - changed_files: {manifest['changed_files']}",
+                    f"    - triage_decision: pending; recommendation={manifest['recommended_decision']}",
                     f"    - detail: {manifest['detail']}",
                 ]
             )
         lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_decision_template(records: list[dict[str, Any]], target: Path) -> str:
+    groups = triage_groups(records, target)
+    lines = [
+        "# Deferred Patch Decision Worksheet",
+        "",
+        f"- deferred_count: {len(records)}",
+        f"- decision_options: {', '.join(DECISION_OPTIONS)}",
+        "- usage: Fill decisions during integrator triage, then update or archive queue items from the main checkout.",
+        "",
+    ]
+    if not groups:
+        lines.append("No deferred patches found.")
+        return "\n".join(lines).rstrip() + "\n"
+
+    for group in groups:
+        lines.extend(
+            [
+                f"## {group['reason']}",
+                "",
+                f"- group_recommendation: {group['recommended_decision']}",
+                f"- local_next_action: {group['action']}",
+                "",
+            ]
+        )
+        for manifest in group["manifests"]:
+            lines.extend(
+                [
+                    f"### {manifest['role']} `{manifest['run_id']}`",
+                    "",
+                    f"- manifest_path: {manifest['manifest_path']}",
+                    f"- changed_files: {manifest['changed_files']}",
+                    f"- detail: {manifest['detail']}",
+                    f"- recommended_decision: {manifest['recommended_decision']}",
+                    "- decision: pending",
+                    "- decision_rationale:",
+                    "- action_taken:",
+                    "- follow_up:",
+                    "",
+                ]
+            )
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -205,10 +272,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("target", nargs="?", default=".", help="Target project directory")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
     parser.add_argument("--markdown", action="store_true", help="Render a grouped Markdown triage report")
+    parser.add_argument(
+        "--decision-template",
+        action="store_true",
+        help="Render a per-manifest Markdown worksheet for recording integrator triage decisions",
+    )
     args = parser.parse_args(argv)
 
     target = Path(args.target).resolve()
     records = deferred_manifests(target)
+    if args.decision_template:
+        print(render_decision_template(records, target), end="")
+        return 0
     if args.markdown:
         print(render_markdown(records, target), end="")
         return 0

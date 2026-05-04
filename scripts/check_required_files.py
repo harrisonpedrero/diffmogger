@@ -265,6 +265,7 @@ DEFERRED_HELPER_REQUIRED_STRINGS = [
     "deferred",
     "--pretty",
     "--markdown",
+    "--decision-template",
 ]
 
 

@@ -919,7 +919,7 @@ Planner, builder, and hardener start from the latest main `HEAD` at run start. T
 - Planner runs hourly at minute `0`; builder, hardener, and integrator run on staggered half-hour offsets.
 - Continuous conveyor mode is available through `scripts/run_conveyor_automation.sh`; it prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work.
 - Integrator maintains `docs/MULTI_ROLE_PROGRESS.md` and local checkpoint commits.
-- Deferred patches remain visible through `scripts/list_deferred_patches.py`; use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local triage.
+- Deferred patches remain visible through `scripts/list_deferred_patches.py`; use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local triage or add `--decision-template` for a per-manifest cleanup worksheet.
 - Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""
         development = f"""Multi-role automations allowed: true
 
@@ -947,7 +947,10 @@ Review deferred backlog triage without mutating the repo:
 
 ```bash
 python3 scripts/list_deferred_patches.py . --markdown
+python3 scripts/list_deferred_patches.py . --decision-template
 ```
+
+The Markdown view groups the backlog by reason and recommended local action. The decision template adds per-manifest fields for archive, replace-from-current-HEAD, repair-and-retry, retry-as-is, or keep-deferred choices during integrator cleanup.
 
 The target must be an initialized git repo. Multi-role mode creates local worktrees, local queue artifacts, and local commits only. It never pushes."""
         bootstrap = f"""Multi-role automations allowed: true

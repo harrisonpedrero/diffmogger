@@ -100,6 +100,8 @@ scripts/integrate_role_outputs.py
 scripts/list_deferred_patches.py
 ```
 
+Use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local deferred queue triage. Add `--decision-template` when the integrator needs a per-manifest worksheet for archive, replace-from-current-HEAD, repair-and-retry, retry-as-is, or keep-deferred decisions.
+
 Scheduled target-project runs should use those local scripts, not scripts from the Diffmogger starter repo.
 
 When `automation_signals_enabled` is true, generated targets also include `docs/AUTOMATION_SIGNALS.md`. Runtime signal state is local and ignored under `target/automation_signals.json`.
