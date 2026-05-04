@@ -164,6 +164,37 @@ class RuntimeStateActionTests(unittest.TestCase):
                     self.assertEqual(manifest["runtime_state_status"], "deferred")
                     self.assertEqual(results[0]["status"], "conflict")
 
+    def test_runtime_state_signal_conflict_does_not_block_docs(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    inbox = target / "docs" / "HUMAN_INBOX.md"
+                    signals = target / "target" / "automation_signals.json"
+                    inbox.parent.mkdir(parents=True)
+                    signals.parent.mkdir(parents=True)
+                    inbox.write_text("old inbox\n", encoding="utf-8")
+                    signals.write_text("changed by integrator\n", encoding="utf-8")
+                    manifest = self.write_actions(
+                        target,
+                        [
+                            self.replace_action("docs/HUMAN_INBOX.md", "old inbox\n", "new inbox\n"),
+                            self.replace_action(
+                                "target/automation_signals.json",
+                                "role-start signals\n",
+                                "role-end signals\n",
+                            ),
+                        ],
+                    )
+
+                    results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
+
+                    self.assertEqual(inbox.read_text(encoding="utf-8"), "new inbox\n")
+                    self.assertEqual(signals.read_text(encoding="utf-8"), "changed by integrator\n")
+                    self.assertEqual(manifest["runtime_state_status"], "applied")
+                    self.assertEqual(results[0]["status"], "applied")
+                    self.assertEqual(results[1]["status"], "skipped_volatile")
+
     def test_runtime_state_rejects_non_whitelisted_path(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):

@@ -81,6 +81,7 @@ RUNTIME_STATE_DENY_SUFFIXES = (
 )
 RUNTIME_STATE_MAX_BYTES = 1024 * 1024
 RUNTIME_STATE_BLOCKING_STATUSES = {"blocked", "conflict", "error", "rejected"}
+RUNTIME_STATE_VOLATILE_PATHS = {"target/automation_signals.json"}
 PROGRESS_SECTIONS = [
     "Project State At Last Integration",
     "Cumulative Metrics",
@@ -563,6 +564,15 @@ def apply_runtime_state_actions(target: Path, manifest: dict[str, Any], *, dry_r
         result.update({"start_hash": start_hash, "end_hash": end_hash, "current_hash": current_hash})
         if current_hash == end_hash:
             result.update({"status": "already_applied", "detail": "current file already matches desired content"})
+            results.append(result)
+            continue
+        if rel_path in RUNTIME_STATE_VOLATILE_PATHS:
+            result.update(
+                {
+                    "status": "skipped_volatile",
+                    "detail": "volatile runtime state is merged separately; not replacing live file",
+                }
+            )
             results.append(result)
             continue
         if current_hash != start_hash:
