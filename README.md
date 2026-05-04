@@ -187,7 +187,7 @@ It supports:
 - optional bounded write-worker settings with a capped count and guidance text
 - optional automation signals for recurring local review nudges
 - optional multi-role automation mode with fixed role-specific launchd jobs, continuous conveyor scheduling, and local-only git guards
-- optional local observatory launch and Markdown self-review export for active signal nudges, conveyor state, active role runs, queued patches, validation state, and recent automation timeline
+- optional local observatory launch and Markdown self-review export for active signal nudges, conveyor state, active role runs, queued patches, validation state, the latest recorded integration-safety result, and recent automation timeline
 - a Monitor tab **Run Safety Check** action that runs `scripts/check_integration_safety.py` and shows the local result in the dashboard log
 - optional context-file import into target `docs/context/`
 - generated `docs/PROJECT_CONTEXT.md`
@@ -226,7 +226,7 @@ python3 scripts/check_required_files.py /tmp/Diffmogger-smoke
 python3 scripts/check_integration_safety.py
 ```
 
-The same integration-safety verifier is also available in the dashboard Monitor tab through **Run Safety Check**.
+The same integration-safety verifier is also available in the dashboard Monitor tab through **Run Safety Check**. The observatory and Markdown self-review export surface the latest recorded integration-safety result from task-state checks.
 
 Run notifier tests:
 

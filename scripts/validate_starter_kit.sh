@@ -396,6 +396,7 @@ for marker in [
 	    "Self Review",
 	    "Scorecard",
 	    "Action Plan",
+	    "Integration Safety",
 	    "Deferred Patch Triage",
 	    "no_progress_circuit",
 	    "Active Signals",
@@ -1480,7 +1481,7 @@ target = Path(sys.argv[1])
 )
 PY
 python3 scripts/run_observatory.py --target "$tmp_dir" --once --output "$tmp_dir/target/observatory/index.html" >/tmp/Diffmogger-observatory-render.log
-for marker in "Diffmogger Observatory" "Conveyor Belt" "Active Signals" "prompt-self-audit" "run-observe" "builder" "Conveyor Health" "Scorecard" "Action Plan" "Run integrator triage" "Accepted patches" "Deferred triage" "Start with \`staleness\`" "NO-PROGRESS CIRCUIT" "staleness:no_detail" "Recent Outcomes" "run-skipped" "skipped" "hardener/integrator churn"; do
+for marker in "Diffmogger Observatory" "Conveyor Belt" "Active Signals" "prompt-self-audit" "run-observe" "builder" "Conveyor Health" "Scorecard" "Action Plan" "Integration safety" "Run integrator triage" "Accepted patches" "Deferred triage" "Start with \`staleness\`" "NO-PROGRESS CIRCUIT" "staleness:no_detail" "Recent Outcomes" "run-skipped" "skipped" "hardener/integrator churn"; do
     if ! grep -q "$marker" "$tmp_dir/target/observatory/index.html"; then
         echo "Observatory render smoke missing marker: $marker" >&2
         rm -rf "$tmp_dir"

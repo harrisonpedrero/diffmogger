@@ -199,6 +199,41 @@ def validation_snapshot(text: str) -> dict[str, Any]:
     return {"summary": summary, "counts": counts, "items": checks}
 
 
+def integration_safety_snapshot(validation: dict[str, Any]) -> dict[str, Any]:
+    items = [item for item in list(validation.get("items") or []) if isinstance(item, dict)]
+    for item in items:
+        text = clean_text(item.get("text") or "", limit=420)
+        lower = text.lower()
+        if "scripts/check_integration_safety.py" not in lower and "integration safety" not in lower and "integration-safety" not in lower:
+            continue
+        status = clean_text(item.get("status") or "info", limit=40)
+        command_match = re.search(r"`([^`]*(?:scripts/check_integration_safety\.py|integration[- ]safety)[^`]*)`", text, re.I)
+        command = clean_text(command_match.group(1), limit=180) if command_match else "python3 scripts/check_integration_safety.py"
+        if status == "pass":
+            summary = f"Latest recorded integration-safety check passed: `{command}`."
+        elif status == "fail":
+            summary = f"Latest recorded integration-safety check failed: `{command}`."
+        elif status == "warn":
+            summary = f"Latest recorded integration-safety check has a warning: `{command}`."
+        elif status == "pending":
+            summary = f"Integration-safety check is recorded as pending: `{command}`."
+        else:
+            summary = f"Integration-safety check was recorded without pass/fail status: `{command}`."
+        return {
+            "status": status,
+            "summary": summary,
+            "command": command,
+            "recorded_text": text,
+        }
+
+    return {
+        "status": "not_recorded",
+        "summary": "No integration-safety check result is recorded in the latest task-state checks.",
+        "command": "python3 scripts/check_integration_safety.py",
+        "recorded_text": "",
+    }
+
+
 def strip_fenced_code_blocks(text: str) -> str:
     return re.sub(r"```.*?```", "", text, flags=re.DOTALL)
 
@@ -257,6 +292,7 @@ def parse_task_state(target: Path) -> dict[str, Any]:
         "Current Project State",
         ["Current assessment", "Current baseline", "Goal"],
     )
+    validation = validation_snapshot(text)
     return {
         "status": status.group(1).strip() if status else "UNKNOWN",
         "last_updated": clean_text(updated.group(1), limit=120) if updated else "unknown",
@@ -267,7 +303,8 @@ def parse_task_state(target: Path) -> dict[str, Any]:
         "suggested_next_task": first_nonempty_section_line(text, "Suggested Next Sprint-Sized Task") or "No sprint task recorded yet.",
         "known_issue": first_nonempty_section_line(text, "Known Issues") or "No active issue summary.",
         "known_issues": section_bullets(text, "Known Issues", limit=MAX_REVIEW_ITEMS),
-        "validation": validation_snapshot(text),
+        "validation": validation,
+        "integration_safety": integration_safety_snapshot(validation),
     }
 
 
@@ -1170,6 +1207,7 @@ def scorecard_snapshot(
     accepted_by_role = progress.get("accepted_by_role") if isinstance(progress.get("accepted_by_role"), dict) else {}
     deferred_by_role = progress.get("deferred_by_role") if isinstance(progress.get("deferred_by_role"), dict) else {}
     deferred_triage = progress.get("deferred_triage") if isinstance(progress.get("deferred_triage"), dict) else {}
+    integration_safety = task.get("integration_safety") if isinstance(task.get("integration_safety"), dict) else {}
     accepted_total = int(progress.get("accepted_total", 0) or 0)
     cumulative_deferred = int(progress.get("deferred_total", 0) or 0)
     queued = int(totals.get("queued", 0) or 0)
@@ -1207,11 +1245,19 @@ def scorecard_snapshot(
         if pass_count or fail_count
         else validation.get("summary") or "No validation checks recorded yet."
     )
+    integration_status = clean_text(integration_safety.get("status") or "not_recorded", limit=40)
+    integration_kind = {
+        "pass": "good",
+        "fail": "bad",
+        "warn": "warn",
+        "pending": "warn",
+    }.get(integration_status, "info")
     summary_parts = [
         f"{accepted_total} accepted patch(es)",
         f"{queued} queued / {deferred_pressure} deferred",
         f"{active_signals} active signal(s)",
         f"{fail_count} validation issue(s)",
+        f"integration safety {integration_status.replace('_', ' ')}",
     ]
     if pending_human:
         summary_parts.append(f"{pending_human} human bridge item(s)")
@@ -1240,6 +1286,12 @@ def scorecard_snapshot(
                 "value": f"{pass_count}/{fail_count}",
                 "detail": validation_detail,
                 "kind": "bad" if fail_count else ("good" if pass_count else "info"),
+            },
+            {
+                "label": "Integration safety",
+                "value": integration_status.replace("_", " "),
+                "detail": integration_safety.get("summary") or "No integration-safety check result recorded yet.",
+                "kind": integration_kind,
             },
             {
                 "label": "Signals due",
@@ -1322,6 +1374,7 @@ def self_review_snapshot(
     )
 
     validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
+    integration_safety = task.get("integration_safety") if isinstance(task.get("integration_safety"), dict) else {}
     deferred_triage = progress.get("deferred_triage") if isinstance(progress.get("deferred_triage"), dict) else {}
     action_plan = scorecard_action_plan(task, queue, signals, conveyor, human, progress)
     deferred_summary = clean_text(
@@ -1344,6 +1397,7 @@ def self_review_snapshot(
         "items": [
             {"label": "Current assessment", "body": task.get("current_assessment") or "No current assessment recorded yet."},
             {"label": "Validation", "body": validation.get("summary") or "No validation results recorded yet."},
+            {"label": "Integration safety", "body": integration_safety.get("summary") or "No integration-safety check result recorded yet."},
             {"label": "Signals", "body": signal_summary},
             {"label": "Queue and conveyor", "body": f"{queue_summary} {conveyor_summary}"},
             {"label": "Human bridge", "body": human_summary},
@@ -2213,6 +2267,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     human = snapshot.get("human") if isinstance(snapshot.get("human"), dict) else {}
     progress = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {}
     follow_through = snapshot.get("follow_through") if isinstance(snapshot.get("follow_through"), dict) else {}
+    integration_safety = task.get("integration_safety") if isinstance(task.get("integration_safety"), dict) else {}
     recommendation_history = (
         snapshot.get("recommendation_history")
         if isinstance(snapshot.get("recommendation_history"), dict)
@@ -2350,6 +2405,16 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
             lines.append(f"- {status}: {text}")
     else:
         lines.append("- No validation checks recorded yet.")
+
+    lines.extend(["", "## Integration Safety", ""])
+    lines.append(f"- status: {clean_text(integration_safety.get('status') or 'not_recorded', limit=80)}")
+    lines.append(
+        f"- summary: {clean_text(integration_safety.get('summary') or 'No integration-safety check result recorded yet.', limit=500)}"
+    )
+    lines.append(f"- command: `{clean_text(integration_safety.get('command') or 'python3 scripts/check_integration_safety.py', limit=180)}`")
+    recorded_text = clean_text(integration_safety.get("recorded_text") or "", limit=420)
+    if recorded_text:
+        lines.append(f"- recorded_check: {recorded_text}")
 
     lines.extend(["", "## Active Signals", ""])
     active_signals = [item for item in list(signals.get("active") or []) if isinstance(item, dict)]

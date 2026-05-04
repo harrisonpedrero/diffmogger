@@ -68,6 +68,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
             ## Checks From Last Run
 
             - PASS: `bash scripts/validate_starter_kit.sh`
+            - PASS: `python3 scripts/check_integration_safety.py`
             - FAIL with environment note: `python3 -m pytest services/agentic-notifier` missing pytest.
 
             ## Known Issues
@@ -666,10 +667,13 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
                     self.assertEqual(active_signal_ids, ["human-inbox-triage", "validation-sweep"])
                     self.assertEqual(snapshot["signals"]["active_count"], 2)
-                    self.assertEqual(snapshot["task"]["validation"]["counts"]["pass"], 1)
+                    self.assertEqual(snapshot["task"]["validation"]["counts"]["pass"], 2)
                     self.assertEqual(snapshot["task"]["validation"]["counts"]["fail"], 1)
-                    self.assertIn("1 pass, 1 fail", snapshot["task"]["validation"]["summary"])
+                    self.assertIn("2 pass, 1 fail", snapshot["task"]["validation"]["summary"])
+                    self.assertEqual(snapshot["task"]["integration_safety"]["status"], "pass")
+                    self.assertIn("check_integration_safety.py", snapshot["task"]["integration_safety"]["summary"])
                     self.assertIn("human-inbox-triage", review_items["Signals"])
+                    self.assertIn("Latest recorded integration-safety check passed", review_items["Integration safety"])
                     self.assertIn("1 queued", review_items["Queue and conveyor"])
                     self.assertIn("No-progress circuit breaker active", review_items["Queue and conveyor"])
                     self.assertIn("Process 1 unhandled human inbox", review_items["Action plan"])
@@ -683,7 +687,9 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("builder 6", scorecard_items["Accepted patches"]["detail"])
                     self.assertEqual(scorecard_items["Deferred pressure"]["value"], "1/1")
                     self.assertIn("1 staleness", scorecard_items["Deferred pressure"]["detail"])
-                    self.assertEqual(scorecard_items["Validation"]["value"], "1/1")
+                    self.assertEqual(scorecard_items["Validation"]["value"], "2/1")
+                    self.assertEqual(scorecard_items["Integration safety"]["value"], "pass")
+                    self.assertEqual(scorecard_items["Integration safety"]["kind"], "good")
 
     def test_review_markdown_export_summarizes_local_state(self) -> None:
         for path, module in self.modules:
@@ -726,6 +732,9 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("## Validation", report)
                     self.assertIn("PASS:", report)
                     self.assertIn("FAIL:", report)
+                    self.assertIn("## Integration Safety", report)
+                    self.assertIn("status: pass", report)
+                    self.assertIn("command: `python3 scripts/check_integration_safety.py`", report)
                     self.assertIn("`human-inbox-triage`", report)
                     self.assertIn("queued_patches: 1", report)
                     self.assertIn("no_progress_circuit: active after 2/2", report)
