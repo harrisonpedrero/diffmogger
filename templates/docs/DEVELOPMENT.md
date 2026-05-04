@@ -64,13 +64,15 @@ bash scripts/run_conveyor_automation.sh --once
 python3 scripts/run_observatory.py --open
 ```
 
-The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_signals.json` to show active signal nudges, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
+The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_signals.json` to show active signal nudges, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
 
 For a durable first-run self-review artifact, render the same local state to Markdown:
 
 ```bash
 python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md
 ```
+
+Markdown review exports update `target/action_plan_history.json` so repeated recommendations and follow-through outcomes remain visible across local conveyor cycles.
 
 ## Human Bridge
 

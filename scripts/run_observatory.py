@@ -30,6 +30,8 @@ MAX_SIGNALS = 8
 MAX_REVIEW_ITEMS = 6
 MAX_CHECK_ITEMS = 8
 MAX_SCORECARD_ITEMS = 8
+MAX_RECOMMENDATION_HISTORY = 5
+ACTION_PLAN_HISTORY_RELATIVE = Path("target/action_plan_history.json")
 DEFERRAL_REASON_ACTIONS = {
     "staleness": "Refresh or recreate the patch from current HEAD, then retry only if the change still matters.",
     "conflict": "Inspect the listed files and replace the patch with a freshly reconciled local change.",
@@ -848,6 +850,172 @@ def follow_through_summary(follow_through: dict[str, Any]) -> str:
     )
 
 
+def no_progress_history_value(no_progress: dict[str, Any]) -> str:
+    if not no_progress.get("active"):
+        return "inactive"
+    streak = int(no_progress.get("streak", 0) or 0)
+    threshold = int(no_progress.get("threshold", 0) or 0)
+    if threshold:
+        return f"active after {streak}/{threshold}"
+    return f"active after {streak}"
+
+
+def history_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def normalize_recommendation_history_record(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        "recorded_at": clean_text(raw.get("recorded_at") or raw.get("generated_at") or "", limit=80),
+        "status": clean_text(raw.get("status") or "still_pending", limit=40),
+        "previous_recommendation": clean_text(
+            raw.get("previous_recommendation") or "No previous recommendation recorded.",
+            limit=500,
+        ),
+        "expected_lane": clean_text(raw.get("expected_lane") or "unknown", limit=80),
+        "observed_lane": clean_text(raw.get("observed_lane") or "none", limit=80),
+        "observed_result": clean_text(
+            raw.get("observed_result") or "No observed result recorded.",
+            limit=420,
+        ),
+        "current_recommendation": clean_text(
+            raw.get("current_recommendation") or "No current action plan recorded.",
+            limit=500,
+        ),
+        "current_lane": clean_text(raw.get("current_lane") or "local", limit=80),
+        "no_progress": clean_text(raw.get("no_progress") or "inactive", limit=80),
+        "accepted_total": history_int(raw.get("accepted_total", 0)),
+        "deferred_queue_depth": history_int(raw.get("deferred_queue_depth", 0)),
+    }
+
+
+def recommendation_history_identity(record: dict[str, Any]) -> tuple[str, ...]:
+    return (
+        str(record.get("status") or ""),
+        str(record.get("previous_recommendation") or ""),
+        str(record.get("expected_lane") or ""),
+        str(record.get("observed_lane") or ""),
+        str(record.get("observed_result") or ""),
+        str(record.get("current_recommendation") or ""),
+        str(record.get("current_lane") or ""),
+        str(record.get("no_progress") or ""),
+        str(record.get("accepted_total") or 0),
+        str(record.get("deferred_queue_depth") or 0),
+    )
+
+
+def recommendation_history_record(
+    generated_at: str,
+    follow_through: dict[str, Any],
+    conveyor: dict[str, Any],
+) -> dict[str, Any]:
+    no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
+    return normalize_recommendation_history_record(
+        {
+            "recorded_at": generated_at,
+            "status": follow_through.get("status") or "still_pending",
+            "previous_recommendation": follow_through.get("previous_recommendation"),
+            "expected_lane": follow_through.get("expected_lane"),
+            "observed_lane": follow_through.get("observed_lane"),
+            "observed_result": follow_through.get("observed_result"),
+            "current_recommendation": follow_through.get("current_recommendation"),
+            "current_lane": follow_through.get("current_lane"),
+            "no_progress": no_progress_history_value(no_progress),
+            "accepted_total": follow_through.get("accepted_total", 0),
+            "deferred_queue_depth": follow_through.get("deferred_queue_depth", 0),
+        }
+    )
+
+
+def merge_recommendation_history(current: dict[str, Any], stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for raw in [current, *stored]:
+        record = normalize_recommendation_history_record(raw)
+        if not record:
+            continue
+        key = recommendation_history_identity(record)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append(record)
+        if len(records) >= MAX_RECOMMENDATION_HISTORY:
+            break
+    return records
+
+
+def load_recommendation_history(target: Path) -> list[dict[str, Any]]:
+    data = read_json(target / ACTION_PLAN_HISTORY_RELATIVE)
+    raw_records = data.get("records") if isinstance(data.get("records"), list) else []
+    records = [normalize_recommendation_history_record(item) for item in raw_records]
+    return [item for item in records if item][:MAX_RECOMMENDATION_HISTORY]
+
+
+def recommendation_history_summary(records: list[dict[str, Any]]) -> str:
+    if not records:
+        return "No recommendation history recorded yet."
+    status_counts: dict[str, int] = {}
+    no_progress_count = 0
+    for record in records:
+        status = clean_text(record.get("status") or "still_pending", limit=40).replace("_", " ")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if str(record.get("no_progress") or "inactive") != "inactive":
+            no_progress_count += 1
+    latest = records[0]
+    statuses = ", ".join(f"{count} {status}" for status, count in sorted(status_counts.items()))
+    latest_status = clean_text(latest.get("status") or "still_pending", limit=40).replace("_", " ")
+    expected = clean_text(latest.get("expected_lane") or "unknown", limit=40)
+    observed = clean_text(latest.get("observed_lane") or "none", limit=40)
+    return (
+        f"{len(records)} recommendation follow-through record(s): {statuses}. "
+        f"Latest {latest_status}; expected `{expected}`, observed `{observed}`. "
+        f"{no_progress_count} no-progress warning record(s)."
+    )
+
+
+def recommendation_history_snapshot(
+    target: Path,
+    generated_at: str,
+    follow_through: dict[str, Any],
+    conveyor: dict[str, Any],
+) -> dict[str, Any]:
+    current = recommendation_history_record(generated_at, follow_through, conveyor)
+    records = merge_recommendation_history(current, load_recommendation_history(target))
+    return {
+        "storage_path": ACTION_PLAN_HISTORY_RELATIVE.as_posix(),
+        "summary": recommendation_history_summary(records),
+        "records": records,
+    }
+
+
+def persist_recommendation_history(target: Path, snapshot: dict[str, Any]) -> dict[str, Any]:
+    history = snapshot.get("recommendation_history") if isinstance(snapshot.get("recommendation_history"), dict) else {}
+    records = [
+        normalize_recommendation_history_record(item)
+        for item in list(history.get("records") or [])
+    ]
+    records = [item for item in records if item][:MAX_RECOMMENDATION_HISTORY]
+    path = target / ACTION_PLAN_HISTORY_RELATIVE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "updated_at": clean_text(snapshot.get("generated_at") or utc_now(), limit=80),
+        "records": records,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    snapshot["recommendation_history"] = {
+        "storage_path": ACTION_PLAN_HISTORY_RELATIVE.as_posix(),
+        "summary": recommendation_history_summary(records),
+        "records": records,
+    }
+    return snapshot
+
+
 def scorecard_action_plan(
     task: dict[str, Any],
     queue: dict[str, Any],
@@ -1103,6 +1271,7 @@ def self_review_snapshot(
     human: dict[str, int],
     progress: dict[str, Any],
     follow_through: dict[str, Any] | None = None,
+    recommendation_history: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     queued = int(totals.get("queued", 0) or 0)
@@ -1163,6 +1332,14 @@ def self_review_snapshot(
         deferred_triage.get("recommended_next_action") or "No local deferred-patch triage action is needed.",
         limit=360,
     )
+    history_records = (
+        list(recommendation_history.get("records") or [])
+        if isinstance(recommendation_history, dict)
+        else []
+    )
+    history_summary = recommendation_history_summary(
+        [item for item in history_records if isinstance(item, dict)]
+    )
     return {
         "items": [
             {"label": "Current assessment", "body": task.get("current_assessment") or "No current assessment recorded yet."},
@@ -1172,6 +1349,7 @@ def self_review_snapshot(
             {"label": "Human bridge", "body": human_summary},
             {"label": "Action plan", "body": f"{action_plan['recommendation']} {action_plan['why']}"},
             {"label": "Action follow-through", "body": follow_through_summary(follow_through or {})},
+            {"label": "Recommendation history", "body": history_summary},
             {"label": "Deferred triage", "body": f"{deferred_summary} {deferred_action}"},
             {"label": "Next sprint", "body": task.get("suggested_next_task") or "No sprint task recorded yet."},
         ],
@@ -1182,6 +1360,7 @@ def self_review_snapshot(
 
 def build_snapshot(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
+    generated_at = utc_now()
     conveyor = read_json(target / "target" / "automation_conveyor_state.json")
     queue = queue_snapshot(target)
     task = parse_task_state(target)
@@ -1220,6 +1399,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         progress,
         scorecard.get("action_plan") if isinstance(scorecard.get("action_plan"), dict) else {},
     )
+    recommendation_history = recommendation_history_snapshot(target, generated_at, follow_through, conveyor_state)
     review = self_review_snapshot(
         task,
         queue,
@@ -1228,10 +1408,11 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         human,
         progress,
         follow_through=follow_through,
+        recommendation_history=recommendation_history,
     )
     return {
         "schema_version": 1,
-        "generated_at": utc_now(),
+        "generated_at": generated_at,
         "target_name": target.name or "target",
         "task": task,
         "human": human,
@@ -1242,6 +1423,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "progress": progress,
         "scorecard": scorecard,
         "follow_through": follow_through,
+        "recommendation_history": recommendation_history,
         "review": review,
         "empty_states": dict(EMPTY_STATES),
         "progress_recent": progress.get("recent_activity") or "No multi-role activity recorded yet.",
@@ -1815,6 +1997,23 @@ HTML_TEMPLATE = r"""<!doctype html>
         if (follow.status_reason) row.appendChild(el("div", "muted", follow.status_reason));
         actionPlan.appendChild(row);
       }
+      const historyState = data.recommendation_history || {};
+      const historyRecords = Array.isArray(historyState.records) ? historyState.records : [];
+      if (historyRecords.length) {
+        const row = el("div", "item");
+        const title = el("div", "item-title");
+        title.appendChild(el("span", "", "Recommendation History"));
+        title.appendChild(el("span", "chip queued", String(historyRecords.length) + " recent"));
+        row.appendChild(title);
+        row.appendChild(el("div", "muted", historyState.summary || "No recommendation history summary recorded."));
+        historyRecords.slice(0, 5).forEach(record => {
+          const status = String(record.status || "still_pending").replace("_", " ");
+          const line = (record.recorded_at || "unknown") + ": " + status + "; expected " + (record.expected_lane || "unknown") + ", observed " + (record.observed_lane || "none") + " - " + (record.observed_result || "No observed result recorded.");
+          row.appendChild(el("div", "", line));
+          row.appendChild(el("div", "muted", "no-progress " + (record.no_progress || "inactive") + "; accepted " + String(record.accepted_total || 0) + ", deferred depth " + String(record.deferred_queue_depth || 0)));
+        });
+        actionPlan.appendChild(row);
+      }
       const scorecard = document.getElementById("scorecard");
       clear(scorecard);
       (scorecardState.items || []).forEach(item => {
@@ -1973,7 +2172,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
         render(await response.json());
       } catch (error) {
-        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, follow_through: {}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, follow_through: {}, recommendation_history: {records: []}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
         fallback.progress_recent = "Observatory refresh failed: " + error;
         render(fallback);
       }
@@ -2014,6 +2213,11 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     human = snapshot.get("human") if isinstance(snapshot.get("human"), dict) else {}
     progress = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {}
     follow_through = snapshot.get("follow_through") if isinstance(snapshot.get("follow_through"), dict) else {}
+    recommendation_history = (
+        snapshot.get("recommendation_history")
+        if isinstance(snapshot.get("recommendation_history"), dict)
+        else {}
+    )
     empty_states = snapshot.get("empty_states") if isinstance(snapshot.get("empty_states"), dict) else {}
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
@@ -2086,6 +2290,37 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
         )
     else:
         lines.append("- No action-plan follow-through state recorded yet.")
+
+    lines.extend(["", "## Recommendation History", ""])
+    history_records = [
+        item
+        for item in list(recommendation_history.get("records") or [])
+        if isinstance(item, dict)
+    ]
+    if history_records:
+        lines.append(
+            f"- summary: {clean_text(recommendation_history.get('summary') or recommendation_history_summary(history_records), limit=500)}"
+        )
+        storage_path = clean_text(recommendation_history.get("storage_path") or ACTION_PLAN_HISTORY_RELATIVE.as_posix(), limit=160)
+        lines.append(f"- history_file: `{storage_path}`")
+        for record in history_records[:MAX_RECOMMENDATION_HISTORY]:
+            recorded_at = clean_text(record.get("recorded_at") or "unknown", limit=80)
+            status = clean_text(record.get("status") or "still_pending", limit=40).replace("_", " ")
+            expected = clean_text(record.get("expected_lane") or "unknown", limit=80)
+            observed = clean_text(record.get("observed_lane") or "none", limit=80)
+            observed_result = clean_text(record.get("observed_result") or "No observed result recorded.", limit=360)
+            lines.append(f"- {recorded_at}: {status}; expected `{expected}`, observed `{observed}` - {observed_result}")
+            lines.append(
+                f"  - previous_recommendation: {clean_text(record.get('previous_recommendation') or 'No previous recommendation recorded.', limit=420)}"
+            )
+            lines.append(
+                f"  - current_recommendation: {clean_text(record.get('current_recommendation') or 'No current action plan recorded.', limit=420)}"
+            )
+            lines.append(f"  - no_progress: {clean_text(record.get('no_progress') or 'inactive', limit=80)}")
+            lines.append(f"  - accepted_total: {history_int(record.get('accepted_total', 0))}")
+            lines.append(f"  - deferred_queue_depth: {history_int(record.get('deferred_queue_depth', 0))}")
+    else:
+        lines.append("- No recommendation history recorded yet.")
 
     lines.extend(["", "## Scorecard", ""])
     lines.append(f"- status: {clean_text(scorecard.get('status') or 'unknown', limit=80)}")
@@ -2290,6 +2525,8 @@ def main(argv: list[str] | None = None) -> int:
 
     target = Path(args.target).expanduser().resolve()
     snapshot = build_snapshot(target)
+    if args.review_output and args.review_output != "-":
+        snapshot = persist_recommendation_history(target, snapshot)
     if args.once:
         body = render_html(snapshot, live=False)
         if args.output:

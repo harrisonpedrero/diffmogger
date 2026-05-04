@@ -506,6 +506,42 @@ class ObservatorySnapshotTests(unittest.TestCase):
                 ],
             },
         )
+        self.write_json(
+            root,
+            "target/action_plan_history.json",
+            {
+                "schema_version": 1,
+                "updated_at": "2026-05-03T22:57:30+00:00",
+                "records": [
+                    {
+                        "recorded_at": "2026-05-03T22:57:30+00:00",
+                        "status": "still_pending",
+                        "previous_recommendation": "Run integrator triage for 1 deferred backlog item(s).",
+                        "expected_lane": "integrator",
+                        "observed_lane": "none",
+                        "observed_result": "No conveyor or queue outcome recorded yet.",
+                        "current_recommendation": "Run integrator triage for 1 deferred backlog item(s).",
+                        "current_lane": "integrator",
+                        "no_progress": "active after 2/2",
+                        "accepted_total": 0,
+                        "deferred_queue_depth": 1,
+                    },
+                    {
+                        "recorded_at": "2026-05-03T22:55:00+00:00",
+                        "status": "superseded",
+                        "previous_recommendation": "Repair local validation.",
+                        "expected_lane": "hardener",
+                        "observed_lane": "builder",
+                        "observed_result": "builder completed with progress",
+                        "current_recommendation": "Continue builder momentum with the next scoped local increment.",
+                        "current_lane": "builder",
+                        "no_progress": "inactive",
+                        "accepted_total": 1,
+                        "deferred_queue_depth": 0,
+                    },
+                ],
+            },
+        )
 
     def seed_queued_integrator_target(self, root: Path) -> None:
         self.write_text(
@@ -667,6 +703,8 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     )
 
                     report = output.read_text(encoding="utf-8")
+                    history_path = target / "target" / "action_plan_history.json"
+                    history = json.loads(history_path.read_text(encoding="utf-8"))
                     self.assertEqual(exit_code, 0)
                     self.assertIn("# Diffmogger Self-Review Snapshot", report)
                     self.assertIn("automation_status: `ACTIVE`", report)
@@ -676,6 +714,12 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("## Action Follow-Through", report)
                     self.assertIn("status: superseded", report)
                     self.assertIn("expected_lane: `hardener`", report)
+                    self.assertIn("## Recommendation History", report)
+                    self.assertIn("history_file: `target/action_plan_history.json`", report)
+                    self.assertIn("accepted_total: 13", report)
+                    self.assertEqual(history["schema_version"], 1)
+                    self.assertEqual(len(history["records"]), 1)
+                    self.assertEqual(history["records"][0]["status"], "superseded")
                     self.assertIn("## Scorecard", report)
                     self.assertIn("Accepted patches: 13", report)
                     self.assertIn("Deferred pressure: 1/1", report)
@@ -762,6 +806,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
                     snapshot = module.build_snapshot(target)
                     follow = snapshot["follow_through"]
+                    history = snapshot["recommendation_history"]
                     review_items = {item["label"]: item["body"] for item in snapshot["review"]["items"]}
                     report = module.render_review_markdown(snapshot)
                     html = module.render_html(snapshot, live=False)
@@ -771,11 +816,20 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(follow["observed_lane"], "builder")
                     self.assertIn("builder completed with progress", follow["observed_result"])
                     self.assertIn("followed", review_items["Action follow-through"])
+                    self.assertIn("3 recommendation follow-through record", review_items["Recommendation history"])
+                    self.assertEqual(len(history["records"]), 3)
+                    self.assertEqual(history["records"][0]["status"], "followed")
+                    self.assertEqual(history["records"][0]["accepted_total"], 1)
+                    self.assertEqual(history["records"][1]["no_progress"], "active after 2/2")
                     self.assertIn("## Action Follow-Through", report)
                     self.assertIn("status: followed", report)
                     self.assertIn("observed_lane: `builder`", report)
                     self.assertIn("builder completed with progress", report)
+                    self.assertIn("## Recommendation History", report)
+                    self.assertIn("3 recommendation follow-through record", report)
+                    self.assertIn("no_progress: active after 2/2", report)
                     self.assertIn("Action Follow-Through", html)
+                    self.assertIn("Recommendation History", html)
                     self.assertIn("followed", html)
 
     def test_deferred_pressure_action_plan_outranks_validation_failures(self) -> None:

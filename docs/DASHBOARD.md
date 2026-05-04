@@ -169,13 +169,15 @@ Launch Observatory
 
 This opens a local browser page backed by `scripts/run_observatory.py`. The page is meant for live demos and reviews: it shows active signal nudges, conveyor health, no-progress circuit breaker state, the active role, upcoming lanes, queued and deferred patches, recent outcomes, progress pulse, and bounded log tails. It reads only target-local files and does not require external services.
 
-The observatory also includes a compact self-review panel and scorecard that pull from local task state, role progress metrics, signal state, queue manifests, conveyor circuit-breaker state, and human bridge files. Use it as the first stop in a local review: it summarizes the current assessment, validation results, accepted and deferred patch pressure, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, active nudges, queue/conveyor state, known issues, and next sprint recommendation without requiring a tour through every Markdown file.
+The observatory also includes a compact self-review panel and scorecard that pull from local task state, role progress metrics, signal state, queue manifests, conveyor circuit-breaker state, and human bridge files. Use it as the first stop in a local review: it summarizes the current assessment, validation results, accepted and deferred patch pressure, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, recent recommendation-history records, active nudges, queue/conveyor state, known issues, and next sprint recommendation without requiring a tour through every Markdown file.
 
 For a durable local review artifact, render the same state to Markdown:
 
 ```bash
 python3 scripts/run_observatory.py --target . --review-output /tmp/Diffmogger-self-review.md
 ```
+
+Each Markdown review export also updates `target/action_plan_history.json` with the latest bounded action-plan follow-through record so later reviews can show repeated recommendations, no-progress warnings, and accepted/deferred follow-through across cycles.
 
 For multi-role jobs in repos with configured git remotes, the dashboard blocks scheduling unless the advanced **Allow local-only multi-role automation when this repo has git remotes** option is checked. When checked, LaunchAgents receive `MULTI_ROLE_ALLOW_REMOTES=1`; scripts still refuse pushes, fetches, pulls, remote configuration, and remote-touching git commands.
 
