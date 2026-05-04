@@ -198,7 +198,7 @@ target = Path(sys.argv[1])
 output = Path(sys.argv[2])
 paths = sys.argv[3:]
 
-def sha256(path: Path) -> str | None:
+def sha256(path: Path):
     if not path.exists() or not path.is_file() or path.is_symlink():
         return None
     return hashlib.sha256(path.read_bytes()).hexdigest()
