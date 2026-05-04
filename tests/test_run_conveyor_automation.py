@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import signal
 import subprocess
+import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -197,6 +200,70 @@ class GitHeadPreflightTests(unittest.TestCase):
                     )
                     status, _ = module.git_head_status(Path(tmp))
                     self.assertEqual(status, "ok")
+
+
+class ConveyorSignalCleanupTests(unittest.TestCase):
+    def write_text(self, root: Path, relative: str, content: str) -> Path:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(content).lstrip(), encoding="utf-8")
+        return path
+
+    def seed_blocked_git_target(self, target: Path) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=target, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=target, check=True)
+        self.write_text(
+            target,
+            "docs/CODEX_AUTOMATION_TASKS.md",
+            """
+            # Codex Automation Tasks
+
+            AUTOMATION_STATUS: BLOCKED_ON_USER
+            """,
+        )
+        subprocess.run(["git", "add", "."], cwd=target, check=True)
+        subprocess.run(["git", "commit", "-m", "init", "-q"], cwd=target, check=True)
+
+    def test_sigterm_during_idle_sleep_releases_scheduler_lock(self) -> None:
+        for path in CONVEYOR_PATHS:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_blocked_git_target(target)
+                    proc = subprocess.Popen(
+                        [
+                            sys.executable,
+                            str(path),
+                            "--target",
+                            str(target),
+                            "--idle-sleep-seconds",
+                            "60",
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    lock_path = target / "target" / "automation_conveyor.lock"
+                    try:
+                        deadline = time.monotonic() + 5
+                        while time.monotonic() < deadline and not lock_path.exists():
+                            if proc.poll() is not None:
+                                break
+                            time.sleep(0.05)
+                        self.assertTrue(lock_path.exists(), "conveyor did not acquire its lock")
+
+                        proc.send_signal(signal.SIGTERM)
+                        stdout, stderr = proc.communicate(timeout=5)
+                    finally:
+                        if proc.poll() is None:
+                            proc.kill()
+                            proc.communicate(timeout=5)
+
+                    self.assertEqual(proc.returncode, 143, stderr)
+                    self.assertFalse(lock_path.exists(), stdout + stderr)
+                    self.assertIn("CONVEYOR_SIGNAL", stdout)
+                    self.assertIn("CONVEYOR_LOCK_RELEASED", stdout)
 
 
 if __name__ == "__main__":
