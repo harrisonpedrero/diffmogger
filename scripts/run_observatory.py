@@ -23,7 +23,7 @@ ROLES = ("planner", "builder", "hardener", "integrator")
 QUEUE_STATUSES = ("queued", "deferred", "applied", "failed", "skipped")
 MAX_MANIFESTS = 18
 MAX_OUTCOMES = 12
-MAX_HISTORY = 14
+MAX_HISTORY = 80
 MAX_LOG_FILES = 8
 MAX_LOG_LINE_CHARS = 220
 MAX_SIGNALS = 8
@@ -68,6 +68,9 @@ EMPTY_STATES = {
     "recent_outcomes": "No integration outcomes yet. Applied, failed, skipped, and deferred role outputs appear here after integrator review.",
     "timeline": "No conveyor timeline yet. Completed role runs will appear here with exit status, progress result, and integration notes.",
 }
+CONVENTIONAL_SUBJECT_RE = re.compile(
+    r"^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9-]+\))?!?: .+"
+)
 
 
 def utc_now() -> str:
@@ -477,6 +480,146 @@ def queue_snapshot(target: Path) -> dict[str, Any]:
     }
 
 
+def classify_path(path: str) -> str:
+    if path.startswith("tests/"):
+        return "tests"
+    if path.startswith("templates/"):
+        return "templates"
+    if path.startswith("services/"):
+        return "services"
+    if path.startswith("scripts/"):
+        return "scripts"
+    if path.startswith("docs/") or path.endswith(".md"):
+        return "docs"
+    return "other"
+
+
+def describe_path(path: str) -> str:
+    if path.endswith("run_observatory.py"):
+        return "observatory/review logic"
+    if path.endswith("run_conveyor_automation.py"):
+        return "conveyor scheduler"
+    if path.endswith("run_role_automation.sh"):
+        return "role runner"
+    if path.endswith("integrate_role_outputs.py"):
+        return "integrator"
+    if path.endswith("validate_starter_kit.sh"):
+        return "starter-kit validation"
+    if path.endswith("check_integration_safety.py"):
+        return "integration safety checker"
+    if path.endswith("check_required_files.py"):
+        return "generated-target contract checker"
+    if path.endswith("test_run_observatory.py"):
+        return "observatory regression tests"
+    if path.endswith("test_integrate_role_outputs.py"):
+        return "integrator/runtime-state tests"
+    if path.endswith("test_check_integration_safety.py"):
+        return "safety checker tests"
+    if path.endswith("test_check_required_files.py"):
+        return "required-file contract tests"
+    if "agentic_dashboard/app.py" in path:
+        return "dashboard app surface"
+    if "agentic-notifier" in path:
+        return "notifier guardrails"
+    if path.endswith("README.md"):
+        return "public docs"
+    if path.startswith("docs/"):
+        return "operator docs"
+    if path.startswith("templates/"):
+        return "generated target mirror"
+    return classify_path(path)
+
+
+def run_git_output(target: Path, args: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def commit_numstat(target: Path, commit_hash: str) -> list[dict[str, Any]]:
+    output = run_git_output(target, ["show", "--format=", "--numstat", "--no-renames", commit_hash])
+    files: list[dict[str, Any]] = []
+    for raw in output.splitlines():
+        parts = raw.split("\t")
+        if len(parts) < 3:
+            continue
+        add_s, del_s, path = parts[0], parts[1], parts[2]
+        additions = 0 if add_s == "-" else int(add_s or 0)
+        deletions = 0 if del_s == "-" else int(del_s or 0)
+        files.append(
+            {
+                "path": clean_text(path, limit=140),
+                "additions": additions,
+                "deletions": deletions,
+                "area": classify_path(path),
+                "label": describe_path(path),
+            }
+        )
+    return sorted(files, key=lambda item: item["additions"] + item["deletions"], reverse=True)
+
+
+def commit_summary_from_files(subject: str, files: list[dict[str, Any]]) -> str:
+    paths = [str(item.get("path") or "") for item in files]
+    joined = "\n".join(paths)
+    if "check_required_files.py" in joined and "test_check_required_files.py" in joined:
+        return "Generated-target contract checks changed, with validation coverage."
+    if "check_integration_safety.py" in joined:
+        return "Integration safety guardrails changed, with local regression coverage."
+    if "agentic_dashboard/app.py" in joined:
+        return "Dashboard controls or status surfaces changed."
+    if "run_role_automation.sh" in joined and "integrate_role_outputs.py" in joined:
+        return "Runtime-state handoff changed so ignored automation state reaches main."
+    if "run_observatory.py" in joined and "test_run_observatory.py" in joined:
+        return "Observatory reporting changed, with matching regression tests."
+    if "run_conveyor_automation.py" in joined and "test_run_conveyor_automation.py" in joined:
+        return "Conveyor scheduling changed, with policy coverage."
+    if paths and all(path.startswith("docs/") or path.endswith(".md") for path in paths):
+        return "Operator documentation and durable planning state changed."
+    return subject
+
+
+def git_commits_snapshot(target: Path, *, max_count: int = 80) -> list[dict[str, Any]]:
+    output = run_git_output(
+        target,
+        ["log", "--date=iso-strict", f"--max-count={max_count}", "--pretty=format:%h%x09%cI%x09%s"],
+    )
+    commits: list[dict[str, Any]] = []
+    for raw in output.splitlines():
+        parts = raw.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        commit_hash, commit_time, subject = parts
+        files = commit_numstat(target, commit_hash)
+        additions = sum(int(item.get("additions") or 0) for item in files)
+        deletions = sum(int(item.get("deletions") or 0) for item in files)
+        role_match = re.search(r"\((planner|builder|hardener|integrator|observatory|conveyor|dashboard|scaffold|safety|docs)\)", subject)
+        commits.append(
+            {
+                "hash": commit_hash,
+                "time": commit_time,
+                "subject": clean_text(subject, limit=220),
+                "semantic": bool(CONVENTIONAL_SUBJECT_RE.match(subject)),
+                "role": role_match.group(1) if role_match else "commit",
+                "files": files[:8],
+                "file_count": len(files),
+                "additions": additions,
+                "deletions": deletions,
+                "summary": commit_summary_from_files(subject, files),
+            }
+        )
+    return commits
+
+
 def git_snapshot(target: Path) -> dict[str, Any]:
     def run_git(args: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -503,6 +646,7 @@ def git_snapshot(target: Path) -> dict[str, Any]:
         ][:5]
         if log_result.returncode == 0
         else [],
+        "commits": git_commits_snapshot(target),
     }
 
 
@@ -2372,11 +2516,653 @@ HTML_TEMPLATE = r"""<!doctype html>
 """
 
 
+REPLAY_HTML_TEMPLATE = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diffmogger Observatory</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1316;
+      --panel: #1b2227;
+      --panel-dark: #13181c;
+      --panel-head: #222a30;
+      --line: #334048;
+      --text: #f4f1ea;
+      --muted: #aab2b4;
+      --subtle: #77828a;
+      --green: #5fd68b;
+      --blue: #70a8ff;
+      --amber: #eebe4e;
+      --red: #f46b69;
+      --cyan: #4fd3df;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 14px;
+      padding: 28px 30px 18px;
+    }
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 20px;
+      align-items: end;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(34px, 5vw, 62px);
+      line-height: .95;
+      letter-spacing: 0;
+    }
+    .subtitle { margin-top: 10px; color: var(--muted); font-size: 17px; }
+    .clock { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+    .chips, .meta-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: none;
+    }
+    .chip.good, .chip.applied, .chip.accepted { color: var(--green); border-color: rgba(95,214,139,.55); }
+    .chip.info, .chip.queued, .chip.built { color: var(--blue); border-color: rgba(112,168,255,.55); }
+    .chip.warn, .chip.deferred, .chip.planned, .chip.no-progress { color: var(--amber); border-color: rgba(238,190,78,.6); }
+    .chip.bad, .chip.failed, .chip.retry { color: var(--red); border-color: rgba(244,107,105,.6); }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(280px, .88fr) minmax(560px, 1.65fr) minmax(340px, 1fr);
+      gap: 18px;
+      min-height: 0;
+    }
+    .stack { display: grid; align-content: start; gap: 18px; min-height: 0; }
+    section {
+      min-width: 0;
+      overflow: hidden;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    section > h2 {
+      margin: 0;
+      padding: 12px 16px;
+      color: var(--muted);
+      background: var(--panel-head);
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+    .content { padding: 16px; }
+    .mission { display: grid; gap: 18px; }
+    .mission-block strong { display: block; margin-bottom: 5px; color: var(--text); }
+    .mission-block div { color: var(--muted); overflow-wrap: anywhere; }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      min-height: 92px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-dark);
+    }
+    .metric b { display: block; font-size: 42px; line-height: .95; font-variant-numeric: tabular-nums; }
+    .metric span { display: block; margin-top: 8px; color: var(--muted); }
+    .belt {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      padding: 16px;
+    }
+    .role {
+      min-height: 178px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-dark);
+    }
+    .role.active { border-color: var(--green); box-shadow: 0 0 0 1px rgba(95,214,139,.35) inset; }
+    .role.next { border-color: var(--blue); }
+    .role h3 { margin: 0 0 12px; font-size: 24px; letter-spacing: 0; text-transform: capitalize; }
+    .role-counts {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 9px 14px;
+      margin-top: 15px;
+      color: var(--muted);
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+    }
+    .runner-strip {
+      margin: 0 16px 16px;
+      padding: 14px 16px;
+      border: 1px solid rgba(95,214,139,.45);
+      border-radius: 8px;
+      background: rgba(95,214,139,.08);
+    }
+    .runner-strip strong { color: var(--green); }
+    .runner-strip div { color: var(--muted); overflow-wrap: anywhere; }
+    .story-panel {
+      min-height: 330px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    .story-body {
+      min-height: 0;
+      overflow: auto;
+      padding: 16px;
+    }
+    .story-title-row { display: flex; justify-content: space-between; gap: 14px; align-items: start; }
+    .story-title {
+      min-width: 0;
+      margin: 0;
+      font-size: clamp(28px, 3.2vw, 42px);
+      line-height: 1.08;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
+    }
+    .story-detail {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 18px;
+      overflow-wrap: anywhere;
+    }
+    .landed-now {
+      margin-top: 24px;
+      display: grid;
+      gap: 10px;
+    }
+    .commit-title {
+      color: var(--text);
+      font-size: 20px;
+      font-weight: 800;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }
+    .commit-summary { color: var(--muted); overflow-wrap: anywhere; }
+    .file-row {
+      display: grid;
+      grid-template-columns: 92px minmax(120px, .9fr) minmax(120px, 1fr);
+      gap: 12px;
+      align-items: baseline;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .file-row code { color: var(--subtle); overflow-wrap: anywhere; }
+    .stat { color: var(--green); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .commit-list {
+      max-height: calc(100vh - 250px);
+      overflow: auto;
+      display: grid;
+      gap: 12px;
+    }
+    .commit-card, .support-card, .timeline-card {
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-dark);
+    }
+    .commit-meta { margin-top: 8px; color: var(--subtle); font-variant-numeric: tabular-nums; }
+    .support-grid { display: grid; gap: 12px; }
+    .support-card strong { display: block; margin-bottom: 6px; }
+    .support-card div { color: var(--muted); overflow-wrap: anywhere; }
+    .timeline-shell {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+    .timeline-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 14px;
+      color: var(--muted);
+      background: var(--panel-head);
+      border-bottom: 1px solid var(--line);
+      text-transform: uppercase;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .timeline-track {
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
+      padding: 12px 14px 14px;
+      scroll-snap-type: x proximity;
+    }
+    .timeline-card {
+      flex: 0 0 260px;
+      cursor: pointer;
+      scroll-snap-align: start;
+      text-align: left;
+      color: inherit;
+    }
+    .timeline-card.selected { border-color: var(--green); box-shadow: 0 0 0 1px rgba(95,214,139,.35) inset; }
+    .timeline-role { display: flex; justify-content: space-between; gap: 8px; font-weight: 800; text-transform: capitalize; }
+    .timeline-time { margin-top: 6px; color: var(--subtle); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .timeline-reason { margin-top: 6px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+    @media (max-width: 1260px) {
+      .grid { grid-template-columns: 1fr; }
+      .commit-list { max-height: none; }
+    }
+    @media (max-width: 760px) {
+      .app { padding: 18px 12px 12px; }
+      header { grid-template-columns: 1fr; }
+      .clock { text-align: left; }
+      .belt, .metric-grid { grid-template-columns: 1fr; }
+      .file-row { grid-template-columns: 1fr; gap: 2px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div>
+        <h1>Diffmogger Autonomous Build Log</h1>
+        <div class="subtitle">Diffmogger Observatory view: replay-style automation progress reconstructed from conveyor events, commits, and diff stats.</div>
+      </div>
+      <div class="clock">
+        <div id="generated">Waiting for state...</div>
+        <div id="targetName"></div>
+      </div>
+    </header>
+    <main class="grid">
+      <div class="stack">
+        <section>
+          <h2>Mission State</h2>
+          <div class="content mission" id="mission"></div>
+        </section>
+        <section>
+          <h2>Scorecard</h2>
+          <div class="content">
+            <div class="metric-grid" id="metrics"></div>
+          </div>
+        </section>
+        <section>
+          <h2>Action Plan</h2>
+          <div class="content support-grid" id="actionPlan"></div>
+        </section>
+      </div>
+      <div class="stack">
+        <section>
+          <h2>Conveyor Belt</h2>
+          <div class="belt" id="belt"></div>
+          <div id="activeRun"></div>
+        </section>
+        <section class="story-panel">
+          <h2>Progress Story</h2>
+          <div class="story-body" id="progressStory"></div>
+        </section>
+        <section>
+          <h2>Conveyor Health</h2>
+          <div class="content support-grid" id="health"></div>
+        </section>
+      </div>
+      <div class="stack">
+        <section>
+          <h2>Landed Work</h2>
+          <div class="content commit-list" id="landedWork"></div>
+        </section>
+        <section>
+          <h2>Recent Outcomes</h2>
+          <div class="content support-grid" id="recentOutcomes"></div>
+        </section>
+        <section>
+          <h2>First Review / Active Signals</h2>
+          <div class="content support-grid" id="support"></div>
+        </section>
+      </div>
+    </main>
+    <section class="timeline-shell">
+      <div class="timeline-header">
+        <span>Event Timeline</span>
+        <span id="timelineCount">0 events</span>
+      </div>
+      <div class="timeline-track" id="timeline"></div>
+    </section>
+  </div>
+  <script>
+    const INITIAL_STATE = __INITIAL_STATE__;
+    const STATE_URL = __STATE_URL__;
+    const ROLES = ["planner", "builder", "hardener", "integrator"];
+    let selectedEventIndex = null;
+    let currentData = null;
+
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+    function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+    function text(value, fallback = "") { return value === undefined || value === null || value === "" ? fallback : String(value); }
+    function timeLabel(value) {
+      if (!value) return "unknown";
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? value : date.toISOString().slice(11, 19) + " UTC";
+    }
+    function metric(label, value, colorClass = "") {
+      const node = el("div", "metric");
+      const number = el("b", colorClass, text(value, "0"));
+      node.appendChild(number);
+      node.appendChild(el("span", "", label));
+      return node;
+    }
+    function chip(label, cls = "") { return el("span", "chip " + cls, label); }
+    function eventStatus(event) {
+      if (event.status === "running") return "running";
+      if (event.role === "integrator") {
+        const accepted = Number(((event.metadata || {}).accepted_delta) || 0);
+        const deferred = Number(((event.metadata || {}).deferred_delta) || 0);
+        if (accepted) return "accepted";
+        if (deferred) return "deferred";
+        return event.progress_success ? "accepted" : "no-progress";
+      }
+      if (event.exit_code !== 0 && event.exit_code !== undefined && event.exit_code !== null) return "retry";
+      if (event.role === "planner") return "planned";
+      if (event.role === "builder") return "built";
+      if (event.role === "hardener") return "accepted";
+      return event.progress_success ? "accepted" : "no-progress";
+    }
+    function eventTitle(event) {
+      const role = text(event.role, "role");
+      if (event.status === "running") return role + " is running now";
+      if (role === "integrator") {
+        const accepted = Number(((event.metadata || {}).accepted_delta) || 0);
+        const deferred = Number(((event.metadata || {}).deferred_delta) || 0);
+        if (accepted) return "Integrator accepted " + accepted + " patch" + (accepted === 1 ? "" : "es");
+        if (deferred) return "Integrator deferred " + deferred + " patch" + (deferred === 1 ? "" : "es");
+        return "Integrator checked the queue";
+      }
+      if (role === "planner") return "Planner refreshed the plan";
+      if (role === "builder") return "Builder produced a patch";
+      if (role === "hardener") return "Hardener verified the lane";
+      return role + " completed";
+    }
+    function eventTime(event) { return event.finished_at || event.started_at || event.time || ""; }
+    function eventsFor(data) {
+      const history = Array.isArray(data.conveyor?.history) ? data.conveyor.history.slice() : [];
+      const active = data.conveyor?.active_role_run || {};
+      if (active.role) {
+        history.push({
+          role: active.role,
+          reason: active.reason,
+          started_at: active.started_at,
+          finished_at: active.started_at,
+          status: active.status,
+          progress_success: active.status === "running",
+          exit_code: null,
+        });
+      }
+      return history;
+    }
+    function commitsFor(data) { return Array.isArray(data.git?.commits) ? data.git.commits.slice() : []; }
+    function latestCommitFor(data, event) {
+      const commits = commitsFor(data).sort((a, b) => new Date(a.time || 0) - new Date(b.time || 0));
+      const eventDate = new Date(eventTime(event) || Date.now());
+      let latest = commits[commits.length - 1] || null;
+      for (const commit of commits) {
+        const commitDate = new Date(commit.time || 0);
+        if (!Number.isNaN(eventDate.getTime()) && commitDate <= eventDate) latest = commit;
+      }
+      return latest;
+    }
+    function renderCommit(commit, compact = false) {
+      const card = el("div", compact ? "support-card" : "commit-card");
+      card.appendChild(el("div", "commit-title", text(commit.subject, "Commit landed")));
+      const meta = el("div", "meta-row commit-meta");
+      meta.appendChild(chip(text(commit.hash, ""), "info"));
+      meta.appendChild(el("span", "", timeLabel(commit.time)));
+      meta.appendChild(el("span", "", text(commit.file_count, 0) + " files"));
+      meta.appendChild(el("span", "stat", "+" + text(commit.additions, 0) + " / -" + text(commit.deletions, 0)));
+      card.appendChild(meta);
+      if (commit.summary) card.appendChild(el("div", "commit-summary", commit.summary));
+      (commit.files || []).slice(0, compact ? 3 : 4).forEach(file => {
+        const row = el("div", "file-row");
+        row.appendChild(el("span", "stat", "+" + text(file.additions, 0) + " / -" + text(file.deletions, 0)));
+        row.appendChild(el("strong", "", text(file.label, file.area || "change")));
+        row.appendChild(el("code", "", text(file.path, "")));
+        card.appendChild(row);
+      });
+      return card;
+    }
+    function renderMission(data) {
+      const mission = document.getElementById("mission");
+      clear(mission);
+      [
+        ["Automation status", data.task?.status],
+        ["Current horizon", data.task?.horizon],
+        ["Mission", data.task?.current_assessment],
+        ["Best next milestone", data.task?.best_next_milestone],
+        ["Known issue", data.task?.known_issue],
+      ].forEach(([label, value]) => {
+        const block = el("div", "mission-block");
+        block.appendChild(el("strong", "", label));
+        block.appendChild(el("div", "", text(value, "unknown")));
+        mission.appendChild(block);
+      });
+      const chips = el("div", "chips");
+      chips.appendChild(chip(text(data.task?.status, "UNKNOWN"), String(data.task?.status || "").startsWith("ACTIVE") ? "good" : "warn"));
+      chips.appendChild(chip("horizon: " + text(data.task?.horizon_decision, "unknown"), "info"));
+      chips.appendChild(chip("last: " + text(data.task?.last_updated, "unknown")));
+      mission.appendChild(chips);
+    }
+    function renderMetrics(data) {
+      const metrics = document.getElementById("metrics");
+      clear(metrics);
+      const totals = data.queue?.totals || {};
+      const progress = data.progress || {};
+      metrics.appendChild(metric("Conveyor cycles", data.conveyor?.cycles || 0, "info"));
+      metrics.appendChild(metric("Accepted patches", progress.accepted_total || totals.applied || 0, "good"));
+      metrics.appendChild(metric("Deferred patches", totals.deferred || progress.deferred_queue_depth || 0, "warn"));
+      metrics.appendChild(metric("Unhandled inbox", data.human?.unhandled_inbox || 0));
+    }
+    function renderBelt(data) {
+      const belt = document.getElementById("belt");
+      clear(belt);
+      const active = data.conveyor?.active_role_run || {};
+      const decisions = Array.isArray(data.conveyor?.decision_queue) ? data.conveyor.decision_queue : [];
+      const nextRoles = new Set(decisions.map(item => item.role));
+      ROLES.forEach(role => {
+        const counts = (data.queue?.counts_by_role || {})[role] || {};
+        const state = active.role === role && active.status === "running" ? "active" : (nextRoles.has(role) ? "next" : "");
+        const card = el("div", "role " + state);
+        card.appendChild(el("h3", "", role));
+        card.appendChild(chip(state === "active" ? "running" : (state === "next" ? "next" : "standby"), state === "active" ? "good" : (state === "next" ? "info" : "")));
+        const grid = el("div", "role-counts");
+        ["queued", "deferred", "applied", "failed", "skipped"].forEach(status => grid.appendChild(el("div", "", status + ": " + text(counts[status], 0))));
+        card.appendChild(grid);
+        belt.appendChild(card);
+      });
+      const activeRun = document.getElementById("activeRun");
+      clear(activeRun);
+      if (active.role) {
+        const node = el("div", "runner-strip");
+        node.appendChild(el("strong", "", active.status === "running" ? "Running now: " + active.role : "Last active role: " + active.role));
+        node.appendChild(el("div", "", text(active.run_id, "unknown") + " | " + text(active.reason, "no reason recorded")));
+        activeRun.appendChild(node);
+      }
+    }
+    function renderStory(data) {
+      const story = document.getElementById("progressStory");
+      clear(story);
+      const events = eventsFor(data);
+      const index = events.length ? Math.min(selectedEventIndex ?? events.length - 1, events.length - 1) : -1;
+      const event = index >= 0 ? events[index] : null;
+      const titleRow = el("div", "story-title-row");
+      const title = el("h3", "story-title", event ? eventTitle(event) : "No conveyor timeline yet");
+      titleRow.appendChild(title);
+      if (event) titleRow.appendChild(chip(eventStatus(event), eventStatus(event)));
+      story.appendChild(titleRow);
+      story.appendChild(el("div", "story-detail", event ? text(event.reason, "No reason recorded.") : text(data.empty_states?.timeline, "No conveyor timeline yet.")));
+      const commit = event ? latestCommitFor(data, event) : commitsFor(data)[0];
+      const latest = el("div", "landed-now");
+      latest.appendChild(el("strong", "", "Latest landed work"));
+      if (commit) latest.appendChild(renderCommit(commit, true));
+      else latest.appendChild(el("div", "support-card", "No commits recorded yet."));
+      story.appendChild(latest);
+    }
+    function renderLanded(data) {
+      const node = document.getElementById("landedWork");
+      clear(node);
+      const commits = commitsFor(data);
+      commits.slice(0, 10).forEach(commit => node.appendChild(renderCommit(commit)));
+      if (!node.children.length) node.appendChild(el("div", "commit-card", "No landed work recorded yet."));
+    }
+    function renderSupport(data) {
+      const action = document.getElementById("actionPlan");
+      clear(action);
+      const plan = data.scorecard?.action_plan || {};
+      const planCard = el("div", "support-card");
+      planCard.appendChild(el("strong", "", text(plan.label, "Action Plan")));
+      planCard.appendChild(el("div", "", text(plan.recommendation, "No action plan recorded yet.")));
+      if (plan.why) planCard.appendChild(el("div", "", plan.why));
+      action.appendChild(planCard);
+      const follow = data.follow_through || {};
+      const followCard = el("div", "support-card");
+      followCard.appendChild(el("strong", "", "Action Follow-Through"));
+      followCard.appendChild(el("div", "", text(follow.status, "No follow-through record yet.")));
+      followCard.appendChild(el("div", "", text(follow.observed_result, "")));
+      action.appendChild(followCard);
+      const historyCard = el("div", "support-card");
+      historyCard.appendChild(el("strong", "", "Recommendation History"));
+      historyCard.appendChild(el("div", "", text(data.recommendation_history?.summary, "No recommendation history recorded.")));
+      action.appendChild(historyCard);
+
+      const health = document.getElementById("health");
+      clear(health);
+      const healthData = data.conveyor?.health || {};
+      const healthCard = el("div", "support-card");
+      healthCard.appendChild(el("strong", "", "Conveyor Health"));
+      healthCard.appendChild(el("div", "", text(healthData.summary, "No conveyor health recorded.")));
+      if (Array.isArray(healthData.recent_roles)) healthCard.appendChild(el("div", "", "recent roles: " + healthData.recent_roles.join(" -> ")));
+      health.appendChild(healthCard);
+      const noProgress = data.conveyor?.no_progress || {};
+      if (noProgress.active) {
+        const card = el("div", "support-card");
+        card.appendChild(el("strong", "", "NO-PROGRESS CIRCUIT"));
+        card.appendChild(el("div", "", "no_progress_circuit: active after " + text(noProgress.streak, 0) + "/" + text(noProgress.threshold, "?")));
+        card.appendChild(el("div", "", text(noProgress.reason, "")));
+        health.appendChild(card);
+      }
+
+      const outcomes = document.getElementById("recentOutcomes");
+      clear(outcomes);
+      (data.queue?.recent_outcomes || []).slice(0, 5).forEach(item => {
+        const card = el("div", "support-card");
+        card.appendChild(el("strong", "", text(item.role, "role") + " / " + text(item.run_id, "run")));
+        card.appendChild(el("div", "", text(item.status, "status") + ": " + text(item.summary, "No summary.")));
+        outcomes.appendChild(card);
+      });
+      if (!outcomes.children.length) outcomes.appendChild(el("div", "support-card", text(data.empty_states?.recent_outcomes, "No recent outcomes.")));
+
+      const support = document.getElementById("support");
+      clear(support);
+      const first = el("div", "support-card");
+      first.appendChild(el("strong", "", "First review"));
+      first.appendChild(el("div", "", text(data.first_review?.summary, "No first review state recorded.")));
+      support.appendChild(first);
+      const safety = el("div", "support-card");
+      safety.appendChild(el("strong", "", "Integration safety"));
+      safety.appendChild(el("div", "", text(data.task?.integration_safety?.summary, "No integration safety result recorded.")));
+      support.appendChild(safety);
+      const signals = el("div", "support-card");
+      signals.appendChild(el("strong", "", "Active Signals"));
+      const activeSignals = Array.isArray(data.signals?.active) ? data.signals.active : [];
+      signals.appendChild(el("div", "", activeSignals.length ? activeSignals.map(item => item.id).join(", ") : "No active automation signals."));
+      support.appendChild(signals);
+      const triage = el("div", "support-card");
+      triage.appendChild(el("strong", "", "Deferred triage"));
+      triage.appendChild(el("div", "", text(data.progress?.deferred_triage?.summary, "No deferred patch backlog recorded.")));
+      support.appendChild(triage);
+    }
+    function renderTimeline(data) {
+      const events = eventsFor(data);
+      const timeline = document.getElementById("timeline");
+      clear(timeline);
+      document.getElementById("timelineCount").textContent = events.length + " event" + (events.length === 1 ? "" : "s");
+      if (!events.length) {
+        timeline.appendChild(el("div", "timeline-card selected", text(data.empty_states?.timeline, "No conveyor timeline yet.")));
+        return;
+      }
+      if (selectedEventIndex === null || selectedEventIndex >= events.length) selectedEventIndex = events.length - 1;
+      events.forEach((event, index) => {
+        const card = el("button", "timeline-card" + (index === selectedEventIndex ? " selected" : ""));
+        card.type = "button";
+        const row = el("div", "timeline-role");
+        row.appendChild(el("span", "", text(event.role, "role")));
+        row.appendChild(chip(eventStatus(event), eventStatus(event)));
+        card.appendChild(row);
+        card.appendChild(el("div", "timeline-time", timeLabel(eventTime(event)) + " | exit " + text(event.exit_code, "running")));
+        card.appendChild(el("div", "timeline-reason", text(event.reason, "No reason recorded.")));
+        card.addEventListener("click", () => {
+          selectedEventIndex = index;
+          renderStory(currentData);
+          renderTimeline(currentData);
+        });
+        timeline.appendChild(card);
+      });
+    }
+    function render(data) {
+      currentData = data || {};
+      document.getElementById("generated").textContent = "Updated " + text(currentData.generated_at, "now");
+      document.getElementById("targetName").textContent = text(currentData.target_name, "target");
+      renderMission(currentData);
+      renderMetrics(currentData);
+      renderBelt(currentData);
+      renderStory(currentData);
+      renderLanded(currentData);
+      renderSupport(currentData);
+      renderTimeline(currentData);
+    }
+    async function refresh() {
+      if (!STATE_URL) {
+        render(INITIAL_STATE);
+        return;
+      }
+      try {
+        const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
+        render(await response.json());
+      } catch (error) {
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {commits: []}, queue: {totals: {}, counts_by_role: {}, manifests: [], recent_outcomes: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, review: {}, empty_states: {}};
+        fallback.progress_recent = "Observatory refresh failed: " + error;
+        render(fallback);
+      }
+    }
+    refresh();
+    if (STATE_URL) setInterval(refresh, 2500);
+  </script>
+</body>
+</html>
+"""
+
+
 def render_html(snapshot: dict[str, Any], *, live: bool) -> str:
     initial_json = json.dumps(snapshot, sort_keys=True).replace("</", "<\\/")
     state_url = '"/state.json"' if live else "null"
     return (
-        HTML_TEMPLATE.replace("__INITIAL_STATE__", initial_json)
+        REPLAY_HTML_TEMPLATE.replace("__INITIAL_STATE__", initial_json)
         .replace("__STATE_URL__", state_url)
     )
 

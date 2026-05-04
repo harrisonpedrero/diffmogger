@@ -17,6 +17,7 @@ BASE_REQUIRED = [
     "scripts/run_conveyor_automation.py",
     "scripts/run_conveyor_automation.sh",
     "scripts/run_observatory.py",
+    "scripts/build_replay.py",
     "scripts/repair_environment.py",
     "scripts/update_automation_signals.py",
     "scripts/spawn_worker_agent.sh",
