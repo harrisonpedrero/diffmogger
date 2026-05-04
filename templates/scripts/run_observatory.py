@@ -29,6 +29,7 @@ MAX_LOG_LINE_CHARS = 220
 MAX_SIGNALS = 8
 MAX_REVIEW_ITEMS = 6
 MAX_CHECK_ITEMS = 8
+MAX_SCORECARD_ITEMS = 8
 EMPTY_STATES = {
     "next_up": "No conveyor decision yet. After the first conveyor cycle, the next local role lane and reason will appear here.",
     "patch_queue": "No queued or deferred patches yet. First role patch manifests will appear here after builder, hardener, or planner lanes write local queue outputs.",
@@ -87,7 +88,7 @@ def process_alive(pid: Any) -> bool:
 
 
 def clean_text(value: Any, *, limit: int = 240) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(r"\s+", " ", "" if value is None else str(value)).strip()
     if len(text) > limit:
         return text[: max(0, limit - 15)].rstrip() + " ... [truncated]"
     return text
@@ -488,14 +489,156 @@ def no_progress_summary(no_progress: dict[str, Any]) -> str:
 
 
 def progress_snapshot(progress_text: str) -> dict[str, Any]:
+    accepted_by_role = cumulative_role_counts(progress_text, "Accepted patches by role")
+    deferred_by_role = cumulative_role_counts(progress_text, "Deferred patches by role")
     deferred_depth = 0
     match = re.search(r"^-\s*Current deferred queue depth:\s*(\d+)", progress_text, re.MULTILINE)
     if match:
         deferred_depth = int(match.group(1))
     return {
         "recent_activity": first_nonempty_section_line(progress_text, "Recent Activity Log") or "No multi-role activity recorded yet.",
+        "integrator_runs": cumulative_metric_int(progress_text, "Total integrator runs"),
+        "accepted_by_role": accepted_by_role,
+        "accepted_total": sum(accepted_by_role.values()),
+        "deferred_by_role": deferred_by_role,
+        "deferred_total": sum(deferred_by_role.values()),
         "deferred_queue_depth": deferred_depth,
         "deferred_backlog": section_bullets(progress_text, "Deferred-Patch Backlog", limit=MAX_REVIEW_ITEMS),
+    }
+
+
+def cumulative_metric_int(progress_text: str, key: str) -> int:
+    section = markdown_section(progress_text, "Cumulative Metrics")
+    match = re.search(rf"^-\s*{re.escape(key)}:\s*(\d+)", section, re.MULTILINE)
+    return int(match.group(1)) if match else 0
+
+
+def cumulative_role_counts(progress_text: str, key: str) -> dict[str, int]:
+    section = markdown_section(progress_text, "Cumulative Metrics")
+    counts = {role: 0 for role in ROLES if role != "integrator"}
+    in_target_block = False
+    for raw in section.splitlines():
+        if re.match(rf"^-\s*{re.escape(key)}:\s*$", raw):
+            in_target_block = True
+            continue
+        if not in_target_block:
+            continue
+        if raw.startswith("- "):
+            break
+        item = re.match(r"\s+-\s+([A-Za-z0-9_-]+):\s*(\d+)\s*$", raw)
+        if not item:
+            continue
+        role = item.group(1)
+        if role in counts:
+            counts[role] = int(item.group(2))
+    return counts
+
+
+def role_count_summary(counts: dict[str, int], *, empty: str) -> str:
+    parts = [f"{role} {int(counts.get(role, 0) or 0)}" for role in ROLES if role in counts and int(counts.get(role, 0) or 0)]
+    return ", ".join(parts) if parts else empty
+
+
+def scorecard_snapshot(
+    task: dict[str, Any],
+    queue: dict[str, Any],
+    signals: dict[str, Any],
+    conveyor: dict[str, Any],
+    human: dict[str, int],
+    progress: dict[str, Any],
+) -> dict[str, Any]:
+    totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
+    validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
+    validation_counts = validation.get("counts") if isinstance(validation.get("counts"), dict) else {}
+    accepted_by_role = progress.get("accepted_by_role") if isinstance(progress.get("accepted_by_role"), dict) else {}
+    deferred_by_role = progress.get("deferred_by_role") if isinstance(progress.get("deferred_by_role"), dict) else {}
+    accepted_total = int(progress.get("accepted_total", 0) or 0)
+    cumulative_deferred = int(progress.get("deferred_total", 0) or 0)
+    queued = int(totals.get("queued", 0) or 0)
+    deferred_manifest_count = int(totals.get("deferred", 0) or 0)
+    deferred_backlog = int(progress.get("deferred_queue_depth", 0) or 0)
+    deferred_pressure = max(deferred_manifest_count, deferred_backlog)
+    active_signals = int(signals.get("active_count", 0) or 0)
+    pending_human = int(human.get("pending_requests", 0) or 0) + int(human.get("unhandled_inbox", 0) or 0)
+    pass_count = int(validation_counts.get("pass", 0) or 0)
+    fail_count = int(validation_counts.get("fail", 0) or 0)
+    no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
+    no_progress_active = bool(no_progress.get("active"))
+
+    attention_count = sum(
+        1
+        for flag in [
+            bool(fail_count),
+            bool(active_signals),
+            bool(queued or deferred_pressure),
+            bool(pending_human),
+            no_progress_active,
+        ]
+        if flag
+    )
+    status = "attention" if attention_count else "clear"
+    queue_detail = (
+        f"{queued} queued, {deferred_pressure} deferred backlog item(s), {cumulative_deferred} cumulative deferral(s)."
+        if queued or deferred_pressure or cumulative_deferred
+        else "No queued or deferred patch pressure recorded."
+    )
+    validation_detail = (
+        f"{pass_count} pass, {fail_count} fail from the last recorded run."
+        if pass_count or fail_count
+        else validation.get("summary") or "No validation checks recorded yet."
+    )
+    summary_parts = [
+        f"{accepted_total} accepted patch(es)",
+        f"{queued} queued / {deferred_pressure} deferred",
+        f"{active_signals} active signal(s)",
+        f"{fail_count} validation issue(s)",
+    ]
+    if pending_human:
+        summary_parts.append(f"{pending_human} human bridge item(s)")
+    if no_progress_active:
+        summary_parts.append("no-progress circuit active")
+
+    return {
+        "status": status,
+        "summary": "; ".join(summary_parts) + ".",
+        "items": [
+            {
+                "label": "Accepted patches",
+                "value": accepted_total,
+                "detail": role_count_summary(accepted_by_role, empty="No accepted role patches recorded."),
+                "kind": "good" if accepted_total else "info",
+            },
+            {
+                "label": "Deferred pressure",
+                "value": f"{queued}/{deferred_pressure}",
+                "detail": queue_detail,
+                "kind": "warn" if queued or deferred_pressure else "good",
+            },
+            {
+                "label": "Validation",
+                "value": f"{pass_count}/{fail_count}",
+                "detail": validation_detail,
+                "kind": "bad" if fail_count else ("good" if pass_count else "info"),
+            },
+            {
+                "label": "Signals due",
+                "value": active_signals,
+                "detail": f"{active_signals} active recurring automation nudge(s).",
+                "kind": "warn" if active_signals else "good",
+            },
+            {
+                "label": "Human bridge",
+                "value": pending_human,
+                "detail": f"{int(human.get('pending_requests', 0) or 0)} pending request(s), {int(human.get('unhandled_inbox', 0) or 0)} unhandled inbox message(s).",
+                "kind": "warn" if pending_human else "good",
+            },
+            {
+                "label": "Conveyor cycles",
+                "value": int(conveyor.get("cycles", 0) or 0),
+                "detail": f"{int(progress.get('integrator_runs', 0) or 0)} integrator run(s); cumulative deferrals by role: {role_count_summary(deferred_by_role, empty='none')}.",
+                "kind": "warn" if no_progress_active else "info",
+            },
+        ][:MAX_SCORECARD_ITEMS],
     }
 
 
@@ -613,6 +756,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "signals": signals,
         "conveyor": conveyor_state,
         "progress": progress,
+        "scorecard": scorecard_snapshot(task, queue, signals, conveyor_state, human, progress),
         "review": self_review_snapshot(task, queue, signals, conveyor_state, human, progress),
         "empty_states": dict(EMPTY_STATES),
         "progress_recent": progress.get("recent_activity") or "No multi-role activity recorded yet.",
@@ -851,6 +995,35 @@ HTML_TEMPLATE = r"""<!doctype html>
     .check-list {
       margin-top: 12px;
     }
+    .score-summary {
+      margin-bottom: 10px;
+      color: var(--muted);
+    }
+    .scorecard-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .scorecard-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #14181b;
+      min-height: 112px;
+    }
+    .scorecard-item b {
+      display: block;
+      font-size: 24px;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .scorecard-item strong {
+      display: block;
+      margin: 8px 0 4px;
+    }
+    .scorecard-item.good { border-color: rgba(87,199,133,.5); }
+    .scorecard-item.warn { border-color: rgba(240,184,79,.6); }
+    .scorecard-item.bad { border-color: rgba(255,107,107,.6); }
     .status-line {
       display: flex;
       flex-wrap: wrap;
@@ -918,6 +1091,13 @@ HTML_TEMPLATE = r"""<!doctype html>
           <div class="content">
             <div class="review-list" id="selfReview"></div>
             <div class="check-list" id="checkList"></div>
+          </div>
+        </section>
+        <section>
+          <h2>Scorecard</h2>
+          <div class="content">
+            <div class="score-summary" id="scoreSummary"></div>
+            <div class="scorecard-grid" id="scorecard"></div>
           </div>
         </section>
         <section>
@@ -1095,6 +1275,20 @@ HTML_TEMPLATE = r"""<!doctype html>
       });
       if (!checkList.children.length) checkList.appendChild(el("div", "item muted", "No validation checks recorded yet."));
 
+      const scorecardState = data.scorecard || {};
+      const scoreSummary = document.getElementById("scoreSummary");
+      scoreSummary.textContent = (scorecardState.summary || "No scorecard metrics recorded yet.") + " Status: " + (scorecardState.status || "unknown") + ".";
+      const scorecard = document.getElementById("scorecard");
+      clear(scorecard);
+      (scorecardState.items || []).forEach(item => {
+        const row = el("div", "scorecard-item " + (item.kind || "info"));
+        row.appendChild(el("b", "", String(item.value ?? "0")));
+        row.appendChild(el("strong", "", item.label || "Metric"));
+        row.appendChild(el("div", "muted", item.detail || "No detail recorded."));
+        scorecard.appendChild(row);
+      });
+      if (!scorecard.children.length) scorecard.appendChild(el("div", "item muted", "No scorecard metrics recorded yet."));
+
       const metrics = document.getElementById("metrics");
       clear(metrics);
       const signalState = data.signals || {};
@@ -1242,7 +1436,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
         render(await response.json());
       } catch (error) {
-        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
         fallback.progress_recent = "Observatory refresh failed: " + error;
         render(fallback);
       }
@@ -1275,6 +1469,7 @@ def append_markdown_bullets(lines: list[str], items: list[Any], *, empty: str) -
 
 def render_review_markdown(snapshot: dict[str, Any]) -> str:
     task = snapshot.get("task") if isinstance(snapshot.get("task"), dict) else {}
+    scorecard = snapshot.get("scorecard") if isinstance(snapshot.get("scorecard"), dict) else {}
     review = snapshot.get("review") if isinstance(snapshot.get("review"), dict) else {}
     signals = snapshot.get("signals") if isinstance(snapshot.get("signals"), dict) else {}
     queue = snapshot.get("queue") if isinstance(snapshot.get("queue"), dict) else {}
@@ -1308,6 +1503,19 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
         review_item_count += 1
     if not review_item_count:
         lines.append("- No self-review state recorded yet.")
+
+    lines.extend(["", "## Scorecard", ""])
+    lines.append(f"- status: {clean_text(scorecard.get('status') or 'unknown', limit=80)}")
+    lines.append(f"- summary: {clean_text(scorecard.get('summary') or 'No scorecard metrics recorded yet.', limit=500)}")
+    scorecard_items = [item for item in list(scorecard.get("items") or []) if isinstance(item, dict)]
+    if scorecard_items:
+        for item in scorecard_items[:MAX_SCORECARD_ITEMS]:
+            label = clean_text(item.get("label") or "Metric", limit=80)
+            value = clean_text(item.get("value") if item.get("value") is not None else "0", limit=80)
+            detail = clean_text(item.get("detail") or "No detail recorded.", limit=420)
+            lines.append(f"- {label}: {value} - {detail}")
+    else:
+        lines.append("- No scorecard metrics recorded yet.")
 
     lines.extend(["", "## Validation", ""])
     checks = [item for item in list(review.get("checks") or []) if isinstance(item, dict)]

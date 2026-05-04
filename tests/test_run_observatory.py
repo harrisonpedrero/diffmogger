@@ -168,6 +168,15 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
             ## Cumulative Metrics
 
+            - Total integrator runs: 15
+            - Accepted patches by role:
+              - planner: 3
+              - builder: 6
+              - hardener: 4
+            - Deferred patches by role:
+              - planner: 2
+              - builder: 1
+              - hardener: 0
             - Current deferred queue depth: 1
 
             ## Recent Activity Log
@@ -342,6 +351,12 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("human-inbox-triage", review_items["Signals"])
                     self.assertIn("1 queued", review_items["Queue and conveyor"])
                     self.assertIn("No-progress circuit breaker active", review_items["Queue and conveyor"])
+                    self.assertEqual(snapshot["scorecard"]["status"], "attention")
+                    scorecard_items = {item["label"]: item for item in snapshot["scorecard"]["items"]}
+                    self.assertEqual(scorecard_items["Accepted patches"]["value"], 13)
+                    self.assertIn("builder 6", scorecard_items["Accepted patches"]["detail"])
+                    self.assertEqual(scorecard_items["Deferred pressure"]["value"], "1/1")
+                    self.assertEqual(scorecard_items["Validation"]["value"], "1/1")
 
     def test_review_markdown_export_summarizes_local_state(self) -> None:
         for path, module in self.modules:
@@ -364,6 +379,9 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(exit_code, 0)
                     self.assertIn("# Diffmogger Self-Review Snapshot", report)
                     self.assertIn("automation_status: `ACTIVE`", report)
+                    self.assertIn("## Scorecard", report)
+                    self.assertIn("Accepted patches: 13", report)
+                    self.assertIn("Deferred pressure: 1/1", report)
                     self.assertIn("## Validation", report)
                     self.assertIn("PASS:", report)
                     self.assertIn("FAIL:", report)
@@ -393,6 +411,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(decision["state"], "first-run")
                     self.assertIn("first conveyor cycle", decision["reason"])
                     self.assertIn("No conveyor timeline yet", html)
+                    self.assertIn("Scorecard", html)
                     self.assertIn("first_run_queue_state:", report)
                     self.assertIn("First role patch manifests", report)
 

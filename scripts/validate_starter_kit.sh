@@ -392,6 +392,7 @@ for marker in [
 	    "--open",
 	    "--review-output",
 	    "Self Review",
+	    "Scorecard",
 	    "no_progress_circuit",
 	    "Active Signals",
 	    "Conveyor Health",
@@ -1309,7 +1310,29 @@ target = Path(sys.argv[1])
     encoding="utf-8",
 )
 (target / "docs/MULTI_ROLE_PROGRESS.md").write_text(
-    "# Multi-Role Progress\n\n## Recent Activity Log\n\n- builder queued an observatory smoke patch.\n",
+    "\n".join(
+        [
+            "# Multi-Role Progress",
+            "",
+            "## Cumulative Metrics",
+            "",
+            "- Total integrator runs: 2",
+            "- Accepted patches by role:",
+            "  - planner: 1",
+            "  - builder: 2",
+            "  - hardener: 1",
+            "- Deferred patches by role:",
+            "  - planner: 1",
+            "  - builder: 0",
+            "  - hardener: 0",
+            "- Current deferred queue depth: 1",
+            "",
+            "## Recent Activity Log",
+            "",
+            "- builder queued an observatory smoke patch.",
+        ]
+    )
+    + "\n",
     encoding="utf-8",
 )
 (target / "target/automation_logs/conveyor.stdout.log").write_text(
@@ -1434,7 +1457,7 @@ target = Path(sys.argv[1])
 )
 PY
 python3 scripts/run_observatory.py --target "$tmp_dir" --once --output "$tmp_dir/target/observatory/index.html" >/tmp/Diffmogger-observatory-render.log
-for marker in "Diffmogger Observatory" "Conveyor Belt" "Active Signals" "prompt-self-audit" "run-observe" "builder" "Conveyor Health" "NO-PROGRESS CIRCUIT" "staleness:no_detail" "Recent Outcomes" "run-skipped" "skipped" "hardener/integrator churn"; do
+for marker in "Diffmogger Observatory" "Conveyor Belt" "Active Signals" "prompt-self-audit" "run-observe" "builder" "Conveyor Health" "Scorecard" "Accepted patches" "NO-PROGRESS CIRCUIT" "staleness:no_detail" "Recent Outcomes" "run-skipped" "skipped" "hardener/integrator churn"; do
     if ! grep -q "$marker" "$tmp_dir/target/observatory/index.html"; then
         echo "Observatory render smoke missing marker: $marker" >&2
         rm -rf "$tmp_dir"
