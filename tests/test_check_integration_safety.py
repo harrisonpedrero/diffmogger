@@ -9,10 +9,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "check_integration_safety.py"
+DASHBOARD_APP_PATH = ROOT / "services" / "agentic-dashboard" / "agentic_dashboard" / "app.py"
 
 
 def load_checker():
     spec = importlib.util.spec_from_file_location("check_integration_safety", SCRIPT_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_dashboard():
+    spec = importlib.util.spec_from_file_location("dashboard_under_test", DASHBOARD_APP_PATH)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -125,6 +136,34 @@ class IntegrationSafetyCheckTests(unittest.TestCase):
             self.assertTrue(
                 any(problem.detail == "notifier settings must default to dry-run" for problem in problems)
             )
+
+
+class DashboardIntegrationSafetyAffordanceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = load_dashboard()
+
+    def test_dashboard_smoke_check_requires_integration_safety_script(self) -> None:
+        self.assertEqual(0, self.module.smoke_check())
+
+    def test_integration_safety_command_uses_selected_kit_like_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "scripts").mkdir()
+            (target / "scripts" / "check_integration_safety.py").write_text("", encoding="utf-8")
+            (target / "services" / "agentic-notifier").mkdir(parents=True)
+
+            command = self.module.integration_safety_command(target)
+
+            self.assertEqual(sys.executable, command[0])
+            self.assertEqual(str(self.module.INTEGRATION_SAFETY_SCRIPT), command[1])
+            self.assertEqual(str(target.resolve()), command[2])
+
+    def test_integration_safety_command_falls_back_to_kit_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            command = self.module.integration_safety_command(Path(tmp))
+
+            self.assertEqual(str(ROOT), command[2])
 
 
 if __name__ == "__main__":

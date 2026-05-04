@@ -31,6 +31,7 @@ SCRIPTS_DIR = KIT_ROOT / "scripts"
 SCAFFOLD_SCRIPT = SCRIPTS_DIR / "scaffold_project_docs.py"
 CHECK_REQUIRED_SCRIPT = SCRIPTS_DIR / "check_required_files.py"
 OBSERVATORY_SCRIPT = SCRIPTS_DIR / "run_observatory.py"
+INTEGRATION_SAFETY_SCRIPT = SCRIPTS_DIR / "check_integration_safety.py"
 LAUNCHD_LABEL_PREFIX = "com.diffmogger.automation"
 SCHEDULABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
 MIN_CADENCE_MINUTES = 30
@@ -543,6 +544,29 @@ def format_prerequisites(items: list[PrerequisiteItem]) -> str:
 
 def required_failures(items: list[PrerequisiteItem]) -> list[PrerequisiteItem]:
     return [item for item in items if item.required and not item.ok]
+
+
+def has_integration_safety_tree(target: Path) -> bool:
+    target = target.expanduser()
+    return (
+        (target / "scripts" / "check_integration_safety.py").is_file()
+        and (target / "services" / "agentic-notifier").is_dir()
+    )
+
+
+def resolve_integration_safety_target(target: Path) -> Path:
+    target = target.expanduser()
+    if has_integration_safety_tree(target):
+        return target.resolve()
+    return KIT_ROOT
+
+
+def integration_safety_command(target: Path) -> list[str]:
+    return [
+        sys.executable,
+        str(INTEGRATION_SAFETY_SCRIPT),
+        str(resolve_integration_safety_target(target)),
+    ]
 
 
 def safe_context_filename(name: str) -> str:
@@ -1209,6 +1233,12 @@ if TK_AVAILABLE:
             ttk.Button(target_row, text="Browse", command=self.browse_target).grid(row=0, column=2, padx=8)
             ttk.Button(target_row, text="Refresh", command=self.refresh_all).grid(row=0, column=3)
             ttk.Button(target_row, text="Launch Observatory", command=self.launch_observatory).grid(row=0, column=4, padx=(8, 0))
+            self.integration_safety_button = ttk.Button(
+                target_row,
+                text="Run Safety Check",
+                command=self.run_integration_safety_check,
+            )
+            self.integration_safety_button.grid(row=0, column=5, padx=(8, 0))
 
             summary = ttk.LabelFrame(self.monitor_tab, text="Status")
             summary.grid(row=1, column=0, sticky="ew", pady=10)
@@ -2231,6 +2261,53 @@ if TK_AVAILABLE:
             self.observatory_processes.append(process)
             self._append_log("Launched local observatory page for the selected target.")
 
+        def run_integration_safety_check(self) -> None:
+            if self.running:
+                messagebox.showinfo("Process running", "A dashboard-launched process is already running.")
+                return
+            if not INTEGRATION_SAFETY_SCRIPT.exists():
+                messagebox.showerror(
+                    "Safety check unavailable",
+                    f"Missing integration-safety helper:\n\n{INTEGRATION_SAFETY_SCRIPT}",
+                )
+                return
+            target_text = self.target_var.get().strip()
+            selected_target = Path(target_text).expanduser() if target_text else KIT_ROOT
+            check_target = resolve_integration_safety_target(selected_target)
+            if check_target == KIT_ROOT and not has_integration_safety_tree(selected_target):
+                self._append_log(
+                    "Selected target does not include starter-kit integration files; checking the Diffmogger kit source instead."
+                )
+            self.running = True
+            self.open_project_button.configure(state="disabled")
+            self.scaffold_button.configure(state="disabled")
+            self.run_automation_button.configure(state="disabled")
+            self.pause_automation_button.configure(state="disabled")
+            self.remove_schedule_button.configure(state="disabled")
+            self.integration_safety_button.configure(state="disabled")
+            self.cancel_button.configure(state="normal")
+            self._append_log(f"Starting integration safety check for {check_target}.")
+            thread = threading.Thread(
+                target=self._integration_safety_worker,
+                args=(check_target,),
+                daemon=True,
+            )
+            thread.start()
+
+        def _integration_safety_worker(self, target: Path) -> None:
+            try:
+                code = self._run_command(integration_safety_command(target), cwd=KIT_ROOT)
+                if code == 0:
+                    self._thread_log("Integration safety check passed.")
+                else:
+                    self._thread_log(f"Integration safety check failed with code {code}.")
+            except Exception as exc:
+                self._thread_log(f"ERROR: {exc}")
+            finally:
+                self.current_process = None
+                self.events.put(("refresh", None))
+                self.events.put(("done", None))
+
         def load_selected_human_doc(self) -> None:
             target = Path(self.target_var.get().strip() or ".").expanduser()
             rel = HUMAN_DOC_CHOICES.get(self.human_doc_choice_var.get(), "docs/HUMAN_REQUESTS.md")
@@ -2467,12 +2544,16 @@ if TK_AVAILABLE:
             if self.running:
                 if hasattr(self, "open_project_button"):
                     self.open_project_button.configure(state="disabled")
+                if hasattr(self, "integration_safety_button"):
+                    self.integration_safety_button.configure(state="disabled")
                 self.run_automation_button.configure(state="disabled")
                 self.pause_automation_button.configure(state="disabled")
                 self.remove_schedule_button.configure(state="disabled")
                 return
             if hasattr(self, "open_project_button"):
                 self.open_project_button.configure(state="normal")
+            if hasattr(self, "integration_safety_button"):
+                self.integration_safety_button.configure(state="normal" if INTEGRATION_SAFETY_SCRIPT.exists() else "disabled")
             target_text = self.target_var.get().strip()
             if not target_text:
                 self.run_automation_button.configure(state="disabled")
@@ -2820,7 +2901,7 @@ if TK_AVAILABLE:
 
 def smoke_check() -> int:
     problems: list[str] = []
-    for path in [SCAFFOLD_SCRIPT, CHECK_REQUIRED_SCRIPT, OBSERVATORY_SCRIPT]:
+    for path in [SCAFFOLD_SCRIPT, CHECK_REQUIRED_SCRIPT, OBSERVATORY_SCRIPT, INTEGRATION_SAFETY_SCRIPT]:
         if not path.exists():
             problems.append(f"Missing required script: {path}")
     if problems:

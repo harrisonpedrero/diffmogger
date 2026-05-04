@@ -542,7 +542,10 @@ for marker in [
     "write_role_launchd_plist",
     "write_conveyor_launchd_plist",
     "OBSERVATORY_SCRIPT",
+    "INTEGRATION_SAFETY_SCRIPT",
     "Launch Observatory",
+    "Run Safety Check",
+    "check_integration_safety.py",
     "run_observatory.py",
     "run_conveyor_automation.sh",
     "DEFAULT_AUTOMATION_PATH",
@@ -565,6 +568,7 @@ for marker in [
     "docs/context/",
     "docs/PROJECT_CONTEXT.md",
     "Codex CLI installed and signed in",
+    "Run Safety Check",
 ]:
     if marker not in dashboard_readme:
         print(f"Dashboard README missing marker: {marker}", file=sys.stderr)

@@ -29,6 +29,7 @@ It opens a native desktop window using Python's standard-library Tkinter runtime
 - removes dashboard-managed schedules by deleting the target LaunchAgent plist(s)
 - renders selected automation Markdown files
 - launches an optional local browser observatory for active signal nudges, conveyor health, active roles, queued/deferred patches, recent outcomes, and timeline events
+- runs `scripts/check_integration_safety.py` from the Monitor tab with **Run Safety Check** and shows the output in the bounded dashboard log
 - lets a human send file-only messages to the next automation run when SMS/WhatsApp is disabled or unavailable
 - displays prerequisites as readiness checks instead of raw command output
 
