@@ -151,6 +151,12 @@ context_paths=(
 )
 
 runtime_state_paths=(
+  ".agentic/automation_prompt.md"
+  ".agentic/verification_commands.txt"
+  ".agentic/roles/planner.md"
+  ".agentic/roles/builder.md"
+  ".agentic/roles/hardener.md"
+  ".agentic/roles/integrator.md"
   "docs/HUMAN_INBOX.md"
   "docs/HUMAN_RESPONSES_ARCHIVE.md"
   "docs/HUMAN_REQUESTS.md"

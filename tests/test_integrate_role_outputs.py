@@ -77,6 +77,31 @@ class RuntimeStateActionTests(unittest.TestCase):
                     self.assertEqual(manifest["runtime_state_status"], "applied")
                     self.assertEqual(results[0]["status"], "applied")
 
+    def test_runtime_state_applies_live_role_prompt_updates(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    prompt = target / ".agentic" / "roles" / "builder.md"
+                    prompt.parent.mkdir(parents=True)
+                    prompt.write_text("old builder prompt\n", encoding="utf-8")
+                    manifest = self.write_actions(
+                        target,
+                        [
+                            self.replace_action(
+                                ".agentic/roles/builder.md",
+                                "old builder prompt\n",
+                                "new builder prompt\n",
+                            )
+                        ],
+                    )
+
+                    results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
+
+                    self.assertEqual(prompt.read_text(encoding="utf-8"), "new builder prompt\n")
+                    self.assertEqual(manifest["runtime_state_status"], "applied")
+                    self.assertEqual(results[0]["status"], "applied")
+
     def test_runtime_state_conflict_defers_without_overwrite(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):

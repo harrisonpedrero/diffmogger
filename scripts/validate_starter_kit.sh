@@ -459,6 +459,8 @@ for marker in [
     "runtime_state_actions.json",
     "runtime_state_changed_files",
     "runtime_state_status",
+    ".agentic/automation_prompt.md",
+    ".agentic/roles/builder.md",
 ]:
     if marker not in run_role:
         print(f"Role runner template missing marker: {marker}", file=sys.stderr)
@@ -479,6 +481,8 @@ for marker in [
     "RUNTIME_STATE_WHITELIST",
     "apply_runtime_state_actions",
     "runtime_state_results",
+    ".agentic/automation_prompt.md",
+    ".agentic/roles/builder.md",
 ]:
     if marker not in integrator:
         print(f"Integrator template missing marker: {marker}", file=sys.stderr)
