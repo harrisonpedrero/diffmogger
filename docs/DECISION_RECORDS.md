@@ -132,6 +132,12 @@ Decision: generated targets include `scripts/run_conveyor_automation.sh` and `sc
 
 Why: work-conserving automation should keep useful local work moving when prior lanes finish early or role timing would otherwise leave gaps. The conveyor records reviewable local state, uses its own dispatcher lock, delegates mutation to existing wrappers, and prioritizes queued integration, fast-follow replanning for planner deferral changes, due planning, builder momentum, and one hardener pass after integrated builder work.
 
+## DR-023: Supersede Stale Planner Patches From Fresh HEAD
+
+Decision: when a planner patch is deferred for staleness and later accepted work already covers its intent, future planner work should treat the stale patch as superseded instead of retrying it. The integrator may keep the deferred manifest visible for audit, but replacement work should start from current `HEAD`.
+
+Why: planner patches coordinate future work; they should not churn current docs or schedules from an obsolete base. Fast-follow replanning after planner deferrals gives the system a fresh planning pass without disrupting builder/hardener momentum.
+
 ## Source Summary From References
 
 Local playbook PDF:
