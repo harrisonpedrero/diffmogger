@@ -507,6 +507,93 @@ class ObservatorySnapshotTests(unittest.TestCase):
             },
         )
 
+    def seed_queued_integrator_target(self, root: Path) -> None:
+        self.write_text(
+            root,
+            "docs/CODEX_AUTOMATION_TASKS.md",
+            """
+            # Codex Automation Tasks
+
+            AUTOMATION_STATUS: ACTIVE
+
+            Last updated: 2026-05-03T23:10:00+00:00
+
+            ## Current Project State
+
+            - Current assessment: Queued patch export fixture is ready.
+
+            ## Product Horizon State
+
+            - Current horizon: H4 Evaluation/reporting/comparison layer
+            - Advancement decision: stay
+
+            ## Checks From Last Run
+
+            - PASS: `bash scripts/validate_starter_kit.sh`
+
+            ## Known Issues
+
+            None.
+
+            ## Suggested Next Sprint-Sized Task
+
+            Continue builder momentum with the next scoped local increment.
+            """,
+        )
+        self.write_text(
+            root,
+            "docs/MULTI_ROLE_PROGRESS.md",
+            """
+            # Multi-Role Progress
+
+            ## Cumulative Metrics
+
+            - Total integrator runs: 2
+            - Accepted patches by role:
+              - planner: 0
+              - builder: 1
+              - hardener: 0
+            - Deferred patches by role:
+              - planner: 0
+              - builder: 0
+              - hardener: 0
+            - Current deferred queue depth: 0
+
+            ## Recent Activity Log
+
+            - builder queued a local observatory export patch.
+
+            ## Deferred-Patch Backlog
+
+            None.
+            """,
+        )
+        self.write_json(
+            root,
+            "target/automation_queue/builder/run-queued-export/manifest.json",
+            {
+                "role": "builder",
+                "run_id": "run-queued-export",
+                "status": "queued",
+                "summary": "Queued observatory export patch.",
+                "changed_files": ["scripts/run_observatory.py", "tests/test_run_observatory.py"],
+                "created_at": "2026-05-03T23:10:00+00:00",
+            },
+        )
+        self.write_json(
+            root,
+            "target/automation_conveyor_state.json",
+            {
+                "schema_version": 1,
+                "cycles": 3,
+                "updated_at": "2026-05-03T23:10:00+00:00",
+                "decision_queue": [
+                    {"role": "integrator", "state": "ready", "reason": "queued patch needs integration"}
+                ],
+                "history": [],
+            },
+        )
+
     def test_build_snapshot_counts_active_human_bridge_records(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
@@ -634,6 +721,36 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("## Action Plan", report)
                     self.assertIn("first_run_queue_state:", report)
                     self.assertIn("First role patch manifests", report)
+                    self.assertIn("No deferred patch backlog recorded", report)
+
+    def test_review_markdown_export_recommends_integrator_for_queued_patches(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_queued_integrator_target(target)
+                    output = target / "target" / "queued-self-review.md"
+
+                    exit_code = module.main(
+                        [
+                            "--target",
+                            str(target),
+                            "--review-output",
+                            str(output),
+                        ]
+                    )
+
+                    report = output.read_text(encoding="utf-8")
+                    self.assertEqual(exit_code, 0)
+                    self.assertIn("## Action Plan", report)
+                    self.assertIn("recommendation: Run integrator on 1 queued patch(es).", report)
+                    self.assertIn("lane: `integrator`", report)
+                    self.assertIn("## Action Follow-Through", report)
+                    self.assertIn("status: superseded", report)
+                    self.assertIn("current_recommendation: Run integrator on 1 queued patch(es).", report)
+                    self.assertIn("queued_patches: 1", report)
+                    self.assertIn("deferred_patches: 0", report)
+                    self.assertIn("next_lane: `integrator` (ready) - queued patch needs integration", report)
                     self.assertIn("No deferred patch backlog recorded", report)
 
     def test_action_plan_follow_through_marks_followed_completed_lane(self) -> None:
