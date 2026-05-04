@@ -150,6 +150,19 @@ context_paths=(
   "target/automation_signals.json"
 )
 
+runtime_state_paths=(
+  "docs/HUMAN_INBOX.md"
+  "docs/HUMAN_RESPONSES_ARCHIVE.md"
+  "docs/HUMAN_REQUESTS.md"
+  "docs/HUMAN_OUTBOX.md"
+  "docs/CODEX_AUTOMATION_TASKS.md"
+  "docs/MULTI_ROLE_PROGRESS.md"
+  "target/automation_signals.json"
+)
+runtime_state_start_path="$queue_dir/runtime_state_start.json"
+runtime_state_actions_path="$queue_dir/runtime_state_actions.json"
+runtime_state_changed_files_path="$queue_dir/runtime_state_changed_files.txt"
+
 context_excludes=()
 for rel in "${context_paths[@]}"; do
   context_excludes+=(":(exclude)$rel")
@@ -174,6 +187,31 @@ seed_context_path() {
 for rel in "${context_paths[@]}"; do
   seed_context_path "$rel"
 done
+
+python3 - "$target_abs" "$runtime_state_start_path" "${runtime_state_paths[@]}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+output = Path(sys.argv[2])
+paths = sys.argv[3:]
+
+def sha256(path: Path) -> str | None:
+    if not path.exists() or not path.is_file() or path.is_symlink():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+snapshot = {"schema_version": 1, "files": {}}
+for rel in paths:
+    path = target / rel
+    snapshot["files"][rel] = {
+        "exists": path.exists() and path.is_file() and not path.is_symlink(),
+        "sha256": sha256(path),
+    }
+output.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
 
 set +e
 codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" -C "$worktree_dir" "$(cat "$prompt_path")" >"$run_stdout" 2>"$run_stderr"
@@ -301,6 +339,61 @@ fi
   cat "$run_stderr"
 } >"$raw_log"
 
+python3 - "$worktree_dir" "$runtime_state_start_path" "$runtime_state_actions_path" "$runtime_state_changed_files_path" "${runtime_state_paths[@]}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+worktree = Path(sys.argv[1])
+start_path = Path(sys.argv[2])
+actions_path = Path(sys.argv[3])
+changed_path = Path(sys.argv[4])
+paths = sys.argv[5:]
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+try:
+    start = json.loads(start_path.read_text(encoding="utf-8"))
+except Exception:
+    start = {"files": {}}
+start_files = start.get("files") if isinstance(start.get("files"), dict) else {}
+
+actions = []
+changed = []
+for rel in paths:
+    file_info = start_files.get(rel) if isinstance(start_files.get(rel), dict) else {}
+    start_hash = file_info.get("sha256")
+    path = worktree / rel
+    if not path.exists() or not path.is_file() or path.is_symlink():
+        continue
+    data = path.read_bytes()
+    end_hash = sha256_bytes(data)
+    if end_hash == start_hash:
+        continue
+    try:
+        content = data.decode("utf-8")
+    except UnicodeDecodeError:
+        continue
+    actions.append(
+        {
+            "action": "replace_file",
+            "path": rel,
+            "start_hash": start_hash,
+            "end_hash": end_hash,
+            "content": content,
+        }
+    )
+    changed.append(rel)
+
+actions_path.write_text(
+    json.dumps({"schema_version": 1, "actions": actions}, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+changed_path.write_text("\n".join(changed) + ("\n" if changed else ""), encoding="utf-8")
+PY
+
 (
   cd "$worktree_dir"
   git ls-files --others --exclude-standard -z -- . "${context_excludes[@]}" >"$queue_dir/untracked_files.z"
@@ -321,7 +414,7 @@ if [[ ! -s "$summary_path" ]]; then
   } >"$summary_path"
 fi
 
-python3 - "$manifest_path" "$role" "$run_id" "$base_commit" "$patch_path" "$summary_path" "$codex_status" "$queue_dir/changed_files.txt" <<'PY'
+python3 - "$manifest_path" "$role" "$run_id" "$base_commit" "$patch_path" "$summary_path" "$codex_status" "$queue_dir/changed_files.txt" "$runtime_state_actions_path" "$runtime_state_changed_files_path" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
@@ -335,14 +428,22 @@ patch_path = Path(sys.argv[5])
 summary_path = Path(sys.argv[6])
 exit_code = int(sys.argv[7])
 changed_files_path = Path(sys.argv[8])
+runtime_state_actions_path = Path(sys.argv[9])
+runtime_state_changed_files_path = Path(sys.argv[10])
 changed_files = [
     line.strip()
     for line in changed_files_path.read_text(encoding="utf-8").splitlines()
     if line.strip()
 ] if changed_files_path.exists() else []
+runtime_state_changed_files = [
+    line.strip()
+    for line in runtime_state_changed_files_path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+] if runtime_state_changed_files_path.exists() else []
 summary = summary_path.read_text(encoding="utf-8", errors="replace")[:2000] if summary_path.exists() else ""
 patch_empty = not patch_path.exists() or patch_path.stat().st_size == 0
-status = "failed" if exit_code != 0 else ("skipped" if patch_empty else "queued")
+runtime_state_empty = not runtime_state_changed_files
+status = "failed" if exit_code != 0 else ("skipped" if patch_empty and runtime_state_empty else "queued")
 manifest = {
     "role": role,
     "run_id": run_id,
@@ -353,6 +454,10 @@ manifest = {
     "deferral_detail": "",
     "patch_path": str(patch_path),
     "changed_files": changed_files,
+    "runtime_state_actions_path": str(runtime_state_actions_path),
+    "runtime_state_changed_files": runtime_state_changed_files,
+    "runtime_state_status": "pending" if runtime_state_changed_files else "none",
+    "runtime_state_results": [],
     "checks_run": [],
     "summary": summary,
     "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -365,7 +470,7 @@ PY
 
 if [[ "$codex_status" != "0" ]]; then
   manifest_status="failed"
-elif [[ -s "$patch_path" ]]; then
+elif [[ -s "$patch_path" || -s "$runtime_state_changed_files_path" ]]; then
   manifest_status="queued"
 else
   manifest_status="skipped"

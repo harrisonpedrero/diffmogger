@@ -68,6 +68,7 @@ required_files=(
   "tests/test_run_observatory.py"
   "tests/test_run_conveyor_automation.py"
   "tests/test_repair_environment.py"
+  "tests/test_integrate_role_outputs.py"
   "examples/generic-web-app/project_intake.md"
   "examples/generic-web-app/expected_generated_files.md"
   "examples/trendlab-signal-intelligence/project_intake.md"
@@ -452,6 +453,9 @@ for marker in [
     "automation_queue",
     "automation_worktrees",
     "manifest.json",
+    "runtime_state_actions.json",
+    "runtime_state_changed_files",
+    "runtime_state_status",
 ]:
     if marker not in run_role:
         print(f"Role runner template missing marker: {marker}", file=sys.stderr)
@@ -469,6 +473,9 @@ for marker in [
     "git push",
     "worktree",
     "prune",
+    "RUNTIME_STATE_WHITELIST",
+    "apply_runtime_state_actions",
+    "runtime_state_results",
 ]:
     if marker not in integrator:
         print(f"Integrator template missing marker: {marker}", file=sys.stderr)
@@ -496,6 +503,8 @@ for path in [
     Path("templates/scripts/run_observatory.py"),
     Path("scripts/repair_environment.py"),
     Path("templates/scripts/repair_environment.py"),
+    Path("scripts/integrate_role_outputs.py"),
+    Path("templates/scripts/integrate_role_outputs.py"),
     Path("scripts/run_dashboard.py"),
     Path("services/agentic-dashboard/agentic_dashboard/app.py"),
 ]:
@@ -629,7 +638,7 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_repair_environment.py
+python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py
 
 python3 scripts/run_dashboard.py --smoke-check >/tmp/Diffmogger-dashboard-smoke.log
 

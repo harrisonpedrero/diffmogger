@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -29,6 +30,16 @@ DEFERRAL_REASONS = {
     "guardrail_violation",
     "other",
 }
+RUNTIME_STATE_WHITELIST = {
+    "docs/HUMAN_INBOX.md",
+    "docs/HUMAN_RESPONSES_ARCHIVE.md",
+    "docs/HUMAN_REQUESTS.md",
+    "docs/HUMAN_OUTBOX.md",
+    "docs/CODEX_AUTOMATION_TASKS.md",
+    "docs/MULTI_ROLE_PROGRESS.md",
+    "target/automation_signals.json",
+}
+RUNTIME_STATE_BLOCKING_STATUSES = {"blocked", "conflict", "error", "rejected"}
 PROGRESS_SECTIONS = [
     "Project State At Last Integration",
     "Cumulative Metrics",
@@ -244,11 +255,273 @@ def write_manifest(path: Path, manifest: dict[str, Any], *, dry_run: bool) -> No
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def file_sha256(path: Path) -> str | None:
+    if not path.exists() or not path.is_file() or path.is_symlink():
+        return None
+    return sha256_bytes(path.read_bytes())
+
+
 def resolve_patch_path(target: Path, manifest: dict[str, Any]) -> Path:
     patch = Path(str(manifest.get("patch_path") or ""))
     if patch.is_absolute():
         return patch
     return target / patch
+
+
+def resolve_runtime_state_actions_path(target: Path, manifest: dict[str, Any]) -> Path | None:
+    raw = str(manifest.get("runtime_state_actions_path") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    return target / path
+
+
+def normalize_runtime_state_path(raw: Any) -> tuple[str | None, str]:
+    if not isinstance(raw, str) or not raw.strip():
+        return None, "runtime-state path is missing or not a string"
+    if "\x00" in raw:
+        return None, "runtime-state path contains a NUL byte"
+    rel = Path(raw)
+    if rel.is_absolute():
+        return None, "runtime-state path must be relative"
+    parts = rel.parts
+    if any(part in {"", ".", ".."} for part in parts):
+        return None, "runtime-state path may not contain empty, '.', or '..' segments"
+    if any(part == ".env" or part.startswith(".env.") for part in parts):
+        return None, "runtime-state path may not reference environment files"
+    rel_text = rel.as_posix()
+    if rel_text not in RUNTIME_STATE_WHITELIST:
+        return None, f"runtime-state path is not whitelisted: {rel_text}"
+    return rel_text, ""
+
+
+def parent_has_symlink(target: Path, rel_path: str) -> bool:
+    current = target
+    for part in Path(rel_path).parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def runtime_state_status_from_results(results: list[dict[str, Any]]) -> str:
+    if not results:
+        return "none"
+    statuses = {str(item.get("status") or "") for item in results}
+    if statuses & RUNTIME_STATE_BLOCKING_STATUSES:
+        return "deferred"
+    if "would_apply" in statuses:
+        return "would_apply"
+    if "applied" in statuses:
+        return "applied"
+    if statuses == {"already_applied"}:
+        return "already_applied"
+    return "applied"
+
+
+def set_runtime_state_results(manifest: dict[str, Any], results: list[dict[str, Any]]) -> None:
+    manifest["runtime_state_results"] = results
+    manifest["runtime_state_status"] = runtime_state_status_from_results(results)
+
+
+def runtime_state_has_blocking_results(manifest: dict[str, Any]) -> bool:
+    return str(manifest.get("runtime_state_status") or "") == "deferred"
+
+
+def runtime_state_deferral_reason(manifest: dict[str, Any]) -> str:
+    results = manifest.get("runtime_state_results") or []
+    statuses = {str(item.get("status") or "") for item in results if isinstance(item, dict)}
+    if "rejected" in statuses:
+        return "guardrail_violation"
+    if "conflict" in statuses:
+        return "conflict"
+    return "other"
+
+
+def runtime_state_deferral_detail(manifest: dict[str, Any]) -> str:
+    details: list[str] = []
+    for item in manifest.get("runtime_state_results") or []:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "unknown")
+        if status not in RUNTIME_STATE_BLOCKING_STATUSES:
+            continue
+        path = str(item.get("path") or "<unknown>")
+        detail = str(item.get("detail") or status)
+        details.append(f"{path}: {status}: {detail}")
+    return "; ".join(details) or "runtime-state action was deferred"
+
+
+def apply_runtime_state_actions(target: Path, manifest: dict[str, Any], *, dry_run: bool) -> list[dict[str, Any]]:
+    actions_path = resolve_runtime_state_actions_path(target, manifest)
+    if actions_path is None:
+        set_runtime_state_results(manifest, [])
+        return []
+    try:
+        actions_path.resolve(strict=False).relative_to(target.resolve())
+    except ValueError:
+        results = [
+            {
+                "action": "load_actions",
+                "path": str(actions_path),
+                "status": "rejected",
+                "detail": "runtime_state_actions_path escapes target checkout",
+            }
+        ]
+        set_runtime_state_results(manifest, results)
+        return results
+    if not actions_path.exists():
+        results = [
+            {
+                "action": "load_actions",
+                "path": str(actions_path),
+                "status": "error",
+                "detail": "runtime_state_actions_path does not exist",
+            }
+        ]
+        set_runtime_state_results(manifest, results)
+        return results
+    try:
+        payload = json.loads(actions_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        results = [
+            {
+                "action": "load_actions",
+                "path": str(actions_path),
+                "status": "error",
+                "detail": f"could not load runtime-state actions: {exc}",
+            }
+        ]
+        set_runtime_state_results(manifest, results)
+        return results
+
+    raw_actions = payload.get("actions") if isinstance(payload, dict) else None
+    if not isinstance(raw_actions, list) or not raw_actions:
+        set_runtime_state_results(manifest, [])
+        return []
+
+    target_resolved = target.resolve()
+    planned_writes: list[tuple[int, Path, bytes]] = []
+    results: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+
+    for index, action in enumerate(raw_actions):
+        result: dict[str, Any] = {
+            "action": "replace_file",
+            "path": str(action.get("path") or "") if isinstance(action, dict) else "",
+        }
+        if not isinstance(action, dict):
+            result.update({"status": "rejected", "detail": "runtime-state action must be an object"})
+            results.append(result)
+            continue
+        if action.get("action") != "replace_file":
+            result.update({"status": "rejected", "detail": "only replace_file runtime-state actions are supported"})
+            results.append(result)
+            continue
+
+        rel_path, path_error = normalize_runtime_state_path(action.get("path"))
+        if rel_path is None:
+            result.update({"status": "rejected", "detail": path_error})
+            results.append(result)
+            continue
+        result["path"] = rel_path
+        if rel_path in seen_paths:
+            result.update({"status": "rejected", "detail": "duplicate runtime-state action for path"})
+            results.append(result)
+            continue
+        seen_paths.add(rel_path)
+
+        content = action.get("content")
+        if not isinstance(content, str):
+            result.update({"status": "rejected", "detail": "runtime-state content must be UTF-8 text"})
+            results.append(result)
+            continue
+        start_hash = action.get("start_hash")
+        end_hash = action.get("end_hash")
+        if start_hash is not None and not isinstance(start_hash, str):
+            result.update({"status": "rejected", "detail": "start_hash must be a string or null"})
+            results.append(result)
+            continue
+        if not isinstance(end_hash, str):
+            result.update({"status": "rejected", "detail": "end_hash must be a string"})
+            results.append(result)
+            continue
+        content_bytes = content.encode("utf-8")
+        actual_end_hash = sha256_bytes(content_bytes)
+        if actual_end_hash != end_hash:
+            result.update(
+                {
+                    "status": "rejected",
+                    "detail": "content hash does not match end_hash",
+                    "end_hash": end_hash,
+                    "actual_end_hash": actual_end_hash,
+                }
+            )
+            results.append(result)
+            continue
+
+        if parent_has_symlink(target, rel_path):
+            result.update({"status": "rejected", "detail": "runtime-state parent path crosses a symlink"})
+            results.append(result)
+            continue
+        destination = target / rel_path
+        try:
+            destination.resolve(strict=False).relative_to(target_resolved)
+        except ValueError:
+            result.update({"status": "rejected", "detail": "runtime-state destination escapes target checkout"})
+            results.append(result)
+            continue
+        if destination.exists() and (destination.is_symlink() or not destination.is_file()):
+            result.update({"status": "rejected", "detail": "runtime-state destination is not a regular file"})
+            results.append(result)
+            continue
+
+        current_hash = file_sha256(destination)
+        result.update({"start_hash": start_hash, "end_hash": end_hash, "current_hash": current_hash})
+        if current_hash == end_hash:
+            result.update({"status": "already_applied", "detail": "current file already matches desired content"})
+            results.append(result)
+            continue
+        if current_hash != start_hash:
+            result.update({"status": "conflict", "detail": "current file hash differs from role-start hash"})
+            results.append(result)
+            continue
+
+        result.update({"status": "would_apply", "detail": "runtime-state file will be replaced"})
+        planned_writes.append((index, destination, content_bytes))
+        results.append(result)
+
+    if any(str(item.get("status") or "") in RUNTIME_STATE_BLOCKING_STATUSES for item in results):
+        for index, item in enumerate(results):
+            if item.get("status") == "would_apply":
+                item["status"] = "blocked"
+                item["detail"] = "not applied because another runtime-state action was deferred"
+        set_runtime_state_results(manifest, results)
+        return results
+
+    if dry_run:
+        set_runtime_state_results(manifest, results)
+        return results
+
+    for index, destination, content_bytes in planned_writes:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = destination.with_name(f".{destination.name}.runtime-state.{os.getpid()}.tmp")
+        try:
+            temp_path.write_bytes(content_bytes)
+            os.replace(temp_path, destination)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        results[index]["status"] = "applied"
+        results[index]["detail"] = "runtime-state file replaced"
+
+    set_runtime_state_results(manifest, results)
+    return results
 
 
 def parse_created_at(manifest: dict[str, Any], fallback: float) -> float:
@@ -868,15 +1141,6 @@ def batch_apply(
         patch = resolve_patch_path(target, manifest)
         manifest["head_before_integration"] = head_before
         if patch_is_empty(patch):
-            mark_applied(
-                path,
-                manifest,
-                accepted_commit=None,
-                head_before_integration=head_before,
-                checkpoint_commit=checkpoint_commit,
-                checks_run=["No patch changes to apply."],
-                dry_run=dry_run,
-            )
             accepted.append((path, manifest))
             continue
         check = apply_check(target, patch)
@@ -925,6 +1189,7 @@ def replay_and_commit(
     committed: list[tuple[Path, dict[str, Any], str | None]] = []
     reset_to(target, head_before, [manifest for _, manifest in accepted], dry_run=dry_run)
     for path, manifest in accepted:
+        current_head = head(target) if not dry_run else head_before
         patch = resolve_patch_path(target, manifest)
         if not patch_is_empty(patch):
             result = apply_patch_file(target, patch, dry_run=dry_run)
@@ -939,6 +1204,20 @@ def replay_and_commit(
                     dry_run=dry_run,
                 )
                 continue
+        apply_runtime_state_actions(target, manifest, dry_run=dry_run)
+        if runtime_state_has_blocking_results(manifest):
+            reset_to(target, current_head, [manifest], dry_run=dry_run)
+            mark_deferred(
+                path,
+                manifest,
+                reason=runtime_state_deferral_reason(manifest),
+                detail=runtime_state_deferral_detail(manifest),
+                head_before_integration=head_before,
+                checkpoint_commit=checkpoint_commit,
+                checks_run=checks_run,
+                dry_run=dry_run,
+            )
+            continue
         commit_hash = commit_current_patch(target, manifest, str(manifest.get("run_id") or ""), dry_run=dry_run)
         mark_applied(
             path,
@@ -966,6 +1245,19 @@ def integrate_individually(
         patch = resolve_patch_path(target, manifest)
         current_head = head(target) if not dry_run else head_before
         if patch_is_empty(patch):
+            apply_runtime_state_actions(target, manifest, dry_run=dry_run)
+            if runtime_state_has_blocking_results(manifest):
+                mark_deferred(
+                    path,
+                    manifest,
+                    reason=runtime_state_deferral_reason(manifest),
+                    detail=runtime_state_deferral_detail(manifest),
+                    head_before_integration=head_before,
+                    checkpoint_commit=checkpoint_commit,
+                    checks_run=["No patch changes to apply."],
+                    dry_run=dry_run,
+                )
+                continue
             mark_applied(
                 path,
                 manifest,
@@ -1016,6 +1308,20 @@ def integrate_individually(
                 dry_run=dry_run,
             )
             reset_to(target, current_head, [manifest], dry_run=dry_run)
+            continue
+        apply_runtime_state_actions(target, manifest, dry_run=dry_run)
+        if runtime_state_has_blocking_results(manifest):
+            reset_to(target, current_head, [manifest], dry_run=dry_run)
+            mark_deferred(
+                path,
+                manifest,
+                reason=runtime_state_deferral_reason(manifest),
+                detail=runtime_state_deferral_detail(manifest),
+                head_before_integration=head_before,
+                checkpoint_commit=checkpoint_commit,
+                checks_run=verification.checks_run,
+                dry_run=dry_run,
+            )
             continue
         commit_hash = commit_current_patch(target, manifest, str(manifest.get("run_id") or ""), dry_run=dry_run)
         mark_applied(
