@@ -123,6 +123,43 @@ class RequiredFilesCheckTests(unittest.TestCase):
                 result.stderr,
             )
 
+    def test_scaffolded_runner_uses_target_local_lock_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+            runner = target / "scripts" / "run_codex_automation.sh"
+            runner_text = runner.read_text(encoding="utf-8")
+
+            self.assertIn("CODEX_LOCK_CONTEXT", runner_text)
+            self.assertIn('target_name="$(basename "$TARGET")"', runner_text)
+            self.assertNotIn("Diffmogger Self Improvement scheduled sprint", runner_text)
+
+            result = self.run_check(target)
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+
+    def test_self_run_lock_context_regression_fails_required_files_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+            runner = target / "scripts" / "run_codex_automation.sh"
+            runner.write_text(
+                runner.read_text(encoding="utf-8").replace(
+                    'bash scripts/acquire_codex_lock.sh "$lock_context" || exit 0',
+                    'bash scripts/acquire_codex_lock.sh "Diffmogger Self Improvement scheduled sprint" || exit 0',
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_check(target)
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn(
+                "scripts/run_codex_automation.sh: forbidden self-run marker",
+                result.stderr,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

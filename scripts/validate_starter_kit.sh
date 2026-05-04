@@ -357,6 +357,7 @@ for marker in [
 runner = Path("templates/scripts/run_codex_automation.sh").read_text(encoding="utf-8")
 for marker in [
     "CODEX_NESTED_CLI_HOME",
+    "CODEX_LOCK_CONTEXT",
     "$HOME/.codex",
     "--add-dir",
     "codex exec --full-auto",
@@ -369,6 +370,9 @@ for marker in [
     if marker not in runner:
         print(f"Scheduled runner template missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
+if "Diffmogger Self Improvement scheduled sprint" in runner:
+    print("Scheduled runner template contains self-run lock context", file=sys.stderr)
+    raise SystemExit(1)
 
 conveyor = Path("templates/scripts/run_conveyor_automation.py").read_text(encoding="utf-8")
 for marker in [
@@ -765,6 +769,18 @@ python3 scripts/check_required_files.py --human-bridge-mode file_only "$tmp_dir"
 if grep -R "POST http://127.0.0.1:8765/api/notify\\|NOTIFIER_UNREACHABLE\\|message_body" "$tmp_dir/.agentic" "$tmp_dir/docs" >/tmp/Diffmogger-file-only-grep.log 2>&1; then
     echo "File-only scaffold unexpectedly contains notifier-only markers" >&2
     cat /tmp/Diffmogger-file-only-grep.log >&2
+    rm -rf "$tmp_dir"
+    exit 1
+fi
+if grep -R "Diffmogger Self Improvement scheduled sprint" "$tmp_dir" >/tmp/Diffmogger-self-run-leak.log 2>&1; then
+    echo "Scaffold unexpectedly contains self-run lock context" >&2
+    cat /tmp/Diffmogger-self-run-leak.log >&2
+    rm -rf "$tmp_dir"
+    exit 1
+fi
+if ! grep "CODEX_LOCK_CONTEXT" "$tmp_dir/scripts/run_codex_automation.sh" >/tmp/Diffmogger-lock-context-marker.log 2>&1; then
+    echo "Scaffolded runner missing target-local lock context override marker" >&2
+    cat "$tmp_dir/scripts/run_codex_automation.sh" >&2
     rm -rf "$tmp_dir"
     exit 1
 fi

@@ -99,6 +99,7 @@ AUTOMATION_REQUIRED_STRINGS = [
 
 RUNNER_REQUIRED_STRINGS = [
     "CODEX_LOCK_ALREADY_ACQUIRED",
+    "CODEX_LOCK_CONTEXT",
     "CODEX_NESTED_CLI_HOME",
     "--add-dir",
     "$HOME/.codex",
@@ -108,6 +109,10 @@ RUNNER_REQUIRED_STRINGS = [
     "repair_environment.py",
     "child_pid",
     "forward_signal",
+]
+
+RUNNER_FORBIDDEN_STRINGS = [
+    "Diffmogger Self Improvement scheduled sprint",
 ]
 
 CONVEYOR_REQUIRED_STRINGS = [
@@ -384,6 +389,9 @@ def main() -> int:
         for marker in RUNNER_REQUIRED_STRINGS:
             if marker not in runner_text:
                 problems.append(f"scripts/run_codex_automation.sh: missing marker {marker!r}")
+        for marker in RUNNER_FORBIDDEN_STRINGS:
+            if marker in runner_text:
+                problems.append(f"scripts/run_codex_automation.sh: forbidden self-run marker {marker!r}")
 
     conveyor_path = root / "scripts/run_conveyor_automation.py"
     if conveyor_path.exists() and conveyor_path.is_file():

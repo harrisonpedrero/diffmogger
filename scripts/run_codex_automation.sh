@@ -40,7 +40,9 @@ trap release_lock EXIT
 trap 'forward_signal TERM 143' TERM
 trap 'forward_signal INT 130' INT
 
-bash scripts/acquire_codex_lock.sh "Diffmogger Self Improvement scheduled sprint" || exit 0
+target_name="$(basename "$TARGET")"
+lock_context="${CODEX_LOCK_CONTEXT:-${target_name} scheduled sprint}"
+bash scripts/acquire_codex_lock.sh "$lock_context" || exit 0
 export CODEX_LOCK_ALREADY_ACQUIRED="true"
 
 if [ -f "scripts/update_automation_signals.py" ] && [ -f "docs/AUTOMATION_SIGNALS.md" ]; then
