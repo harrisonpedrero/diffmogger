@@ -70,6 +70,7 @@ required_files=(
   "tests/test_run_conveyor_automation.py"
   "tests/test_repair_environment.py"
   "tests/test_integrate_role_outputs.py"
+  "tests/test_list_deferred_patches.py"
   "tests/test_check_integration_safety.py"
   "tests/test_check_required_files.py"
   "tests/test_summarize_worker_outputs.py"
@@ -734,7 +735,7 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_check_integration_safety.py tests/test_check_required_files.py tests/test_summarize_worker_outputs.py
+python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_list_deferred_patches.py tests/test_check_integration_safety.py tests/test_check_required_files.py tests/test_summarize_worker_outputs.py
 
 python3 scripts/check_integration_safety.py >/tmp/Diffmogger-integration-safety.log
 
@@ -972,6 +973,13 @@ if ! grep '"deferral_reason": "staleness"' "$tmp_dir/target/automation_queue/bui
     exit 1
 fi
 python3 scripts/list_deferred_patches.py "$tmp_dir" --pretty >/tmp/Diffmogger-deferred-list.log
+python3 scripts/list_deferred_patches.py "$tmp_dir" --markdown >/tmp/Diffmogger-deferred-list.md
+if ! grep 'recommended_next_action: Start with `staleness`' /tmp/Diffmogger-deferred-list.md >/tmp/Diffmogger-deferred-markdown.log; then
+    echo "Deferred patch Markdown triage smoke did not recommend staleness first" >&2
+    cat /tmp/Diffmogger-deferred-list.md >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
 CODEX_LOCK_PATH="$tmp_dir/target/codex_automation.lock" \
 CODEX_RUN_ID="held-lock" \
 bash "$tmp_dir/scripts/acquire_codex_lock.sh" "validation held lock" >/tmp/Diffmogger-integrator-held-lock-acquire.log

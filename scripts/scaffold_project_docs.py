@@ -919,7 +919,7 @@ Planner, builder, and hardener start from the latest main `HEAD` at run start. T
 - Planner runs hourly at minute `0`; builder, hardener, and integrator run on staggered half-hour offsets.
 - Continuous conveyor mode is available through `scripts/run_conveyor_automation.sh`; it prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work.
 - Integrator maintains `docs/MULTI_ROLE_PROGRESS.md` and local checkpoint commits.
-- Deferred patches remain visible through `scripts/list_deferred_patches.py`.
+- Deferred patches remain visible through `scripts/list_deferred_patches.py`; use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local triage.
 - Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""
         development = f"""Multi-role automations allowed: true
 
@@ -941,6 +941,12 @@ bash scripts/run_role_automation.sh --role planner
 bash scripts/run_role_automation.sh --role builder
 bash scripts/run_role_automation.sh --role hardener
 bash scripts/run_role_automation.sh --role integrator
+```
+
+Review deferred backlog triage without mutating the repo:
+
+```bash
+python3 scripts/list_deferred_patches.py . --markdown
 ```
 
 The target must be an initialized git repo. Multi-role mode creates local worktrees, local queue artifacts, and local commits only. It never pushes."""

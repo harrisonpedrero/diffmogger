@@ -264,6 +264,7 @@ DEFERRED_HELPER_REQUIRED_STRINGS = [
     "status",
     "deferred",
     "--pretty",
+    "--markdown",
 ]
 
 
