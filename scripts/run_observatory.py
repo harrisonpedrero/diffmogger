@@ -671,6 +671,146 @@ def role_count_summary(counts: dict[str, int], *, empty: str) -> str:
     return ", ".join(parts) if parts else empty
 
 
+def scorecard_action_plan(
+    task: dict[str, Any],
+    queue: dict[str, Any],
+    signals: dict[str, Any],
+    conveyor: dict[str, Any],
+    human: dict[str, int],
+    progress: dict[str, Any],
+) -> dict[str, Any]:
+    totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
+    validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
+    validation_counts = validation.get("counts") if isinstance(validation.get("counts"), dict) else {}
+    deferred_triage = progress.get("deferred_triage") if isinstance(progress.get("deferred_triage"), dict) else {}
+    active_signals = [item for item in list(signals.get("active") or []) if isinstance(item, dict)]
+    decisions = [item for item in list(conveyor.get("decision_queue") or []) if isinstance(item, dict)]
+    queued = int(totals.get("queued", 0) or 0)
+    deferred_manifest_count = int(totals.get("deferred", 0) or 0)
+    deferred_backlog = int(progress.get("deferred_queue_depth", 0) or 0)
+    deferred_pressure = max(deferred_manifest_count, deferred_backlog)
+    fail_count = int(validation_counts.get("fail", 0) or 0)
+    pending_requests = int(human.get("pending_requests", 0) or 0)
+    unhandled_inbox = int(human.get("unhandled_inbox", 0) or 0)
+
+    if unhandled_inbox:
+        return {
+            "label": "Process human inbox",
+            "lane": "planner",
+            "priority": "high",
+            "recommendation": f"Process {unhandled_inbox} unhandled human inbox message(s) before role work.",
+            "why": "Human-provided instructions can change scope or unblock existing requests.",
+            "next_steps": [
+                "Read `docs/HUMAN_INBOX.md` and classify each unhandled entry.",
+                "Complete or intentionally defer the requested action locally.",
+                "Archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md` before removing handled inbox entries.",
+            ],
+        }
+    if pending_requests:
+        return {
+            "label": "Request human input",
+            "lane": "human",
+            "priority": "blocked",
+            "recommendation": f"Wait for or request human input on {pending_requests} active request(s).",
+            "why": "A pending human request remains the highest-order local bridge item.",
+            "next_steps": [
+                "Keep reversible local work moving if it does not depend on the reply.",
+                "Do not use notifier, SMS, WhatsApp, or external channels in file-only mode.",
+                "Resume the blocked path after the human response is archived.",
+            ],
+        }
+    if queued or deferred_pressure:
+        summary = clean_text(
+            deferred_triage.get("summary") or f"{deferred_pressure} deferred backlog item(s).",
+            limit=260,
+        )
+        triage_action = clean_text(
+            deferred_triage.get("recommended_next_action") or "Review queued and deferred patches locally.",
+            limit=300,
+        )
+        if queued and not deferred_pressure:
+            recommendation = f"Run integrator on {queued} queued patch(es)."
+        elif queued:
+            recommendation = f"Run integrator triage for {queued} queued patch(es) and {deferred_pressure} deferred backlog item(s)."
+        else:
+            recommendation = f"Run integrator triage for {deferred_pressure} deferred backlog item(s)."
+        return {
+            "label": "Run integrator triage",
+            "lane": "integrator",
+            "priority": "high",
+            "recommendation": recommendation,
+            "why": summary,
+            "next_steps": [
+                triage_action,
+                "Repair locally now: retry clean conflicts or verification failures only after local patch checks and validation.",
+                "Archive or document stale work that no longer applies instead of keeping it in the active deferred backlog.",
+            ],
+        }
+    if fail_count:
+        return {
+            "label": "Repair validation",
+            "lane": "hardener",
+            "priority": "high",
+            "recommendation": f"Repair or document {fail_count} validation issue(s) before expanding scope.",
+            "why": clean_text(validation.get("summary") or "The latest recorded checks include failures.", limit=260),
+            "next_steps": [
+                "Re-run the failing local check or the nearest focused test.",
+                "Use project-local dependency repair only; do not install global packages.",
+                "Record any environment-only blocker in the task file with the exact command.",
+            ],
+        }
+    if active_signals:
+        first = active_signals[0]
+        signal_id = clean_text(first.get("id") or "signal", limit=80)
+        owner = clean_text(first.get("owner_role") or "planner", limit=40)
+        return {
+            "label": "Handle active signal",
+            "lane": owner,
+            "priority": clean_text(first.get("priority") or "medium", limit=40),
+            "recommendation": f"Run `{owner}` work for active signal `{signal_id}`.",
+            "why": clean_text(first.get("instructions") or "A recurring local automation nudge is due.", limit=260),
+            "next_steps": [
+                "Confirm the signal still matches the current project state.",
+                "Complete the smallest useful local increment for the signal owner role.",
+                "Mark the signal complete only when that role actually handled it.",
+            ],
+        }
+    if decisions:
+        first = decisions[0]
+        role = clean_text(first.get("role") or "builder", limit=40)
+        state = clean_text(first.get("state") or "planned", limit=40)
+        reason = clean_text(first.get("reason") or "No conveyor reason recorded.", limit=260)
+        if role == "idle" or state == "first-run":
+            role = "builder"
+            recommendation = "Continue builder momentum with the next scoped local increment."
+        else:
+            recommendation = f"Continue with the `{role}` lane."
+        return {
+            "label": "Continue builder momentum" if role == "builder" else f"Continue {role}",
+            "lane": role,
+            "priority": "normal",
+            "recommendation": recommendation,
+            "why": reason,
+            "next_steps": [
+                "Keep ownership narrow enough for clean integration.",
+                "Update tests, fixtures, or docs that belong with the implementation.",
+                "Run the relevant local validation path and record the result.",
+            ],
+        }
+    return {
+        "label": "Continue builder momentum",
+        "lane": "builder",
+        "priority": "normal",
+        "recommendation": "Continue builder momentum with the next scoped local increment.",
+        "why": "No human bridge item, validation failure, queued patch, deferred backlog, active signal, or conveyor handoff currently outranks builder work.",
+        "next_steps": [
+            "Choose the highest-value task from the current horizon.",
+            "Keep the patch generic, local-first, and reviewable.",
+            "Run focused tests plus starter-kit validation when applicable.",
+        ],
+    }
+
+
 def scorecard_snapshot(
     task: dict[str, Any],
     queue: dict[str, Any],
@@ -736,6 +876,7 @@ def scorecard_snapshot(
     return {
         "status": status,
         "summary": "; ".join(summary_parts) + ".",
+        "action_plan": scorecard_action_plan(task, queue, signals, conveyor, human, progress),
         "items": [
             {
                 "label": "Accepted patches",
@@ -835,6 +976,7 @@ def self_review_snapshot(
 
     validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
     deferred_triage = progress.get("deferred_triage") if isinstance(progress.get("deferred_triage"), dict) else {}
+    action_plan = scorecard_action_plan(task, queue, signals, conveyor, human, progress)
     deferred_summary = clean_text(
         deferred_triage.get("summary") or "No deferred patch backlog recorded.",
         limit=300,
@@ -850,6 +992,7 @@ def self_review_snapshot(
             {"label": "Signals", "body": signal_summary},
             {"label": "Queue and conveyor", "body": f"{queue_summary} {conveyor_summary}"},
             {"label": "Human bridge", "body": human_summary},
+            {"label": "Action plan", "body": f"{action_plan['recommendation']} {action_plan['why']}"},
             {"label": "Deferred triage", "body": f"{deferred_summary} {deferred_action}"},
             {"label": "Next sprint", "body": task.get("suggested_next_task") or "No sprint task recorded yet."},
         ],
@@ -1144,6 +1287,17 @@ HTML_TEMPLATE = r"""<!doctype html>
       margin-bottom: 10px;
       color: var(--muted);
     }
+    .action-plan {
+      margin-bottom: 10px;
+    }
+    .action-plan .item-title {
+      align-items: center;
+    }
+    .action-plan ol {
+      margin: 8px 0 0;
+      padding-left: 20px;
+      color: var(--muted);
+    }
     .scorecard-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1242,6 +1396,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <h2>Scorecard</h2>
           <div class="content">
             <div class="score-summary" id="scoreSummary"></div>
+            <div class="action-plan" id="actionPlan"></div>
             <div class="scorecard-grid" id="scorecard"></div>
           </div>
         </section>
@@ -1423,6 +1578,27 @@ HTML_TEMPLATE = r"""<!doctype html>
       const scorecardState = data.scorecard || {};
       const scoreSummary = document.getElementById("scoreSummary");
       scoreSummary.textContent = (scorecardState.summary || "No scorecard metrics recorded yet.") + " Status: " + (scorecardState.status || "unknown") + ".";
+      const actionPlan = document.getElementById("actionPlan");
+      clear(actionPlan);
+      const plan = scorecardState.action_plan || {};
+      if (plan.recommendation) {
+        const row = el("div", "item");
+        const title = el("div", "item-title");
+        title.appendChild(el("span", "", plan.label || "Action Plan"));
+        title.appendChild(el("span", "chip " + (plan.priority === "high" || plan.priority === "blocked" ? "deferred" : "queued"), plan.lane || "local"));
+        row.appendChild(title);
+        row.appendChild(el("div", "", plan.recommendation));
+        row.appendChild(el("div", "muted", plan.why || "No rationale recorded."));
+        const steps = Array.isArray(plan.next_steps) ? plan.next_steps : [];
+        if (steps.length) {
+          const list = document.createElement("ol");
+          steps.slice(0, 3).forEach(step => list.appendChild(el("li", "", step)));
+          row.appendChild(list);
+        }
+        actionPlan.appendChild(row);
+      } else {
+        actionPlan.appendChild(el("div", "item muted", "No action plan recorded yet."));
+      }
       const scorecard = document.getElementById("scorecard");
       clear(scorecard);
       (scorecardState.items || []).forEach(item => {
@@ -1625,6 +1801,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
     deferred_triage = progress.get("deferred_triage") if isinstance(progress.get("deferred_triage"), dict) else {}
+    action_plan = scorecard.get("action_plan") if isinstance(scorecard.get("action_plan"), dict) else {}
 
     lines = [
         "# Diffmogger Self-Review Snapshot",
@@ -1649,6 +1826,22 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
         review_item_count += 1
     if not review_item_count:
         lines.append("- No self-review state recorded yet.")
+
+    lines.extend(["", "## Action Plan", ""])
+    if action_plan:
+        lines.append(
+            f"- recommendation: {clean_text(action_plan.get('recommendation') or 'No local recommendation recorded.', limit=500)}"
+        )
+        lines.append(f"- lane: `{clean_text(action_plan.get('lane') or 'local', limit=80)}`")
+        lines.append(f"- priority: {clean_text(action_plan.get('priority') or 'normal', limit=80)}")
+        lines.append(f"- why: {clean_text(action_plan.get('why') or 'No rationale recorded.', limit=500)}")
+        steps = [item for item in list(action_plan.get("next_steps") or []) if item]
+        if steps:
+            lines.append("- next_steps:")
+            for step in steps[:MAX_REVIEW_ITEMS]:
+                lines.append(f"  - {clean_text(step, limit=420)}")
+    else:
+        lines.append("- No action plan recorded yet.")
 
     lines.extend(["", "## Scorecard", ""])
     lines.append(f"- status: {clean_text(scorecard.get('status') or 'unknown', limit=80)}")

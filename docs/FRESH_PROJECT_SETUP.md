@@ -148,9 +148,9 @@ The observatory is a local browser page for demos and live monitoring. It reads
 target-local state, including `target/automation_conveyor_state.json`,
 `target/automation_signals.json`, `target/automation_queue/`, automation logs, and progress docs,
 then shows active signal nudges, accepted/deferred patch scorecard metrics, deferred-patch
-triage reasons with local next actions, the active conveyor role, upcoming lanes,
-queued/deferred patches, no-progress circuit breaker state, recent outcomes, and timeline
-events without requiring external services.
+triage reasons with local next actions, an explicit next-lane action plan, the active
+conveyor role, upcoming lanes, queued/deferred patches, no-progress circuit breaker
+state, recent outcomes, and timeline events without requiring external services.
 
 For a first-run review artifact from the same local state, run:
 

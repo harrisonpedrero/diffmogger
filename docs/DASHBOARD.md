@@ -169,7 +169,7 @@ Launch Observatory
 
 This opens a local browser page backed by `scripts/run_observatory.py`. The page is meant for live demos and reviews: it shows active signal nudges, conveyor health, no-progress circuit breaker state, the active role, upcoming lanes, queued and deferred patches, recent outcomes, progress pulse, and bounded log tails. It reads only target-local files and does not require external services.
 
-The observatory also includes a compact self-review panel and scorecard that pull from local task state, role progress metrics, signal state, queue manifests, conveyor circuit-breaker state, and human bridge files. Use it as the first stop in a local review: it summarizes the current assessment, validation results, accepted and deferred patch pressure, deferred-patch triage reasons with local next actions, active nudges, queue/conveyor state, known issues, and next sprint recommendation without requiring a tour through every Markdown file.
+The observatory also includes a compact self-review panel and scorecard that pull from local task state, role progress metrics, signal state, queue manifests, conveyor circuit-breaker state, and human bridge files. Use it as the first stop in a local review: it summarizes the current assessment, validation results, accepted and deferred patch pressure, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, active nudges, queue/conveyor state, known issues, and next sprint recommendation without requiring a tour through every Markdown file.
 
 For a durable local review artifact, render the same state to Markdown:
 
