@@ -608,6 +608,97 @@ class ObservatorySnapshotTests(unittest.TestCase):
             },
         )
 
+    def seed_write_worker_strategy_target(self, root: Path) -> None:
+        self.write_text(
+            root,
+            "docs/CODEX_AUTOMATION_TASKS.md",
+            """
+            # Codex Automation Tasks
+
+            AUTOMATION_STATUS: ACTIVE
+
+            Last updated: 2026-05-04T05:35:00+00:00
+
+            ## Current Project State
+
+            - Current assessment: H7 builder momentum is clear enough for a split implementation lane.
+
+            ## Product Horizon State
+
+            - Current horizon: H7 Ambitious extensions
+            - Advancement decision: stay
+
+            ## Checks From Last Run
+
+            - PASS: `bash scripts/validate_starter_kit.sh`
+
+            ## Known Issues
+
+            None.
+
+            ## Worker-Agent Activity
+
+            - Worker agents allowed: true
+            - Write-capable worker agents allowed: true
+            - Max write worker count: 4
+
+            ## Suggested Next Sprint-Sized Task
+
+            Implement a dashboard and observatory extension with disjoint source and test ownership.
+            """,
+        )
+        self.write_text(
+            root,
+            "docs/MULTI_ROLE_PROGRESS.md",
+            """
+            # Multi-Role Progress
+
+            ## Cumulative Metrics
+
+            - Total integrator runs: 8
+            - Accepted patches by role:
+              - planner: 1
+              - builder: 4
+              - hardener: 2
+            - Deferred patches by role:
+              - planner: 0
+              - builder: 0
+              - hardener: 0
+            - Current deferred queue depth: 0
+
+            ## Recent Activity Log
+
+            - integrator accepted the latest hardener patch.
+
+            ## Deferred-Patch Backlog
+
+            None.
+            """,
+        )
+        self.write_json(
+            root,
+            "target/automation_conveyor_state.json",
+            {
+                "schema_version": 1,
+                "cycles": 8,
+                "updated_at": "2026-05-04T05:35:00+00:00",
+                "decision_queue": [
+                    {"role": "builder", "state": "ready", "reason": "H7 builder momentum is available"}
+                ],
+                "history": [
+                    {
+                        "role": "integrator",
+                        "reason": "accepted hardener patch",
+                        "exit_code": 0,
+                        "started_at": "2026-05-04T05:30:00+00:00",
+                        "finished_at": "2026-05-04T05:34:00+00:00",
+                        "progress_success": True,
+                        "metadata": {"accepted_by_role": {"hardener": 1}},
+                    }
+                ],
+            },
+        )
+
     def seed_queued_integrator_target(self, root: Path) -> None:
         self.write_text(
             root,
@@ -1054,6 +1145,9 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("## Action Plan", report)
                     self.assertIn("recommendation: Run integrator on 1 queued patch(es).", report)
                     self.assertIn("lane: `integrator`", report)
+                    self.assertIn("## Next-Run Worker Strategy", report)
+                    self.assertIn("strategy: `INTEGRATION_ONLY`", report)
+                    self.assertIn("Use an integration-only run", report)
                     self.assertIn("## Action Follow-Through", report)
                     self.assertIn("status: superseded", report)
                     self.assertIn("current_recommendation: Run integrator on 1 queued patch(es).", report)
@@ -1061,6 +1155,32 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("deferred_patches: 0", report)
                     self.assertIn("next_lane: `integrator` (ready) - queued patch needs integration", report)
                     self.assertIn("No deferred patch backlog recorded", report)
+
+    def test_worker_strategy_recommends_bounded_write_workers_for_clear_builder_lane(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_write_worker_strategy_target(target)
+
+                    snapshot = module.build_snapshot(target)
+                    strategy = snapshot["worker_strategy"]
+                    review_items = {item["label"]: item["body"] for item in snapshot["review"]["items"]}
+                    html = module.render_html(snapshot, live=False)
+                    report = module.render_review_markdown(snapshot)
+
+                    self.assertEqual("builder", snapshot["scorecard"]["action_plan"]["lane"])
+                    self.assertEqual("WRITE_WORKERS", strategy["strategy"])
+                    self.assertEqual(2, strategy["parallelism_budget"])
+                    self.assertEqual("builder", strategy["action_lane"])
+                    self.assertIn("Write-capable workers are enabled", " ".join(strategy["reasons"]))
+                    self.assertIn("WRITE_WORKERS with budget 2", review_items["Worker strategy"])
+                    self.assertIn("Next-Run Worker Strategy", html)
+                    self.assertIn("WRITE_WORKERS", html)
+                    self.assertIn("## Next-Run Worker Strategy", report)
+                    self.assertIn("strategy: `WRITE_WORKERS`", report)
+                    self.assertIn("parallelism_budget: 2", report)
+                    self.assertIn("Split work into disjoint file or module ownership", report)
 
     def test_action_plan_follow_through_marks_followed_completed_lane(self) -> None:
         for path, module in self.modules:

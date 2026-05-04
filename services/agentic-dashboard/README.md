@@ -48,7 +48,7 @@ Use the dashboard Monitor tab to tie the local review together:
 **Run Safety Check** also writes `target/integration_safety_check.json` under the selected target.
 The review bundle reads that runtime marker so the exported HTML and Markdown show the latest
 dashboard safety result.
-6. Check first-review readiness, safety status, validation state, active role or queue, known issues, and the next-lane action plan in the observatory or Markdown export.
+6. Check first-review readiness, safety status, validation state, active role or queue, known issues, the next-lane action plan, and the next-run worker strategy in the observatory or Markdown export.
 
 ## Prerequisites
 

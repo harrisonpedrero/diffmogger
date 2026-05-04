@@ -31,6 +31,7 @@ MAX_REVIEW_ITEMS = 6
 MAX_CHECK_ITEMS = 8
 MAX_SCORECARD_ITEMS = 8
 MAX_RECOMMENDATION_HISTORY = 5
+MAX_WORKER_STRATEGY_REASONS = 4
 ACTION_PLAN_HISTORY_RELATIVE = Path("target/action_plan_history.json")
 INTEGRATION_SAFETY_RECORD_RELATIVE = Path("target/integration_safety_check.json")
 FIRST_REVIEW_OBSERVATORY_FILENAME = "Diffmogger-observatory.html"
@@ -177,6 +178,24 @@ def keyed_section_value(text: str, heading: str, keys: list[str]) -> str:
             if value:
                 return value
     return ""
+
+
+def task_bool_value(text: str, label: str, *, default: bool) -> bool:
+    match = re.search(rf"^-\s*{re.escape(label)}:\s*(true|false)\s*$", text, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return default
+    return match.group(1).lower() == "true"
+
+
+def task_int_value(text: str, label: str, *, default: int, minimum: int = 0, maximum: int = 10) -> int:
+    match = re.search(rf"^-\s*{re.escape(label)}:\s*(\d+)\s*$", text, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return default
+    try:
+        value = int(match.group(1))
+    except ValueError:
+        return default
+    return min(max(value, minimum), maximum)
 
 
 def validation_snapshot(text: str) -> dict[str, Any]:
@@ -344,6 +363,9 @@ def parse_task_state(target: Path) -> dict[str, Any]:
         "Current Project State",
         ["Current assessment", "Current baseline", "Goal"],
     )
+    worker_agents_allowed = task_bool_value(text, "Worker agents allowed", default=True)
+    write_workers_allowed = task_bool_value(text, "Write-capable worker agents allowed", default=False)
+    max_write_worker_count = task_int_value(text, "Max write worker count", default=0 if not write_workers_allowed else 1)
     validation = validation_snapshot(text)
     return {
         "status": status.group(1).strip() if status else "UNKNOWN",
@@ -357,6 +379,11 @@ def parse_task_state(target: Path) -> dict[str, Any]:
         "known_issues": section_bullets(text, "Known Issues", limit=MAX_REVIEW_ITEMS),
         "validation": validation,
         "integration_safety": integration_safety_snapshot(validation, target),
+        "worker": {
+            "agents_allowed": worker_agents_allowed,
+            "write_workers_allowed": write_workers_allowed and worker_agents_allowed,
+            "max_write_worker_count": max_write_worker_count if write_workers_allowed and worker_agents_allowed else 0,
+        },
     }
 
 
@@ -1365,6 +1392,141 @@ def persist_recommendation_history(target: Path, snapshot: dict[str, Any]) -> di
     return snapshot
 
 
+def worker_strategy_snapshot(
+    task: dict[str, Any],
+    queue: dict[str, Any],
+    conveyor: dict[str, Any],
+    progress: dict[str, Any],
+    action_plan: dict[str, Any],
+    recommendation_history: dict[str, Any],
+) -> dict[str, Any]:
+    worker_config = task.get("worker") if isinstance(task.get("worker"), dict) else {}
+    worker_agents_allowed = bool(worker_config.get("agents_allowed", True))
+    write_workers_allowed = bool(worker_config.get("write_workers_allowed"))
+    max_write_workers = history_int(worker_config.get("max_write_worker_count", 0))
+    action_lane = clean_text(action_plan.get("lane") or "local", limit=40)
+    action_priority = clean_text(action_plan.get("priority") or "normal", limit=40).lower()
+    totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
+    queued = history_int(totals.get("queued", 0))
+    deferred_manifest_count = history_int(totals.get("deferred", 0))
+    deferred_backlog = history_int(progress.get("deferred_queue_depth", 0))
+    deferred_pressure = max(deferred_manifest_count, deferred_backlog)
+    no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
+    records = [
+        item
+        for item in list(recommendation_history.get("records") or [])
+        if isinstance(item, dict)
+    ]
+    pending_or_no_progress = sum(
+        1
+        for record in records
+        if (
+            clean_text(record.get("status") or "", limit=40) == "still_pending"
+            or clean_text(record.get("no_progress") or "inactive", limit=80) != "inactive"
+        )
+    )
+
+    reasons: list[str] = []
+    next_steps: list[str] = []
+
+    def result(strategy: str, budget: int, summary: str) -> dict[str, Any]:
+        return {
+            "strategy": strategy,
+            "parallelism_budget": max(0, budget),
+            "summary": clean_text(summary, limit=420),
+            "reasons": [clean_text(item, limit=260) for item in reasons[:MAX_WORKER_STRATEGY_REASONS]],
+            "next_steps": [clean_text(item, limit=320) for item in next_steps[:MAX_REVIEW_ITEMS]],
+            "action_lane": action_lane,
+        }
+
+    if not worker_agents_allowed:
+        reasons.append("Worker agents are disabled in the target task state.")
+        next_steps.extend(
+            [
+                "Keep the next run in the main agent.",
+                "Re-enable workers only through reviewed target-local automation settings.",
+            ]
+        )
+        return result("NO_WORKERS", 0, "Run without workers because target-local worker agents are disabled.")
+
+    if action_lane == "human" or action_priority == "blocked":
+        reasons.append("The current action plan is blocked on human input.")
+        next_steps.extend(
+            [
+                "Wait for or archive the human bridge reply before spawning workers.",
+                "Continue only reversible local work that does not depend on the reply.",
+            ]
+        )
+        return result("NO_WORKERS", 0, "Do not spawn workers while the highest-priority lane is blocked on human input.")
+
+    if action_lane == "integrator" or queued or deferred_pressure:
+        if queued:
+            reasons.append(f"{queued} queued patch(es) need main-agent integration.")
+        if deferred_pressure:
+            reasons.append(f"{deferred_pressure} deferred backlog item(s) need triage.")
+        next_steps.extend(
+            [
+                "Run the integrator lane locally and keep patch acceptance or deferral decisions in the main agent.",
+                "Use workers only after the queue is clear or a specific non-overlapping triage audit is needed.",
+            ]
+        )
+        return result("INTEGRATION_ONLY", 0, "Use an integration-only run before creating more worker output.")
+
+    if no_progress.get("active") or pending_or_no_progress >= 2:
+        if no_progress.get("active"):
+            reasons.append(no_progress_summary(no_progress))
+        if pending_or_no_progress >= 2:
+            reasons.append(f"{pending_or_no_progress} recent recommendation-history record(s) show pending or no-progress evidence.")
+        next_steps.extend(
+            [
+                "Ask one read-only worker to identify the smallest unblock or stale-loop cause.",
+                "Keep implementation local until the no-progress pattern has a concrete next action.",
+            ]
+        )
+        return result("READ_ONLY_REPORTS", 1, "Use one read-only worker report to diagnose repeated pending or no-progress evidence.")
+
+    if action_lane in {"planner", "hardener"}:
+        reasons.append(f"The current action plan points at the `{action_lane}` lane, where review coverage is usually higher value than parallel edits.")
+        next_steps.extend(
+            [
+                f"Use one bounded read-only `{action_lane}` report if the scope is broad.",
+                "Keep any code changes in the main agent unless ownership can be split cleanly.",
+            ]
+        )
+        return result("READ_ONLY_REPORTS", 1, f"Use one read-only worker report for the next `{action_lane}` pass if the task is broad.")
+
+    if action_lane == "builder" and write_workers_allowed and max_write_workers:
+        budget = min(max_write_workers, 2)
+        reasons.append("The current action plan points at builder momentum with no queue, validation, human, or no-progress blocker ahead of it.")
+        reasons.append(f"Write-capable workers are enabled with a configured cap of {max_write_workers}.")
+        next_steps.extend(
+            [
+                "Split work into disjoint file or module ownership before launching write workers.",
+                "Keep the main agent responsible for reviewing, integrating, and verifying worker diffs.",
+            ]
+        )
+        return result("WRITE_WORKERS", budget, f"Use up to {budget} bounded write worker(s) only when the builder increment splits cleanly.")
+
+    if action_lane == "builder":
+        reasons.append("The current action plan points at builder momentum, but write-capable workers are not enabled in target task state.")
+        next_steps.extend(
+            [
+                "Use one read-only design or test-gap report for broad builder work.",
+                "Keep implementation in the main agent unless target-local settings explicitly enable write workers.",
+            ]
+        )
+        return result("READ_ONLY_REPORTS", 1, "Use one read-only worker report for broad builder work; keep edits in the main agent.")
+
+    reasons.append("No worker-friendly split is visible from the current local state.")
+    next_steps.extend(
+        [
+            "Keep the next run in the main agent.",
+            "Reconsider workers after the action plan names independent review or implementation lanes.",
+        ]
+    )
+    return result("NO_WORKERS", 0, "Run without workers until the next action has a clearer parallelization boundary.")
+
+
 def scorecard_action_plan(
     task: dict[str, Any],
     queue: dict[str, Any],
@@ -1648,6 +1810,7 @@ def self_review_snapshot(
     first_review: dict[str, Any],
     follow_through: dict[str, Any] | None = None,
     recommendation_history: dict[str, Any] | None = None,
+    worker_strategy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     queued = int(totals.get("queued", 0) or 0)
@@ -1717,6 +1880,16 @@ def self_review_snapshot(
     history_summary = recommendation_history_summary(
         [item for item in history_records if isinstance(item, dict)]
     )
+    worker_strategy = worker_strategy if isinstance(worker_strategy, dict) else {}
+    worker_summary = clean_text(
+        worker_strategy.get("summary") or "No next-run worker strategy recorded yet.",
+        limit=420,
+    )
+    if worker_strategy.get("strategy"):
+        worker_summary = (
+            f"{clean_text(worker_strategy.get('strategy'), limit=80)} with budget "
+            f"{history_int(worker_strategy.get('parallelism_budget', 0))}: {worker_summary}"
+        )
     return {
         "items": [
             {"label": "Current assessment", "body": task.get("current_assessment") or "No current assessment recorded yet."},
@@ -1729,6 +1902,7 @@ def self_review_snapshot(
             {"label": "Action plan", "body": f"{action_plan['recommendation']} {action_plan['why']}"},
             {"label": "Action follow-through", "body": follow_through_summary(follow_through or {})},
             {"label": "Recommendation history", "body": history_summary},
+            {"label": "Worker strategy", "body": worker_summary},
             {"label": "Deferred triage", "body": f"{deferred_summary} {deferred_action}"},
             {"label": "Next sprint", "body": task.get("suggested_next_task") or "No sprint task recorded yet."},
         ],
@@ -1780,6 +1954,14 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         scorecard.get("action_plan") if isinstance(scorecard.get("action_plan"), dict) else {},
     )
     recommendation_history = recommendation_history_snapshot(target, generated_at, follow_through, conveyor_state)
+    worker_strategy = worker_strategy_snapshot(
+        task,
+        queue,
+        conveyor_state,
+        progress,
+        scorecard.get("action_plan") if isinstance(scorecard.get("action_plan"), dict) else {},
+        recommendation_history,
+    )
     review = self_review_snapshot(
         task,
         queue,
@@ -1790,6 +1972,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         first_review,
         follow_through=follow_through,
         recommendation_history=recommendation_history,
+        worker_strategy=worker_strategy,
     )
     return {
         "schema_version": 1,
@@ -1806,6 +1989,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "first_review": first_review,
         "follow_through": follow_through,
         "recommendation_history": recommendation_history,
+        "worker_strategy": worker_strategy,
         "review": review,
         "empty_states": dict(EMPTY_STATES),
         "progress_recent": progress.get("recent_activity") or "No multi-role activity recorded yet.",
@@ -2396,6 +2580,19 @@ HTML_TEMPLATE = r"""<!doctype html>
         });
         actionPlan.appendChild(row);
       }
+      const workerStrategy = data.worker_strategy || {};
+      if (workerStrategy.strategy) {
+        const row = el("div", "item");
+        const title = el("div", "item-title");
+        title.appendChild(el("span", "", "Next-Run Worker Strategy"));
+        title.appendChild(el("span", "chip queued", workerStrategy.strategy));
+        row.appendChild(title);
+        row.appendChild(el("div", "", "parallelism budget: " + String(workerStrategy.parallelism_budget || 0)));
+        row.appendChild(el("div", "muted", workerStrategy.summary || "No next-run worker strategy recorded yet."));
+        const reasons = Array.isArray(workerStrategy.reasons) ? workerStrategy.reasons : [];
+        reasons.slice(0, 3).forEach(reason => row.appendChild(el("div", "muted", reason)));
+        actionPlan.appendChild(row);
+      }
       const scorecard = document.getElementById("scorecard");
       clear(scorecard);
       (scorecardState.items || []).forEach(item => {
@@ -2554,7 +2751,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
         render(await response.json());
       } catch (error) {
-        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, first_review: {}, follow_through: {}, recommendation_history: {records: []}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, first_review: {}, follow_through: {}, recommendation_history: {records: []}, worker_strategy: {}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
         fallback.progress_recent = "Observatory refresh failed: " + error;
         render(fallback);
       }
@@ -3101,6 +3298,12 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
       historyCard.appendChild(el("strong", "", "Recommendation History"));
       historyCard.appendChild(el("div", "", text(data.recommendation_history?.summary, "No recommendation history recorded.")));
       action.appendChild(historyCard);
+      const workerCard = el("div", "support-card");
+      const workerStrategy = data.worker_strategy || {};
+      workerCard.appendChild(el("strong", "", "Next-Run Worker Strategy"));
+      workerCard.appendChild(el("div", "", text(workerStrategy.strategy, "NO_WORKERS") + " / budget " + text(workerStrategy.parallelism_budget, 0)));
+      workerCard.appendChild(el("div", "", text(workerStrategy.summary, "No next-run worker strategy recorded.")));
+      action.appendChild(workerCard);
 
       const health = document.getElementById("health");
       clear(health);
@@ -3197,7 +3400,7 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
         const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
         render(await response.json());
       } catch (error) {
-        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {commits: []}, queue: {totals: {}, counts_by_role: {}, manifests: [], recent_outcomes: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, review: {}, empty_states: {}};
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {commits: []}, queue: {totals: {}, counts_by_role: {}, manifests: [], recent_outcomes: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, worker_strategy: {}, review: {}, empty_states: {}};
         fallback.progress_recent = "Observatory refresh failed: " + error;
         render(fallback);
       }
@@ -3244,6 +3447,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
         if isinstance(snapshot.get("recommendation_history"), dict)
         else {}
     )
+    worker_strategy = snapshot.get("worker_strategy") if isinstance(snapshot.get("worker_strategy"), dict) else {}
     empty_states = snapshot.get("empty_states") if isinstance(snapshot.get("empty_states"), dict) else {}
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
@@ -3347,6 +3551,27 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
             lines.append(f"  - deferred_queue_depth: {history_int(record.get('deferred_queue_depth', 0))}")
     else:
         lines.append("- No recommendation history recorded yet.")
+
+    lines.extend(["", "## Next-Run Worker Strategy", ""])
+    if worker_strategy:
+        lines.append(f"- strategy: `{clean_text(worker_strategy.get('strategy') or 'NO_WORKERS', limit=80)}`")
+        lines.append(f"- parallelism_budget: {history_int(worker_strategy.get('parallelism_budget', 0))}")
+        lines.append(f"- action_lane: `{clean_text(worker_strategy.get('action_lane') or 'local', limit=80)}`")
+        lines.append(
+            f"- summary: {clean_text(worker_strategy.get('summary') or 'No next-run worker strategy recorded yet.', limit=500)}"
+        )
+        reasons = [item for item in list(worker_strategy.get("reasons") or []) if item]
+        if reasons:
+            lines.append("- reasons:")
+            for reason in reasons[:MAX_WORKER_STRATEGY_REASONS]:
+                lines.append(f"  - {clean_text(reason, limit=420)}")
+        steps = [item for item in list(worker_strategy.get("next_steps") or []) if item]
+        if steps:
+            lines.append("- next_steps:")
+            for step in steps[:MAX_REVIEW_ITEMS]:
+                lines.append(f"  - {clean_text(step, limit=420)}")
+    else:
+        lines.append("- No next-run worker strategy recorded yet.")
 
     lines.extend(["", "## Scorecard", ""])
     lines.append(f"- status: {clean_text(scorecard.get('status') or 'unknown', limit=80)}")

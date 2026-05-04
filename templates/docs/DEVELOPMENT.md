@@ -64,7 +64,7 @@ bash scripts/run_conveyor_automation.sh --once
 python3 scripts/run_observatory.py --open
 ```
 
-The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_signals.json` to show active signal nudges, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
+The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_signals.json` to show active signal nudges, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
 
 For a durable first-run review bundle, render the same local state to HTML and Markdown:
 
@@ -85,7 +85,7 @@ After the first bootstrap, use one local review path:
 2. Open the dashboard with `python3 /path/to/Diffmogger/scripts/run_dashboard.py`, reopen this target, and click **Run Safety Check** in the Monitor tab.
 3. Click **Export Review Bundle** or, from this target repo, run `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
 4. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
-5. Confirm the review shows first-review readiness, safety status, validation state, active role or queue, known issues, and the next sprint recommendation.
+5. Confirm the review shows first-review readiness, safety status, validation state, active role or queue, known issues, the next sprint recommendation, and the next-run worker strategy.
 
 The dashboard writes the safety-check result to `target/integration_safety_check.json` in this
 target before the export reads it. That file is runtime state, not source.

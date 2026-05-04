@@ -151,8 +151,9 @@ then shows active signal nudges, the latest recorded integration-safety check re
 accepted/deferred patch scorecard metrics, deferred-patch triage reasons with local next
 actions, an explicit next-lane action plan, action-plan
 follow-through status from recent conveyor or queue outcomes, bounded recommendation-history
-records, the active conveyor role, upcoming lanes, queued/deferred patches, no-progress
-circuit breaker state, recent outcomes, and timeline events without requiring external services.
+records, a next-run worker strategy recommendation, the active conveyor role, upcoming lanes,
+queued/deferred patches, no-progress circuit breaker state, recent outcomes, and timeline
+events without requiring external services.
 
 For a first-run review bundle from the same local state, run:
 
@@ -173,7 +174,7 @@ After the first bootstrap, use one local review path:
 2. Open the dashboard with `python3 /path/to/Diffmogger/scripts/run_dashboard.py`, reopen the target, and click **Run Safety Check** in the Monitor tab.
 3. Click **Export Review Bundle** or, from the target repo, run `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
 4. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
-5. Confirm the review shows first-review readiness, safety status, validation state, active role or queue, known issues, and the next sprint recommendation.
+5. Confirm the review shows first-review readiness, safety status, validation state, active role or queue, known issues, the next sprint recommendation, and the next-run worker strategy.
 
 The dashboard writes the safety-check result to the target-local
 `target/integration_safety_check.json` file before the export reads it. That file is runtime state,
