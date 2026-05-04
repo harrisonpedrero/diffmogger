@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -164,6 +165,25 @@ class DashboardIntegrationSafetyAffordanceTests(unittest.TestCase):
             command = self.module.integration_safety_command(Path(tmp))
 
             self.assertEqual(str(ROOT), command[2])
+
+    def test_write_integration_safety_record_creates_target_local_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as selected_tmp, tempfile.TemporaryDirectory() as checked_tmp:
+            selected = Path(selected_tmp)
+            checked = Path(checked_tmp)
+            command = [sys.executable, str(self.module.INTEGRATION_SAFETY_SCRIPT), str(checked)]
+
+            record_path = self.module.write_integration_safety_record(selected, checked, command, 0)
+
+            self.assertEqual(selected.resolve() / self.module.INTEGRATION_SAFETY_RECORD_RELATIVE, record_path)
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual(1, record["schema_version"])
+            self.assertEqual("dashboard_run_safety_check", record["source"])
+            self.assertEqual("pass", record["status"])
+            self.assertEqual(0, record["exit_code"])
+            self.assertEqual(str(selected.resolve()), record["selected_target"])
+            self.assertEqual(str(checked.resolve()), record["checked_target"])
+            self.assertIn("check_integration_safety.py", record["command"])
+            self.assertIn("Dashboard Run Safety Check passed", record["summary"])
 
     def test_review_bundle_command_exports_standard_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

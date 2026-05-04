@@ -175,6 +175,10 @@ After the first bootstrap, use one local review path:
 4. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
 5. Confirm the review shows first-review readiness, safety status, validation state, active role or queue, known issues, and the next sprint recommendation.
 
+The dashboard writes the safety-check result to the target-local
+`target/integration_safety_check.json` file before the export reads it. That file is runtime state,
+not source.
+
 The generated wrapper runs the parent automation with:
 
 ```bash

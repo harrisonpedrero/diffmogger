@@ -179,6 +179,10 @@ After bootstrap or before a demo, use one local review path instead of hunting t
 
 The generated target includes local runtime scripts under `scripts/`. After the first bootstrap produces a runnable baseline, use the target repo's own `scripts/run_codex_automation.sh` for recurring Codex automation.
 
+The dashboard records **Run Safety Check** results in the selected target's gitignored
+`target/integration_safety_check.json`; the exported review bundle reads that marker so the
+Markdown and HTML review reflect the safety check you just ran.
+
 For the manual CLI path, see `docs/FRESH_PROJECT_SETUP.md`.
 
 Use a virtual environment for Python package work. Homebrew Python may reject system-wide `pip` installs because of externally managed environment protections.

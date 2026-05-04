@@ -11,6 +11,7 @@ import os
 import plistlib
 import queue
 import re
+import shlex
 import select
 import signal
 import shutil
@@ -33,6 +34,7 @@ CHECK_REQUIRED_SCRIPT = SCRIPTS_DIR / "check_required_files.py"
 OBSERVATORY_SCRIPT = SCRIPTS_DIR / "run_observatory.py"
 INTEGRATION_SAFETY_SCRIPT = SCRIPTS_DIR / "check_integration_safety.py"
 DEFAULT_REVIEW_BUNDLE_DIR = Path("/tmp/Diffmogger-review")
+INTEGRATION_SAFETY_RECORD_RELATIVE = Path("target/integration_safety_check.json")
 LAUNCHD_LABEL_PREFIX = "com.diffmogger.automation"
 SCHEDULABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
 MIN_CADENCE_MINUTES = 30
@@ -568,6 +570,46 @@ def integration_safety_command(target: Path) -> list[str]:
         str(INTEGRATION_SAFETY_SCRIPT),
         str(resolve_integration_safety_target(target)),
     ]
+
+
+def integration_safety_record_path(target: Path) -> Path:
+    return target.expanduser().resolve() / INTEGRATION_SAFETY_RECORD_RELATIVE
+
+
+def write_integration_safety_record(
+    selected_target: Path,
+    checked_target: Path,
+    command: list[str],
+    exit_code: int,
+) -> Path:
+    selected_target = selected_target.expanduser().resolve()
+    checked_target = checked_target.expanduser().resolve()
+    status = "pass" if exit_code == 0 else "fail"
+    status_word = "passed" if status == "pass" else "failed"
+    checked_label = "the Diffmogger kit source" if checked_target == KIT_ROOT else str(checked_target)
+    selected_label = selected_target.name or str(selected_target)
+    if selected_target == checked_target:
+        summary = f"Dashboard Run Safety Check {status_word} for {checked_label}."
+    else:
+        summary = (
+            f"Dashboard Run Safety Check {status_word} against {checked_label} "
+            f"for selected target {selected_label}."
+        )
+    record = {
+        "schema_version": 1,
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source": "dashboard_run_safety_check",
+        "status": status,
+        "exit_code": exit_code,
+        "command": shlex.join(str(part) for part in command),
+        "selected_target": str(selected_target),
+        "checked_target": str(checked_target),
+        "summary": summary,
+    }
+    record_path = integration_safety_record_path(selected_target)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return record_path
 
 
 def review_bundle_command(target: Path, review_dir: Path = DEFAULT_REVIEW_BUNDLE_DIR) -> list[str]:
@@ -2336,6 +2378,7 @@ if TK_AVAILABLE:
                 return
             target_text = self.target_var.get().strip()
             selected_target = Path(target_text).expanduser() if target_text else KIT_ROOT
+            selected_target = selected_target.resolve()
             check_target = resolve_integration_safety_target(selected_target)
             if check_target == KIT_ROOT and not has_integration_safety_tree(selected_target):
                 self._append_log(
@@ -2353,14 +2396,25 @@ if TK_AVAILABLE:
             self._append_log(f"Starting integration safety check for {check_target}.")
             thread = threading.Thread(
                 target=self._integration_safety_worker,
-                args=(check_target,),
+                args=(selected_target, check_target),
                 daemon=True,
             )
             thread.start()
 
-        def _integration_safety_worker(self, target: Path) -> None:
+        def _integration_safety_worker(self, selected_target: Path, target: Path) -> None:
             try:
-                code = self._run_command(integration_safety_command(target), cwd=KIT_ROOT)
+                command = integration_safety_command(target)
+                code = self._run_command(command, cwd=KIT_ROOT)
+                if selected_target.exists():
+                    try:
+                        record_path = write_integration_safety_record(selected_target, target, command, code)
+                        self._thread_log(f"Recorded integration safety result at {record_path}.")
+                    except OSError as exc:
+                        self._thread_log(f"Could not record integration safety result: {exc}")
+                else:
+                    self._thread_log(
+                        f"Selected target no longer exists; skipped durable safety record for {selected_target}."
+                    )
                 if code == 0:
                     self._thread_log("Integration safety check passed.")
                 else:

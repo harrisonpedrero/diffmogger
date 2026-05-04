@@ -192,6 +192,11 @@ Run Safety Check
 
 This runs `scripts/check_integration_safety.py` and streams the result into the dashboard run log. When the selected target is not the Diffmogger starter-kit source tree, the dashboard checks the kit source instead so generated target projects are not expected to contain notifier and dashboard service files.
 
+The result is also recorded in the selected target's gitignored
+`target/integration_safety_check.json`. **Export Review Bundle** reads that local marker so the
+HTML and Markdown review can show the latest dashboard safety status even when the selected target
+does not include `scripts/check_integration_safety.py`.
+
 ### First Review Checklist
 
 Use the Monitor tab as the center of the first review:

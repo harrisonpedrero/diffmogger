@@ -792,6 +792,50 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("Checklist docs: pass", report)
                     self.assertIn("Run Safety Check: pass", report)
 
+    def test_dashboard_safety_record_feeds_first_review_readiness(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_first_run_target(target)
+                    self.write_text(
+                        target,
+                        "docs/DEVELOPMENT.md",
+                        """
+                        # Development
+
+                        ### First Review Checklist
+
+                        1. Run `bash scripts/validate_starter_kit.sh`.
+                        2. Click **Run Safety Check**.
+                        3. Render `Diffmogger-observatory.html`.
+                        4. Export `Diffmogger-self-review.md`.
+                        """,
+                    )
+                    self.write_json(
+                        target,
+                        "target/integration_safety_check.json",
+                        {
+                            "schema_version": 1,
+                            "checked_at": "2026-05-04T04:50:00+00:00",
+                            "source": "dashboard_run_safety_check",
+                            "status": "pass",
+                            "exit_code": 0,
+                            "command": "python3 scripts/check_integration_safety.py .",
+                            "selected_target": str(target),
+                            "checked_target": str(ROOT),
+                            "summary": "Dashboard Run Safety Check passed against the kit source.",
+                        },
+                    )
+
+                    snapshot = module.build_snapshot(target)
+                    first_review_items = {item["label"]: item for item in snapshot["first_review"]["items"]}
+
+                    self.assertEqual("pass", snapshot["task"]["integration_safety"]["status"])
+                    self.assertIn("Dashboard Run Safety Check passed", snapshot["task"]["integration_safety"]["summary"])
+                    self.assertEqual("ready", snapshot["first_review"]["status"])
+                    self.assertEqual("pass", first_review_items["Run Safety Check"]["status"])
+
     def test_review_markdown_export_summarizes_local_state(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):

@@ -32,6 +32,7 @@ MAX_CHECK_ITEMS = 8
 MAX_SCORECARD_ITEMS = 8
 MAX_RECOMMENDATION_HISTORY = 5
 ACTION_PLAN_HISTORY_RELATIVE = Path("target/action_plan_history.json")
+INTEGRATION_SAFETY_RECORD_RELATIVE = Path("target/integration_safety_check.json")
 FIRST_REVIEW_OBSERVATORY_FILENAME = "Diffmogger-observatory.html"
 FIRST_REVIEW_SELF_REVIEW_FILENAME = "Diffmogger-self-review.md"
 FIRST_REVIEW_MARKERS = (
@@ -217,7 +218,35 @@ def validation_snapshot(text: str) -> dict[str, Any]:
     return {"summary": summary, "counts": counts, "items": checks}
 
 
-def integration_safety_snapshot(validation: dict[str, Any]) -> dict[str, Any]:
+def integration_safety_record_snapshot(target: Path) -> dict[str, Any]:
+    record = read_json(target / INTEGRATION_SAFETY_RECORD_RELATIVE)
+    if not record:
+        return {}
+
+    raw_status = str(record.get("status") or "info").lower()
+    status = raw_status if raw_status in {"pass", "fail", "warn", "pending", "info"} else "info"
+    command = clean_text(record.get("command") or "python3 scripts/check_integration_safety.py", limit=180)
+    checked_at = clean_text(record.get("checked_at") or "", limit=80)
+    detail = clean_text(record.get("summary") or "", limit=360)
+    if not detail:
+        status_word = {
+            "pass": "passed",
+            "fail": "failed",
+            "warn": "reported a warning",
+            "pending": "is pending",
+        }.get(status, "was recorded")
+        detail = f"Dashboard Run Safety Check {status_word}: `{command}`."
+    recorded_text = f"{checked_at}: {detail}" if checked_at else detail
+    return {
+        "status": status,
+        "summary": detail,
+        "command": command,
+        "recorded_text": recorded_text,
+        "source": clean_text(record.get("source") or "target/integration_safety_check.json", limit=80),
+    }
+
+
+def integration_safety_snapshot(validation: dict[str, Any], target: Path | None = None) -> dict[str, Any]:
     items = [item for item in list(validation.get("items") or []) if isinstance(item, dict)]
     for item in items:
         text = clean_text(item.get("text") or "", limit=420)
@@ -243,6 +272,11 @@ def integration_safety_snapshot(validation: dict[str, Any]) -> dict[str, Any]:
             "command": command,
             "recorded_text": text,
         }
+
+    if target is not None:
+        record_snapshot = integration_safety_record_snapshot(target)
+        if record_snapshot:
+            return record_snapshot
 
     return {
         "status": "not_recorded",
@@ -322,7 +356,7 @@ def parse_task_state(target: Path) -> dict[str, Any]:
         "known_issue": first_nonempty_section_line(text, "Known Issues") or "No active issue summary.",
         "known_issues": section_bullets(text, "Known Issues", limit=MAX_REVIEW_ITEMS),
         "validation": validation,
-        "integration_safety": integration_safety_snapshot(validation),
+        "integration_safety": integration_safety_snapshot(validation, target),
     }
 
 
