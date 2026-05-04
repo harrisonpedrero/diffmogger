@@ -72,6 +72,7 @@ required_files=(
   "tests/test_integrate_role_outputs.py"
   "tests/test_check_integration_safety.py"
   "tests/test_check_required_files.py"
+  "tests/test_summarize_worker_outputs.py"
   "examples/generic-web-app/project_intake.md"
   "examples/generic-web-app/expected_generated_files.md"
   "examples/trendlab-signal-intelligence/project_intake.md"
@@ -527,6 +528,8 @@ for path in [
     Path("templates/scripts/repair_environment.py"),
     Path("scripts/integrate_role_outputs.py"),
     Path("templates/scripts/integrate_role_outputs.py"),
+    Path("scripts/summarize_worker_outputs.py"),
+    Path("templates/scripts/summarize_worker_outputs.py"),
     Path("scripts/run_dashboard.py"),
     Path("scripts/check_integration_safety.py"),
     Path("services/agentic-dashboard/agentic_dashboard/app.py"),
@@ -731,7 +734,7 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_check_integration_safety.py tests/test_check_required_files.py
+python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_check_integration_safety.py tests/test_check_required_files.py tests/test_summarize_worker_outputs.py
 
 python3 scripts/check_integration_safety.py >/tmp/Diffmogger-integration-safety.log
 

@@ -16,14 +16,14 @@ from pathlib import Path
 
 
 WORKER_GLOB = "worker_*.md"
-INTERESTING_HEADINGS = {
+INTERESTING_HEADINGS = (
     "findings",
     "risks",
     "recommendations",
     "suggested verification",
     "checks run",
     "integration notes",
-}
+)
 
 
 @dataclass(frozen=True)
