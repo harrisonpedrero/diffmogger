@@ -81,6 +81,27 @@ class RequiredFilesCheckTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("docs/DEVELOPMENT.md: missing marker 'Run Safety Check'", result.stderr)
 
+    def test_development_review_bundle_command_regression_fails_required_files_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+            development = target / "docs" / "DEVELOPMENT.md"
+            development.write_text(
+                development.read_text(encoding="utf-8").replace(
+                    "--review-dir /tmp/Diffmogger-review",
+                    "--review-output /tmp/Diffmogger-self-review.md",
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_check(target)
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn(
+                "docs/DEVELOPMENT.md: missing marker 'python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review'",
+                result.stderr,
+            )
+
     def test_observatory_first_review_marker_regression_fails_required_files_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)

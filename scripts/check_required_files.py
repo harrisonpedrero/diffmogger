@@ -77,6 +77,7 @@ DEVELOPMENT_REQUIRED_STRINGS = [
     "First Review Checklist",
     "bash scripts/validate_starter_kit.sh",
     "Run Safety Check",
+    "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
     "Diffmogger-observatory.html",
     "Diffmogger-self-review.md",
 ]
