@@ -319,6 +319,117 @@ class ObservatorySnapshotTests(unittest.TestCase):
             """,
         )
 
+    def seed_priority_target(self, root: Path, *, include_deferred_pressure: bool) -> None:
+        self.write_text(
+            root,
+            "docs/CODEX_AUTOMATION_TASKS.md",
+            """
+            # Codex Automation Tasks
+
+            AUTOMATION_STATUS: ACTIVE
+
+            Last updated: 2026-05-03T22:50:00+00:00
+
+            ## Current Project State
+
+            - Current assessment: Action-plan priority fixtures are ready.
+
+            ## Product Horizon State
+
+            - Current horizon: H4 Evaluation/reporting/comparison layer
+            - Advancement decision: stay
+
+            ## Checks From Last Run
+
+            - FAIL: `bash scripts/validate_starter_kit.sh`
+
+            ## Known Issues
+
+            - Validation fixture failed.
+
+            ## Suggested Next Sprint-Sized Task
+
+            Repair local validation.
+            """,
+        )
+        backlog = (
+            "- builder `builder-verify`: verification_failure; $ bash scripts/validate_starter_kit.sh"
+            if include_deferred_pressure
+            else "None."
+        )
+        depth = 1 if include_deferred_pressure else 0
+        self.write_text(
+            root,
+            "docs/MULTI_ROLE_PROGRESS.md",
+            f"""
+            # Multi-Role Progress
+
+            ## Cumulative Metrics
+
+            - Total integrator runs: 4
+            - Accepted patches by role:
+              - builder: 2
+            - Deferred patches by role:
+              - builder: {depth}
+            - Current deferred queue depth: {depth}
+
+            ## Recent Activity Log
+
+            - validation fixture state recorded.
+
+            ## Deferred-Patch Backlog
+
+            {backlog}
+            """,
+        )
+        self.write_json(
+            root,
+            "target/automation_signals.json",
+            {
+                "schema_version": 1,
+                "updated_at": "2026-05-03T22:50:00+00:00",
+                "signals": [
+                    {
+                        "id": "validation-sweep",
+                        "owner_role": "hardener",
+                        "priority": "medium",
+                        "cadence": "weekly",
+                        "instructions": "Improve validation coverage.",
+                        "active": True,
+                        "next_due_at": "2026-05-03T22:50:00+00:00",
+                        "last_completed_at": None,
+                        "last_completed_by": None,
+                    }
+                ],
+            },
+        )
+        self.write_json(
+            root,
+            "target/automation_conveyor_state.json",
+            {
+                "schema_version": 1,
+                "cycles": 2,
+                "updated_at": "2026-05-03T22:50:00+00:00",
+                "decision_queue": [
+                    {"role": "builder", "state": "ready", "reason": "builder momentum is available"}
+                ],
+            },
+        )
+        if include_deferred_pressure:
+            self.write_json(
+                root,
+                "target/automation_queue/builder/run-deferred/manifest.json",
+                {
+                    "role": "builder",
+                    "run_id": "run-deferred",
+                    "status": "deferred",
+                    "summary": "Deferred validation patch.",
+                    "deferral_reason": "verification_failure",
+                    "changed_files": ["scripts/validate_starter_kit.sh"],
+                    "created_at": "2026-05-03T22:50:00+00:00",
+                },
+            )
+
     def test_build_snapshot_counts_active_human_bridge_records(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
@@ -444,6 +555,36 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("first_run_queue_state:", report)
                     self.assertIn("First role patch manifests", report)
                     self.assertIn("No deferred patch backlog recorded", report)
+
+    def test_deferred_pressure_action_plan_outranks_validation_failures(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_priority_target(target, include_deferred_pressure=True)
+
+                    snapshot = module.build_snapshot(target)
+                    action_plan = snapshot["scorecard"]["action_plan"]
+
+                    self.assertEqual(action_plan["label"], "Run integrator triage")
+                    self.assertEqual(action_plan["lane"], "integrator")
+                    self.assertIn("1 deferred backlog item", action_plan["recommendation"])
+                    self.assertIn("verification_failure", action_plan["why"])
+
+    def test_validation_action_plan_outranks_signal_and_builder_momentum(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_priority_target(target, include_deferred_pressure=False)
+
+                    snapshot = module.build_snapshot(target)
+                    action_plan = snapshot["scorecard"]["action_plan"]
+
+                    self.assertEqual(action_plan["label"], "Repair validation")
+                    self.assertEqual(action_plan["lane"], "hardener")
+                    self.assertIn("1 validation issue", action_plan["recommendation"])
+                    self.assertIn("1 fail", action_plan["why"])
 
 
 if __name__ == "__main__":
