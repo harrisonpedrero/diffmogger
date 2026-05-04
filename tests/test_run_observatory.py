@@ -836,6 +836,86 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual("ready", snapshot["first_review"]["status"])
                     self.assertEqual("pass", first_review_items["Run Safety Check"]["status"])
 
+    def test_prebootstrap_generated_target_gets_target_local_validation_action(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_text(
+                        target,
+                        "docs/CODEX_AUTOMATION_TASKS.md",
+                        """
+                        # Codex Automation Tasks
+
+                        AUTOMATION_STATUS: ACTIVE
+
+                        Last updated: 2026-05-04T05:20:00+00:00
+
+                        ## Current Project State
+
+                        - Current assessment: not bootstrapped yet.
+
+                        ## Product Horizon State
+
+                        - Current horizon: H1 Runnable baseline
+                        - Advancement decision: stay
+
+                        ## Checks From Last Run
+
+                        - Not run yet. Bootstrap run should discover or create verification commands.
+
+                        ## Known Issues
+
+                        - Product baseline still needs to be created or inspected.
+
+                        ## Suggested Next Sprint-Sized Task
+
+                        Run the initial bootstrap prompt.
+                        """,
+                    )
+                    self.write_text(
+                        target,
+                        "docs/DEVELOPMENT.md",
+                        """
+                        # Development
+
+                        ### First Review Checklist
+
+                        1. Run `bash scripts/validate_starter_kit.sh` from the Diffmogger source when reviewing kit behavior.
+                        2. Click **Run Safety Check**.
+                        3. Render `Diffmogger-observatory.html`.
+                        4. Export `Diffmogger-self-review.md`.
+                        """,
+                    )
+                    self.write_json(
+                        target,
+                        "target/integration_safety_check.json",
+                        {
+                            "schema_version": 1,
+                            "checked_at": "2026-05-04T05:20:00+00:00",
+                            "source": "dashboard_run_safety_check",
+                            "status": "pass",
+                            "exit_code": 0,
+                            "command": "python3 scripts/check_integration_safety.py .",
+                            "selected_target": str(target),
+                            "checked_target": str(ROOT),
+                            "summary": "Dashboard Run Safety Check passed against the kit source.",
+                        },
+                    )
+
+                    snapshot = module.build_snapshot(target)
+                    first_review_items = {item["label"]: item for item in snapshot["first_review"]["items"]}
+                    missing_actions = snapshot["first_review"]["missing_actions"]
+                    report = module.render_review_markdown(snapshot)
+
+                    self.assertFalse((target / "scripts" / "validate_starter_kit.sh").exists())
+                    self.assertEqual("attention", snapshot["first_review"]["status"])
+                    self.assertEqual("warn", first_review_items["Validation"]["status"])
+                    self.assertIn("target-local validation", first_review_items["Validation"]["detail"])
+                    self.assertIn("Complete the first bootstrap", missing_actions[0])
+                    self.assertNotIn("validate_starter_kit.sh", missing_actions[0])
+                    self.assertIn("Complete the first bootstrap", report)
+
     def test_review_markdown_export_summarizes_local_state(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):

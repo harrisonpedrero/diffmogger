@@ -411,6 +411,24 @@ def first_review_doc_coverage(target: Path) -> dict[str, Any]:
     }
 
 
+def first_review_validation_detail(target: Path) -> str:
+    if (target / "scripts" / "validate_starter_kit.sh").is_file():
+        return "No passing validation run is recorded in the task file yet."
+    return (
+        "No passing target-local validation run is recorded yet. Generated targets usually show this "
+        "until bootstrap creates or confirms the project's own checks."
+    )
+
+
+def first_review_validation_missing_action(target: Path) -> str:
+    if (target / "scripts" / "validate_starter_kit.sh").is_file():
+        return "Record a passing `bash scripts/validate_starter_kit.sh` run."
+    return (
+        "Complete the first bootstrap and record a passing target-local verification run in "
+        "`docs/CODEX_AUTOMATION_TASKS.md`."
+    )
+
+
 def first_review_snapshot(target: Path, task: dict[str, Any]) -> dict[str, Any]:
     validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
     validation_counts = validation.get("counts") if isinstance(validation.get("counts"), dict) else {}
@@ -428,7 +446,7 @@ def first_review_snapshot(target: Path, task: dict[str, Any]) -> dict[str, Any]:
         validation_detail = validation.get("summary") or f"{pass_count} passing check(s) recorded."
     else:
         validation_status = "warn"
-        validation_detail = "No passing validation run is recorded in the task file yet."
+        validation_detail = first_review_validation_detail(target)
 
     safety_status = "pass" if integration_status == "pass" else ("fail" if integration_status == "fail" else "warn")
     safety_detail = integration_safety.get("summary") or "No integration-safety check result is recorded yet."
@@ -442,7 +460,7 @@ def first_review_snapshot(target: Path, task: dict[str, Any]) -> dict[str, Any]:
     if docs["status"] != "pass":
         missing_actions.append("Update a first-review checklist doc with the validation, safety, observatory, and Markdown export steps.")
     if validation_status != "pass":
-        missing_actions.append("Record a passing `bash scripts/validate_starter_kit.sh` run.")
+        missing_actions.append(first_review_validation_missing_action(target))
     if safety_status != "pass":
         missing_actions.append("Run dashboard **Run Safety Check** or `python3 scripts/check_integration_safety.py` and record the result.")
 
