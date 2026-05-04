@@ -23,6 +23,7 @@ BASE_REQUIRED = [
     "scripts/summarize_worker_outputs.py",
     "scripts/compact_agent_state.py",
     "docs/INITIAL_BOOTSTRAP_PROMPT.md",
+    "docs/DEVELOPMENT.md",
     "docs/PROJECT_CONTEXT.md",
     "docs/CODEX_AUTOMATION_TASKS.md",
     "docs/CODEX_AUTOMATION_GUARDRAILS.md",
@@ -70,6 +71,14 @@ TASK_REQUIRED_STRINGS = [
     "## Suggested Next Sprint-Sized Task",
     "## Ambitious Ideas Backlog",
     "## Continue/Block/Critical-Stop Rationale",
+]
+
+DEVELOPMENT_REQUIRED_STRINGS = [
+    "First Review Checklist",
+    "bash scripts/validate_starter_kit.sh",
+    "Run Safety Check",
+    "Diffmogger-observatory.html",
+    "Diffmogger-self-review.md",
 ]
 
 AUTOMATION_REQUIRED_STRINGS = [
@@ -313,6 +322,13 @@ def main() -> int:
         for marker in TASK_REQUIRED_STRINGS:
             if marker not in task_text:
                 problems.append(f"docs/CODEX_AUTOMATION_TASKS.md: missing marker {marker!r}")
+
+    development_path = root / "docs/DEVELOPMENT.md"
+    if development_path.exists() and development_path.is_file():
+        development_text = development_path.read_text(encoding="utf-8")
+        for marker in DEVELOPMENT_REQUIRED_STRINGS:
+            if marker not in development_text:
+                problems.append(f"docs/DEVELOPMENT.md: missing marker {marker!r}")
 
     automation_path = root / ".agentic/automation_prompt.md"
     if automation_path.exists() and automation_path.is_file():
