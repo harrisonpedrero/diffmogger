@@ -112,6 +112,8 @@ case "$mode" in
     ;;
 esac
 
+ownership_scope="$(printf '%s' "$ownership_scope" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+
 if [[ "$mode" == "write" && -z "$ownership_scope" ]]; then
   echo "--mode write requires --ownership with disjoint file/module scope" >&2
   exit 2

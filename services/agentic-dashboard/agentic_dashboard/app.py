@@ -725,6 +725,13 @@ def worker_assignment_prompt(strategy: dict[str, Any], *, mode: str) -> str:
     return "\n".join(lines)
 
 
+def normalize_worker_ownership_scope(ownership_scope: str) -> str:
+    scope = re.sub(r"\s+", " ", str(ownership_scope or "").strip())
+    if not scope:
+        raise ValueError("write workers require a non-empty ownership scope")
+    return scope
+
+
 def read_only_worker_command(target: Path, strategy: dict[str, Any], *, run_id: str | None = None) -> list[str]:
     target = target.expanduser().resolve()
     return [
@@ -750,6 +757,7 @@ def write_worker_command(
     run_id: str | None = None,
 ) -> list[str]:
     target = target.expanduser().resolve()
+    ownership_scope = normalize_worker_ownership_scope(ownership_scope)
     return [
         "bash",
         str(target / "scripts" / "spawn_worker_agent.sh"),

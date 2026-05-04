@@ -253,6 +253,32 @@ class DashboardIntegrationSafetyAffordanceTests(unittest.TestCase):
             self.assertIn("services/example/** and tests/example/** only", command)
             self.assertIn("dashboard-write-test", command)
 
+    def test_write_worker_command_rejects_blank_ownership_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+
+            with self.assertRaisesRegex(ValueError, "ownership scope"):
+                self.module.write_worker_command(
+                    target,
+                    {"strategy": "WRITE_WORKERS", "action_lane": "builder"},
+                    " \n\t ",
+                    run_id="dashboard-write-test",
+                )
+
+    def test_write_worker_command_normalizes_ownership_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+
+            command = self.module.write_worker_command(
+                target,
+                {"strategy": "WRITE_WORKERS", "action_lane": "builder"},
+                "  services/example/**\n  and tests/example/** only  ",
+                run_id="dashboard-write-test",
+            )
+
+            ownership_index = command.index("--ownership") + 1
+            self.assertEqual("services/example/** and tests/example/** only", command[ownership_index])
+
     def test_integration_only_command_runs_target_local_integrator_role(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
