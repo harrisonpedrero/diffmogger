@@ -66,6 +66,15 @@ fi
 target_abs="$(cd "$target_dir" && pwd)"
 cd "$target_abs"
 
+if [[ -n "${DIFFMOGGER_BROWSER_PATH:-}" && -z "${CHROME_PATH:-}" ]]; then
+  export CHROME_PATH="$DIFFMOGGER_BROWSER_PATH"
+elif [[ -z "${DIFFMOGGER_BROWSER_PATH:-}" && -z "${CHROME_PATH:-}" && -f "scripts/diffmogger_browser.py" ]]; then
+  browser_env="$(python3 scripts/diffmogger_browser.py env 2>/dev/null || true)"
+  if [[ -n "$browser_env" ]]; then
+    eval "$browser_env"
+  fi
+fi
+
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "Multi-role automation requires an initialized git repo: $target_abs" >&2
   exit 2
@@ -121,6 +130,7 @@ stdout_log="$log_dir/$role.stdout.log"
 stderr_log="$log_dir/$role.stderr.log"
 run_stdout="$queue_dir/codex.stdout.log"
 run_stderr="$queue_dir/codex.stderr.log"
+runtime_prompt_path="$queue_dir/runtime_prompt.md"
 env_repair_path="$queue_dir/environment_repair.json"
 rerun_stdout="$queue_dir/codex.rerun.stdout.log"
 rerun_stderr="$queue_dir/codex.rerun.stderr.log"
@@ -357,8 +367,32 @@ for rel in paths:
 output.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
+{
+  cat "$prompt_path"
+  cat <<EOF
+
+## Runtime Summary Contract
+
+Before your final response, write a concise Markdown summary to this exact file:
+
+\`\`\`text
+$summary_path
+\`\`\`
+
+Start the file with this exact commit-intent block so the integrator can create useful semantic commits:
+
+\`\`\`text
+Commit type: <feat|fix|docs|test|refactor|chore|build|ci|perf|style>
+Commit scope: <short-kebab-case-scope>
+Commit subject: <imperative subject without type/scope, 72 chars or less>
+\`\`\`
+
+Then add short \`## Summary\` and \`## Checks\` sections. The commit subject must describe the actual user-visible, code, test, validation, or docs change. Do not use generic subjects such as \`integrate $role work\`, \`document automation progress\`, \`update files\`, or \`changes\`.
+EOF
+} >"$runtime_prompt_path"
+
 set +e
-codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" -C "$worktree_dir" "$(cat "$prompt_path")" >"$run_stdout" 2>"$run_stderr"
+codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" -C "$worktree_dir" "$(cat "$runtime_prompt_path")" >"$run_stdout" 2>"$run_stderr"
 codex_status=$?
 set -e
 critical_stop_detected=0
@@ -433,7 +467,7 @@ for item in data.get("path_prepend") or []:
 PY
 )
     set +e
-    codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" -C "$worktree_dir" "$(cat "$prompt_path")" >"$rerun_stdout" 2>"$rerun_stderr"
+    codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" -C "$worktree_dir" "$(cat "$runtime_prompt_path")" >"$rerun_stdout" 2>"$rerun_stderr"
     rerun_status=$?
     set -e
     {

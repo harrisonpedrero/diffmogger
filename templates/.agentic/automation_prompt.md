@@ -257,6 +257,16 @@ Preferred commands:
 
 Run the checks that match the files changed. Do not claim checks passed unless they were run. If a check cannot run because of missing local tooling or dependencies, diagnose the environment and use `scripts/repair_environment.py` or an equivalent local-only repair before declaring an environment blocker. Never install globally.
 
+For browser-backed smoke checks, visual QA, or documentation research, prefer the managed browser runtime:
+
+```bash
+python3 scripts/diffmogger_browser.py doctor --launch
+python3 scripts/diffmogger_browser.py install
+python3 scripts/diffmogger_browser.py env
+```
+
+Use `DIFFMOGGER_BROWSER_PATH` or `CHROME_PATH` when launching headless browser checks. If the same browser launch fails repeatedly before DevTools is ready, record the diagnostics as `BLOCKED_ON_ENVIRONMENT` and switch to an equivalent managed-browser/manual QA path rather than retrying the identical command.
+
 ## End-Of-Run Requirements
 
 Rewrite `docs/CODEX_AUTOMATION_TASKS.md` with:

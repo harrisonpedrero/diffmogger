@@ -125,6 +125,7 @@ These are observations from private repositories that ran on Diffmogger. They ar
 - scheduled-run wrapper template: `scripts/run_codex_automation.sh`
 - continuous conveyor wrapper: `scripts/run_conveyor_automation.sh`, `scripts/run_conveyor_automation.py`
 - local observatory page: `scripts/run_observatory.py`
+- managed browser runtime helper: `scripts/diffmogger_browser.py`
 - local environment repair helper: `scripts/repair_environment.py`
 - optional automation signal helper: `scripts/update_automation_signals.py`
 - worker helper scripts: `scripts/spawn_worker_agent.sh`, `scripts/summarize_worker_outputs.py`

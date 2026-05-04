@@ -22,6 +22,7 @@ scripts/run_codex_automation.sh
 scripts/run_conveyor_automation.py
 scripts/run_conveyor_automation.sh
 scripts/run_observatory.py
+scripts/diffmogger_browser.py
 scripts/repair_environment.py
 scripts/update_automation_signals.py
 scripts/spawn_worker_agent.sh

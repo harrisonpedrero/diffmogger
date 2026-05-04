@@ -305,6 +305,44 @@ def dashboard_state_path(target: Path) -> Path:
     return target.expanduser().resolve() / DASHBOARD_STATE_FILE
 
 
+def default_browser_cache_dir() -> Path:
+    configured = os.environ.get("DIFFMOGGER_BROWSER_CACHE", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".cache" / "diffmogger" / "browsers"
+
+
+def managed_browser_path() -> str | None:
+    cache_dir = default_browser_cache_dir()
+    if not cache_dir.exists():
+        return None
+    names = {"chrome-headless-shell", "chrome", "Google Chrome for Testing", "Chromium"}
+    candidates = [
+        path
+        for path in cache_dir.rglob("*")
+        if path.is_file() and path.name in names and os.access(path, os.X_OK) and "Crashpad" not in path.parts
+    ]
+    candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return str(candidates[0]) if candidates else None
+
+
+def automation_environment(target: Path, *, allow_remotes: bool = False) -> dict[str, str]:
+    environment = {
+        "TARGET": str(target),
+        "PATH": DEFAULT_AUTOMATION_PATH,
+        "HOME": str(Path.home()),
+        "DIFFMOGGER_BROWSER_CACHE": str(default_browser_cache_dir()),
+    }
+    env_browser = os.environ.get("DIFFMOGGER_BROWSER_PATH", "").strip() or os.environ.get("CHROME_PATH", "").strip()
+    browser_path = env_browser or managed_browser_path()
+    if browser_path:
+        environment["DIFFMOGGER_BROWSER_PATH"] = browser_path
+        environment["CHROME_PATH"] = browser_path
+    if allow_remotes:
+        environment["MULTI_ROLE_ALLOW_REMOTES"] = "1"
+    return environment
+
+
 def write_launchd_plist(target: Path, cadence_seconds: int) -> tuple[str, Path]:
     target = target.expanduser().resolve()
     label = launchd_label(target)
@@ -320,10 +358,7 @@ def write_launchd_plist(target: Path, cadence_seconds: int) -> tuple[str, Path]:
         "StartInterval": cadence_seconds,
         "StandardOutPath": str(log_dir / "stdout.log"),
         "StandardErrorPath": str(log_dir / "stderr.log"),
-        "EnvironmentVariables": {
-            "TARGET": str(target),
-            "PATH": DEFAULT_AUTOMATION_PATH,
-        },
+        "EnvironmentVariables": automation_environment(target),
     }
     plist_path.write_bytes(plistlib.dumps(plist, sort_keys=True))
     return label, plist_path
@@ -344,12 +379,7 @@ def write_role_launchd_plist(target: Path, role: str, *, allow_remotes: bool = F
         intervals = {"Minute": minutes[0]}
     else:
         intervals = [{"Minute": minute} for minute in minutes]
-    environment = {
-        "TARGET": str(target),
-        "PATH": DEFAULT_AUTOMATION_PATH,
-    }
-    if allow_remotes:
-        environment["MULTI_ROLE_ALLOW_REMOTES"] = "1"
+    environment = automation_environment(target, allow_remotes=allow_remotes)
     plist = {
         "Label": label,
         "ProgramArguments": [
@@ -376,12 +406,7 @@ def write_conveyor_launchd_plist(target: Path, *, allow_remotes: bool = False) -
     log_dir = launchd_log_dir(target)
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
-    environment = {
-        "TARGET": str(target),
-        "PATH": DEFAULT_AUTOMATION_PATH,
-    }
-    if allow_remotes:
-        environment["MULTI_ROLE_ALLOW_REMOTES"] = "1"
+    environment = automation_environment(target, allow_remotes=allow_remotes)
     plist = {
         "Label": label,
         "ProgramArguments": [

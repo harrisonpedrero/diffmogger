@@ -45,6 +45,16 @@ target/automation_queue/hardener/<run_id>/changes.patch
 target/automation_queue/hardener/<run_id>/summary.md
 ```
 
+When writing `summary.md`, start with:
+
+```text
+Commit type: <feat|fix|docs|test|refactor|chore|build|ci|perf|style>
+Commit scope: <short-kebab-case-scope>
+Commit subject: <imperative subject without type/scope, 72 chars or less>
+```
+
+The commit subject must name the actual code, test, validation, docs, or user-visible behavior change. Do not use generic subjects such as `integrate hardener work`, `document automation progress`, `update files`, or `changes`.
+
 Do not mutate the main checkout directly.
 
 If you handle an automation signal, run:

@@ -68,6 +68,22 @@ Continuous conveyor scheduling requires this target to be an initialized git rep
 
 The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_signals.json` to show active signal nudges, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
 
+## Managed Browser Runtime
+
+Browser-backed automation should prefer Diffmogger's managed local browser over ambient system Chrome:
+
+```bash
+python3 scripts/diffmogger_browser.py doctor --launch
+python3 scripts/diffmogger_browser.py install
+python3 scripts/diffmogger_browser.py env
+```
+
+The helper checks `DIFFMOGGER_BROWSER_PATH`, `CHROME_PATH`, and the managed cache at
+`DIFFMOGGER_BROWSER_CACHE` or `~/.cache/diffmogger/browsers`. Scheduled wrappers export
+the managed path for child Codex runs when it exists, and dashboard-managed LaunchAgents
+inherit the same environment. Do not make browser smoke checks depend only on system
+Chrome; use `python3 scripts/diffmogger_browser.py resolve` or the exported `CHROME_PATH`.
+
 For a durable first-run review bundle, render the same local state to HTML and Markdown:
 
 ```bash

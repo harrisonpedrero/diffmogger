@@ -263,10 +263,117 @@ class RuntimeStateActionTests(unittest.TestCase):
 
                 self.assertEqual(
                     message,
-                    "docs(docs): document automation progress\n\n"
+                    "docs(dashboard): document dashboard workflow\n\n"
                     "Role: planner\n"
                     "Patch-run: run-docs",
                 )
+
+    def test_semantic_commit_message_prefers_valid_role_commit_intent(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                manifest = {
+                    "role": "builder",
+                    "changed_files": [
+                        "README.md",
+                        "docs/DEVELOPMENT.md",
+                        "src/lib/planning.test.ts",
+                        "src/lib/planning.ts",
+                    ],
+                    "summary": "\n".join(
+                        [
+                            "Commit type: feat",
+                            "Commit scope: review",
+                            "Commit subject: add baseline comparison guidance to review briefs",
+                            "",
+                            "## Summary",
+                            "- Added stable no-baseline review brief guidance.",
+                        ]
+                    ),
+                }
+
+                message = module.semantic_commit_message(manifest, ROOT, "run-intent")
+
+                self.assertEqual(
+                    message,
+                    "feat(review): add baseline comparison guidance to review briefs\n\n"
+                    "Role: builder\n"
+                    "Patch-run: run-intent",
+                )
+
+    def test_semantic_commit_message_ignores_docs_scope_for_mixed_product_patch(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    patch = target / "changes.patch"
+                    patch.write_text(
+                        "diff --git a/src/lib/planning.ts b/src/lib/planning.ts\n"
+                        "+  lines.push(\"### Closure Checklist\");\n",
+                        encoding="utf-8",
+                    )
+                    manifest = {
+                        "role": "builder",
+                        "patch_path": str(patch),
+                        "changed_files": [
+                            "README.md",
+                            "docs/DEVELOPMENT.md",
+                            "scripts/browser_smoke.mjs",
+                            "src/App.tsx",
+                            "src/lib/planning.test.ts",
+                            "src/lib/planning.ts",
+                            "src/styles.css",
+                        ],
+                        "summary": "\n".join(
+                            [
+                                "Commit type: feat",
+                                "Commit scope: docs",
+                                "Commit subject: integrate builder work",
+                            ]
+                        ),
+                    }
+
+                    message = module.semantic_commit_message(manifest, target, "run-product")
+
+                    self.assertEqual(
+                        message,
+                        "feat(planning): add review closure checklist\n\n"
+                        "Role: builder\n"
+                        "Patch-run: run-product",
+                    )
+
+    def test_semantic_commit_message_describes_browser_smoke_diagnostics(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    patch = target / "changes.patch"
+                    patch.write_text(
+                        "diff --git a/scripts/browser_smoke.mjs b/scripts/browser_smoke.mjs\n"
+                        "+      status: \"failed_missing_browser\",\n"
+                        "+      diagnosticPath: \"target/browser-smoke/chrome-launch-diagnostics.json\",\n",
+                        encoding="utf-8",
+                    )
+                    manifest = {
+                        "role": "hardener",
+                        "patch_path": str(patch),
+                        "changed_files": [
+                            "README.md",
+                            "docs/DEVELOPMENT.md",
+                            "docs/LOCAL_FIRST_BASELINE.md",
+                            "package.json",
+                            "scripts/browser_smoke.mjs",
+                        ],
+                        "summary": "# hardener role run run-smoke\n\n- patch: /tmp/changes.patch\n",
+                    }
+
+                    message = module.semantic_commit_message(manifest, target, "run-smoke")
+
+                    self.assertEqual(
+                        message,
+                        "test(browser-smoke): report browser smoke launch diagnostics\n\n"
+                        "Role: hardener\n"
+                        "Patch-run: run-smoke",
+                    )
 
     def test_first_summary_line_skips_wrapper_heading(self) -> None:
         for path, module in self.modules:
@@ -280,6 +387,26 @@ Implemented the useful thing.
 """
 
                 self.assertEqual(module.first_summary_line(summary), "Implemented the useful thing.")
+
+    def test_first_summary_line_skips_wrapper_paths_and_commit_intent(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                summary = """# builder role run run-001
+
+Commit type: feat
+Commit scope: planning
+Commit subject: add review closure checklist
+- patch: /tmp/example-project/target/automation_queue/builder/run/changes.patch
+Review `/tmp/example-project/target/automation_queue/builder/run/codex.raw.log` for raw Codex output.
+
+## Summary
+- Added closure checklist rows to the weekly review handoff.
+"""
+
+                self.assertEqual(
+                    module.first_summary_line(summary),
+                    "Added closure checklist rows to the weekly review handoff.",
+                )
 
 
 if __name__ == "__main__":

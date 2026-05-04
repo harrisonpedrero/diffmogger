@@ -10,6 +10,21 @@ child_pid=""
 
 cd "$TARGET" || exit 1
 
+configure_diffmogger_browser() {
+  if [ -n "${DIFFMOGGER_BROWSER_PATH:-}" ] && [ -z "${CHROME_PATH:-}" ]; then
+    export CHROME_PATH="$DIFFMOGGER_BROWSER_PATH"
+    return
+  fi
+  if [ -z "${DIFFMOGGER_BROWSER_PATH:-}" ] && [ -z "${CHROME_PATH:-}" ] && [ -f "scripts/diffmogger_browser.py" ]; then
+    browser_env="$(python3 scripts/diffmogger_browser.py env 2>/dev/null || true)"
+    if [ -n "$browser_env" ]; then
+      eval "$browser_env"
+    fi
+  fi
+}
+
+configure_diffmogger_browser
+
 CODEX_PARENT_ARGS=()
 if [ "${CODEX_ENABLE_NESTED_CLI_HOME:-true}" = "true" ] && [ -n "${HOME:-}" ]; then
   export CODEX_NESTED_CLI_HOME="${CODEX_NESTED_CLI_HOME:-$HOME/.codex}"

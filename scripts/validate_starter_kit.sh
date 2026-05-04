@@ -58,6 +58,7 @@ required_files=(
   "templates/scripts/run_conveyor_automation.sh"
   "templates/scripts/run_observatory.py"
   "templates/scripts/build_replay.py"
+  "templates/scripts/diffmogger_browser.py"
   "templates/scripts/repair_environment.py"
   "templates/scripts/update_automation_signals.py"
   "templates/scripts/run_role_automation.sh"
@@ -93,6 +94,7 @@ required_files=(
   "scripts/run_conveyor_automation.sh"
   "scripts/run_observatory.py"
   "scripts/build_replay.py"
+  "scripts/diffmogger_browser.py"
   "scripts/repair_environment.py"
   "scripts/update_automation_signals.py"
   "scripts/run_role_automation.sh"
@@ -359,6 +361,8 @@ for marker in [
     "CODEX_NESTED_CLI_HOME",
     "CODEX_LOCK_CONTEXT",
     "$HOME/.codex",
+    "diffmogger_browser.py",
+    "DIFFMOGGER_BROWSER_PATH",
     "--add-dir",
     "codex exec --full-auto",
     "--skip-git-repo-check",
@@ -373,6 +377,19 @@ for marker in [
 if "Diffmogger Self Improvement scheduled sprint" in runner:
     print("Scheduled runner template contains self-run lock context", file=sys.stderr)
     raise SystemExit(1)
+
+browser_helper = Path("templates/scripts/diffmogger_browser.py").read_text(encoding="utf-8")
+for marker in [
+    "chrome-headless-shell@stable",
+    "@puppeteer/browsers",
+    "DIFFMOGGER_BROWSER_PATH",
+    "CHROME_PATH",
+    "DIFFMOGGER_BROWSER_CACHE",
+    "DevTools listening on",
+]:
+    if marker not in browser_helper:
+        print(f"Browser helper template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
 
 conveyor = Path("templates/scripts/run_conveyor_automation.py").read_text(encoding="utf-8")
 for marker in [
@@ -446,13 +463,16 @@ for marker in [
 
 for role in ["planner", "builder", "hardener", "integrator"]:
     role_prompt = Path(f"templates/.agentic/roles/{role}.md").read_text(encoding="utf-8")
-    for marker in [
+    markers = [
         "NEVER push to a remote",
         "NEVER configure a remote",
         "NEVER set up upstream tracking",
         "CRITICAL_STOP",
         "docs/MULTI_ROLE_PROGRESS.md",
-    ]:
+    ]
+    if role != "integrator":
+        markers.extend(["Commit subject:", "Do not use generic subjects"])
+    for marker in markers:
         if marker not in role_prompt:
             print(f"Role prompt template {role} missing marker: {marker}", file=sys.stderr)
             raise SystemExit(1)
@@ -479,6 +499,8 @@ for marker in [
     "allowed_runtime_path",
     ".agentic/automation_prompt.md",
     ".agentic/roles/builder.md",
+    "Runtime Summary Contract",
+    "Commit subject:",
 ]:
     if marker not in run_role:
         print(f"Role runner template missing marker: {marker}", file=sys.stderr)
@@ -504,6 +526,8 @@ for marker in [
     "RUNTIME_STATE_DENY_PARTS",
     ".agentic/automation_prompt.md",
     ".agentic/roles/builder.md",
+    "parse_commit_intent",
+    "semantic_changed_files",
 ]:
     if marker not in integrator:
         print(f"Integrator template missing marker: {marker}", file=sys.stderr)
@@ -529,6 +553,8 @@ for path in [
     Path("templates/scripts/run_conveyor_automation.py"),
     Path("scripts/run_observatory.py"),
     Path("templates/scripts/run_observatory.py"),
+    Path("scripts/diffmogger_browser.py"),
+    Path("templates/scripts/diffmogger_browser.py"),
     Path("scripts/repair_environment.py"),
     Path("templates/scripts/repair_environment.py"),
     Path("scripts/integrate_role_outputs.py"),
@@ -576,6 +602,9 @@ for marker in [
     "spawn_worker_agent.sh",
     "run_conveyor_automation.sh",
     "DEFAULT_AUTOMATION_PATH",
+    "DIFFMOGGER_BROWSER_PATH",
+    "DIFFMOGGER_BROWSER_CACHE",
+    "automation_environment",
     "StartCalendarInterval",
     "run_role_automation.sh",
     "start_new_session=True",
@@ -634,6 +663,7 @@ first_review_markers = {
     Path("templates/docs/DEVELOPMENT.md"): [
         "First Review Checklist",
         "bash scripts/validate_starter_kit.sh",
+        "python3 scripts/diffmogger_browser.py doctor --launch",
         "Export Review Bundle",
         "Run Safety Check",
         "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
@@ -934,7 +964,7 @@ cat >"$tmp_dir/target/automation_queue/builder/run-001/manifest.json" <<JSON
   "patch_path": "target/automation_queue/builder/run-001/changes.patch",
   "changed_files": ["accepted.txt"],
   "checks_run": [],
-  "summary": "Create accepted smoke file.",
+  "summary": "Commit type: chore\\nCommit scope: smoke\\nCommit subject: create accepted smoke file\\n\\n## Summary\\n- Create accepted smoke file.",
   "created_at": "2026-05-02T00:00:00+00:00",
   "integrated_at": null,
   "checkpoint_commit": null,
@@ -942,7 +972,7 @@ cat >"$tmp_dir/target/automation_queue/builder/run-001/manifest.json" <<JSON
 }
 JSON
 python3 scripts/integrate_role_outputs.py "$tmp_dir" --run-id validation-integrator >/tmp/Diffmogger-integrator-smoke.log
-if ! git -C "$tmp_dir" log --oneline --all | grep "chore(builder): integrate builder work" >/tmp/Diffmogger-integrator-log.log; then
+if ! git -C "$tmp_dir" log --oneline --all | grep "chore(smoke): create accepted smoke file" >/tmp/Diffmogger-integrator-log.log; then
     echo "Integrator smoke did not create accepted patch commit" >&2
     cat /tmp/Diffmogger-integrator-smoke.log >&2
     rm -rf "$tmp_dir" "$tmp_intake"

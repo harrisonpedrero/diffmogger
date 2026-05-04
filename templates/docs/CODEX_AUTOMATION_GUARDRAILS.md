@@ -36,6 +36,8 @@ Do not build unrelated apps or large unrelated systems.
 - Run relevant checks when possible.
 - Diagnose missing local tooling or dependency failures and attempt safe project-local repair before declaring `BLOCKED_ON_ENVIRONMENT`.
 - Do not install dependencies globally; use ignored local venvs, `node_modules`, or other project-local runtime state.
+- For browser-backed smoke checks, visual QA, or documentation research, prefer `scripts/diffmogger_browser.py` and the exported `DIFFMOGGER_BROWSER_PATH`/`CHROME_PATH` over ambient system Chrome.
+- If repeated browser launches fail before DevTools is ready, record `BLOCKED_ON_ENVIRONMENT` with diagnostics and use an equivalent manual or managed-browser QA path instead of looping on the same launch command.
 - Do not delete tests just to pass checks.
 - Do not hide broad classes of errors with blanket suppressions.
 - Keep changes scoped to the current sprint.

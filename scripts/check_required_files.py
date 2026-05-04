@@ -18,6 +18,7 @@ BASE_REQUIRED = [
     "scripts/run_conveyor_automation.sh",
     "scripts/run_observatory.py",
     "scripts/build_replay.py",
+    "scripts/diffmogger_browser.py",
     "scripts/repair_environment.py",
     "scripts/update_automation_signals.py",
     "scripts/spawn_worker_agent.sh",
@@ -77,6 +78,7 @@ TASK_REQUIRED_STRINGS = [
 DEVELOPMENT_REQUIRED_STRINGS = [
     "First Review Checklist",
     "bash scripts/validate_starter_kit.sh",
+    "python3 scripts/diffmogger_browser.py doctor --launch",
     "Run Safety Check",
     "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
     "Diffmogger-observatory.html",
@@ -101,6 +103,8 @@ RUNNER_REQUIRED_STRINGS = [
     "CODEX_LOCK_ALREADY_ACQUIRED",
     "CODEX_LOCK_CONTEXT",
     "CODEX_NESTED_CLI_HOME",
+    "diffmogger_browser.py",
+    "DIFFMOGGER_BROWSER_PATH",
     "--add-dir",
     "$HOME/.codex",
     "codex exec --full-auto",
@@ -156,6 +160,15 @@ WORKER_HELPER_REQUIRED_STRINGS = [
     "--ephemeral",
     "--dangerously-bypass-approvals-and-sandbox",
     "-C \"$target_abs\"",
+]
+
+BROWSER_HELPER_REQUIRED_STRINGS = [
+    "chrome-headless-shell@stable",
+    "@puppeteer/browsers",
+    "DIFFMOGGER_BROWSER_PATH",
+    "CHROME_PATH",
+    "DIFFMOGGER_BROWSER_CACHE",
+    "DevTools listening on",
 ]
 
 WRITE_WORKER_AUTOMATION_REQUIRED_STRINGS = [
@@ -234,9 +247,16 @@ ROLE_PROMPT_REQUIRED_STRINGS = [
     "docs/MULTI_ROLE_PROGRESS.md",
 ]
 
+QUEUE_ROLE_PROMPT_REQUIRED_STRINGS = [
+    "Commit subject:",
+    "Do not use generic subjects",
+]
+
 RUN_ROLE_REQUIRED_STRINGS = [
     "--role",
     "MULTI_ROLE_ALLOW_REMOTES",
+    "diffmogger_browser.py",
+    "DIFFMOGGER_BROWSER_PATH",
     "git remote -v",
     "git worktree add",
     "git ls-files --others --exclude-standard -z",
@@ -247,6 +267,8 @@ RUN_ROLE_REQUIRED_STRINGS = [
     "manifest.json",
     "automation_worktrees",
     "automation_queue",
+    "Runtime Summary Contract",
+    "Commit subject:",
 ]
 
 INTEGRATOR_REQUIRED_STRINGS = [
@@ -258,6 +280,8 @@ INTEGRATOR_REQUIRED_STRINGS = [
     "git push",
     "hooks",
     "semantic_commit_message",
+    "parse_commit_intent",
+    "semantic_changed_files",
     "chore(integrator): checkpoint dirty main",
     "repair_environment.py",
     "worktree",
@@ -379,7 +403,10 @@ def main() -> int:
             role_path = root / ".agentic" / "roles" / f"{role}.md"
             if role_path.exists() and role_path.is_file():
                 role_text = role_path.read_text(encoding="utf-8")
-                for marker in ROLE_PROMPT_REQUIRED_STRINGS:
+                role_markers = ROLE_PROMPT_REQUIRED_STRINGS
+                if role != "integrator":
+                    role_markers = role_markers + QUEUE_ROLE_PROMPT_REQUIRED_STRINGS
+                for marker in role_markers:
                     if marker not in role_text:
                         problems.append(f".agentic/roles/{role}.md: missing marker {marker!r}")
 
@@ -421,6 +448,13 @@ def main() -> int:
         for marker in WORKER_HELPER_REQUIRED_STRINGS + write_worker_helper_markers:
             if marker not in worker_helper_text:
                 problems.append(f"scripts/spawn_worker_agent.sh: missing marker {marker!r}")
+
+    browser_helper_path = root / "scripts/diffmogger_browser.py"
+    if browser_helper_path.exists() and browser_helper_path.is_file():
+        browser_helper_text = browser_helper_path.read_text(encoding="utf-8")
+        for marker in BROWSER_HELPER_REQUIRED_STRINGS:
+            if marker not in browser_helper_text:
+                problems.append(f"scripts/diffmogger_browser.py: missing marker {marker!r}")
 
     if args.multi_role_enabled:
         run_role_path = root / "scripts/run_role_automation.sh"

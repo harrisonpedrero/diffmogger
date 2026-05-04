@@ -32,6 +32,23 @@ Use:
 python3 scripts/summarize_worker_outputs.py /absolute/path/to/target-project --run-id "$CODEX_RUN_ID"
 ```
 
+## Browser Smoke Fails Before DevTools
+
+Prefer Diffmogger's managed browser runtime instead of system Chrome:
+
+```bash
+python3 scripts/diffmogger_browser.py doctor --launch
+python3 scripts/diffmogger_browser.py install
+python3 scripts/diffmogger_browser.py env
+```
+
+The helper resolves `DIFFMOGGER_BROWSER_PATH`, `CHROME_PATH`, then the managed
+cache at `DIFFMOGGER_BROWSER_CACHE` or `~/.cache/diffmogger/browsers`. Scheduled
+wrappers and dashboard-managed LaunchAgents export the managed browser path when
+it exists. If repeated browser launches exit before DevTools is ready, record the
+diagnostics as `BLOCKED_ON_ENVIRONMENT`, avoid retrying the same command, and use
+a managed-browser or manual visual-QA path.
+
 ## Broad Runs Skip Workers Without Explanation
 
 Require the task file to include:
