@@ -62,7 +62,7 @@ class Settings:
     webhook_port: int = 8787
     local_notify_api_token: str = ""
     webhook_public_base_url: str = ""
-    dry_run: bool = False
+    dry_run: bool = True
     runtime_dir: Path = Path("runtime")
     test_mode: bool = False
 
@@ -129,7 +129,7 @@ def load_settings(load_dotenv_file: bool | None = None) -> Settings:
         webhook_port=int(os.getenv("WEBHOOK_PORT", "8787")),
         local_notify_api_token=os.getenv("LOCAL_NOTIFY_API_TOKEN", ""),
         webhook_public_base_url=os.getenv("WEBHOOK_PUBLIC_BASE_URL", "").rstrip("/"),
-        dry_run=_truthy(os.getenv("DRY_RUN")),
+        dry_run=_truthy(os.getenv("DRY_RUN", "true")),
         runtime_dir=runtime_dir,
         test_mode=_truthy(os.getenv("AGENTIC_NOTIFIER_TEST_MODE")),
     )

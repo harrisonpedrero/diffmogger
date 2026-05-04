@@ -60,6 +60,8 @@ The notifier owns:
 - dry-run mode
 - optional JSONL queue files
 
+The checked-in example config and no-env defaults start in dry-run mode. Change `DRY_RUN=false` only when you intentionally want real outbound sends.
+
 The target project owns:
 
 - request files

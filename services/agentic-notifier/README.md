@@ -27,6 +27,8 @@ cp .env.example .env
 
 Edit `.env` locally. Real Twilio values belong in this service's local `.env`, never in a generated target project and never in Codex-visible task files.
 
+The example config starts with `DRY_RUN=true`. Leave it enabled until you intentionally test a real outbound send with approved Twilio sender setup.
+
 Use a virtual environment. Do not install packages into Homebrew/system Python if it reports an externally managed environment.
 
 ## Target Project Paths
@@ -179,7 +181,7 @@ Without a token, the API must remain bound to loopback.
 
 ## Dry-Run Outbound Test
 
-Start the service with `DRY_RUN=true` or use the test script, which forces `"dry_run": true` unless `--real-send` is passed:
+The default `.env.example` and no-env configuration use `DRY_RUN=true`. You can also use the test script, which forces `"dry_run": true` unless `--real-send` is passed:
 
 ```bash
 python scripts/send_test_notification.py

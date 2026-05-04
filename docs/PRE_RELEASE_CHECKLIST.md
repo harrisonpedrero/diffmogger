@@ -7,6 +7,7 @@ This checklist records the release checks for the current public-alpha pass. It 
 - [x] `LICENSE` exists.
 - [x] README clone URL checked.
 - [x] Validation passes with `bash scripts/validate_starter_kit.sh`.
+- [x] Integration safety defaults pass with `python3 scripts/check_integration_safety.py`.
 - [x] Notifier tests pass in a venv.
 - [x] GitHub Actions workflow present.
 - [x] No secrets or PII in repo.

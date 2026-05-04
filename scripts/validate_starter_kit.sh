@@ -69,6 +69,7 @@ required_files=(
   "tests/test_run_conveyor_automation.py"
   "tests/test_repair_environment.py"
   "tests/test_integrate_role_outputs.py"
+  "tests/test_check_integration_safety.py"
   "examples/generic-web-app/project_intake.md"
   "examples/generic-web-app/expected_generated_files.md"
   "examples/trendlab-signal-intelligence/project_intake.md"
@@ -79,6 +80,7 @@ required_files=(
   "schemas/human_response.schema.json"
   "schemas/automation_task_file.schema.json"
   "scripts/check_required_files.py"
+  "scripts/check_integration_safety.py"
   "scripts/scaffold_project_docs.py"
   "scripts/run_dashboard.py"
   "scripts/acquire_codex_lock.sh"
@@ -517,6 +519,7 @@ for path in [
     Path("scripts/integrate_role_outputs.py"),
     Path("templates/scripts/integrate_role_outputs.py"),
     Path("scripts/run_dashboard.py"),
+    Path("scripts/check_integration_safety.py"),
     Path("services/agentic-dashboard/agentic_dashboard/app.py"),
 ]:
     result = subprocess.run([sys.executable, "-m", "py_compile", str(path)])
@@ -649,7 +652,9 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py
+python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_check_integration_safety.py
+
+python3 scripts/check_integration_safety.py >/tmp/Diffmogger-integration-safety.log
 
 python3 scripts/run_dashboard.py --smoke-check >/tmp/Diffmogger-dashboard-smoke.log
 

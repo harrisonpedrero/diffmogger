@@ -221,6 +221,8 @@ python3 scripts/scaffold_project_docs.py \
   --force
 
 python3 scripts/check_required_files.py /tmp/Diffmogger-smoke
+
+python3 scripts/check_integration_safety.py
 ```
 
 Run notifier tests:
@@ -370,6 +372,7 @@ python -m agentic_notifier.run_service
 ```
 
 Real Twilio values belong only in `services/agentic-notifier/.env`. Keep secrets out of target project docs, prompts, task files, and examples.
+The example config starts with `DRY_RUN=true`; change it only when you intentionally want a real outbound send.
 
 Expose only the webhook port with ngrok:
 
