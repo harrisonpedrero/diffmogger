@@ -187,7 +187,7 @@ Use this command shape for nested Codex CLI workers launched from an automation 
 Worker rules:
 
 - Workers must not spawn additional workers.
-- Workers must not send SMS/WhatsApp messages.
+- Workers must not send Discord, local notifier, email, or other external messages.
 - Workers must not touch `.env` or credentials.
 - Workers must not use network unless explicitly approved for that run.
 - The main automation agent must read and consolidate worker findings before implementation is considered complete.

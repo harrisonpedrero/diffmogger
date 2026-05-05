@@ -157,6 +157,435 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertEqual(queue[0]["state"], "next")
                     self.assertIn("planner deferred patch resolved", queue[0]["reason"])
 
+    def write_ticket_run(self, root: Path, payload: str) -> None:
+        self.write_text(
+            root,
+            "docs/TICKET_RUN.md",
+            f"""
+            # Ticket Run
+
+            ```json ticket-run
+            {payload}
+            ```
+            """,
+        )
+
+    def test_ticket_campaign_complete_stops_conveyor(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-complete",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "done", "evidence": ["test passed"]}
+                          ]
+                        }
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 3600, 2)
+
+                    self.assertIsNone(role)
+                    self.assertEqual(reason, "ticket campaign complete")
+                    self.assertTrue(stop)
+
+    def test_ticket_campaign_blocked_stops_conveyor(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-blocked",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "done", "evidence": ["test passed"]},
+                            {"id": "T-2", "status": "blocked", "blocker": "needs API key"}
+                          ]
+                        }
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 3600, 2)
+
+                    self.assertIsNone(role)
+                    self.assertEqual(reason, "ticket campaign blocked")
+                    self.assertTrue(stop)
+
+    def test_active_ticket_campaign_does_not_preempt_normal_conveyor(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-active",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "pending"}
+                          ]
+                        }
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 3600, 2)
+
+                    self.assertEqual(role, "builder")
+                    self.assertIn("builder-first policy", reason)
+                    self.assertFalse(stop)
+
+    def test_deferral_signature_uses_root_cause_before_local_paths(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                local_path = "/User" + "s/example/project/test.ts"
+                signature = module.normalized_deferral_signature(
+                    {
+                        "deferral_reason": "verification_failure",
+                        "deferral_detail": f"Error in {local_path}: DATABASE_URL is not set",
+                    }
+                )
+
+                self.assertEqual("verification_failure:missing_env_var", signature)
+                self.assertNotIn("local_path_reference", signature)
+
+    def test_duplicate_builder_deferrals_route_to_integrator_triage(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    for run_id in ("run-a", "run-b"):
+                        manifest = target / "target" / "automation_queue" / "builder" / run_id / "manifest.json"
+                        manifest.parent.mkdir(parents=True, exist_ok=True)
+                        manifest.write_text(
+                            textwrap.dedent(
+                                f"""
+                                {{
+                                  "role": "builder",
+                                  "run_id": "{run_id}",
+                                  "status": "deferred",
+                                  "deferral_reason": "verification_failure",
+                                  "deferral_category": "missing_env_var",
+                                  "changed_files": ["src/query.ts"],
+                                  "created_at": "2026-05-04T00:00:00+00:00"
+                                }}
+                                """
+                            ).strip()
+                            + "\n",
+                            encoding="utf-8",
+                        )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 3600, 2)
+
+                    self.assertEqual("integrator", role)
+                    self.assertIn("duplicate builder deferred patches need triage", reason)
+                    self.assertFalse(stop)
+
+    def test_missing_baseline_ledger_routes_to_integrator_preflight(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "python3 -m pytest\n")
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 3600, 2)
+
+                    self.assertEqual("integrator", role)
+                    self.assertIn("baseline verification ledger", reason)
+                    self.assertFalse(stop)
+
+    def test_baseline_source_failure_routes_to_repair_lane(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "python3 -m pytest\n")
+                    self.write_text(
+                        target,
+                        "target/baseline_verification.json",
+                        """
+                        {
+                          "schema_version": 1,
+                          "head": "abc",
+                          "verification_config_hash": "missing",
+                          "status": "failing_source",
+                          "root_cause": "Expected category to match fixture",
+                          "failure_signature": "verification_failure:test_assertion_failure:abc"
+                        }
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 3600, 2)
+
+                    self.assertEqual("planner", role)
+                    self.assertIn("verification_scope=baseline_repair", reason)
+                    self.assertFalse(stop)
+
+    def test_repairable_local_service_routes_from_planner_to_builder(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "corepack pnpm test\n")
+                    self.write_text(
+                        target,
+                        "target/baseline_verification.json",
+                        """
+                        {
+                          "schema_version": 1,
+                          "head": "abc",
+                          "verification_config_hash": "missing",
+                          "status": "repairable_local_service",
+                          "root_cause": "Local PostgreSQL is unavailable at 127.0.0.1:5432.",
+                          "failure_signature": "verification_environment_failure:missing_local_database:abc"
+                        }
+                        """,
+                    )
+                    state = self.conveyor_state(module)
+                    state["last_completed_role"] = "planner"
+
+                    role, reason, stop = module.choose_next(target, state, 3600, 2)
+
+                    self.assertEqual("builder", role)
+                    self.assertIn("local service harness", reason)
+                    self.assertIn("verification_scope=baseline_repair", reason)
+                    self.assertFalse(stop)
+
+    def test_repairable_local_service_routes_from_accepted_planner_handoff_to_builder(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "corepack pnpm test\n")
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-blocked",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "blocked", "evidence": ["focused checks passed"], "blocker": "local database unavailable"}
+                          ]
+                        }
+                        """,
+                    )
+                    self.write_text(
+                        target,
+                        "target/baseline_verification.json",
+                        """
+                        {
+                          "schema_version": 1,
+                          "head": "abc",
+                          "verification_config_hash": "missing",
+                          "status": "repairable_local_service",
+                          "root_cause": "Local PostgreSQL is unavailable at 127.0.0.1:5432.",
+                          "failure_signature": "verification_environment_failure:missing_local_database:abc"
+                        }
+                        """,
+                    )
+                    state = self.conveyor_state(
+                        module,
+                        accepted_by_role={"planner": 1, "builder": 0, "hardener": 0},
+                    )
+
+                    role, reason, stop = module.choose_next(target, state, 3600, 2)
+
+                    self.assertEqual("builder", role)
+                    self.assertIn("local service harness", reason)
+                    self.assertIn("verification_scope=baseline_repair", reason)
+                    self.assertFalse(stop)
+
+    def test_repairable_local_service_ignores_noop_integrator_after_planner_handoff(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "corepack pnpm test\n")
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-blocked",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "blocked", "evidence": ["focused checks passed"], "blocker": "local database unavailable"}
+                          ]
+                        }
+                        """,
+                    )
+                    self.write_text(
+                        target,
+                        "target/baseline_verification.json",
+                        """
+                        {
+                          "schema_version": 1,
+                          "head": "abc",
+                          "verification_config_hash": "missing",
+                          "status": "repairable_local_service",
+                          "root_cause": "Local PostgreSQL is unavailable at 127.0.0.1:5432.",
+                          "failure_signature": "verification_environment_failure:missing_local_database:abc"
+                        }
+                        """,
+                    )
+                    state = self.conveyor_state(
+                        module,
+                        accepted_by_role={"planner": 1, "builder": 0, "hardener": 0},
+                    )
+                    state["history"].append(
+                        {
+                            "role": "integrator",
+                            "metadata": {
+                                "accepted_by_role": {"planner": 0, "builder": 0, "hardener": 0},
+                                "deferred_delta_by_role": {"planner": 0, "builder": 0, "hardener": 0},
+                            },
+                        }
+                    )
+
+                    role, reason, stop = module.choose_next(target, state, 3600, 2)
+
+                    self.assertEqual("builder", role)
+                    self.assertIn("local service harness", reason)
+                    self.assertIn("verification_scope=baseline_repair", reason)
+                    self.assertFalse(stop)
+
+    def test_repairable_local_service_routes_from_accepted_builder_repair_to_hardener(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "corepack pnpm test\n")
+                    self.write_text(
+                        target,
+                        "target/baseline_verification.json",
+                        """
+                        {
+                          "schema_version": 1,
+                          "head": "abc",
+                          "verification_config_hash": "missing",
+                          "status": "repairable_local_service",
+                          "root_cause": "Local PostgreSQL is unavailable at 127.0.0.1:5432.",
+                          "failure_signature": "verification_environment_failure:missing_local_database:abc"
+                        }
+                        """,
+                    )
+                    state = self.conveyor_state(
+                        module,
+                        accepted_by_role={"planner": 0, "builder": 1, "hardener": 0},
+                    )
+
+                    role, reason, stop = module.choose_next(target, state, 3600, 2)
+
+                    self.assertEqual("hardener", role)
+                    self.assertIn("baseline local-service repair", reason)
+                    self.assertIn("verification_scope=baseline_repair", reason)
+                    self.assertFalse(stop)
+
+    def test_blocked_environment_baseline_idles_after_preflight(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "python3 -m pytest\n")
+                    self.write_text(
+                        target,
+                        "target/baseline_verification.json",
+                        """
+                        {
+                          "schema_version": 1,
+                          "head": "abc",
+                          "verification_config_hash": "missing",
+                          "status": "blocked_environment",
+                          "root_cause": "Missing required environment variable DATABASE_URL.",
+                          "failure_signature": "verification_environment_failure:missing_env_var:abc"
+                        }
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 3600, 2)
+
+                    self.assertIsNone(role)
+                    self.assertIn("blocked_environment", reason)
+                    self.assertFalse(stop)
+
+    def test_blocked_ticket_campaign_runs_baseline_preflight_before_halting(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "corepack pnpm test\n")
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-blocked",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "blocked", "evidence": ["focused checks passed"], "blocker": "local database unavailable"}
+                          ]
+                        }
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 3600, 2)
+
+                    self.assertEqual("integrator", role)
+                    self.assertIn("baseline verification may be repairable", reason)
+                    self.assertFalse(stop)
+
+    def test_triaged_builder_deferral_gets_planner_handoff_once(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    manifest = target / "target" / "automation_queue" / "builder" / "run-new" / "manifest.json"
+                    manifest.parent.mkdir(parents=True, exist_ok=True)
+                    manifest.write_text(
+                        textwrap.dedent(
+                            """
+                            {
+                              "role": "builder",
+                              "run_id": "run-new",
+                              "status": "deferred",
+                              "deferral_reason": "conflict",
+                              "deferral_category": "apply_conflict",
+                              "deferral_triage_status": "replace-from-current-HEAD",
+                              "deferral_next_action": "Replace this work from current HEAD before retrying.",
+                              "changed_files": ["src/query.ts"],
+                              "created_at": "2026-05-04T00:00:00+00:00"
+                            }
+                            """
+                        ).strip()
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 3600, 2)
+
+                    self.assertEqual("planner", role)
+                    self.assertIn("replace-from-current-HEAD", reason)
+                    self.assertFalse(stop)
+
 
 class GitHeadPreflightTests(unittest.TestCase):
     @classmethod

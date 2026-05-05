@@ -45,7 +45,7 @@
       "properties": {
         "current_horizon": {
           "type": "string",
-          "pattern": "^H[1-8] "
+          "pattern": "^(H[1-8]|T[1-4]) "
         },
         "horizon_goal": { "type": "string" },
         "advancement_criteria": {

@@ -21,6 +21,7 @@ The standalone dashboard opens a native local window. Before automation starts, 
 - Codex home availability for nested workers
 - macOS Full Disk Access advisory for targets under `~/Documents`
 - optional local notifier health when using `local_notifier`
+- optional macOS desktop notification command when ticket completion notifications are enabled
 
 Fill in the wizard, choose the target directory, optionally add context files such as PDFs or research notes, then click **Scaffold & Bootstrap**. Choose fresh-project mode for a new target directory. Choose existing-project mode when the target is an existing repo and describe the first integrated change in the intake. The dashboard writes `.agentic/project_intake.json`, copies context files into `docs/context/`, creates `docs/PROJECT_CONTEXT.md`, scaffolds required files, validates them, and starts the initial Codex bootstrap run.
 
@@ -36,7 +37,7 @@ python3 /path/to/Diffmogger/scripts/scaffold_project_docs.py \
   --target /path/to/target-project
 ```
 
-Use `human_bridge_mode: file_only` when you want manual Markdown communication. Use `local_notifier` only when the separate notifier service should send SMS/WhatsApp.
+Use `human_bridge_mode: file_only` when you want manual Markdown communication, `local_notifier` for native desktop notifications, or `discord_notifier` for Discord progress/messages plus optional desktop notifications.
 
 Use `project_mode: existing_project` when scaffolding into a repo that already has app code, docs, or project-specific instructions.
 
@@ -68,6 +69,20 @@ Multi-role automation is also disabled unless explicitly enabled. CLI intakes ca
 
 Multi-role and continuous conveyor scheduling require the target to be an initialized git repo with an initial commit before scheduling starts.
 
+For bounded ticket work, enable **Ticket Campaign** in the dashboard run config or set these intake fields:
+
+```json
+{
+  "automation_run_mode": "ticket_campaign",
+  "ticket_run_file": "docs/TICKET_RUN.md",
+  "ticket_completion_notify": true
+}
+```
+
+The dashboard scaffolds `docs/TICKET_RUN.md` but does not edit tickets directly. Populate that Markdown file with ticket IDs, acceptance criteria, verification commands, evidence fields, and blockers before leaving automation unattended. Completion notifications use the laptop's native desktop notification system when enabled; failures are recorded in `docs/HUMAN_OUTBOX.md`.
+
+For CLI validation of a ticket-campaign target, add `--ticket-campaign-enabled` to `scripts/check_required_files.py`.
+
 ## 2. Validate The Scaffold
 
 ```bash
@@ -85,6 +100,7 @@ scripts/run_codex_automation.sh
 scripts/run_conveyor_automation.py
 scripts/run_conveyor_automation.sh
 scripts/run_observatory.py
+scripts/ticket_run.py
 scripts/repair_environment.py
 scripts/update_automation_signals.py
 scripts/spawn_worker_agent.sh
@@ -95,12 +111,18 @@ scripts/compact_agent_state.py
 When multi-role mode is enabled, generated targets also include:
 
 ```text
+.agentic/verification_commands.txt
+.agentic/smoke_commands.txt
 scripts/run_role_automation.sh
 scripts/integrate_role_outputs.py
 scripts/list_deferred_patches.py
 ```
 
 Use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local deferred queue triage. Add `--decision-template` when the integrator needs a per-manifest worksheet for archive, replace-from-current-HEAD, repair-and-retry, retry-as-is, or keep-deferred decisions.
+
+`Preferred commands` in docs are not an unconditional multi-role gate. Full-suite gates come from `.agentic/verification_commands.txt` and are used for hardener/finalization or explicit full-suite manifests. Builder/planner patches should carry focused checks or match `.agentic/smoke_commands.txt` selectors.
+
+The integrator records clean-HEAD full-suite baseline verification in `target/baseline_verification.json`. If that baseline fails before a patch is applied, normal hardener/finalization patches are deferred as `baseline_verification_blocker` until a `Verification scope: baseline_repair` patch or local environment repair clears the baseline. Missing project-local services, such as an unavailable local PostgreSQL test database in a repo with Prisma/Postgres test configuration, are routed as `repairable_local_service` baseline repair instead of a terminal human blocker. Builder/planner patches with passing focused checks can still integrate when unrelated to the baseline failure.
 
 Scheduled target-project runs should use those local scripts, not scripts from the Diffmogger starter repo.
 
@@ -135,7 +157,7 @@ If the scheduling strategy is continuous conveyor, the dashboard writes one Laun
 bash scripts/run_conveyor_automation.sh
 ```
 
-The conveyor keeps running locally, chooses the next runnable lane from current state, and records state in `target/automation_conveyor_state.json`. It prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It falls back to `scripts/run_codex_automation.sh` when multi-role files are absent.
+The conveyor keeps running locally, chooses the next runnable lane from current state, and records state in `target/automation_conveyor_state.json`. It prioritizes queued integration first, baseline verification preflight or repair routing when needed, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It falls back to `scripts/run_codex_automation.sh` when multi-role files are absent.
 
 The target wrapper can still be run manually for debugging:
 
@@ -227,7 +249,7 @@ In `file_only` mode:
 - Reply in `docs/HUMAN_INBOX.md`.
 - Let the next automation run remove handled inbox entries and archive concise notes.
 
-In `local_notifier` mode, the separate notifier service owns SMS/WhatsApp credentials and writes inbound replies to `docs/HUMAN_INBOX.md`.
+In `local_notifier` mode, the separate notifier service owns native desktop notification delivery. In `discord_notifier` mode, it owns Discord credentials, posts progress/messages to configured channels, and writes captured bot mentions/replies to `docs/HUMAN_INBOX.md`.
 
 ## 6. Worker Agents
 

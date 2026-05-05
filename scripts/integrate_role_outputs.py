@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import importlib.util
 import json
@@ -14,6 +15,8 @@ import shlex
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,11 +30,15 @@ DEFERRAL_REASONS = {
     "conflict",
     "verification_failure",
     "verification_environment_failure",
+    "baseline_verification_blocker",
     "guardrail_violation",
     "other",
 }
+BASELINE_VERIFICATION_RELATIVE = Path("target/baseline_verification.json")
+BASELINE_SCHEMA_VERSION = 1
 RUNTIME_STATE_WHITELIST = {
     ".agentic/automation_prompt.md",
+    ".agentic/smoke_commands.txt",
     ".agentic/verification_commands.txt",
     ".agentic/roles/planner.md",
     ".agentic/roles/builder.md",
@@ -91,6 +98,19 @@ PROGRESS_SECTIONS = [
     "Architectural Decisions",
     "Role Health",
 ]
+NOTIFIER_URL = "http://127.0.0.1:8765/api/notify"
+ENVIRONMENT_FAILURE_CATEGORIES = {
+    "db_schema_drift",
+    "missing_local_database",
+    "missing_env_var",
+    "missing_verification_config",
+    "missing_package_executable",
+    "missing_pytest",
+}
+REPAIRABLE_LOCAL_SERVICE_CATEGORIES = {
+    "missing_local_database",
+    "missing_env_var",
+}
 
 
 @dataclass
@@ -105,6 +125,8 @@ class VerificationResult:
     checks_run: list[str]
     detail: str
     reason: str = ""
+    category: str = ""
+    root_cause: str = ""
 
 
 @dataclass
@@ -136,6 +158,23 @@ def now_id() -> str:
     return utc_now().strftime("%Y%m%dT%H%M%SZ")
 
 
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def project_intake(target: Path) -> dict[str, Any]:
+    return read_json(target / ".agentic" / "project_intake.json")
+
+
+def human_bridge_mode(target: Path) -> str:
+    mode = str(project_intake(target).get("human_bridge_mode") or "file_only").strip().lower()
+    return mode if mode in {"disabled", "file_only", "local_notifier", "discord_notifier"} else "file_only"
+
+
 def run(
     args: list[str],
     *,
@@ -157,6 +196,88 @@ def run(
 
 def git(target: Path, *args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
     return run(["git", *args], cwd=target, check=check)
+
+
+def post_notifier(payload: dict[str, Any]) -> dict[str, Any]:
+    headers = {"Content-Type": "application/json"}
+    token = os.getenv("LOCAL_NOTIFY_API_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        os.getenv("DIFFMOGGER_NOTIFY_URL", NOTIFIER_URL),
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        body = response.read().decode("utf-8", errors="replace")
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return {"ok": True, "raw_body": body[:500]}
+    return data if isinstance(data, dict) else {"ok": False, "raw_body": body[:500]}
+
+
+def commit_subject(message: str) -> str:
+    for raw in message.splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if line:
+            return line[:160]
+    return "local automation commit"
+
+
+def notify_commit_progress(
+    target: Path,
+    *,
+    commit_hash: str | None,
+    commit_message: str,
+    description: str,
+    run_id: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    if dry_run:
+        return {"status": "dry_run"}
+    if not commit_hash:
+        return {"status": "no_commit"}
+    if human_bridge_mode(target) != "discord_notifier":
+        return {"status": "disabled", "detail": "human bridge mode is not discord_notifier"}
+
+    short_hash = commit_hash[:12]
+    subject = commit_subject(commit_message)
+    body = (
+        f"New local automation commit `{short_hash}`\n\n"
+        f"Commit: {subject}\n"
+        f"Work: {progress_inline(description, target, limit=500)}"
+    )
+    payload = {
+        "request_id": f"COMMIT-{short_hash}",
+        "type": "automation_commit_progress",
+        "priority": "normal",
+        "summary": f"New local commit: {subject}",
+        "event_kind": "progress",
+        "context": f"Integrator run {run_id} created local commit {short_hash}.",
+        "message_body": body,
+        "agent_recommendation": "Review the local commit when convenient; no reply required.",
+        "minimum_user_action": "None.",
+        "reply_format": "No reply required.",
+        "unblocked_work_remaining": [],
+        "dedupe_key": f"commit-progress:{commit_hash}",
+        "expects_reply": False,
+        "local_notify": False,
+    }
+    try:
+        delivered = post_notifier(payload)
+    except (OSError, TimeoutError, urllib.error.URLError) as exc:
+        print(f"WARN: commit progress notification failed for {short_hash}: {exc}", file=sys.stderr)
+        return {"status": "notifier_unreachable", "detail": str(exc)}
+    if not delivered.get("ok"):
+        print(
+            f"WARN: commit progress notification was not delivered for {short_hash}: "
+            f"{json.dumps(delivered, sort_keys=True)[:500]}",
+            file=sys.stderr,
+        )
+        return {"status": "notifier_failed", "detail": delivered}
+    return {"status": "sent_notifier", "detail": delivered}
 
 
 def require_git_repo(target: Path) -> None:
@@ -206,13 +327,61 @@ def scan_push_hooks(target: Path) -> None:
 
 
 def update_info_exclude(target: Path, *, dry_run: bool) -> None:
-    exclude = target / ".git" / "info" / "exclude"
+    result = git(target, "rev-parse", "--git-path", "info/exclude")
+    raw = result.stdout.strip() if result.returncode == 0 else ""
+    exclude = Path(raw) if raw else target / ".git" / "info" / "exclude"
+    if not exclude.is_absolute():
+        exclude = target / exclude
     patterns = [
+        "/.agentic/",
+        "/AGENTS.md",
+        "/docs/AUTOMATION_SIGNALS.md",
+        "/docs/AUTONOMY_EXPERIMENT_LOG.md",
+        "/docs/CODEX_AUTOMATION_GUARDRAILS.md",
+        "/docs/CODEX_AUTOMATION_TASKS.md",
+        "/docs/DAILY_AUTOMATION_REVIEW.md",
+        "/docs/DEVELOPMENT.md",
+        "/docs/HUMAN_BRIDGE_SETUP.md",
+        "/docs/HUMAN_INBOX.md",
+        "/docs/HUMAN_OUTBOX.md",
+        "/docs/HUMAN_REQUESTS.md",
+        "/docs/HUMAN_RESPONSES_ARCHIVE.md",
+        "/docs/INITIAL_BOOTSTRAP_PROMPT.md",
+        "/docs/MULTI_ROLE_PROGRESS.md",
+        "/docs/PROJECT_CONTEXT.md",
+        "/docs/TICKET_RUN.md",
+        "/scripts/acquire_codex_lock.sh",
+        "/scripts/__pycache__/",
+        "/scripts/build_replay.py",
+        "/scripts/compact_agent_state.py",
+        "/scripts/diffmogger_browser.py",
+        "/scripts/integrate_role_outputs.py",
+        "/scripts/list_deferred_patches.py",
+        "/scripts/release_codex_lock.sh",
+        "/scripts/repair_environment.py",
+        "/scripts/run_codex_automation.sh",
+        "/scripts/run_conveyor_automation.py",
+        "/scripts/run_conveyor_automation.sh",
+        "/scripts/run_observatory.py",
+        "/scripts/run_role_automation.sh",
+        "/scripts/spawn_worker_agent.sh",
+        "/scripts/summarize_worker_outputs.py",
+        "/scripts/ticket_run.py",
+        "/scripts/update_automation_signals.py",
+        "/target/agent_runs/",
+        "/target/automation_conveyor.lock",
+        "/target/automation_conveyor_state.json",
+        "/target/automation_logs/",
         "/target/codex_automation.lock",
         "/target/automation_venvs/",
         "/target/automation_queue/",
+        "/target/automation_signals.json",
         "/target/automation_worktrees/",
-        "/target/automation_logs/",
+        "/target/baseline_verification.json",
+        "/target/prisma-cache/",
+        "/target/ticket_run_completion.json",
+        "/target/ticket_run_reports/",
+        "/.pnpm-store/",
     ]
     if dry_run:
         return
@@ -220,6 +389,11 @@ def update_info_exclude(target: Path, *, dry_run: bool) -> None:
     existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
     lines = existing.splitlines()
     changed = False
+    if "# Diffmogger local automation scaffold/runtime" not in lines:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("# Diffmogger local automation scaffold/runtime")
+        changed = True
     for pattern in patterns:
         if pattern not in lines:
             lines.append(pattern)
@@ -655,7 +829,7 @@ def all_role_manifests(target: Path) -> list[tuple[Path, dict[str, Any]]]:
 
 
 def dirty_status(target: Path) -> str:
-    return git(target, "status", "--porcelain").stdout.strip()
+    return git(target, "status", "--porcelain").stdout.rstrip()
 
 
 def checkpoint_dirty_main(target: Path, run_id: str, *, dry_run: bool) -> tuple[str | None, list[str]]:
@@ -676,12 +850,23 @@ def checkpoint_dirty_main(target: Path, run_id: str, *, dry_run: bool) -> tuple[
             "GIT_COMMITTER_EMAIL": "diffmogger-integrator@example.invalid",
         }
     )
-    message = f"chore(integrator): checkpoint dirty main before {run_id}"
+    message = (
+        "chore(integrator): checkpoint preexisting local changes\n\n"
+        f"Run: {run_id}"
+    )
     result = run(["git", "commit", "-m", message], cwd=target, env=env)
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         raise SystemExit(1)
     checkpoint = git(target, "rev-parse", "HEAD", check=True).stdout.strip()
+    notify_commit_progress(
+        target,
+        commit_hash=checkpoint,
+        commit_message=message,
+        description=f"Checkpointed dirty main changes before integrator run {run_id}: {', '.join(dirty_files[:8]) or 'tracked local state'}.",
+        run_id=run_id,
+        dry_run=dry_run,
+    )
     return checkpoint, dirty_files
 
 
@@ -743,6 +928,7 @@ def mark_deferred(
     path: Path,
     manifest: dict[str, Any],
     *,
+    target: Path,
     reason: str,
     detail: str,
     head_before_integration: str,
@@ -752,10 +938,16 @@ def mark_deferred(
 ) -> None:
     if reason not in DEFERRAL_REASONS:
         reason = "other"
+    category, root_cause = classify_deferral_cause(reason, detail)
+    if category in ENVIRONMENT_FAILURE_CATEGORIES and reason == "verification_failure":
+        reason = "verification_environment_failure"
+    sanitized_detail = scrub_local_references(detail, target)
     update = {
         "status": "deferred",
         "deferral_reason": reason,
-        "deferral_detail": detail,
+        "deferral_category": category,
+        "deferral_root_cause": progress_inline(root_cause, target, limit=300),
+        "deferral_detail": sanitized_detail,
         "head_before_integration": head_before_integration,
         "integrated_at": utc_now().isoformat(timespec="seconds"),
         "checkpoint_commit": checkpoint_commit,
@@ -791,21 +983,18 @@ def mark_applied(
     write_manifest(path, manifest, dry_run=dry_run)
 
 
-def load_verification_commands(target: Path) -> list[str]:
-    command_file = target / ".agentic" / "verification_commands.txt"
-    if command_file.exists():
-        lines = command_file.read_text(encoding="utf-8").splitlines()
-    else:
-        prompt = target / ".agentic" / "automation_prompt.md"
-        if not prompt.exists():
-            return []
-        text = prompt.read_text(encoding="utf-8", errors="replace")
-        marker = re_extract_fenced_block(text, "## Verification")
-        lines = marker.splitlines() if marker else []
+def clean_command_line(raw: str) -> str:
+    line = raw.strip()
+    line = line.removeprefix("- ").strip()
+    return line
+
+
+def load_command_file(path: Path) -> list[str]:
+    if not path.exists():
+        return []
     commands: list[str] = []
-    for raw in lines:
-        line = raw.strip()
-        line = line.removeprefix("- ").strip()
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = clean_command_line(raw)
         if not line or line.startswith("#"):
             continue
         if line.lower().startswith("add project-specific"):
@@ -814,21 +1003,258 @@ def load_verification_commands(target: Path) -> list[str]:
     return commands
 
 
-def re_extract_fenced_block(text: str, heading: str) -> str:
-    start = text.find(heading)
-    if start == -1:
-        return ""
-    section = text[start:]
-    fence_start = section.find("```")
-    if fence_start == -1:
-        return ""
-    fence_body_start = section.find("\n", fence_start)
-    if fence_body_start == -1:
-        return ""
-    fence_end = section.find("```", fence_body_start + 1)
-    if fence_end == -1:
-        return ""
-    return section[fence_body_start + 1 : fence_end].strip()
+def normalize_command_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_lines = [str(item) for item in value]
+    elif isinstance(value, str):
+        raw_lines = value.splitlines()
+    else:
+        return []
+    commands: list[str] = []
+    for raw in raw_lines:
+        line = clean_command_line(raw)
+        if line and not line.startswith("#"):
+            commands.append(line)
+    return commands
+
+
+def dedupe_commands(commands: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for command in commands:
+        normalized = re.sub(r"\s+", " ", command).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(command)
+    return unique
+
+
+def load_full_verification_commands(target: Path) -> list[str]:
+    return load_command_file(target / ".agentic" / "verification_commands.txt")
+
+
+def manifest_list(manifests: list[dict[str, Any]] | dict[str, Any] | None) -> list[dict[str, Any]]:
+    if manifests is None:
+        return []
+    if isinstance(manifests, dict):
+        return [manifests]
+    return [item for item in manifests if isinstance(item, dict)]
+
+
+def manifest_verification_scope(manifest: dict[str, Any]) -> str:
+    scope = str(manifest.get("verification_scope") or manifest.get("verification_policy") or "").strip().lower()
+    return scope.replace("-", "_")
+
+
+def manifest_is_baseline_repair(manifest: dict[str, Any]) -> bool:
+    return manifest_verification_scope(manifest) in {"baseline_repair", "baseline-repair"}
+
+
+def manifest_declared_verification_commands(manifests: list[dict[str, Any]]) -> list[str]:
+    commands: list[str] = []
+    for manifest in manifests:
+        for field in (
+            "verification_commands",
+            "focused_verification_commands",
+            "patch_verification_commands",
+            "smoke_commands",
+        ):
+            commands.extend(normalize_command_list(manifest.get(field)))
+    return dedupe_commands(commands)
+
+
+def manifest_requires_full_verification(manifest: dict[str, Any]) -> bool:
+    role = str(manifest.get("role") or "").strip().lower()
+    scope = manifest_verification_scope(manifest)
+    if role == "hardener" or scope == "baseline_repair":
+        return True
+    for field in ("requires_full_verification", "full_suite_required"):
+        value = manifest.get(field)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "required"}:
+            return True
+    return scope in {"full", "full_suite", "required", "finalization"}
+
+
+def command_selector_matches(selector: str, role: str, changed_files: list[str]) -> bool:
+    selector = selector.strip()
+    if not selector:
+        return False
+    lowered = selector.lower()
+    if lowered in {"all", "*"}:
+        return True
+    if lowered in {"planner", "builder", "hardener"}:
+        return lowered == role
+    if lowered.startswith(("role:", "role=")):
+        return lowered.split(":", 1)[-1].split("=", 1)[-1].strip() == role
+    if lowered.startswith(("path:", "path=", "file:", "file=", "changed:", "changed=")):
+        pattern = selector.split(":", 1)[-1].split("=", 1)[-1].strip()
+        return any(fnmatch.fnmatch(path, pattern) or path.startswith(pattern.rstrip("/")) for path in changed_files)
+    return False
+
+
+def parse_smoke_command_line(line: str, role: str, changed_files: list[str]) -> str | None:
+    if "|" not in line:
+        return line
+    selector_text, command = line.split("|", 1)
+    command = command.strip()
+    selectors = [item.strip() for item in selector_text.split(",") if item.strip()]
+    if command and any(command_selector_matches(selector, role, changed_files) for selector in selectors):
+        return command
+    return None
+
+
+def load_smoke_verification_commands(target: Path, manifests: list[dict[str, Any]]) -> list[str]:
+    lines = load_command_file(target / ".agentic" / "smoke_commands.txt")
+    if not lines or not manifests:
+        return []
+    commands: list[str] = []
+    for manifest in manifests:
+        role = str(manifest.get("role") or "").strip().lower()
+        changed_files = [str(item) for item in manifest.get("changed_files") or [] if isinstance(item, str)]
+        for line in lines:
+            command = parse_smoke_command_line(line, role, changed_files)
+            if command:
+                commands.append(command)
+    return dedupe_commands(commands)
+
+
+def verification_plan(
+    target: Path,
+    manifests: list[dict[str, Any]] | dict[str, Any] | None = None,
+) -> tuple[list[str], list[str]]:
+    scoped_manifests = manifest_list(manifests)
+    full_commands = load_full_verification_commands(target)
+    declared = manifest_declared_verification_commands(scoped_manifests)
+    smoke = load_smoke_verification_commands(target, scoped_manifests)
+    requires_full = manifests is None or any(manifest_requires_full_verification(manifest) for manifest in scoped_manifests)
+    commands = [*declared, *smoke]
+    notes: list[str] = []
+    if requires_full:
+        commands.extend(full_commands)
+        if full_commands:
+            notes.append(
+                "Full-suite verification required for this role or manifest."
+                if manifests is not None
+                else "Full-suite verification requested directly."
+            )
+        else:
+            notes.append("Full-suite verification was required, but .agentic/verification_commands.txt is empty or missing.")
+    elif full_commands:
+        roles = ", ".join(sorted({str(item.get("role") or "role") for item in scoped_manifests})) or "unspecified role"
+        notes.append(
+            f"Full-suite verification configured in .agentic/verification_commands.txt but not required for {roles}; using patch-scoped checks only."
+        )
+
+    commands = dedupe_commands(commands)
+    if commands:
+        return commands, notes
+    if notes:
+        return [], notes + ["No patch-scoped verification commands matched this patch."]
+    return [], ["No patch-scoped verification commands configured; treated as pass."]
+
+
+def root_cause_line(output: str, keywords: tuple[str, ...] = ()) -> str:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in output.splitlines()]
+    lines = [line for line in lines if line]
+    lowered_keywords = tuple(keyword.lower() for keyword in keywords if keyword)
+    if lowered_keywords:
+        for line in lines:
+            lowered = line.lower()
+            if any(keyword in lowered for keyword in lowered_keywords):
+                return line[:400]
+    for line in lines:
+        if not line.startswith("$ ") and not line.startswith("exit="):
+            return line[:400]
+    return (lines[0] if lines else "No failure detail recorded.")[:400]
+
+
+def classify_failure_text(command: str, output: str) -> tuple[str, str]:
+    lowered = output.lower()
+    if ".agentic/verification_commands.txt" in lowered and any(
+        marker in lowered for marker in ("missing", "empty", "required")
+    ):
+        return "missing_verification_config", ".agentic/verification_commands.txt is required but empty or missing."
+    if local_database_unavailable_text(command, output):
+        return "missing_local_database", root_cause_line(
+            output,
+            ("can't reach database", "connection refused", "econnrefused", "p1001", "postgres", "database"),
+        )
+    env_var_match = re.search(
+        r"\b([A-Z][A-Z0-9_]{2,})\b[^\n]{0,100}(?:not set|missing|required|undefined|not found)",
+        output,
+    ) or re.search(
+        r"(?:missing|required|undefined|not found)[^\n]{0,100}\b([A-Z][A-Z0-9_]{2,})\b",
+        output,
+        re.IGNORECASE,
+    )
+    if env_var_match and env_var_match.group(1) != env_var_match.group(1).upper():
+        env_var_match = None
+    if env_var_match:
+        name = env_var_match.group(1)
+        return "missing_env_var", f"Missing required environment variable `{name}`."
+    if "database_url" in lowered:
+        return "missing_env_var", "Missing required environment variable `DATABASE_URL`."
+    if any(marker in lowered for marker in ("no module named pytest", "pytest: command not found", "pytest: not found")):
+        return "missing_pytest", "Missing pytest in the verification environment."
+    if re.search(r"(command not found|not found:|no such file or directory|could not determine executable)", lowered):
+        return "missing_package_executable", root_cause_line(output, ("command not found", "not found", "executable"))
+    if any(
+        marker in lowered
+        for marker in (
+            "relation does not exist",
+            "no such table",
+            "schema drift",
+            "database schema",
+            "migration",
+            "prisma migrate",
+            "p2021",
+            "p2022",
+            "p3005",
+        )
+    ):
+        return "db_schema_drift", root_cause_line(output, ("schema", "relation", "table", "migration", "prisma"))
+    if any(marker in lowered for marker in ("gemini", "openai", "anthropic", "provider", "mock")):
+        return "provider_mock_failure", root_cause_line(output, ("gemini", "openai", "anthropic", "provider", "mock"))
+    if any(marker in lowered for marker in ("assertionerror", "expected", "received", "failed", "failures:")):
+        return "test_assertion_failure", root_cause_line(output, ("assert", "expected", "received", "failed"))
+    if "git apply" in lowered or "patch failed" in lowered:
+        return "apply_conflict", root_cause_line(output, ("git apply", "patch failed", "conflict"))
+    return "other", root_cause_line(output)
+
+
+def classify_deferral_cause(reason: str, detail: str) -> tuple[str, str]:
+    if reason == "staleness":
+        return "stale_patch", root_cause_line(detail, ("no longer matches", "stale", "base"))
+    if reason == "conflict":
+        return "apply_conflict", root_cause_line(detail, ("conflict", "patch failed", "git apply"))
+    if reason == "guardrail_violation":
+        return "guardrail_violation", root_cause_line(detail, ("guardrail", "unsafe", "rejected"))
+    category, root_cause = classify_failure_text("", detail)
+    return category, root_cause
+
+
+def local_database_unavailable_text(command: str, output: str) -> bool:
+    text = f"{command}\n{output}".lower()
+    database_markers = (
+        "can't reach database server",
+        "cannot reach database server",
+        "could not connect to server",
+        "connection refused",
+        "econnrefused",
+        "p1001",
+        "is the server running",
+        "server closed the connection unexpectedly",
+    )
+    if not any(marker in text for marker in database_markers):
+        return False
+    return any(marker in text for marker in ("postgres", "postgresql", "prisma", "database_url", "localhost", "127.0.0.1"))
+
+
+def verification_reason_for_category(category: str) -> str:
+    return "verification_environment_failure" if category in ENVIRONMENT_FAILURE_CATEGORIES else "verification_failure"
 
 
 def combined_output(result: subprocess.CompletedProcess[str]) -> str:
@@ -1006,33 +1432,50 @@ def attempt_verification_repair(
     )
 
 
-def run_verification(target: Path) -> VerificationResult:
-    commands = load_verification_commands(target)
+def run_verification(
+    target: Path,
+    manifests: list[dict[str, Any]] | dict[str, Any] | None = None,
+) -> VerificationResult:
+    commands, plan_notes = verification_plan(target, manifests)
+    if any(note.startswith("Full-suite verification was required") for note in plan_notes):
+        detail = "\n".join(plan_notes)
+        return VerificationResult(
+            ok=False,
+            checks_run=plan_notes,
+            detail=detail,
+            reason="verification_environment_failure",
+            category="missing_verification_config",
+            root_cause=".agentic/verification_commands.txt is required for this role but is empty or missing.",
+        )
     if not commands:
         return VerificationResult(
             ok=True,
-            checks_run=["No verification commands configured; treated as pass."],
-            detail="No verification commands configured.",
+            checks_run=plan_notes,
+            detail="\n".join(plan_notes),
         )
     repair_module = load_environment_repair_module()
     if repair_module is not None:
-        checks_run: list[str] = []
-        details: list[str] = []
+        checks_run: list[str] = [*plan_notes]
+        details: list[str] = [*plan_notes]
         for command in commands:
             outcome = repair_module.run_command_with_repair(target, command)
             checks_run.extend(str(item) for item in outcome.checks_run())
             details.append(outcome.detail())
             if not outcome.ok:
+                detail = "\n\n".join(details)
+                category, root_cause = classify_failure_text(command, detail)
                 return VerificationResult(
                     ok=False,
                     checks_run=checks_run,
-                    detail="\n\n".join(details),
-                    reason="verification_environment_failure" if outcome.environment_failure else "verification_failure",
+                    detail=detail,
+                    reason=verification_reason_for_category(category),
+                    category=category,
+                    root_cause=root_cause,
                 )
         return VerificationResult(ok=True, checks_run=checks_run, detail="\n\n".join(details))
 
-    checks_run: list[str] = []
-    details: list[str] = []
+    checks_run: list[str] = [*plan_notes]
+    details: list[str] = [*plan_notes]
     for command in commands:
         result = run(["/bin/bash", "-lc", command], cwd=target)
         checks_run.append(command)
@@ -1041,20 +1484,28 @@ def run_verification(target: Path) -> VerificationResult:
         if result.returncode != 0:
             repair = attempt_verification_repair(target, command, result)
             if repair is None:
+                detail = "\n\n".join(details)
+                category, root_cause = classify_failure_text(command, detail)
                 return VerificationResult(
                     ok=False,
                     checks_run=checks_run,
-                    detail="\n\n".join(details),
-                    reason="verification_failure",
+                    detail=detail,
+                    reason=verification_reason_for_category(category),
+                    category=category,
+                    root_cause=root_cause,
                 )
             checks_run.append(f"verification repair: {repair.detail}")
             details.append(f"verification repair: {repair.detail}")
             if repair.final_command is None or repair.final_result is None:
+                detail = "\n\n".join(details)
+                category, root_cause = classify_failure_text(command, detail)
                 return VerificationResult(
                     ok=False,
                     checks_run=checks_run,
-                    detail="\n\n".join(details),
-                    reason="verification_environment_failure",
+                    detail=detail,
+                    reason=verification_reason_for_category(category),
+                    category=category,
+                    root_cause=root_cause,
                 )
             checks_run.append(repair.final_command)
             final_output = combined_output(repair.final_result)
@@ -1062,18 +1513,283 @@ def run_verification(target: Path) -> VerificationResult:
                 f"$ {repair.final_command}\nexit={repair.final_result.returncode}\n{final_output}".strip()
             )
             if repair.final_result.returncode != 0:
-                reason = (
-                    "verification_environment_failure"
-                    if missing_pytest_failure(repair.final_command, final_output)
-                    else "verification_failure"
-                )
+                detail = "\n\n".join(details)
+                category, root_cause = classify_failure_text(repair.final_command, detail)
                 return VerificationResult(
                     ok=False,
                     checks_run=checks_run,
-                    detail="\n\n".join(details),
-                    reason=reason,
+                    detail=detail,
+                    reason=verification_reason_for_category(category),
+                    category=category,
+                    root_cause=root_cause,
                 )
     return VerificationResult(ok=True, checks_run=checks_run, detail="\n\n".join(details))
+
+
+def baseline_verification_path(target: Path) -> Path:
+    return target / BASELINE_VERIFICATION_RELATIVE
+
+
+def verification_config_hash(target: Path) -> str:
+    config = target / ".agentic" / "verification_commands.txt"
+    if not config.exists() or not config.is_file() or config.is_symlink():
+        return "missing"
+    digest = file_sha256(config)
+    return digest or "unreadable"
+
+
+def verification_failure_signature(result: VerificationResult) -> str:
+    if result.ok:
+        return "passing"
+    category = result.category or "other"
+    reason = result.reason or verification_reason_for_category(category)
+    root = result.root_cause or root_cause_line(result.detail)
+    normalized = re.sub(r"\s+", " ", root).strip().lower()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"{reason}:{category}:{digest}"
+
+
+def iter_project_files_named(target: Path, filename: str, *, limit: int = 40) -> list[Path]:
+    matches: list[Path] = []
+    for root, dirs, files in os.walk(target):
+        root_path = Path(root)
+        try:
+            relative = root_path.relative_to(target)
+        except ValueError:
+            continue
+        parts = set(relative.parts)
+        dirs[:] = [
+            item
+            for item in dirs
+            if item not in RUNTIME_STATE_DENY_PARTS
+            and item not in {"dist", "build", ".next", ".turbo", "coverage"}
+            and not item.startswith(".git")
+        ]
+        if parts.intersection(RUNTIME_STATE_DENY_PARTS):
+            dirs[:] = []
+            continue
+        if filename in files:
+            matches.append(root_path / filename)
+            if len(matches) >= limit:
+                break
+    return matches
+
+
+def read_small_text(path: Path, *, limit: int = 20000) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[:limit]
+    except OSError:
+        return ""
+
+
+def target_has_postgres_prisma_schema(target: Path) -> bool:
+    for schema in iter_project_files_named(target, "schema.prisma"):
+        text = read_small_text(schema).lower()
+        if 'provider = "postgresql"' in text or "provider = 'postgresql'" in text:
+            return True
+    return False
+
+
+def target_has_local_database_example(target: Path) -> bool:
+    local_markers = ("127.0.0.1", "localhost", "@postgres:", "@db:", ":5432")
+    for root, dirs, files in os.walk(target):
+        root_path = Path(root)
+        try:
+            relative = root_path.relative_to(target)
+        except ValueError:
+            continue
+        dirs[:] = [
+            item
+            for item in dirs
+            if item not in RUNTIME_STATE_DENY_PARTS
+            and item not in {"dist", "build", ".next", ".turbo", "coverage"}
+            and not item.startswith(".git")
+        ]
+        if set(relative.parts).intersection(RUNTIME_STATE_DENY_PARTS):
+            dirs[:] = []
+            continue
+        for name in files:
+            lowered = name.lower()
+            if not (lowered.endswith(".example") or lowered.endswith(".sample") or lowered.endswith(".template")):
+                continue
+            if ".env" not in lowered and "env" not in lowered:
+                continue
+            text = read_small_text(root_path / name).lower()
+            if "database_url" in text and any(marker in text for marker in local_markers):
+                return True
+    return False
+
+
+def verification_mentions_database_url(result: VerificationResult) -> bool:
+    text = "\n".join([result.root_cause or "", result.detail or "", *[str(item) for item in result.checks_run]]).lower()
+    return any(marker in text for marker in ("database_url", "postgres", "postgresql", "prisma", "localhost:5432", "127.0.0.1:5432"))
+
+
+def result_is_repairable_local_service(target: Path | None, result: VerificationResult) -> bool:
+    if target is None or result.ok:
+        return False
+    if result.category not in REPAIRABLE_LOCAL_SERVICE_CATEGORIES:
+        return False
+    if not verification_mentions_database_url(result):
+        return False
+    if result.category == "missing_local_database":
+        return target_has_postgres_prisma_schema(target)
+    return target_has_postgres_prisma_schema(target) and target_has_local_database_example(target)
+
+
+def baseline_status_for_result(result: VerificationResult, target: Path | None = None) -> str:
+    if result.ok:
+        return "passing"
+    if result.category == "missing_verification_config":
+        return "missing_config"
+    if result_is_repairable_local_service(target, result):
+        return "repairable_local_service"
+    if result.reason == "verification_environment_failure" or result.category in ENVIRONMENT_FAILURE_CATEGORIES:
+        return "blocked_environment"
+    if result.reason == "verification_failure":
+        return "failing_source"
+    return "unknown"
+
+
+def baseline_next_action(status: str, result: VerificationResult) -> str:
+    if status == "passing":
+        return "Full-suite baseline is passing; normal full-suite integration may proceed."
+    if status == "missing_config":
+        return "Create .agentic/verification_commands.txt with explicit full-suite commands before hardener/finalization gates."
+    if status == "repairable_local_service":
+        return (
+            "Route a baseline repair patch to create or wire a safe local service harness "
+            "for the failing verification command, then rerun the full suite."
+        )
+    if status == "blocked_environment":
+        return "Safe local repair was not available or did not clear the environment blocker; record the blocker before requiring full-suite integration."
+    if status == "failing_source":
+        return "Route a baseline repair patch through planner/builder/hardener with verification_scope baseline_repair."
+    return result.root_cause or "Inspect baseline verification output before running full-suite-required integration."
+
+
+def baseline_record_from_result(
+    target: Path,
+    result: VerificationResult,
+    *,
+    head_value: str,
+    previous: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    previous = previous or {}
+    now = utc_now().isoformat(timespec="seconds")
+    signature = verification_failure_signature(result)
+    status = baseline_status_for_result(result, target)
+    previous_signature = str(previous.get("failure_signature") or "")
+    first_seen = str(previous.get("first_seen_at") or now) if previous_signature == signature else now
+    root_cause = result.root_cause or root_cause_line(result.detail)
+    repair_attempted = any("repair" in str(item).lower() for item in result.checks_run) or "repair" in result.detail.lower()
+    return {
+        "schema_version": BASELINE_SCHEMA_VERSION,
+        "head": head_value,
+        "verification_config_hash": verification_config_hash(target),
+        "status": status,
+        "category": result.category or "",
+        "root_cause": progress_inline(root_cause, target, limit=300),
+        "failure_signature": signature,
+        "checks_run": [progress_inline(str(item), target, limit=300) for item in result.checks_run],
+        "detail": progress_inline(result.detail, target, limit=1200),
+        "repair_attempted": repair_attempted,
+        "next_action": baseline_next_action(status, result),
+        "first_seen_at": first_seen,
+        "last_seen_at": now,
+    }
+
+
+def write_baseline_record(target: Path, record: dict[str, Any], *, dry_run: bool) -> None:
+    if dry_run:
+        return
+    path = baseline_verification_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def read_baseline_record(target: Path) -> dict[str, Any]:
+    return read_json(baseline_verification_path(target))
+
+
+def baseline_record_is_current(target: Path, record: dict[str, Any], head_value: str) -> bool:
+    return (
+        bool(record)
+        and int(record.get("schema_version") or 0) == BASELINE_SCHEMA_VERSION
+        and str(record.get("head") or "") == head_value
+        and str(record.get("verification_config_hash") or "") == verification_config_hash(target)
+    )
+
+
+def run_baseline_verification(
+    target: Path,
+    *,
+    head_value: str,
+    dry_run: bool,
+    force: bool = False,
+) -> dict[str, Any]:
+    previous = read_baseline_record(target)
+    if not force and baseline_record_is_current(target, previous, head_value):
+        return previous
+    result = run_verification(target, None)
+    record = baseline_record_from_result(target, result, head_value=head_value, previous=previous)
+    write_baseline_record(target, record, dry_run=dry_run)
+    return record
+
+
+def baseline_record_blocks_full_suite(record: dict[str, Any] | None) -> bool:
+    return bool(record) and str(record.get("status") or "unknown") != "passing"
+
+
+def attach_baseline_fields(manifest: dict[str, Any], baseline: dict[str, Any] | None) -> None:
+    if not baseline:
+        return
+    manifest["baseline_status"] = str(baseline.get("status") or "unknown")
+    manifest["baseline_failure_signature"] = str(baseline.get("failure_signature") or "")
+
+
+def baseline_blocker_detail(target: Path, baseline: dict[str, Any]) -> str:
+    status = str(baseline.get("status") or "unknown")
+    root_cause = str(baseline.get("root_cause") or "No baseline root cause recorded.")
+    next_action = str(baseline.get("next_action") or "Repair the baseline before retrying full-suite-required work.")
+    return scrub_local_references(
+        f"Baseline full-suite verification is {status}: {root_cause} Next action: {next_action}",
+        target,
+    )
+
+
+def baseline_repair_has_focused_evidence(target: Path, manifest: dict[str, Any], verification: VerificationResult) -> bool:
+    declared = manifest_declared_verification_commands([manifest])
+    smoke = load_smoke_verification_commands(target, [manifest])
+    if not declared and not smoke:
+        return False
+    detail = verification.detail
+    return all(command in detail or command in verification.checks_run for command in [*declared, *smoke])
+
+
+def baseline_repair_accepts_failure(
+    target: Path,
+    manifest: dict[str, Any],
+    baseline: dict[str, Any] | None,
+    verification: VerificationResult,
+) -> bool:
+    if not manifest_is_baseline_repair(manifest) or verification.ok:
+        return verification.ok
+    if not baseline_record_blocks_full_suite(baseline):
+        return False
+    old_signature = str((baseline or {}).get("failure_signature") or "")
+    new_signature = verification_failure_signature(verification)
+    manifest["baseline_status"] = baseline_status_for_result(verification, target)
+    manifest["baseline_failure_signature"] = new_signature
+    if new_signature and new_signature != old_signature:
+        manifest["baseline_repair_result"] = "accepted_changed_failure_signature"
+        return True
+    if str((baseline or {}).get("status") or "") in {"blocked_environment", "repairable_local_service"} and (
+        baseline_repair_has_focused_evidence(target, manifest, verification)
+    ):
+        manifest["baseline_repair_result"] = "accepted_with_focused_evidence"
+        return True
+    return False
 
 
 def staged_or_worktree_changes(target: Path) -> bool:
@@ -1105,7 +1821,16 @@ def commit_current_patch(target: Path, manifest: dict[str, Any], run_id: str, *,
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         raise SystemExit(1)
-    return head(target)
+    commit_hash = head(target)
+    notify_commit_progress(
+        target,
+        commit_hash=commit_hash,
+        commit_message=message,
+        description=summary or f"Integrated {role} patch {patch_run_id}.",
+        run_id=run_id,
+        dry_run=dry_run,
+    )
+    return commit_hash
 
 
 def commit_automation_state(target: Path, run_id: str, *, dry_run: bool) -> str | None:
@@ -1134,11 +1859,21 @@ def commit_automation_state(target: Path, run_id: str, *, dry_run: bool) -> str 
             "GIT_COMMITTER_EMAIL": "diffmogger-integrator@example.invalid",
         }
     )
-    result = run(["git", "commit", "-m", f"chore(integrator): update multi-role state {run_id}"], cwd=target, env=env)
+    message = f"chore(integrator): update multi-role state {run_id}"
+    result = run(["git", "commit", "-m", message], cwd=target, env=env)
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         raise SystemExit(1)
-    return head(target)
+    commit_hash = head(target)
+    notify_commit_progress(
+        target,
+        commit_hash=commit_hash,
+        commit_message=message,
+        description=f"Updated multi-role progress and automation task state for integrator run {run_id}.",
+        run_id=run_id,
+        dry_run=dry_run,
+    )
+    return commit_hash
 
 
 SEMANTIC_COMMIT_TYPES = {"feat", "fix", "docs", "test", "refactor", "chore", "build", "ci", "perf", "style"}
@@ -1375,6 +2110,35 @@ def semantic_patch_text(manifest: dict[str, Any], target: Path) -> str:
     return ""
 
 
+def manifest_test_change_rationale(manifest: dict[str, Any]) -> str:
+    value = str(manifest.get("test_change_rationale") or "").strip()
+    if value:
+        return value
+    return summary_field(str(manifest.get("summary") or ""), "Test change rationale")
+
+
+def hardener_test_change_requires_rationale(manifest: dict[str, Any], target: Path) -> bool:
+    if str(manifest.get("role") or "").strip().lower() != "hardener":
+        return False
+    changed_tests = [str(path) for path in manifest.get("changed_files") or [] if is_test_path(str(path))]
+    if not changed_tests or manifest_test_change_rationale(manifest):
+        return False
+    patch_text = semantic_patch_text(manifest, target)
+    current_file = ""
+    removed_lines = 0
+    deleted_test_file = False
+    for raw in patch_text.splitlines():
+        if raw.startswith("diff --git "):
+            parts = raw.split()
+            current_file = parts[3][2:] if len(parts) >= 4 and parts[3].startswith("b/") else ""
+            continue
+        if raw.startswith("deleted file mode") and is_test_path(current_file):
+            deleted_test_file = True
+        if is_test_path(current_file) and raw.startswith("-") and not raw.startswith("---"):
+            removed_lines += 1
+    return deleted_test_file or removed_lines >= 10
+
+
 def semantic_commit_action(changed_files: list[str], role: str, patch_text: str = "", scope: str | None = None) -> str:
     joined = "\n".join(changed_files)
     lower_patch = patch_text.lower()
@@ -1454,11 +2218,16 @@ def progress_inline(text: str, target: Path, *, limit: int = 240) -> str:
 
 
 def summarize_deferral_for_progress(item: dict[str, Any], target: Path) -> str:
+    category = str(item.get("deferral_category") or "").strip()
+    root_cause = str(item.get("deferral_root_cause") or "").strip()
+    if category and root_cause:
+        return progress_inline(f"{category}: {root_cause}", target)
     detail = str(item.get("deferral_detail") or "")
     if missing_pytest_failure("pytest", detail):
         return "missing pytest in the verification environment; raw detail stays in the manifest."
-    if ("/User" + "s/") in detail or ("agentic-kit-" + "lab") in detail:
-        return "local workspace path/reference in generated state; raw detail stays in the manifest."
+    inferred_category, inferred_root_cause = classify_deferral_cause(str(item.get("deferral_reason") or "other"), detail)
+    if inferred_category != "other":
+        return progress_inline(f"{inferred_category}: {inferred_root_cause}", target)
     first_line = next((line.strip() for line in detail.splitlines() if line.strip()), detail)
     return progress_inline(first_line, target)
 
@@ -1490,6 +2259,7 @@ def batch_apply(
     *,
     head_before: str,
     checkpoint_commit: str | None,
+    baseline: dict[str, Any] | None,
     dry_run: bool,
 ) -> tuple[bool, list[tuple[Path, dict[str, Any]]], list[tuple[Path, dict[str, Any], str]]]:
     accepted: list[tuple[Path, dict[str, Any]]] = []
@@ -1497,6 +2267,38 @@ def batch_apply(
     for path, manifest in queued:
         patch = resolve_patch_path(target, manifest)
         manifest["head_before_integration"] = head_before
+        if hardener_test_change_requires_rationale(manifest, target):
+            mark_deferred(
+                path,
+                manifest,
+                target=target,
+                reason="guardrail_violation",
+                detail="Hardener removed or substantially rewrote tests without a `Test change rationale:` summary line.",
+                head_before_integration=head_before,
+                checkpoint_commit=checkpoint_commit,
+                dry_run=dry_run,
+            )
+            deferred.append((path, manifest, "guardrail_violation"))
+            continue
+        if (
+            manifest_requires_full_verification(manifest)
+            and not manifest_is_baseline_repair(manifest)
+            and baseline_record_blocks_full_suite(baseline)
+        ):
+            attach_baseline_fields(manifest, baseline)
+            mark_deferred(
+                path,
+                manifest,
+                target=target,
+                reason="baseline_verification_blocker",
+                detail=baseline_blocker_detail(target, baseline or {}),
+                head_before_integration=head_before,
+                checkpoint_commit=checkpoint_commit,
+                checks_run=[str(item) for item in (baseline or {}).get("checks_run") or []],
+                dry_run=dry_run,
+            )
+            deferred.append((path, manifest, "baseline_verification_blocker"))
+            continue
         if patch_is_empty(patch):
             accepted.append((path, manifest))
             continue
@@ -1506,6 +2308,7 @@ def batch_apply(
             mark_deferred(
                 path,
                 manifest,
+                target=target,
                 reason=reason,
                 detail=detail,
                 head_before_integration=head_before,
@@ -1519,6 +2322,7 @@ def batch_apply(
             mark_deferred(
                 path,
                 manifest,
+                target=target,
                 reason="conflict",
                 detail=apply_result.stderr.strip() or "git apply failed after check",
                 head_before_integration=head_before,
@@ -1528,7 +2332,7 @@ def batch_apply(
             deferred.append((path, manifest, "conflict"))
             continue
         accepted.append((path, manifest))
-    verification = run_verification(target)
+    verification = run_verification(target, [manifest for _, manifest in accepted])
     for _, manifest in accepted:
         manifest["checks_run"] = verification.checks_run
     return verification.ok, accepted, deferred
@@ -1554,6 +2358,7 @@ def replay_and_commit(
                 mark_deferred(
                     path,
                     manifest,
+                    target=target,
                     reason="conflict",
                     detail=result.stderr.strip() or "Patch failed while replaying accepted batch.",
                     head_before_integration=head_before,
@@ -1567,6 +2372,7 @@ def replay_and_commit(
             mark_deferred(
                 path,
                 manifest,
+                target=target,
                 reason=runtime_state_deferral_reason(manifest),
                 detail=runtime_state_deferral_detail(manifest),
                 head_before_integration=head_before,
@@ -1595,18 +2401,50 @@ def integrate_individually(
     *,
     head_before: str,
     checkpoint_commit: str | None,
+    baseline: dict[str, Any] | None,
     dry_run: bool,
 ) -> list[tuple[Path, dict[str, Any], str | None]]:
     committed: list[tuple[Path, dict[str, Any], str | None]] = []
     for path, manifest in queued:
         patch = resolve_patch_path(target, manifest)
         current_head = head(target) if not dry_run else head_before
+        if hardener_test_change_requires_rationale(manifest, target):
+            mark_deferred(
+                path,
+                manifest,
+                target=target,
+                reason="guardrail_violation",
+                detail="Hardener removed or substantially rewrote tests without a `Test change rationale:` summary line.",
+                head_before_integration=head_before,
+                checkpoint_commit=checkpoint_commit,
+                dry_run=dry_run,
+            )
+            continue
+        if (
+            manifest_requires_full_verification(manifest)
+            and not manifest_is_baseline_repair(manifest)
+            and baseline_record_blocks_full_suite(baseline)
+        ):
+            attach_baseline_fields(manifest, baseline)
+            mark_deferred(
+                path,
+                manifest,
+                target=target,
+                reason="baseline_verification_blocker",
+                detail=baseline_blocker_detail(target, baseline or {}),
+                head_before_integration=head_before,
+                checkpoint_commit=checkpoint_commit,
+                checks_run=[str(item) for item in (baseline or {}).get("checks_run") or []],
+                dry_run=dry_run,
+            )
+            continue
         if patch_is_empty(patch):
             apply_runtime_state_actions(target, manifest, dry_run=dry_run)
             if runtime_state_has_blocking_results(manifest):
                 mark_deferred(
                     path,
                     manifest,
+                    target=target,
                     reason=runtime_state_deferral_reason(manifest),
                     detail=runtime_state_deferral_detail(manifest),
                     head_before_integration=head_before,
@@ -1632,6 +2470,7 @@ def integrate_individually(
             mark_deferred(
                 path,
                 manifest,
+                target=target,
                 reason=reason,
                 detail=detail,
                 head_before_integration=head_before,
@@ -1644,6 +2483,7 @@ def integrate_individually(
             mark_deferred(
                 path,
                 manifest,
+                target=target,
                 reason="conflict",
                 detail=result.stderr.strip() or "git apply failed",
                 head_before_integration=head_before,
@@ -1652,26 +2492,29 @@ def integrate_individually(
             )
             reset_to(target, current_head, [manifest], dry_run=dry_run)
             continue
-        verification = run_verification(target)
+        verification = run_verification(target, manifest)
         if not verification.ok:
-            mark_deferred(
-                path,
-                manifest,
-                reason=verification.reason or "verification_failure",
-                detail=verification.detail,
-                head_before_integration=head_before,
-                checkpoint_commit=checkpoint_commit,
-                checks_run=verification.checks_run,
-                dry_run=dry_run,
-            )
-            reset_to(target, current_head, [manifest], dry_run=dry_run)
-            continue
+            if not baseline_repair_accepts_failure(target, manifest, baseline, verification):
+                mark_deferred(
+                    path,
+                    manifest,
+                    target=target,
+                    reason=verification.reason or "verification_failure",
+                    detail=verification.detail,
+                    head_before_integration=head_before,
+                    checkpoint_commit=checkpoint_commit,
+                    checks_run=verification.checks_run,
+                    dry_run=dry_run,
+                )
+                reset_to(target, current_head, [manifest], dry_run=dry_run)
+                continue
         apply_runtime_state_actions(target, manifest, dry_run=dry_run)
         if runtime_state_has_blocking_results(manifest):
             reset_to(target, current_head, [manifest], dry_run=dry_run)
             mark_deferred(
                 path,
                 manifest,
+                target=target,
                 reason=runtime_state_deferral_reason(manifest),
                 detail=runtime_state_deferral_detail(manifest),
                 head_before_integration=head_before,
@@ -1681,6 +2524,11 @@ def integrate_individually(
             )
             continue
         commit_hash = commit_current_patch(target, manifest, str(manifest.get("run_id") or ""), dry_run=dry_run)
+        if manifest_is_baseline_repair(manifest):
+            post_head = head(target) if not dry_run else current_head
+            record = baseline_record_from_result(target, verification, head_value=post_head, previous=baseline)
+            write_baseline_record(target, record, dry_run=dry_run)
+            attach_baseline_fields(manifest, record)
         mark_applied(
             path,
             manifest,
@@ -1712,6 +2560,79 @@ def split_h2_sections(text: str) -> tuple[str, dict[str, str]]:
 
 def deferred_manifests(target: Path) -> list[dict[str, Any]]:
     return [manifest for _, manifest in all_role_manifests(target) if manifest.get("status") == "deferred"]
+
+
+def deferred_equivalence_key(manifest: dict[str, Any]) -> str:
+    role = str(manifest.get("role") or "role").strip().lower()
+    changed_files = sorted(str(item).strip() for item in manifest.get("changed_files") or [] if str(item).strip())
+    category = str(manifest.get("deferral_category") or manifest.get("deferral_reason") or "other").strip().lower()
+    if not changed_files:
+        patch_path = str(manifest.get("patch_path") or "")
+        patch_name = Path(patch_path).name if patch_path else "no-patch"
+        changed_files = [patch_name]
+    payload = json.dumps([role, changed_files, category], sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def triage_status_for_deferred(manifest: dict[str, Any]) -> tuple[str, str]:
+    reason = str(manifest.get("deferral_reason") or "other")
+    category = str(manifest.get("deferral_category") or "")
+    if reason == "baseline_verification_blocker":
+        return "retryable-after-baseline-repair", "Repair or replace the baseline verification failure, then retry from current HEAD."
+    if reason in {"staleness", "conflict"} or category in {"stale_patch", "apply_conflict"}:
+        return "replace-from-current-HEAD", "Replace this work from current HEAD before retrying."
+    if reason == "verification_environment_failure" or category in ENVIRONMENT_FAILURE_CATEGORIES:
+        return "retryable-after-environment-repair", "Repair the environment or fixtures, then retry from current HEAD."
+    if reason == "verification_failure":
+        return "retryable", "Fix the failing assertion or provider/mock expectation, then retry from current HEAD."
+    if reason == "guardrail_violation":
+        return "superseded", "Archive this patch and replace it with a guardrail-compliant change if the intent still matters."
+    return "needs-triage", "Inspect this deferred patch before launching more equivalent builder work."
+
+
+def triage_deferred_equivalents(target: Path, *, dry_run: bool) -> list[str]:
+    grouped: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
+    for path, manifest in all_role_manifests(target):
+        if manifest.get("status") != "deferred":
+            continue
+        key = deferred_equivalence_key(manifest)
+        grouped.setdefault(key, []).append((path, manifest))
+
+    summary: list[str] = []
+    for key, items in sorted(grouped.items()):
+        if len(items) < 2:
+            continue
+        items.sort(key=lambda item: (parse_created_at(item[1], item[0].stat().st_mtime), str(item[0])))
+        latest_path, latest = items[-1]
+        latest_status, latest_action = triage_status_for_deferred(latest)
+        latest.update(
+            {
+                "deferral_equivalence_key": key,
+                "deferral_triage_status": latest_status,
+                "deferral_next_action": latest_action,
+                "deferral_triaged_at": utc_now().isoformat(timespec="seconds"),
+            }
+        )
+        write_manifest(latest_path, latest, dry_run=dry_run)
+        for path, manifest in items[:-1]:
+            manifest.update(
+                {
+                    "status": "superseded",
+                    "deferral_equivalence_key": key,
+                    "deferral_triage_status": "superseded",
+                    "deferral_next_action": f"Superseded by equivalent deferred patch {latest.get('run_id') or latest_path.parent.name}.",
+                    "superseded_by_run_id": latest.get("run_id") or latest_path.parent.name,
+                    "deferral_triaged_at": utc_now().isoformat(timespec="seconds"),
+                }
+            )
+            write_manifest(path, manifest, dry_run=dry_run)
+        role = str(latest.get("role") or "role")
+        files = ", ".join(str(item) for item in latest.get("changed_files") or []) or "unrecorded files"
+        summary.append(
+            f"triaged {len(items)} equivalent {role} deferred patches for {files}; "
+            f"kept {latest.get('run_id') or latest_path.parent.name} as {latest_status}"
+        )
+    return summary
 
 
 def progress_counts(target: Path) -> tuple[dict[str, int], dict[str, int], int]:
@@ -1748,6 +2669,10 @@ def update_progress(
         sections = {}
     accepted_counts, deferred_counts, integrator_runs = progress_counts(target)
     deferred_items = deferred_manifests(target)
+    baseline = read_baseline_record(target)
+    baseline_status = progress_inline(str(baseline.get("status") or "not_recorded"), target, limit=80)
+    baseline_root = progress_inline(str(baseline.get("root_cause") or "No baseline verification recorded."), target)
+    baseline_next = progress_inline(str(baseline.get("next_action") or "Run integrator baseline preflight."), target)
     accepted_lines = [
         f"- {progress_inline(str(manifest.get('role') or 'role'), target)} `{progress_inline(str(manifest.get('run_id') or 'unknown'), target, limit=80)}` -> {commit or 'no commit'}: {progress_inline(first_summary_line(str(manifest.get('summary') or '')) or 'No summary.', target)}"
         for _, manifest, commit in committed
@@ -1768,6 +2693,7 @@ def update_progress(
         f"### {utc_now().isoformat(timespec='seconds')} {run_id}",
         "",
         f"- verification: {progress_inline(verification_status, target)}",
+        f"- baseline_verification: {baseline_status}; {baseline_root}",
         f"- accepted_patches: {len(committed)}",
         f"- deferred_patches: {deferred_count}",
         f"- checkpoint_commit: {checkpoint_commit or 'none'}",
@@ -1785,6 +2711,8 @@ def update_progress(
             f"- Latest evidence: integrator run `{run_id}` accepted {len(committed)} patches and deferred {deferred_count}.",
             f"- Last integrator run: {utc_now().isoformat(timespec='seconds')}",
             f"- Last verification status: {progress_inline(verification_status, target)}",
+            f"- Baseline verification: {baseline_status}; {baseline_root}",
+            f"- Baseline next action: {baseline_next}",
         ]
     )
     sections["Cumulative Metrics"] = "\n".join(
@@ -1973,18 +2901,26 @@ def integrate(target: Path, run_id: str, *, dry_run: bool) -> int:
     committed: list[tuple[Path, dict[str, Any], str | None]] = []
     deferred_count = 0
     verification_status = "not run"
+    baseline_record: dict[str, Any] | None = None
     try:
         checkpoint_commit, dirty_files = checkpoint_dirty_main(target, run_id, dry_run=dry_run)
         head_before = head(target)
         queued = load_queued_manifests(target)
         if not queued:
-            cleanup_summary = cleanup_artifacts(target, dry_run=dry_run)
+            existing_baseline = read_baseline_record(target)
+            if not baseline_record_is_current(target, existing_baseline, head_before):
+                baseline_record = run_baseline_verification(target, head_value=head_before, dry_run=dry_run)
+                verification_status = f"baseline {baseline_record.get('status') or 'unknown'}"
+            else:
+                baseline_record = existing_baseline
+            triage_summary = triage_deferred_equivalents(target, dry_run=dry_run)
+            cleanup_summary = [*triage_summary, *cleanup_artifacts(target, dry_run=dry_run)]
             update_progress(
                 target,
                 run_id=run_id,
-                verification_status="no queued patches",
+                verification_status=verification_status if baseline_record else "no queued patches",
                 committed=[],
-                deferred_count=0,
+                deferred_count=len(deferred_manifests(target)),
                 checkpoint_commit=checkpoint_commit,
                 cleanup_summary=cleanup_summary,
                 dry_run=dry_run,
@@ -1995,7 +2931,7 @@ def integrate(target: Path, run_id: str, *, dry_run: bool) -> int:
                 checkpoint_commit=checkpoint_commit,
                 dirty_files=dirty_files,
                 committed=[],
-                deferred_count=0,
+                deferred_count=len(deferred_manifests(target)),
                 dry_run=dry_run,
             )
             create_integrator_manifest(
@@ -2004,18 +2940,29 @@ def integrate(target: Path, run_id: str, *, dry_run: bool) -> int:
                 status="applied",
                 head_before=head_before,
                 checkpoint_commit=checkpoint_commit,
-                summary="No queued patches.",
+                summary=(
+                    (
+                        f"No queued patches. Baseline verification status: {baseline_record.get('status')}. "
+                        if baseline_record
+                        else "No queued patches. "
+                    )
+                    + ("Deferred duplicate triage updated existing manifests." if triage_summary else "")
+                ).strip(),
                 dry_run=dry_run,
             )
             commit_automation_state(target, run_id, dry_run=dry_run)
             print("No queued multi-role patches.")
             return 0
 
+        if any(manifest_requires_full_verification(manifest) for _, manifest in queued):
+            baseline_record = run_baseline_verification(target, head_value=head_before, dry_run=dry_run)
+
         ok, accepted, deferred = batch_apply(
             target,
             queued,
             head_before=head_before,
             checkpoint_commit=checkpoint_commit,
+            baseline=baseline_record,
             dry_run=dry_run,
         )
         deferred_count += len(deferred)
@@ -2038,6 +2985,7 @@ def integrate(target: Path, run_id: str, *, dry_run: bool) -> int:
                 queued,
                 head_before=head_before,
                 checkpoint_commit=checkpoint_commit,
+                baseline=baseline_record,
                 dry_run=dry_run,
             )
             deferred_count = sum(
@@ -2045,7 +2993,9 @@ def integrate(target: Path, run_id: str, *, dry_run: bool) -> int:
                 for _, manifest in all_role_manifests(target)
                 if manifest.get("status") == "deferred" and manifest.get("integrated_at")
             )
-        cleanup_summary = cleanup_artifacts(target, dry_run=dry_run)
+        triage_summary = triage_deferred_equivalents(target, dry_run=dry_run)
+        cleanup_summary = [*triage_summary, *cleanup_artifacts(target, dry_run=dry_run)]
+        deferred_count = len(deferred_manifests(target))
         update_progress(
             target,
             run_id=run_id,

@@ -12,7 +12,7 @@ Rewrite `docs/CODEX_AUTOMATION_TASKS.md` around one best next milestone. Tighten
 
 Require an integrated deliverable each run: code, tests, report, demo command, fixture, screenshot, UX improvement, or verification result.
 
-In file-only human bridge mode, summary/status requests should be satisfied locally in Markdown or app artifacts. In local-notifier mode, if the human asked to be texted or sent a status update, writing a local Markdown summary is insufficient; the automation should call `POST http://127.0.0.1:8765/api/notify` when the notifier is available.
+In file-only human bridge mode, summary/status requests should be satisfied locally in Markdown or app artifacts. In notifier modes, if the human asked to be messaged or sent a status update, writing a local Markdown summary is insufficient; the automation should call `POST http://127.0.0.1:8765/api/notify` when the notifier is available.
 
 ## Automation Keeps Asking The Human
 
@@ -88,24 +88,24 @@ The bypass is for the nested child only. The scheduled parent remains the outer 
 
 For existing target repos, update `scripts/run_codex_automation.sh` to add `$HOME/.codex` and update `scripts/spawn_worker_agent.sh` to use the nested-child command shape above. Then rerun the scheduled job. If worker startup still fails, record `Codex CLI worker decision: UNAVAILABLE` and continue the sprint with in-session or main-agent review.
 
-## Notifier Outbound Works But Inbound Does Not
+## Discord Notifier Outbound Works But Inbound Does Not
 
 Check:
 
-- ngrok or tunnel points at the webhook port, not the local notify API port
-- Twilio inbound webhook URL includes the correct path
-- `WEBHOOK_PUBLIC_BASE_URL` matches the public ngrok origin
-- webhook handler validates the same URL Twilio used
+- `DISCORD_MESSAGING_CHANNEL_ID` matches the channel where replies are being written
+- Message Content Intent is enabled for the bot
+- the bot has View Channels, Send Messages, and Read Message History permissions
+- the human message mentions the bot or replies to a bot-authored message
 - inbound writes use the target project path
 - dedupe is not suppressing new messages incorrectly
 
-## Notifier Sends Real SMS During Testing
+## Notifier Sends Real Messages During Testing
 
-Set `DRY_RUN=true`, use `python scripts/send_test_notification.py` without `--real-send`, and run tests with fake Twilio clients. Unit tests should never require real credentials.
+Set `DRY_RUN=true`, use `python scripts/send_test_notification.py` without `--real-send`, and run tests with fake Discord senders. Unit tests should never require real credentials.
 
-## Notifier Provider Failure Mentions A2P Or 30034
+## Discord Send Fails
 
-For SMS via US +1 10DLC, Twilio may reject outbound sends until the sender and A2P 10DLC campaign are registered and ready. Error `30034` usually means that setup is not complete for the route. Use file-only mode, dry-run mode, or a configured WhatsApp sandbox while SMS setup is pending.
+Check the Discord bot token, channel ids, server invite, and bot permissions. Use `DRY_RUN=true` or `file_only` mode while setup is incomplete.
 
 ## Target Project Cannot Reach The Notifier
 
@@ -117,9 +117,9 @@ The target automation should not claim a message was sent if the API is unreacha
 
 The target automation owns inbox cleanup. It must remove handled entries from `docs/HUMAN_INBOX.md` only after the requested action is complete or intentionally deferred, then append concise notes to `docs/HUMAN_RESPONSES_ARCHIVE.md`.
 
-## Human Asked For A Text But Got Only A File
+## Human Asked For A Message But Got Only A File
 
-In file-only mode, this is expected: the automation should answer locally. In local-notifier mode, treat it as an automation-process bug. Update `.agentic/automation_prompt.md` so freeform inbox requests such as `send me a summary`, `text me the blocker`, `status update`, or `what have you done so far?` are handled through the notifier. If still relevant, send the concise outbound response and archive the handled inbox entry.
+In file-only mode, this is expected: the automation should answer locally. In notifier modes, treat it as an automation-process bug. Update `.agentic/automation_prompt.md` so freeform inbox requests such as `send me a summary`, `message me the blocker`, `status update`, or `what have you done so far?` are handled through the notifier. If still relevant, send the concise outbound response and archive the handled inbox entry.
 
 ## Codex Cannot Read Or Write Expected Files
 

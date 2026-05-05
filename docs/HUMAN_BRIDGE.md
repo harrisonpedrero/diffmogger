@@ -15,9 +15,20 @@ Ask the human for:
 
 Do not ask for routine implementation choices. Pick a safe default and document it.
 
-## Style A: File Queue
+## Modes
 
-This is the recommended first mode.
+Diffmogger supports:
+
+- `file_only`: Markdown queues and dashboard messages only.
+- `local_notifier`: Markdown files plus native local desktop notifications through the loopback notifier API.
+- `discord_notifier`: Discord progress/messages plus optional native local desktop notifications.
+- `disabled`: no human bridge files required.
+
+In `file_only` mode, if the human writes `send me a summary`, `status update`, or similar in `docs/HUMAN_INBOX.md`, the automation should answer locally in Markdown or an app artifact. It should not call notifier APIs unless the target project is explicitly configured for notifier mode.
+
+## Markdown Files
+
+Enabled bridge modes use:
 
 ```text
 docs/HUMAN_REQUESTS.md
@@ -26,11 +37,9 @@ docs/HUMAN_OUTBOX.md
 docs/HUMAN_RESPONSES_ARCHIVE.md
 ```
 
-Codex writes a request. The human manually writes a reply in `HUMAN_INBOX.md`. The next run handles the reply, removes it from the inbox, and appends a concise archive entry.
+Codex writes requests. The human or notifier writes replies in `HUMAN_INBOX.md`. A later run handles the reply, removes it only after the requested action is complete or intentionally deferred, and appends a concise archive entry.
 
-`HUMAN_INBOX.md` is also where freeform human commands may appear. In file-only mode, if the human writes `send me a summary`, `status update`, or similar, the automation should answer locally in Markdown or an app artifact. It should not try to send SMS/WhatsApp unless the target project is explicitly configured for local-notifier mode.
-
-## Style B: Bundled Local Notifier Service
+## Bundled Notifier Service
 
 Diffmogger includes a reusable notifier service:
 
@@ -38,79 +47,30 @@ Diffmogger includes a reusable notifier service:
 services/agentic-notifier/
 ```
 
-Advanced users can run it locally. The target project automation may call:
+Target project automation may call:
 
 ```text
 POST http://127.0.0.1:8765/api/notify
 ```
 
-The notifier sends SMS/WhatsApp through Twilio and writes replies into the configured target project file:
-
-```text
-docs/HUMAN_INBOX.md
-```
-
 The notifier owns:
 
-- Twilio credentials
-- external webhook server
-- ngrok or public tunnel
-- signature validation
+- Discord bot credentials and channel routing
+- native macOS desktop notifications
 - outbound and inbound dedupe
+- target Markdown handoff writes
 - dry-run mode
 - optional JSONL queue files
 
-The checked-in example config and no-env defaults start in dry-run mode. Change `DRY_RUN=false` only when you intentionally want real outbound sends.
+Target projects must not import notifier code, inspect notifier internals during normal runs, or handle Discord credentials.
 
-The target project owns:
+## Notify API Shape
 
-- request files
-- inbox processing
-- archive cleanup
-- automation status
-- interpreting freeform human commands
-- fallback records when the notifier is unavailable
+Progress events use `event_kind: "progress"` and route to the Discord progress channel when `discord_notifier` is configured. In multi-role automation, each local commit created by `scripts/integrate_role_outputs.py` triggers a brief progress notification with the commit subject and work summary.
 
-In local-notifier mode, freeform requests such as `send me a summary`, `text me the current blocker`, or `status update` should produce an outbound SMS/WhatsApp response when the notifier is available. If the notifier is unavailable, the automation should record `NOTIFIER_UNREACHABLE` and continue safe work.
+Direct human messages use `event_kind: "message"` and route to the Discord messaging channel when configured. Human-unlock requests, blockers that need user input, and replies to user messages also use `event_kind: "message"`. They default to local desktop notifications when local notifications are enabled.
 
-## Human-Unlock Request Shape
-
-Each request should include:
-
-- request id
-- type
-- priority
-- summary
-- context
-- agent recommendation
-- minimum user action
-- reply format
-- work the agent can continue meanwhile
-- dedupe key
-
-Example payload:
-
-```json
-{
-  "request_id": "HR-2026-04-29-001",
-  "type": "api_key_setup",
-  "priority": "unlocking",
-  "summary": "Add Service X read-only API key",
-  "context": "This unlocks the next source adapter while offline fixtures remain available.",
-  "agent_recommendation": "Use read-only/data-only access. Do not grant write, billing, admin, or production permissions.",
-  "minimum_user_action": "Add SERVICE_X_API_KEY to your local secret store and reply HR-001 DONE.",
-  "reply_format": "HR-001 DONE or HR-001 SKIP",
-  "unblocked_work_remaining": [
-    "Continue fixture-based dashboard work",
-    "Continue report polish"
-  ],
-  "dedupe_key": "HR-2026-04-29-001:v1"
-}
-```
-
-## Direct Status/Update Message Shape
-
-When a human inbox entry asks for a summary, status update, or direct reply by text, use a direct outbound message payload if the notifier supports `message_body`:
+Example direct message:
 
 ```json
 {
@@ -118,7 +78,8 @@ When a human inbox entry asks for a summary, status update, or direct reply by t
   "type": "human_requested_summary",
   "priority": "normal",
   "summary": "Progress summary requested by human",
-  "message_body": "Project update: Built X, Y, and Z. Checks passing: tests/build. Current blocker: none. Next sprint: improve the report path.",
+  "event_kind": "message",
+  "message_body": "Project update: Built X, Y, and Z. Checks passing: tests/build. Current blocker: none.",
   "agent_recommendation": "No action needed unless you want to review the generated artifacts.",
   "minimum_user_action": "None.",
   "reply_format": "Optional follow-up request.",
@@ -130,39 +91,22 @@ When a human inbox entry asks for a summary, status update, or direct reply by t
 }
 ```
 
+Ticket completion and terminal blocker notifications should use `event_kind: "progress"` and set `local_notify: true` when the human should also receive a local desktop notification.
+
 If the notifier is unavailable:
 
-1. Do not claim a text was sent.
+1. Do not claim a message was delivered.
 2. Write the intended message to `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`.
 3. Keep or annotate the inbox entry as unresolved if a response is still required.
 4. Continue useful work where possible.
 
-## Inbound Handling
+The notifier records delivery failures with generic statuses such as `DISCORD_SEND_FAILED`, `LOCAL_NOTIFICATION_FAILED`, and `NOTIFIER_UNREACHABLE`.
 
-At the start of every run:
+## Discord Inbound Replies
 
-1. Read `docs/HUMAN_INBOX.md`.
-2. Match unhandled replies to active requests.
-3. Classify freeform commands as outbound text, local artifact creation, product direction, or request resolution.
-4. Apply safe responses.
-5. Send a notifier response when the human asked to be texted or sent a status update.
-6. Remove handled inbox entries only after the requested action has been completed or intentionally deferred.
-7. Append concise archive entries.
-8. Update automation status.
+In `discord_notifier` mode, the bot reads only the configured messaging channel. It ignores bot messages and captures human messages only when they mention the bot or reply to a bot-authored message.
 
-Outbound SMS/WhatsApp responses should target 300-900 characters, use at most five short bullets, avoid raw stack traces, avoid secrets or sensitive environment details, and avoid embedded URLs unless explicitly necessary and allowed by the messaging setup.
-
-## Twilio Notes
-
-Twilio inbound messaging webhooks send request parameters such as sender, recipient, message body, and message SID to your application. Twilio recommends using SDK signature validation rather than writing custom validation. Configure the inbound webhook URL in the Twilio Console or Messaging REST API.
-
-For WhatsApp through Twilio, inbound customer messages can also be delivered to your application by webhook. WhatsApp notification workflows may require approved templates or session rules depending on the use case.
-
-For outbound SMS, the notifier supports either `TWILIO_MESSAGING_SERVICE_SID` or `TWILIO_FROM`. If `TWILIO_MESSAGING_SERVICE_SID` is set, the service sends with `messaging_service_sid` and does not pass `from_`; otherwise it falls back to `TWILIO_FROM`.
-
-SMS via US +1 10DLC may require A2P 10DLC approval before sends work. Twilio error `30034` usually means the sender or campaign is not registered or ready. The notifier returns structured JSON for provider failures and writes `PROVIDER_SEND_FAILED` to `docs/HUMAN_OUTBOX.md` when target paths are configured.
-
-Diffmogger does not require SMS. File-only mode is valid, and WhatsApp sandbox mode can be used when configured.
+Captured messages are appended to `docs/HUMAN_INBOX.md` with Discord metadata and deduped by Discord message ID.
 
 ## Running The Bundled Service
 
@@ -175,23 +119,24 @@ cp .env.example .env
 python -m agentic_notifier.run_service
 ```
 
-Expose only the webhook port:
+The example config starts with `DRY_RUN=true`; change it only after target files, Discord channels, and local notifications are verified.
 
-```bash
-ngrok http 8787
-```
+## Discord Setup
 
-Configure Twilio inbound webhook:
+1. Create a Discord application and bot.
+2. Copy the bot token into `DISCORD_BOT_TOKEN` in `services/agentic-notifier/.env`.
+3. Enable Message Content Intent for inbound replies. Leave Presence Intent and Server Members Intent off.
+4. Create a progress channel and messaging channel, then set `DISCORD_PROGRESS_CHANNEL_ID` and `DISCORD_MESSAGING_CHANNEL_ID`.
+5. Invite the bot with the OAuth2 URL Generator. Check only the `bot` scope. After `bot` is checked, Discord shows a separate **Bot Permissions** section below the scopes list. In that section, check View Channels, Send Messages, and Read Message History.
+6. Copy the generated URL, open it, choose your server, and authorize the bot. The invite URL may show `scope=bot&permissions=68608`.
 
-```text
-https://<ngrok-domain>/twilio/inbound
-```
+To get channel IDs, enable **User Settings -> Advanced -> Developer Mode** in Discord. Then right-click the progress channel, choose **Copy Channel ID**, and paste it into `DISCORD_PROGRESS_CHANNEL_ID`. Do the same for the messaging channel and `DISCORD_MESSAGING_CHANNEL_ID`.
 
-Set `WEBHOOK_PUBLIC_BASE_URL` to the same ngrok origin.
+Do not check `identify`, `email`, `guilds`, `messages.read`, `webhook.incoming`, `applications.commands`, or `Administrator` for the basic Diffmogger notifier. `messages.read` is an OAuth2 scope and is not the same as the **Read Message History** bot permission.
 
-## Official Sources
+Message Content Intent is enabled separately under **Bot -> Privileged Gateway Intents**. It is not an OAuth2 URL checkbox. Turn on only **Message Content Intent**; leave **Presence Intent** and **Server Members Intent** off. Diffmogger does not read presence updates or member lists.
 
-- [Twilio incoming message webhook request](https://www.twilio.com/docs/messaging/guides/webhook-request)
-- [Twilio messaging webhooks](https://www.twilio.com/docs/usage/webhooks/messaging-webhooks)
-- [Twilio Messages resource](https://www.twilio.com/docs/sms/api/message)
-- [Twilio WhatsApp overview](https://www.twilio.com/docs/sms/whatsapp/api)
+Official references:
+
+- [Discord bot docs](https://docs.discord.com/developers/bots)
+- [Discord OAuth2 and permissions docs](https://docs.discord.com/developers/platform/oauth2-and-permissions)

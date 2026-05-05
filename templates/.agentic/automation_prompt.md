@@ -8,6 +8,8 @@ At the start of every run, explicitly read and follow:
 
 ```text
 AGENTS.md
+.agentic/verification_commands.txt
+.agentic/smoke_commands.txt
 docs/CODEX_AUTOMATION_TASKS.md
 docs/CODEX_AUTOMATION_GUARDRAILS.md
 docs/PROJECT_CONTEXT.md
@@ -40,6 +42,8 @@ A strong run usually combines implementation, tests or fixtures, integration int
 
 A weak run is one that only reads files and summarizes, makes a tiny doc-only change when implementation work is available, adds a placeholder without wiring it into the product, avoids Codex CLI worker usage on a broad task without explaining why, or updates the task file without improving the app, tests, reports, or automation process.
 
+Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. Do not invent new backlog after every ticket is `done` or `blocked`; finalize the ticket run and stop only after remaining blockers are not repairable baseline/service setup work.
+
 ## Run Structure
 
 1. Check lock context before mutating code. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, treat `scripts/run_codex_automation.sh` as the lock owner and do not acquire, overwrite, manually create, or release `target/codex_automation.lock` inside the Codex run. If no wrapper-owned lock is present, acquire the lock before mutating code using the target repo's local `scripts/acquire_codex_lock.sh`.
@@ -67,34 +71,13 @@ For reversible or low-impact choices, choose a reasonable default and document t
 
 ## Product Horizons
 
-Product horizons are explicit state, not just inspiration. At the start of each run, read the `## Product Horizon State` section in `docs/CODEX_AUTOMATION_TASKS.md`. Choose work that advances the current horizon unless a regression, blocker, or human instruction requires a different focus.
+{{PRODUCT_HORIZON_GUIDANCE}}
 
-Use these default horizons and advancement criteria:
+The dynamic task file must keep the parser-compatible sections `## Product Horizon State` and `## Horizon Transition Log`.
 
-| Horizon | Goal | Advance when |
-| --- | --- | --- |
-| H1 Runnable baseline | Create or confirm a runnable local baseline. | Setup, run command, and at least one useful verification path exist and have run or have a documented environment blocker. |
-| H2 Offline/local demo | Make the desired first demo usable with fixtures, mocks, or local data. | A human can follow a documented local path through the core demo without live external services. |
-| H3 Serious core functionality | Replace thin placeholders with meaningful product logic. | The core workflow has real behavior, representative data, and targeted tests or smoke checks. |
-| H4 Evaluation/reporting/comparison layer | Add evidence, summaries, reports, scoring, review, or comparison surfaces appropriate to the project. | The project can produce a useful review artifact or decision-support output from local data. |
-| H5 Safe integration architecture | Prepare optional real integrations without unsafe side effects. | External adapters are mocked, gated, documented, and keep secrets outside the repo. |
-| H6 Showcase quality | Improve the demo, UX, docs, and reliability enough to review confidently. | The project has a polished review path, clear docs, and no obvious broken first-impression workflow. |
-| H7 Ambitious extensions | Extend beyond the obvious MVP while staying aligned with the mission. | At least one high-leverage extension is implemented, verified, and added to the product narrative or backlog. |
-| H8 Automation process improvement | Improve the recurring automation system itself. | The workflow has been reviewed, simplified, strengthened, or compacted based on actual run evidence. |
+## Ticket Campaign Mode
 
-At the end of every run, update `## Product Horizon State` with:
-
-- current horizon
-- horizon goal
-- advancement criteria
-- evidence gathered this run
-- advancement decision: `stay`, `advance`, or `defer`
-- next horizon candidate
-- remaining work before advancement
-
-If the advancement criteria are met, update the current horizon to the next horizon and append a dated note to `## Horizon Transition Log` with the previous horizon, new horizon, evidence, and checks. Do not advance merely because a demo exists; advance when the criteria are satisfied enough that the next horizon is now the highest-leverage work. It is acceptable to advance with minor known issues if they are documented and do not undermine the next horizon. If a later regression undermines an earlier horizon, keep the current horizon but make the regression the next sprint-sized task.
-
-Beyond MVP direction: {{BEYOND_MVP}}
+{{TICKET_CAMPAIGN_SECTION}}
 
 ## Worker-Agent Orchestration
 
@@ -180,7 +163,7 @@ Rules:
 - Give each worker a clear assignment, output file, and stop condition.
 - Workers must not spawn additional workers.
 - Workers must not send SMS/WhatsApp messages.
-- Workers must not touch `.env` or credentials.
+- {{WORKER_ENV_ACCESS_RULE}}
 - Workers must not use network unless the human explicitly approved that run to do so.
 - Use this output convention:
 
@@ -255,7 +238,9 @@ Preferred commands:
 {{VERIFICATION_COMMANDS}}
 ```
 
-Run the checks that match the files changed. Do not claim checks passed unless they were run. If a check cannot run because of missing local tooling or dependencies, diagnose the environment and use `scripts/repair_environment.py` or an equivalent local-only repair before declaring an environment blocker. Never install globally.
+Run the checks that match the files changed. Do not claim checks passed unless they were run. If a check cannot run because of missing local tooling, dependencies, or a project-local service such as a test database, diagnose the environment and use `scripts/repair_environment.py` or an equivalent local-only repair before declaring an environment blocker. Never install globally.
+
+If a repo has enough local configuration to repair the service setup safely, such as Prisma/PostgreSQL schema plus local test database examples, classify the baseline as `repairable_local_service` and route `Verification scope: baseline_repair` work instead of asking the human to start the service manually.
 
 For browser-backed smoke checks, visual QA, or documentation research, prefer the managed browser runtime:
 

@@ -88,18 +88,67 @@ if [[ -n "$remotes" && "${MULTI_ROLE_ALLOW_REMOTES:-0}" != "1" ]]; then
   exit 2
 fi
 
-mkdir -p .git/info
-touch .git/info/exclude
+exclude_path="$(git rev-parse --git-path info/exclude 2>/dev/null || printf '.git/info/exclude')"
+mkdir -p "$(dirname "$exclude_path")"
+touch "$exclude_path"
+if ! grep -Fx "# Diffmogger local automation scaffold/runtime" "$exclude_path" >/dev/null 2>&1; then
+  if [ -s "$exclude_path" ]; then
+    printf '\n' >> "$exclude_path"
+  fi
+  printf '%s\n' "# Diffmogger local automation scaffold/runtime" >> "$exclude_path"
+fi
 for pattern in \
-  "/target/codex_automation.lock" \
+  "/.agentic/" \
+  "/AGENTS.md" \
+  "/docs/AUTOMATION_SIGNALS.md" \
+  "/docs/AUTONOMY_EXPERIMENT_LOG.md" \
+  "/docs/CODEX_AUTOMATION_GUARDRAILS.md" \
+  "/docs/CODEX_AUTOMATION_TASKS.md" \
+  "/docs/DAILY_AUTOMATION_REVIEW.md" \
+  "/docs/DEVELOPMENT.md" \
+  "/docs/HUMAN_BRIDGE_SETUP.md" \
+  "/docs/HUMAN_INBOX.md" \
+  "/docs/HUMAN_OUTBOX.md" \
+  "/docs/HUMAN_REQUESTS.md" \
+  "/docs/HUMAN_RESPONSES_ARCHIVE.md" \
+  "/docs/INITIAL_BOOTSTRAP_PROMPT.md" \
+  "/docs/MULTI_ROLE_PROGRESS.md" \
+  "/docs/PROJECT_CONTEXT.md" \
+  "/docs/TICKET_RUN.md" \
+  "/scripts/acquire_codex_lock.sh" \
+  "/scripts/__pycache__/" \
+  "/scripts/build_replay.py" \
+  "/scripts/compact_agent_state.py" \
+  "/scripts/diffmogger_browser.py" \
+  "/scripts/integrate_role_outputs.py" \
+  "/scripts/list_deferred_patches.py" \
+  "/scripts/release_codex_lock.sh" \
+  "/scripts/repair_environment.py" \
+  "/scripts/run_codex_automation.sh" \
+  "/scripts/run_conveyor_automation.py" \
+  "/scripts/run_conveyor_automation.sh" \
+  "/scripts/run_observatory.py" \
+  "/scripts/run_role_automation.sh" \
+  "/scripts/spawn_worker_agent.sh" \
+  "/scripts/summarize_worker_outputs.py" \
+  "/scripts/ticket_run.py" \
+  "/scripts/update_automation_signals.py" \
+  "/target/agent_runs/" \
   "/target/automation_conveyor.lock" \
   "/target/automation_conveyor_state.json" \
+  "/target/baseline_verification.json" \
+  "/target/automation_logs/" \
   "/target/automation_queue/" \
   "/target/automation_signals.json" \
+  "/target/automation_venvs/" \
   "/target/automation_worktrees/" \
-  "/target/automation_logs/"; do
-  if ! grep -Fx "$pattern" .git/info/exclude >/dev/null 2>&1; then
-    printf '%s\n' "$pattern" >> .git/info/exclude
+  "/target/codex_automation.lock" \
+  "/target/prisma-cache/" \
+  "/target/ticket_run_completion.json" \
+  "/target/ticket_run_reports/" \
+  "/.pnpm-store/"; do
+  if ! grep -Fx "$pattern" "$exclude_path" >/dev/null 2>&1; then
+    printf '%s\n' "$pattern" >> "$exclude_path"
   fi
 done
 
@@ -113,7 +162,12 @@ if [[ "$role" == "integrator" ]]; then
   if [[ -f "$target_abs/scripts/update_automation_signals.py" && -f "$target_abs/docs/AUTOMATION_SIGNALS.md" ]]; then
     python3 "$target_abs/scripts/update_automation_signals.py" "$target_abs" --refresh --role integrator --summary || true
   fi
-  exec python3 scripts/integrate_role_outputs.py "$target_abs" --run-id "$run_id"
+  python3 scripts/integrate_role_outputs.py "$target_abs" --run-id "$run_id"
+  integrator_status=$?
+  if [[ "$integrator_status" -eq 0 && -f "$target_abs/scripts/ticket_run.py" ]]; then
+    python3 "$target_abs/scripts/ticket_run.py" "$target_abs" should-halt --finalize || true
+  fi
+  exit "$integrator_status"
 fi
 
 base_commit="$(git rev-parse HEAD)"
@@ -123,6 +177,7 @@ log_dir="$target_abs/target/automation_logs"
 mkdir -p "$queue_dir" "$(dirname "$worktree_dir")" "$log_dir"
 
 summary_path="$queue_dir/summary.md"
+worktree_summary_path="$worktree_dir/target/automation_queue/$role/$run_id/summary.md"
 patch_path="$queue_dir/changes.patch"
 manifest_path="$queue_dir/manifest.json"
 raw_log="$queue_dir/codex.raw.log"
@@ -136,6 +191,7 @@ rerun_stdout="$queue_dir/codex.rerun.stdout.log"
 rerun_stderr="$queue_dir/codex.rerun.stderr.log"
 
 git worktree add --detach "$worktree_dir" "$base_commit" >/dev/null
+mkdir -p "$(dirname "$worktree_summary_path")"
 
 if [[ -f "$target_abs/scripts/update_automation_signals.py" && -f "$target_abs/docs/AUTOMATION_SIGNALS.md" ]]; then
   python3 "$target_abs/scripts/update_automation_signals.py" "$target_abs" --refresh --role "$role" --summary || true
@@ -143,6 +199,7 @@ fi
 
 context_paths=(
   ".agentic/automation_prompt.md"
+  ".agentic/smoke_commands.txt"
   ".agentic/verification_commands.txt"
   ".agentic/roles"
   "docs/CODEX_AUTOMATION_TASKS.md"
@@ -158,6 +215,7 @@ context_paths=(
   "docs/HUMAN_REQUESTS.md"
   "docs/HUMAN_RESPONSES_ARCHIVE.md"
   "target/automation_signals.json"
+  "target/baseline_verification.json"
 )
 
 runtime_state_paths_path="$queue_dir/runtime_state_paths.txt"
@@ -176,6 +234,7 @@ output = Path(sys.argv[2])
 max_bytes = int(os.environ.get("RUNTIME_STATE_MAX_BYTES", "1048576"))
 explicit_paths = [
     ".agentic/automation_prompt.md",
+    ".agentic/smoke_commands.txt",
     ".agentic/verification_commands.txt",
     ".agentic/roles/planner.md",
     ".agentic/roles/builder.md",
@@ -376,7 +435,7 @@ PY
 Before your final response, write a concise Markdown summary to this exact file:
 
 \`\`\`text
-$summary_path
+$worktree_summary_path
 \`\`\`
 
 Start the file with this exact commit-intent block so the integrator can create useful semantic commits:
@@ -388,6 +447,20 @@ Commit subject: <imperative subject without type/scope, 72 chars or less>
 \`\`\`
 
 Then add short \`## Summary\` and \`## Checks\` sections. The commit subject must describe the actual user-visible, code, test, validation, or docs change. Do not use generic subjects such as \`integrate $role work\`, \`document automation progress\`, \`update files\`, or \`changes\`.
+
+When this work intentionally repairs a failing clean-HEAD full-suite baseline, add:
+
+\`\`\`text
+Verification scope: baseline_repair
+\`\`\`
+
+If you are the hardener and you remove obsolete tests or substantially rewrite brittle/stale tests, add:
+
+\`\`\`text
+Test change rationale: <one concise reason this preserves or improves meaningful coverage>
+\`\`\`
+
+Do not remove or weaken tests merely to make verification pass.
 EOF
 } >"$runtime_prompt_path"
 
@@ -517,6 +590,10 @@ fi
   cat "$run_stderr"
 } >"$raw_log"
 
+if [[ -s "$worktree_summary_path" ]]; then
+  cp "$worktree_summary_path" "$summary_path"
+fi
+
 python3 - "$worktree_dir" "$runtime_state_start_path" "$runtime_state_actions_path" "$runtime_state_changed_files_path" "${runtime_state_paths[@]}" <<'PY'
 import hashlib
 import json
@@ -582,18 +659,64 @@ PY
   git diff --name-only "$base_commit" -- . "${context_excludes[@]}" >"$queue_dir/changed_files.txt"
 )
 
-if [[ ! -s "$summary_path" ]]; then
-  {
-    printf '# %s role run %s\n\n' "$role" "$run_id"
-    printf -- '- base_commit: %s\n' "$base_commit"
-    printf -- '- codex_exit_code: %s\n' "$codex_status"
-    printf -- '- patch: %s\n\n' "$patch_path"
-    printf 'Review `%s` for raw Codex output.\n' "$raw_log"
-  } >"$summary_path"
-fi
+python3 - "$summary_path" "$role" "$run_id" "$base_commit" "$codex_status" "$target_abs" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+summary_path = Path(sys.argv[1])
+role = sys.argv[2]
+run_id = sys.argv[3]
+base_commit = sys.argv[4]
+codex_status = sys.argv[5]
+target = Path(sys.argv[6])
+
+def scrub(text: str) -> str:
+    replacements = {
+        str(target): "<target>",
+        str(Path.home()): "<home>",
+    }
+    for old, new in replacements.items():
+        if old:
+            text = text.replace(old, new)
+    text = re.sub(r"(?<![\w.])/(?:Users|private/tmp|tmp|var/folders)/[^\s`'\"<>)]*", "<local-path>", text)
+    return text
+
+def has_commit_intent(text: str) -> bool:
+    lowered = text.lower()
+    return all(marker in lowered for marker in ("commit type:", "commit scope:", "commit subject:"))
+
+if summary_path.exists():
+    original = scrub(summary_path.read_text(encoding="utf-8", errors="replace"))
+else:
+    original = ""
+
+if has_commit_intent(original):
+    summary_path.write_text(original.rstrip() + "\n", encoding="utf-8")
+    raise SystemExit(0)
+
+subject = f"capture {role} automation output"
+fallback = [
+    "Commit type: chore",
+    f"Commit scope: {role}",
+    f"Commit subject: {subject}",
+    "",
+    "## Summary",
+    f"- {role} role run `{run_id}` produced queue output for integrator review.",
+    "",
+    "## Checks",
+    f"- Codex exit code: {codex_status}",
+    f"- Base commit: {base_commit[:12]}",
+]
+if original.strip():
+    fallback.extend(["", "## Role Notes", original.strip()[:1600]])
+summary_path.parent.mkdir(parents=True, exist_ok=True)
+summary_path.write_text("\n".join(fallback).rstrip() + "\n", encoding="utf-8")
+PY
 
 python3 - "$manifest_path" "$role" "$run_id" "$base_commit" "$patch_path" "$summary_path" "$codex_status" "$queue_dir/changed_files.txt" "$runtime_state_actions_path" "$runtime_state_changed_files_path" <<'PY'
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -619,6 +742,17 @@ runtime_state_changed_files = [
     if line.strip()
 ] if runtime_state_changed_files_path.exists() else []
 summary = summary_path.read_text(encoding="utf-8", errors="replace")[:2000] if summary_path.exists() else ""
+
+def summary_field(field_name: str) -> str:
+    prefix = f"{field_name.lower()}:"
+    for raw in summary.splitlines():
+        line = re.sub(r"\s+", " ", raw.strip().lstrip("#>*- \t").strip("` "))
+        if line.lower().startswith(prefix):
+            return line[len(prefix):].strip(" `")
+    return ""
+
+verification_scope = summary_field("Verification scope").lower().replace("-", "_")
+test_change_rationale = summary_field("Test change rationale")
 patch_empty = not patch_path.exists() or patch_path.stat().st_size == 0
 runtime_state_empty = not runtime_state_changed_files
 status = "failed" if exit_code != 0 else ("skipped" if patch_empty and runtime_state_empty else "queued")
@@ -637,6 +771,8 @@ manifest = {
     "runtime_state_status": "pending" if runtime_state_changed_files else "none",
     "runtime_state_results": [],
     "checks_run": [],
+    "verification_scope": verification_scope,
+    "test_change_rationale": test_change_rationale,
     "summary": summary,
     "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     "integrated_at": None,

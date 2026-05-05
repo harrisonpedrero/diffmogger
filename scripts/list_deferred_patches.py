@@ -16,6 +16,7 @@ DEFERRAL_REASON_ACTIONS = {
     "conflict": "Inspect the listed files and replace the patch with a freshly reconciled local change.",
     "verification_failure": "Re-run the failing command locally, fix the source or test issue, then submit a new verified patch.",
     "verification_environment_failure": "Repair project-local tooling or fixtures first, then rerun verification before retrying.",
+    "baseline_verification_blocker": "Repair the clean-HEAD full-suite baseline, then retry full-suite-required patches.",
     "guardrail_violation": "Do not apply as-is; replace it with a guardrail-compliant local patch or archive it.",
     "other": "Inspect the manifest and summary, then choose retry, replacement, archival, or documentation.",
 }
@@ -24,6 +25,7 @@ DEFERRAL_REASON_DECISIONS = {
     "conflict": "replace_from_current_head",
     "verification_failure": "retry_after_fix",
     "verification_environment_failure": "retry_after_environment_repair",
+    "baseline_verification_blocker": "retry_after_baseline_repair",
     "guardrail_violation": "archive",
     "other": "keep_deferred",
 }
@@ -33,6 +35,7 @@ DECISION_OPTIONS = (
     "replace_from_current_head",
     "retry_after_fix",
     "retry_after_environment_repair",
+    "retry_after_baseline_repair",
     "retry_as_is",
     "keep_deferred",
 )
@@ -115,6 +118,21 @@ def summarize_changed_files(manifest: dict[str, Any]) -> str:
     return ", ".join(files[:4]) + f", +{len(files) - 4} more"
 
 
+def summarize_deferral_detail(manifest: dict[str, Any], target: Path) -> str:
+    root_cause = clean_text(manifest.get("deferral_root_cause"), limit=220)
+    baseline_status = clean_text(manifest.get("baseline_status"), limit=80)
+    baseline_signature = clean_text(manifest.get("baseline_failure_signature"), limit=120)
+    base = manifest.get("deferral_detail") or manifest.get("summary") or "No deferral detail recorded."
+    detail = scrub_local_references(base, target, limit=320)
+    if root_cause:
+        detail = f"{root_cause} Detail: {detail}"
+    if baseline_status:
+        detail = f"baseline_status={baseline_status}; {detail}"
+    if baseline_signature:
+        detail = f"{detail} baseline_signature={baseline_signature}"
+    return clean_text(detail, limit=420)
+
+
 def reason_sort_key(reason: str) -> tuple[int, str]:
     try:
         return DEFERRAL_REASON_ORDER.index(reason), reason
@@ -160,13 +178,7 @@ def triage_groups(records: list[dict[str, Any]], target: Path) -> list[dict[str,
                         "manifest_path": clean_text(manifest.get("manifest_path") or "", limit=180),
                         "changed_files": summarize_changed_files(manifest),
                         "recommended_decision": recommended_decision(reason),
-                        "detail": scrub_local_references(
-                            manifest.get("deferral_detail")
-                            or manifest.get("summary")
-                            or "No deferral detail recorded.",
-                            target,
-                            limit=320,
-                        ),
+                        "detail": summarize_deferral_detail(manifest, target),
                     }
                     for manifest in manifests
                 ],

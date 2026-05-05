@@ -1,48 +1,40 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 
 from agentic_notifier.config import load_settings
-from agentic_notifier.dedupe import JsonlDedupeStore
-from agentic_notifier.parser import parse_reply
+from agentic_notifier.formatter import extract_request_id
 from agentic_notifier.target_files import TargetFiles
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Append a fake inbound reply to HUMAN_INBOX.md.")
-    parser.add_argument("body", nargs="?", default="HR-001 DONE. Key added locally.")
-    parser.add_argument("--from", dest="from_value", default="+15555555555")
-    parser.add_argument("--to", dest="to_value", default="+15555555555")
-    parser.add_argument("--message-sid", default="")
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Write a simulated Discord inbound reply into the target inbox.")
+    parser.add_argument("body", help="Message body to write.")
+    parser.add_argument("--author-name", default="local-test-user")
+    parser.add_argument("--author-id", default="local-test-author")
+    parser.add_argument("--channel-id", default="local-test-channel")
+    parser.add_argument("--message-id", default=None)
+    parser.add_argument("--capture-reason", choices=["mention", "reply"], default="mention")
     args = parser.parse_args()
 
     settings = load_settings()
     files = TargetFiles.from_settings(settings)
-    parsed = parse_reply(args.body)
-    message_sid = args.message_sid or "DRYRUN-" + datetime.now().strftime("%Y%m%d%H%M%S")
-    store = JsonlDedupeStore(settings.inbound_message_sids_path, "message_sid")
-    if store.contains(message_sid):
-        print(f"Duplicate inbound message ignored: {message_sid}")
-        return
-    inbox_id = files.append_inbound_message(
-        from_value=args.from_value,
-        to_value=args.to_value,
+    message_id = args.message_id or "local-test-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    inbox_id = files.append_discord_inbound_message(
+        author_name=args.author_name,
+        author_id=args.author_id,
+        channel_id=args.channel_id,
+        message_id=message_id,
         body=args.body,
-        message_sid=message_sid,
-        wa_id=None,
-        request_id=parsed.request_id,
-        parsed_intent=parsed.parsed_intent,
-        channel="sms",
+        request_id=extract_request_id(args.body),
+        capture_reason=args.capture_reason,
+        received_at=datetime.now(timezone.utc),
     )
-    store.record(
-        message_sid,
-        {"request_id": parsed.request_id, "parsed_intent": parsed.parsed_intent, "channel": "sms"},
-    )
-    print(f"Appended {inbox_id} to {files.paths.inbox}")
+    print(inbox_id)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
-
+    raise SystemExit(main())

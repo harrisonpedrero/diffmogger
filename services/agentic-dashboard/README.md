@@ -15,7 +15,7 @@ It opens a native desktop window using Python's standard-library Tkinter runtime
 - collects a project intake
 - splits intake into Basics, Product, Rules, Run Config, Progression, and Context steps instead of a long scroll
 - supports fresh-project and existing-project integration modes
-- covers constraints, safety rules, automation prohibitions, human bridge choices, worker settings, optional bounded write-worker acceleration settings, optional automation signals, optional multi-role automation, deliverable definition, and beyond-MVP direction
+- covers constraints, safety rules, automation prohibitions, human bridge choices, worker settings, optional bounded write-worker acceleration settings, optional automation signals, optional ticket-campaign mode, optional multi-role automation, deliverable definition, and long-run direction
 - copies optional context files into `docs/context/`
 - writes `docs/PROJECT_CONTEXT.md`
 - scaffolds Diffmogger target-project files
@@ -31,7 +31,7 @@ It opens a native desktop window using Python's standard-library Tkinter runtime
 - launches an optional local browser observatory for active signal nudges, conveyor health, active roles, queued/deferred patches, the latest recorded integration-safety result, recent outcomes, and timeline events
 - runs `scripts/check_integration_safety.py` from the Monitor tab with **Run Safety Check** and shows the output in the bounded dashboard log
 - shows **Worker Strategy Controls** from the observatory's next-run recommendation and can launch one bounded read-only worker, one explicitly owned write worker, or one local integrator lane when that strategy recommends it; dashboard-launched workers are summarized into `target/agent_runs/<run_id>/summary.md` and the latest summary can be loaded from the Monitor tab
-- lets a human send file-only messages to the next automation run when SMS/WhatsApp is disabled or unavailable
+- lets a human send file-only messages to the next automation run when notifier delivery is disabled or unavailable
 - displays prerequisites as readiness checks instead of raw command output
 
 In existing-project mode, pre-existing `AGENTS.md` and `docs/DEVELOPMENT.md` files receive a managed Diffmogger automation section instead of being replaced wholesale.
@@ -63,8 +63,10 @@ Before starting automation, the dashboard checks for:
 - writable target parent directory
 - Codex home availability for nested workers
 - macOS Full Disk Access advisory when the target lives under `~/Documents`
-- optional local notifier health when `local_notifier` mode is selected
+- optional local notifier health when `local_notifier` or `discord_notifier` mode is selected
+- optional macOS desktop notification command when local notifications are enabled
 - initialized git repo with an initial commit before starting multi-role or conveyor scheduling
 - explicit local-only remote opt-in before multi-role or conveyor scheduling in repos with configured git remotes
 
-The dashboard keeps notifier credentials out of target projects. In local-notifier mode, use `services/agentic-notifier/` for Twilio configuration.
+The dashboard keeps notifier credentials out of target projects. In notifier modes, use `services/agentic-notifier/` for Discord and local desktop notification configuration.
+Ticket campaign setup lives in Run Config, but tickets themselves are populated in the generated Markdown file, usually `docs/TICKET_RUN.md`.

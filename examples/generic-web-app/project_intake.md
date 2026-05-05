@@ -35,20 +35,24 @@ A user can create a project, add goals, generate a weekly board from seed data, 
 
 ## Safety Rules
 
-- Do not read `.env`.
+- Do not open local `.env*` files unless env access is explicitly enabled.
 - Do not send notifications externally in the first demo.
 - Do not publish or deploy without approval.
 
 ## Automation Must Never Do
 
-- Never read secrets or `.env` files.
+- Never print, store, or commit secrets.
 - Never spend money, deploy publicly, publish externally, or contact real users without explicit approval.
 - Never delete user data or rewrite history without approval.
 
 ## External Services
 
 - Optional calendar integration later.
-- Optional SMS/email reminders later.
+- Optional Discord/email reminders later.
+
+## Environment Access Policy
+
+project_commands_only
 
 ## Verification
 
@@ -72,7 +76,7 @@ Allowed for read-only architecture, test gap, and product polish reviews.
 
 A runnable UI or local workflow improvement backed by tests, build, or a demo script.
 
-## Beyond MVP
+## Long-Run Direction
 
 Add recurring review capsules, local import/export, richer planning views, and optional notification adapters behind feature gates.
 

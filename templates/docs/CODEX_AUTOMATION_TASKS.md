@@ -25,18 +25,16 @@ Last updated: {{CREATED_AT}}
 
 ## Product Horizon State
 
-- Current horizon: H1 Runnable baseline
-- Horizon goal: Create or confirm a runnable local baseline for `{{PROJECT_NAME}}`.
+- Current horizon: {{CURRENT_HORIZON}}
+- Horizon goal: {{HORIZON_GOAL}}
 - Advancement criteria:
-  - Setup path is documented.
-  - A local run or demo command exists.
-  - At least one useful verification command exists and has run, or an environment blocker is documented.
+{{HORIZON_ADVANCEMENT_CRITERIA}}
 - Evidence gathered this run:
   - Initial scaffold only; bootstrap has not run yet.
 - Advancement decision: stay
-- Next horizon candidate: H2 Offline/local demo
+- Next horizon candidate: {{NEXT_HORIZON_CANDIDATE}}
 - Remaining work before advancement:
-  - Run the bootstrap prompt, create or inspect the baseline, and record verification results.
+{{REMAINING_WORK_BEFORE_ADVANCEMENT}}
 
 ## Horizon Transition Log
 
@@ -49,6 +47,7 @@ Last updated: {{CREATED_AT}}
 ## Checks From Last Run
 
 - Not run yet. Bootstrap run should discover or create verification commands.
+- Full-suite config: `.agentic/verification_commands.txt`
 - Preferred commands: `{{VERIFICATION_COMMANDS}}`
 
 ## Worker-Agent Activity
@@ -67,12 +66,11 @@ Last updated: {{CREATED_AT}}
 
 {{AUTOMATION_SIGNALS_TASK_NOTES}}
 
+{{TICKET_CAMPAIGN_TASK_NOTES}}
+
 ## Known Issues
 
-- Product baseline still needs to be created or inspected.
-- Verification commands may need adjustment after bootstrap.
-- Scheduled runs should use `scripts/run_codex_automation.sh`, which wraps local lock acquire/release before code mutation.
-- Optional continuous conveyor scheduling should use `scripts/run_conveyor_automation.sh`, which records local scheduler state and delegates to the target-local wrappers.
+{{INITIAL_KNOWN_ISSUES}}
 
 ## Pending Human Requests
 
@@ -86,19 +84,16 @@ Last updated: {{CREATED_AT}}
 
 ## Best Next Milestone
 
-Complete H1 Runnable baseline for `{{PROJECT_NAME}}` and record whether the project is ready to advance to H2 Offline/local demo.
+{{BEST_NEXT_MILESTONE}}
 
 ## Suggested Next Sprint-Sized Task
 
-Run `docs/INITIAL_BOOTSTRAP_PROMPT.md` in Codex to scaffold the first demo, setup docs, checks, automation state, and H1 advancement evidence.
+{{SUGGESTED_NEXT_SPRINT_TASK}}
 
-## Ambitious Ideas Backlog
+## {{BACKLOG_SECTION_HEADING}}
 
-- Improve the first demo until it is easy for the target user to understand.
-- Add an evaluation/reporting layer once the baseline works.
-- Add safe integration architecture behind mocks or feature gates.
-- Add worker-agent reviews once the project has enough surface area.
+{{BACKLOG_SECTION_BODY}}
 
 ## Continue/Block/Critical-Stop Rationale
 
-Continue. The project has a clear mission and no active blocker.
+{{CONTINUE_RATIONALE}}

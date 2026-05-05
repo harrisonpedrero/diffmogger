@@ -31,6 +31,8 @@ Implement one scoped product or code increment that advances the current project
 - Add or update tests, fixtures, demo paths, or docs that belong with the implementation.
 - Avoid touching unrelated files.
 - Record checks run in your final summary.
+- When assigned `verification_scope=baseline_repair` for a missing local service such as PostgreSQL, implement the safest repeatable local verification harness the project supports: scripts, Docker Compose/Testcontainers wiring, test env examples, wait/migrate commands, or focused fallback tests. Do not read `.env` files or invent secrets.
+- In `ticket_campaign` mode, implement a listed ticket from `docs/TICKET_RUN.md`, update its evidence when useful, and mark it `candidate_done` only when it is ready for hardening or final verification.
 
 ## Worktree Behavior
 

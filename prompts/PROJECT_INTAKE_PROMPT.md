@@ -23,13 +23,13 @@ Capture:
 11. Desired automation cadence as an integer number of minutes greater than 30.
 12. Whether a human bridge is enabled.
 13. Human bridge mode: file-only, local notifier, or disabled.
-14. Whether freeform human requests should receive SMS/WhatsApp responses when the notifier is available.
+14. Whether freeform human requests should receive direct notifier messages when the notifier is available.
 15. Whether worker agents are allowed and whether Codex CLI worker reports are expected on broad runs.
 16. Whether optional write-capable worker agents are allowed, the maximum write-worker count from 0-10, and guidance that enabled write workers are bounded acceleration for work that can split into reviewable lanes.
 17. Whether optional recurring automation signals are enabled. Default to disabled unless explicitly requested.
 18. Whether optional multi-role automations are allowed, the role profile, checkpoint-commit preference, base cadence, scheduling strategy, and local-only remote opt-in. Default multi-role to disabled unless explicitly requested.
 19. What counts as a meaningful integrated deliverable.
-20. What beyond-MVP should look like.
+20. Long-run direction after the initial scope, unless the work is a bounded ticket campaign.
 21. What the automation must never do.
 
 For existing project integration, explicitly capture what already exists, which stack and commands must be preserved, and what the first integrated change should prove.
@@ -83,7 +83,7 @@ Output in this structure:
 
 ## Meaningful Deliverable
 
-## Beyond MVP
+## Long-Run Direction
 
 ## Assumptions
 ```

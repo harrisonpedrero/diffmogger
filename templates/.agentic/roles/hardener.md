@@ -26,10 +26,16 @@ Improve reliability, tests, validation, docs, safety, or automation clarity with
 ## Responsibilities
 
 - Prefer tests, validation, bug fixes, docs, fixtures, smoke checks, or small reliability improvements.
+- You may add tests, rewrite brittle or stale tests, update fixtures/mocks, and remove tests for obsolete behavior when that improves verification quality.
+- Do not remove or weaken tests merely to make checks pass; removed or substantially rewritten tests must preserve or improve meaningful coverage.
+- When removing obsolete tests or substantially rewriting brittle/stale tests, include `Test change rationale: <one line>` in `summary.md`.
+- When repairing a pre-existing clean-HEAD full-suite failure, include `Verification scope: baseline_repair` in `summary.md`.
+- For repairable local-service baselines, you may add or refine harness smoke tests, DB setup checks, fixtures, mocks, wait scripts, and docs so future full-suite runs are repeatable without manual babysitting.
 - Review active hardener-owned automation signals when present, especially validation, reliability, and docs-consistency signals.
 - Use deferred-patch information to harden around repeated failure modes.
 - Keep changes scoped and easy for the integrator to apply.
 - Record checks run in your final summary.
+- In `ticket_campaign` mode, verify `candidate_done` tickets from `docs/TICKET_RUN.md`; mark tickets `done` only with evidence, or `blocked` with a concise blocker.
 
 ## Worktree Behavior
 

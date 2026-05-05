@@ -11,16 +11,17 @@ ROOT = Path(__file__).resolve().parents[1]
 SCAFFOLD_SCRIPT = ROOT / "scripts" / "scaffold_project_docs.py"
 CHECK_SCRIPT = ROOT / "scripts" / "check_required_files.py"
 GENERIC_INTAKE = ROOT / "examples" / "generic-web-app" / "project_intake.md"
+TRENDLAB_INTAKE = ROOT / "examples" / "trendlab-signal-intelligence" / "project_intake.md"
 
 
 class RequiredFilesCheckTests(unittest.TestCase):
-    def scaffold_target(self, target: Path) -> None:
+    def scaffold_target(self, target: Path, intake: Path = GENERIC_INTAKE) -> None:
         subprocess.run(
             [
                 sys.executable,
                 str(SCAFFOLD_SCRIPT),
                 "--intake",
-                str(GENERIC_INTAKE),
+                str(intake),
                 "--target",
                 str(target),
             ],
@@ -48,6 +49,74 @@ class RequiredFilesCheckTests(unittest.TestCase):
             self.scaffold_target(target)
 
             result = self.run_check(target)
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+
+    def test_continuous_scaffold_uses_intake_specific_horizons(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+            prompt = (target / ".agentic" / "automation_prompt.md").read_text(encoding="utf-8")
+            task = (target / "docs" / "CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
+
+            self.assertIn("H2 Local-first demo", prompt)
+            self.assertIn("weekly board", prompt)
+            self.assertIn("recurring review capsules", prompt)
+            self.assertIn("## Improvement Backlog", task)
+            self.assertNotIn("H2 Offline/local demo", prompt)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target, TRENDLAB_INTAKE)
+            prompt = (target / ".agentic" / "automation_prompt.md").read_text(encoding="utf-8")
+
+            self.assertIn("scored signals", prompt)
+            self.assertIn("generated brief", prompt)
+            self.assertIn("source-quality attribution", prompt)
+
+    def test_ticket_campaign_scaffold_uses_ticket_phases_without_product_roadmap_language(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.NamedTemporaryFile("w", suffix=".json") as intake:
+            target = Path(tmp)
+            intake.write(
+                """
+{
+  "project_name": "Ticket Campaign Smoke",
+  "product_goal": "Resolve a bounded set of local tickets.",
+  "target_user": "Maintainer reviewing local patches.",
+  "desired_first_demo": "All listed tickets completed or blocked with evidence.",
+  "human_bridge_enabled": false,
+  "human_bridge_mode": "disabled",
+  "automation_run_mode": "ticket_campaign",
+  "verification_commands": ["npm test"]
+}
+""".strip()
+            )
+            intake.flush()
+
+            self.scaffold_target(target, Path(intake.name))
+            prompt = (target / ".agentic" / "automation_prompt.md").read_text(encoding="utf-8")
+            task = (target / "docs" / "CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
+            combined = prompt + "\n" + task
+
+            self.assertIn("T1 Ticket-run readiness", combined)
+            self.assertIn("T4 Completion report and stop", combined)
+            self.assertIn("## Deferred / Follow-Up Tickets", task)
+            for forbidden in ["MVP", "Beyond MVP", "Ambitious extensions"]:
+                self.assertNotIn(forbidden, combined)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECK_SCRIPT),
+                    "--human-bridge-mode",
+                    "disabled",
+                    "--ticket-campaign-enabled",
+                    str(target),
+                ],
+                text=True,
+                capture_output=True,
+            )
 
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)

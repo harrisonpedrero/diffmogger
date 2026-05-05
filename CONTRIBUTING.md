@@ -6,7 +6,7 @@ Before opening a PR:
 
 - Run `bash scripts/validate_starter_kit.sh`.
 - If touching `services/agentic-notifier/`, use a venv and run `python -m pytest` from that directory.
-- Do not commit secrets, real Twilio values, personal phone numbers, live ngrok URLs, or local machine paths.
+- Do not commit secrets, real Discord bot tokens/channel setup, personal contact details, live tunnel URLs, or local machine paths.
 - Do not weaken guardrails, status markers, or validation markers without explaining why.
 - Keep examples local-first, dry-run friendly, and mockable.
 - Open issues and PRs with clear reproduction steps, rationale, or the workflow gap being addressed.

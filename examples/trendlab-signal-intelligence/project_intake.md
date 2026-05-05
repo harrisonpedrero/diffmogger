@@ -35,14 +35,14 @@ A dashboard shows fixture trend events, scored signals, source evidence, a gener
 
 ## Safety Rules
 
-- Do not read `.env`.
+- Do not open local `.env*` files unless env access is explicitly enabled.
 - Do not scrape websites without terms review.
 - Do not make investment, medical, legal, or safety-critical recommendations.
 - Do not publish externally without approval.
 
 ## Automation Must Never Do
 
-- Never read secrets or `.env` files.
+- Never print, store, or commit secrets.
 - Never scrape, call paid APIs, publish, or contact real users without explicit approval.
 - Never present generated briefs as investment, medical, legal, or safety-critical advice.
 
@@ -50,6 +50,10 @@ A dashboard shows fixture trend events, scored signals, source evidence, a gener
 
 - Optional read-only news/search adapter later.
 - Optional local notifier bridge later.
+
+## Environment Access Policy
+
+project_commands_only
 
 ## Verification
 
@@ -75,7 +79,7 @@ Allowed for read-only architecture review, test gap review, product polish revie
 
 A verified product increment that improves the dashboard, scoring, report generation, fixtures, or evaluation workflow.
 
-## Beyond MVP
+## Long-Run Direction
 
 Add adapter architecture, source-quality attribution, confidence calibration, richer reports, alerting, and daily review capsules.
 

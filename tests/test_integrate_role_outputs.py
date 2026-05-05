@@ -40,6 +40,67 @@ class RuntimeStateActionTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.modules = [(path, load_integrator(path)) for path in INTEGRATOR_PATHS]
 
+    def init_repo(self, target: Path, *, bridge_mode: str = "discord_notifier") -> None:
+        (target / ".agentic").mkdir(parents=True, exist_ok=True)
+        (target / ".agentic" / "project_intake.json").write_text(
+            json.dumps({"human_bridge_mode": bridge_mode}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (target / "docs").mkdir(parents=True, exist_ok=True)
+        (target / "docs" / "CODEX_AUTOMATION_TASKS.md").write_text("tasks v1\n", encoding="utf-8")
+        (target / "docs" / "MULTI_ROLE_PROGRESS.md").write_text("progress v1\n", encoding="utf-8")
+        (target / "README.md").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "init"], cwd=target, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(["git", "add", "."], cwd=target, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "chore: base",
+            ],
+            cwd=target,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+
+    def add_committed_file(self, target: Path, relative: str, content: str) -> None:
+        path = target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "add", relative], cwd=target, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                f"test: add {Path(relative).name}",
+            ],
+            cwd=target,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+
+    def write_patch_for_file(self, target: Path, relative: str, new_content: str, patch_path: Path) -> None:
+        (target / relative).write_text(new_content, encoding="utf-8")
+        result = subprocess.run(
+            ["git", "diff", "--binary", "HEAD", "--", relative],
+            cwd=target,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        patch_path.write_text(result.stdout, encoding="utf-8")
+        subprocess.run(["git", "checkout", "--", relative], cwd=target, check=True, stdout=subprocess.DEVNULL)
+
     def write_actions(self, target: Path, actions: list[dict[str, object]]) -> dict[str, object]:
         path = target / "target" / "automation_queue" / "builder" / "run-001" / "runtime_state_actions.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -407,6 +468,457 @@ Review `/tmp/example-project/target/automation_queue/builder/run/codex.raw.log` 
                     module.first_summary_line(summary),
                     "Added closure checklist rows to the weekly review handoff.",
                 )
+
+    def test_patch_commit_posts_discord_progress_notification(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target)
+                    source = target / "src" / "app.py"
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text("print('hello')\n", encoding="utf-8")
+                    manifest = {
+                        "role": "builder",
+                        "run_id": "builder-run-001",
+                        "changed_files": ["src/app.py"],
+                        "summary": "\n".join(
+                            [
+                                "Commit type: feat",
+                                "Commit scope: app",
+                                "Commit subject: add app workflow",
+                                "",
+                                "## Summary",
+                                "- Added the app workflow.",
+                            ]
+                        ),
+                    }
+                    calls: list[dict[str, object]] = []
+                    original_post = module.post_notifier
+                    try:
+                        module.post_notifier = lambda payload: calls.append(payload) or {"ok": True}
+                        commit = module.commit_current_patch(
+                            target,
+                            manifest,
+                            "integrator-run-001",
+                            dry_run=False,
+                        )
+                    finally:
+                        module.post_notifier = original_post
+
+                    self.assertIsNotNone(commit)
+                    self.assertEqual(1, len(calls))
+                    payload = calls[0]
+                    self.assertEqual("progress", payload["event_kind"])
+                    self.assertEqual("automation_commit_progress", payload["type"])
+                    self.assertFalse(payload["expects_reply"])
+                    self.assertFalse(payload["local_notify"])
+                    self.assertIn("feat(app): add app workflow", str(payload["message_body"]))
+                    self.assertIn("Added the app workflow.", str(payload["message_body"]))
+                    self.assertEqual(f"commit-progress:{commit}", payload["dedupe_key"])
+
+    def test_commit_progress_notification_is_disabled_outside_discord_mode(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target, bridge_mode="local_notifier")
+                    calls: list[dict[str, object]] = []
+                    original_post = module.post_notifier
+                    try:
+                        module.post_notifier = lambda payload: calls.append(payload) or {"ok": True}
+                        result = module.notify_commit_progress(
+                            target,
+                            commit_hash="abc123def456",
+                            commit_message="feat(app): add thing",
+                            description="Added a useful thing.",
+                            run_id="integrator-run-001",
+                            dry_run=False,
+                        )
+                    finally:
+                        module.post_notifier = original_post
+
+                    self.assertEqual({"status": "disabled", "detail": "human bridge mode is not discord_notifier"}, result)
+                    self.assertEqual([], calls)
+
+    def test_checkpoint_and_state_commits_post_discord_progress_notifications(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target)
+                    (target / "README.md").write_text("dirty main\n", encoding="utf-8")
+                    calls: list[dict[str, object]] = []
+                    original_post = module.post_notifier
+                    try:
+                        module.post_notifier = lambda payload: calls.append(payload) or {"ok": True}
+                        checkpoint, dirty_files = module.checkpoint_dirty_main(
+                            target,
+                            "integrator-run-002",
+                            dry_run=False,
+                        )
+                        (target / "docs" / "CODEX_AUTOMATION_TASKS.md").write_text("tasks v2\n", encoding="utf-8")
+                        state_commit = module.commit_automation_state(
+                            target,
+                            "integrator-run-002",
+                            dry_run=False,
+                        )
+                    finally:
+                        module.post_notifier = original_post
+
+                    self.assertIsNotNone(checkpoint)
+                    self.assertIn("README.md", dirty_files)
+                    self.assertIsNotNone(state_commit)
+                    self.assertEqual(2, len(calls))
+                    checkpoint_message = subprocess.run(
+                        ["git", "log", "-1", "--format=%B", str(checkpoint)],
+                        cwd=target,
+                        text=True,
+                        capture_output=True,
+                        check=True,
+                    ).stdout
+                    self.assertIn(
+                        "chore(integrator): checkpoint preexisting local changes",
+                        checkpoint_message,
+                    )
+                    self.assertIn("Run: integrator-run-002", checkpoint_message)
+                    bodies = [str(payload["message_body"]) for payload in calls]
+                    self.assertIn("checkpoint preexisting local changes", bodies[0])
+                    self.assertIn("update multi-role state", bodies[1])
+                    self.assertTrue(all(payload["event_kind"] == "progress" for payload in calls))
+
+    def test_preferred_prompt_verification_is_not_used_as_gate(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    (target / ".agentic").mkdir(parents=True)
+                    (target / ".agentic" / "automation_prompt.md").write_text(
+                        "## Verification\n\n```text\npython3 -c 'import sys; sys.exit(9)'\n```\n",
+                        encoding="utf-8",
+                    )
+
+                    result = module.run_verification(target, {"role": "builder", "changed_files": ["src/app.ts"]})
+
+                    self.assertTrue(result.ok)
+                    self.assertIn("No patch-scoped verification commands configured", "\n".join(result.checks_run))
+
+    def test_builder_patch_does_not_run_full_suite_without_scope_requirement(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    (target / ".agentic").mkdir(parents=True)
+                    (target / ".agentic" / "verification_commands.txt").write_text(
+                        "python3 -c 'import sys; sys.exit(7)'\n",
+                        encoding="utf-8",
+                    )
+
+                    result = module.run_verification(target, {"role": "builder", "changed_files": ["src/app.ts"]})
+
+                    self.assertTrue(result.ok)
+                    joined = "\n".join(result.checks_run)
+                    self.assertIn("Full-suite verification configured", joined)
+                    self.assertNotIn("sys.exit(7)", joined)
+
+    def test_smoke_commands_match_changed_files_for_patch_scope(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    (target / ".agentic").mkdir(parents=True)
+                    (target / ".agentic" / "smoke_commands.txt").write_text(
+                        "path:src/** | python3 -c 'print(\"scoped smoke\")'\n",
+                        encoding="utf-8",
+                    )
+
+                    result = module.run_verification(target, {"role": "builder", "changed_files": ["src/app.ts"]})
+
+                    self.assertTrue(result.ok, result.detail)
+                    self.assertIn("scoped smoke", result.detail)
+
+    def test_hardener_full_suite_classifies_missing_env_var_without_path_category(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    local_path = "/User" + "s/example/project/test.py"
+                    (target / ".agentic").mkdir(parents=True)
+                    (target / ".agentic" / "verification_commands.txt").write_text(
+                        f"python3 -c 'import sys; print(\"Error: DATABASE_URL is not set at {local_path}\", file=sys.stderr); sys.exit(1)'\n",
+                        encoding="utf-8",
+                    )
+
+                    result = module.run_verification(target, {"role": "hardener", "changed_files": ["src/app.ts"]})
+
+                    self.assertFalse(result.ok)
+                    self.assertEqual("verification_environment_failure", result.reason)
+                    self.assertEqual("missing_env_var", result.category)
+                    self.assertIn("DATABASE_URL", result.root_cause)
+
+    def test_mark_deferred_sanitizes_detail_and_records_root_cause(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    local_path = "/User" + "s/example/project/test.py"
+                    manifest_path = target / "target/automation_queue/builder/run-env/manifest.json"
+                    manifest = {"role": "builder", "run_id": "run-env", "changed_files": ["src/app.ts"]}
+
+                    module.mark_deferred(
+                        manifest_path,
+                        manifest,
+                        target=target,
+                        reason="verification_failure",
+                        detail=f"Error: DATABASE_URL is not set at {local_path}",
+                        head_before_integration="abc",
+                        checkpoint_commit=None,
+                        checks_run=["npm test"],
+                        dry_run=False,
+                    )
+
+                    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    self.assertEqual("verification_environment_failure", saved["deferral_reason"])
+                    self.assertEqual("missing_env_var", saved["deferral_category"])
+                    self.assertIn("DATABASE_URL", saved["deferral_root_cause"])
+                    self.assertNotIn("/User" + "s/example", saved["deferral_detail"])
+                    self.assertNotIn("local_path_reference", json.dumps(saved))
+
+    def test_baseline_verification_ledger_records_sanitized_failure(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    local_path = "/User" + "s/example/project/test.py"
+                    (target / ".agentic").mkdir(parents=True)
+                    (target / ".agentic" / "verification_commands.txt").write_text(
+                        f"python3 -c 'import sys; print(\"DATABASE_URL missing at {local_path}\"); sys.exit(1)'\n",
+                        encoding="utf-8",
+                    )
+
+                    record = module.run_baseline_verification(target, head_value="abc123", dry_run=False, force=True)
+
+                    saved = json.loads((target / "target/baseline_verification.json").read_text(encoding="utf-8"))
+                    self.assertEqual(record, saved)
+                    self.assertEqual("blocked_environment", saved["status"])
+                    self.assertEqual("missing_env_var", saved["category"])
+                    self.assertIn("verification_environment_failure:missing_env_var", saved["failure_signature"])
+                    self.assertNotIn("/User" + "s/example", json.dumps(saved))
+
+    def test_local_postgres_connection_failure_is_repairable_baseline_service(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    (target / ".agentic").mkdir(parents=True)
+                    (target / "packages/database/prisma").mkdir(parents=True)
+                    (target / "packages/database/prisma/schema.prisma").write_text(
+                        'datasource db {\n  provider = "postgresql"\n  url = env("DATABASE_URL")\n}\n',
+                        encoding="utf-8",
+                    )
+                    (target / "apps/web").mkdir(parents=True)
+                    (target / "apps/web/.env.test.example").write_text(
+                        'DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/app_test"\n',
+                        encoding="utf-8",
+                    )
+                    (target / ".agentic" / "verification_commands.txt").write_text(
+                        "python3 -c 'import sys; print(\"Prisma P1001: Can not reach database server at `127.0.0.1:5432`\"); sys.exit(1)'\n",
+                        encoding="utf-8",
+                    )
+
+                    record = module.run_baseline_verification(target, head_value="abc123", dry_run=False, force=True)
+
+                    self.assertEqual("repairable_local_service", record["status"])
+                    self.assertEqual("missing_local_database", record["category"])
+                    self.assertIn("local service harness", record["next_action"])
+
+    def test_builder_patch_accepts_scoped_checks_despite_failing_baseline(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target, bridge_mode="disabled")
+                    self.add_committed_file(target, "src/app.ts", "old\n")
+                    (target / ".agentic" / "verification_commands.txt").write_text(
+                        "python3 -c 'import sys; print(\"suite fails\"); sys.exit(5)'\n",
+                        encoding="utf-8",
+                    )
+                    (target / ".agentic" / "smoke_commands.txt").write_text(
+                        "builder | python3 -c 'print(\"builder smoke passed\")'\n",
+                        encoding="utf-8",
+                    )
+                    patch = target / "target/automation_queue/builder/run-builder/changes.patch"
+                    manifest_path = patch.parent / "manifest.json"
+                    patch.parent.mkdir(parents=True, exist_ok=True)
+                    self.write_patch_for_file(target, "src/app.ts", "new\n", patch)
+                    manifest = {
+                        "role": "builder",
+                        "run_id": "run-builder",
+                        "patch_path": str(patch),
+                        "changed_files": ["src/app.ts"],
+                        "summary": "Commit type: feat\nCommit scope: app\nCommit subject: update app text\n",
+                    }
+                    head_before = module.head(target)
+                    baseline = {
+                        "status": "blocked_environment",
+                        "failure_signature": "verification_failure:other:old",
+                        "root_cause": "suite fails before patch",
+                        "checks_run": ["full suite"],
+                    }
+
+                    committed = module.integrate_individually(
+                        target,
+                        [(manifest_path, manifest)],
+                        head_before=head_before,
+                        checkpoint_commit=None,
+                        baseline=baseline,
+                        dry_run=False,
+                    )
+
+                    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    self.assertEqual(1, len(committed))
+                    self.assertEqual("applied", saved["status"])
+                    self.assertIn("builder smoke passed", "\n".join(saved["checks_run"]))
+                    self.assertNotIn("suite fails", "\n".join(saved["checks_run"]))
+                    self.assertEqual("new\n", (target / "src/app.ts").read_text(encoding="utf-8"))
+
+    def test_normal_hardener_patch_defers_on_failing_baseline(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target, bridge_mode="disabled")
+                    self.add_committed_file(target, "src/app.ts", "old\n")
+                    patch = target / "target/automation_queue/hardener/run-hardener/changes.patch"
+                    manifest_path = patch.parent / "manifest.json"
+                    patch.parent.mkdir(parents=True, exist_ok=True)
+                    self.write_patch_for_file(target, "src/app.ts", "new\n", patch)
+                    manifest = {
+                        "role": "hardener",
+                        "run_id": "run-hardener",
+                        "patch_path": str(patch),
+                        "changed_files": ["src/app.ts"],
+                        "summary": "Commit type: test\nCommit scope: app\nCommit subject: harden app tests\n",
+                    }
+                    baseline = {
+                        "status": "failing_source",
+                        "failure_signature": "verification_failure:test_assertion_failure:old",
+                        "root_cause": "Expected true, received false",
+                        "next_action": "Create a baseline repair patch.",
+                        "checks_run": ["python3 -m pytest"],
+                    }
+
+                    committed = module.integrate_individually(
+                        target,
+                        [(manifest_path, manifest)],
+                        head_before=module.head(target),
+                        checkpoint_commit=None,
+                        baseline=baseline,
+                        dry_run=False,
+                    )
+
+                    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    self.assertEqual([], committed)
+                    self.assertEqual("deferred", saved["status"])
+                    self.assertEqual("baseline_verification_blocker", saved["deferral_reason"])
+                    self.assertEqual("failing_source", saved["baseline_status"])
+                    self.assertEqual("old\n", (target / "src/app.ts").read_text(encoding="utf-8"))
+
+    def test_baseline_repair_hardener_patch_accepts_test_rationale_and_updates_ledger(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target, bridge_mode="disabled")
+                    original_test = "\n".join(f"assert old_{index}" for index in range(12)) + "\n"
+                    self.add_committed_file(target, "tests/test_legacy.py", original_test)
+                    (target / ".agentic" / "verification_commands.txt").write_text(
+                        "python3 -c 'import sys; print(\"Expected fresh baseline, received stale test\"); sys.exit(1)'\n",
+                        encoding="utf-8",
+                    )
+                    (target / ".agentic" / "smoke_commands.txt").write_text(
+                        "hardener | python3 -c 'print(\"focused hardener evidence\")'\n",
+                        encoding="utf-8",
+                    )
+                    patch = target / "target/automation_queue/hardener/run-repair/changes.patch"
+                    manifest_path = patch.parent / "manifest.json"
+                    patch.parent.mkdir(parents=True, exist_ok=True)
+                    self.write_patch_for_file(target, "tests/test_legacy.py", "assert fresh_baseline\n", patch)
+                    manifest = {
+                        "role": "hardener",
+                        "run_id": "run-repair",
+                        "patch_path": str(patch),
+                        "changed_files": ["tests/test_legacy.py"],
+                        "verification_scope": "baseline_repair",
+                        "test_change_rationale": "Replaces obsolete legacy expectations with the current fixture contract.",
+                        "summary": (
+                            "Commit type: test\n"
+                            "Commit scope: baseline\n"
+                            "Commit subject: refresh stale baseline test\n"
+                            "Verification scope: baseline_repair\n"
+                            "Test change rationale: Replaces obsolete legacy expectations with the current fixture contract.\n"
+                        ),
+                    }
+                    baseline = {
+                        "status": "failing_source",
+                        "failure_signature": "verification_failure:test_assertion_failure:oldoldold",
+                        "root_cause": "Old source failure",
+                        "checks_run": ["python3 -m pytest"],
+                    }
+
+                    committed = module.integrate_individually(
+                        target,
+                        [(manifest_path, manifest)],
+                        head_before=module.head(target),
+                        checkpoint_commit=None,
+                        baseline=baseline,
+                        dry_run=False,
+                    )
+
+                    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    ledger = json.loads((target / "target/baseline_verification.json").read_text(encoding="utf-8"))
+                    self.assertEqual(1, len(committed))
+                    self.assertEqual("applied", saved["status"])
+                    self.assertEqual("accepted_changed_failure_signature", saved["baseline_repair_result"])
+                    self.assertEqual("failing_source", saved["baseline_status"])
+                    self.assertEqual(ledger["failure_signature"], saved["baseline_failure_signature"])
+                    self.assertIn("fresh_baseline", (target / "tests/test_legacy.py").read_text(encoding="utf-8"))
+
+    def test_duplicate_deferred_patches_are_triaged_as_superseded_and_replaceable(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    older = target / "target/automation_queue/builder/run-old/manifest.json"
+                    newer = target / "target/automation_queue/builder/run-new/manifest.json"
+                    for manifest_path, run_id in [(older, "run-old"), (newer, "run-new")]:
+                        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                        manifest_path.write_text(
+                            json.dumps(
+                                {
+                                    "role": "builder",
+                                    "run_id": run_id,
+                                    "status": "deferred",
+                                    "deferral_reason": "conflict",
+                                    "deferral_category": "apply_conflict",
+                                    "deferral_detail": "patch failed",
+                                    "changed_files": ["src/query.ts"],
+                                    "created_at": f"2026-05-0{1 if run_id == 'run-old' else 2}T00:00:00+00:00",
+                                }
+                            )
+                            + "\n",
+                            encoding="utf-8",
+                        )
+
+                    summary = module.triage_deferred_equivalents(target, dry_run=False)
+
+                    self.assertTrue(summary)
+                    older_saved = json.loads(older.read_text(encoding="utf-8"))
+                    newer_saved = json.loads(newer.read_text(encoding="utf-8"))
+                    self.assertEqual("superseded", older_saved["status"])
+                    self.assertEqual("superseded", older_saved["deferral_triage_status"])
+                    self.assertEqual("deferred", newer_saved["status"])
+                    self.assertEqual("replace-from-current-HEAD", newer_saved["deferral_triage_status"])
 
 
 if __name__ == "__main__":

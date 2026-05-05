@@ -174,9 +174,9 @@ Rules:
 - Do not touch unrelated files.
 - Do not revert unrelated edits or changes made by other agents or humans.
 - Adjust your implementation to documented contracts and outputs from other workers when visible.
-- Do not read .env files or print secrets.
+- Follow the target project's environment-access policy. Never print, copy, store, or commit secret values.
 - Do not use network.
-- Do not send SMS, WhatsApp, email, or other external messages.
+- Do not send Discord, notifier, email, or other external messages.
 - Do not spawn subagents, do not call codex exec, and do not call spawn_worker_agent.sh.
 - Do not run destructive cleanup, history rewrites, mass deletion, or broad formatting outside your owned scope.
 - Stop after the bounded assignment and report.
@@ -209,9 +209,9 @@ Output report: $output_path
 Rules:
 - Read the target project and produce the assigned report.
 - Do not modify source files or docs except for the output report path above.
-- Do not read .env files or print secrets.
+- Follow the target project's environment-access policy. Never print, copy, store, or commit secret values.
 - Do not use network.
-- Do not send SMS, WhatsApp, email, or other external messages.
+- Do not send Discord, notifier, email, or other external messages.
 - Do not spawn subagents, do not call codex exec, and do not call spawn_worker_agent.sh.
 - Stop after writing the report.
 

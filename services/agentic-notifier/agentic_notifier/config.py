@@ -6,12 +6,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-def _truthy(value: str | bool | None) -> bool:
+def _truthy(value: str | bool | None, *, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     if value is None:
+        return default
+    text = value.strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
         return False
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
 
 
 def _running_under_pytest() -> bool:
@@ -42,14 +47,20 @@ def _optional_path(value: str | None) -> Path | None:
     return Path(value).expanduser()
 
 
+def _optional_int(value: str | int | None) -> int | None:
+    if isinstance(value, int):
+        return value
+    if value is None or not str(value).strip():
+        return None
+    return int(str(value).strip())
+
+
 @dataclass(frozen=True)
 class Settings:
-    twilio_account_sid: str = ""
-    twilio_auth_token: str = ""
-    twilio_messaging_service_sid: str = ""
-    twilio_from: str = ""
-    human_to: str = ""
-    human_channel: str = "sms"
+    discord_bot_token: str = ""
+    discord_progress_channel_id: int | None = None
+    discord_messaging_channel_id: int | None = None
+    local_notifications_enabled: bool = True
     target_repo_dir: Path | None = None
     target_human_inbox_path: Path | None = None
     target_human_requests_path: Path | None = None
@@ -58,10 +69,7 @@ class Settings:
     target_queue_dir: Path | None = None
     notifier_api_host: str = "127.0.0.1"
     notifier_api_port: int = 8765
-    webhook_host: str = "127.0.0.1"
-    webhook_port: int = 8787
     local_notify_api_token: str = ""
-    webhook_public_base_url: str = ""
     dry_run: bool = True
     runtime_dir: Path = Path("runtime")
     test_mode: bool = False
@@ -78,12 +86,20 @@ class Settings:
         )
 
     @property
+    def discord_enabled(self) -> bool:
+        return bool(
+            self.discord_bot_token
+            and self.discord_progress_channel_id
+            and self.discord_messaging_channel_id
+        )
+
+    @property
     def sent_notifications_path(self) -> Path:
         return self.runtime_dir / "sent_notifications.jsonl"
 
     @property
-    def inbound_message_sids_path(self) -> Path:
-        return self.runtime_dir / "inbound_message_sids.jsonl"
+    def inbound_message_ids_path(self) -> Path:
+        return self.runtime_dir / "discord_inbound_message_ids.jsonl"
 
 
 def load_settings(load_dotenv_file: bool | None = None) -> Settings:
@@ -103,12 +119,10 @@ def load_settings(load_dotenv_file: bool | None = None) -> Settings:
     runtime_dir = _optional_path(os.getenv("NOTIFIER_RUNTIME_DIR")) or repo_root / "runtime"
 
     return Settings(
-        twilio_account_sid=os.getenv("TWILIO_ACCOUNT_SID", ""),
-        twilio_auth_token=os.getenv("TWILIO_AUTH_TOKEN", ""),
-        twilio_messaging_service_sid=os.getenv("TWILIO_MESSAGING_SERVICE_SID", ""),
-        twilio_from=os.getenv("TWILIO_FROM", ""),
-        human_to=os.getenv("HUMAN_TO", ""),
-        human_channel=os.getenv("HUMAN_CHANNEL", "sms"),
+        discord_bot_token=os.getenv("DISCORD_BOT_TOKEN", ""),
+        discord_progress_channel_id=_optional_int(os.getenv("DISCORD_PROGRESS_CHANNEL_ID")),
+        discord_messaging_channel_id=_optional_int(os.getenv("DISCORD_MESSAGING_CHANNEL_ID")),
+        local_notifications_enabled=_truthy(os.getenv("LOCAL_NOTIFICATIONS_ENABLED", "true"), default=True),
         target_repo_dir=repo_dir,
         target_human_inbox_path=target_path(
             "TARGET_HUMAN_INBOX_PATH", "HUMAN_INBOX.md"
@@ -125,11 +139,8 @@ def load_settings(load_dotenv_file: bool | None = None) -> Settings:
         target_queue_dir=_optional_path(os.getenv("TARGET_QUEUE_DIR")),
         notifier_api_host=os.getenv("NOTIFIER_API_HOST", "127.0.0.1"),
         notifier_api_port=int(os.getenv("NOTIFIER_API_PORT", "8765")),
-        webhook_host=os.getenv("WEBHOOK_HOST", "127.0.0.1"),
-        webhook_port=int(os.getenv("WEBHOOK_PORT", "8787")),
         local_notify_api_token=os.getenv("LOCAL_NOTIFY_API_TOKEN", ""),
-        webhook_public_base_url=os.getenv("WEBHOOK_PUBLIC_BASE_URL", "").rstrip("/"),
-        dry_run=_truthy(os.getenv("DRY_RUN", "true")),
+        dry_run=_truthy(os.getenv("DRY_RUN", "true"), default=True),
         runtime_dir=runtime_dir,
         test_mode=_truthy(os.getenv("AGENTIC_NOTIFIER_TEST_MODE")),
     )

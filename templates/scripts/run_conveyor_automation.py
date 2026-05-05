@@ -10,6 +10,7 @@ the integrator still owns the main mutation lock.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -34,6 +35,7 @@ DEFAULT_NO_PROGRESS_THRESHOLD = 2
 STATE_HISTORY_LIMIT = 60
 NO_PROGRESS_STATE_KEY = "integrator_no_progress"
 DECISION_QUEUE_LIMIT = 8
+BASELINE_VERIFICATION_RELATIVE = Path("target/baseline_verification.json")
 
 CHILD: subprocess.Popen[str] | None = None
 TERMINATE_REQUESTED = False
@@ -53,6 +55,14 @@ def read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def process_alive(pid: int | None) -> bool:
@@ -244,6 +254,108 @@ def automation_status(target: Path) -> str:
     return match.group(1).strip().upper() if match else "UNKNOWN"
 
 
+def verification_config_hash(target: Path) -> str:
+    path = target / ".agentic" / "verification_commands.txt"
+    if not path.exists() or not path.is_file() or path.is_symlink():
+        return "missing"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def current_head(target: Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=target,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def baseline_record(target: Path) -> dict[str, Any]:
+    return read_json(target / BASELINE_VERIFICATION_RELATIVE)
+
+
+def baseline_record_is_current(target: Path, record: dict[str, Any]) -> bool:
+    if not record:
+        return False
+    head_value = current_head(target)
+    if not head_value:
+        return True
+    return (
+        str(record.get("head") or "") == head_value
+        and str(record.get("verification_config_hash") or "") == verification_config_hash(target)
+    )
+
+
+def baseline_preflight_needed(target: Path) -> bool:
+    if not (target / ".agentic" / "verification_commands.txt").exists():
+        return False
+    return not baseline_record_is_current(target, baseline_record(target))
+
+
+def last_baseline_repair_source_role(state: dict[str, Any]) -> str:
+    last_completed = str(state.get("last_completed_role") or "")
+    if last_completed in {"planner", "builder", "hardener"}:
+        return last_completed
+    for entry in reversed(state.get("history") or []):
+        if not isinstance(entry, dict):
+            continue
+        role = str(entry.get("role") or "")
+        if role == "integrator":
+            metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+            accepted = metadata.get("accepted_by_role") if isinstance(metadata.get("accepted_by_role"), dict) else {}
+            for accepted_role in ("hardener", "builder", "planner"):
+                if int(accepted.get(accepted_role) or 0) > 0:
+                    return accepted_role
+            continue
+        if role in {"planner", "builder", "hardener"} and int(entry.get("exit_code") or 0) == 0:
+            return role
+    return ""
+
+
+def baseline_repair_route(target: Path, state: dict[str, Any]) -> tuple[str | None, str, bool] | None:
+    record = baseline_record(target)
+    if not baseline_record_is_current(target, record):
+        return None
+    status = str(record.get("status") or "unknown")
+    root = str(record.get("root_cause") or "No baseline root cause recorded.")
+    if status in {"passing", ""}:
+        return None
+    if status in {"failing_source", "missing_config", "repairable_local_service"}:
+        source_role = last_baseline_repair_source_role(state)
+        if source_role == "planner":
+            if status == "repairable_local_service":
+                return (
+                    "builder",
+                    f"baseline verification needs a repairable local service harness; create a verification_scope=baseline_repair patch: {root}",
+                    False,
+                )
+            return (
+                "hardener",
+                    f"baseline verification is {status}; create a verification_scope=baseline_repair patch: {root}",
+                    False,
+                )
+        if source_role == "builder" and status == "repairable_local_service":
+            return (
+                "hardener",
+                f"baseline local-service repair needs hardening with verification_scope=baseline_repair: {root}",
+                False,
+            )
+        return (
+            "planner",
+            f"baseline verification is {status}; plan a verification_scope=baseline_repair patch: {root}",
+            False,
+        )
+    if status == "blocked_environment":
+        return (
+            None,
+            f"baseline verification is blocked_environment after integrator preflight: {root}",
+            False,
+        )
+    return None
+
+
 def unhandled_human_inbox_count(target: Path) -> int:
     text = read_text(target / "docs" / "HUMAN_INBOX.md")
     text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
@@ -269,24 +381,189 @@ def queued_manifests(target: Path) -> list[Path]:
     return manifests
 
 
+TICKET_FENCE_RE = re.compile(r"```(?:json\s+ticket-run|ticket-run-json)\s*\n(.*?)\n```", re.DOTALL)
+
+
+def project_intake(target: Path) -> dict[str, Any]:
+    path = target / ".agentic" / "project_intake.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def ticket_run_file(target: Path) -> Path:
+    configured = str(project_intake(target).get("ticket_run_file") or "docs/TICKET_RUN.md").strip()
+    return target / (configured or "docs/TICKET_RUN.md")
+
+
+def load_ticket_run(target: Path) -> dict[str, Any] | None:
+    path = ticket_run_file(target)
+    if not path.exists():
+        return None
+    text = read_text(path)
+    match = TICKET_FENCE_RE.search(text)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def ticket_status(ticket: dict[str, Any]) -> str:
+    status = str(ticket.get("status") or "pending").strip().lower()
+    return status if status in {"pending", "in_progress", "candidate_done", "done", "blocked"} else "pending"
+
+
+def ticket_has_evidence(ticket: dict[str, Any]) -> bool:
+    for key in ("evidence", "checks_run", "related_commits"):
+        value = ticket.get(key)
+        if isinstance(value, list) and any(str(item).strip() for item in value):
+            return True
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def ticket_campaign_terminal(target: Path) -> tuple[str | None, str]:
+    data = load_ticket_run(target)
+    if not data or not bool(data.get("halt_when_complete", True)):
+        return None, "ticket campaign inactive"
+    if queued_manifests(target):
+        return None, "ticket campaign has queued role patches"
+    raw_tickets = data.get("tickets")
+    items = [item for item in raw_tickets if isinstance(item, dict)] if isinstance(raw_tickets, list) else []
+    if not items:
+        return None, "ticket campaign has no tickets"
+    statuses = [ticket_status(item) for item in items]
+    all_done = all(status == "done" for status in statuses) and all(ticket_has_evidence(item) for item in items)
+    if all_done:
+        return "complete", "ticket campaign complete"
+    all_terminal = all(status in {"done", "blocked"} for status in statuses)
+    if all_terminal and any(status == "blocked" for status in statuses):
+        return "blocked", "ticket campaign blocked"
+    return None, "ticket campaign active"
+
+
+def finalize_ticket_campaign(target: Path) -> None:
+    helper = target / "scripts" / "ticket_run.py"
+    if not helper.exists():
+        return
+    result = subprocess.run(
+        [sys.executable, str(helper), str(target), "should-halt", "--finalize"],
+        cwd=target,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.stdout.strip():
+        print(result.stdout.strip(), flush=True)
+    if result.returncode not in {0, 1} and result.stderr.strip():
+        print(result.stderr.strip(), file=sys.stderr, flush=True)
+
+
 def normalized_deferral_signature(manifest: dict[str, Any]) -> str:
     reason = str(manifest.get("deferral_reason") or "other")
+    category = str(manifest.get("deferral_category") or "").strip().lower()
+    if category:
+        return f"{reason}:{category}"
     detail = re.sub(r"\s+", " ", str(manifest.get("deferral_detail") or "")).strip()
     lowered = detail.lower()
-    if "no module named pytest" in lowered or "pytest: command not found" in lowered:
+    if "database_url" in lowered or re.search(r"\b[A-Z][A-Z0-9_]{2,}\b.*(?:not set|missing|required)", detail):
+        detail_class = "missing_env_var"
+    elif "no module named pytest" in lowered or "pytest: command not found" in lowered:
         detail_class = "missing_pytest"
-    elif re.search(r"/(?:user" + r"s|tmp|private/tmp|var/folders)/", lowered) or (
-        "agentic-kit-" + "lab"
-    ) in lowered:
-        detail_class = "local_path_reference"
+    elif re.search(r"(command not found|not found:|could not determine executable)", lowered):
+        detail_class = "missing_package_executable"
+    elif any(marker in lowered for marker in ("relation does not exist", "no such table", "schema drift", "migration", "p2021", "p2022", "p3005")):
+        detail_class = "db_schema_drift"
+    elif any(marker in lowered for marker in ("gemini", "openai", "anthropic", "provider", "mock")):
+        detail_class = "provider_mock_failure"
+    elif any(marker in lowered for marker in ("assertionerror", "expected", "received", "failed")):
+        detail_class = "test_assertion_failure"
+    elif reason == "conflict":
+        detail_class = "apply_conflict"
+    elif reason == "staleness":
+        detail_class = "stale_patch"
     else:
         detail_class = detail[:120] if detail else "no_detail"
     return f"{reason}:{detail_class}"
 
 
+def deferred_equivalence_key(manifest: dict[str, Any]) -> str:
+    role = str(manifest.get("role") or "role").strip().lower()
+    changed_files = sorted(str(item).strip() for item in manifest.get("changed_files") or [] if str(item).strip())
+    signature = normalized_deferral_signature(manifest)
+    return json.dumps([role, changed_files, signature], sort_keys=True)
+
+
+def duplicate_builder_deferral_info(target: Path) -> dict[str, Any] | None:
+    queue_root = target / "target" / "automation_queue" / "builder"
+    groups: dict[str, list[dict[str, Any]]] = {}
+    if not queue_root.exists():
+        return None
+    for path in sorted(queue_root.glob("*/manifest.json")):
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if manifest.get("status") != "deferred":
+            continue
+        key = deferred_equivalence_key(manifest)
+        manifest["_manifest_path"] = str(path)
+        groups.setdefault(key, []).append(manifest)
+    duplicates = [items for items in groups.values() if len(items) >= 2]
+    if not duplicates:
+        return None
+    duplicates.sort(key=len, reverse=True)
+    group = duplicates[0]
+    newest = sorted(group, key=lambda item: str(item.get("created_at") or ""))[-1]
+    files = [str(item) for item in newest.get("changed_files") or [] if str(item).strip()]
+    return {
+        "count": len(group),
+        "run_id": str(newest.get("run_id") or "unknown"),
+        "signature": normalized_deferral_signature(newest),
+        "files": ", ".join(files[:4]) if files else "unrecorded files",
+    }
+
+
+def builder_triage_followup_info(target: Path) -> dict[str, Any] | None:
+    queue_root = target / "target" / "automation_queue" / "builder"
+    if not queue_root.exists():
+        return None
+    candidates: list[dict[str, Any]] = []
+    for path in sorted(queue_root.glob("*/manifest.json")):
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if manifest.get("status") != "deferred":
+            continue
+        triage_status = str(manifest.get("deferral_triage_status") or "")
+        if triage_status in {
+            "replace-from-current-HEAD",
+            "retryable",
+            "retryable-after-environment-repair",
+            "retryable-after-baseline-repair",
+            "needs-triage",
+        }:
+            candidates.append(manifest)
+    if not candidates:
+        return None
+    latest = sorted(candidates, key=lambda item: str(item.get("deferral_triaged_at") or item.get("created_at") or ""))[-1]
+    return {
+        "run_id": str(latest.get("run_id") or "unknown"),
+        "triage_status": str(latest.get("deferral_triage_status") or "needs-triage"),
+        "next_action": str(latest.get("deferral_next_action") or "Planner should decide whether to replace or retry this work."),
+    }
+
+
 def queue_snapshot(target: Path) -> dict[str, Any]:
     queue_root = target / "target" / "automation_queue"
-    counts = {"queued": 0, "deferred": 0, "applied": 0, "failed": 0, "skipped": 0}
+    counts = {"queued": 0, "deferred": 0, "applied": 0, "failed": 0, "skipped": 0, "superseded": 0}
     applied_by_role = {"planner": 0, "builder": 0, "hardener": 0}
     deferred_by_role = {"planner": 0, "builder": 0, "hardener": 0}
     queued_by_role = {"planner": 0, "builder": 0, "hardener": 0}
@@ -517,12 +794,56 @@ def choose_next(
     if active:
         return None, f"main automation lock active: {detail}", False
 
+    ticket_state, ticket_reason = ticket_campaign_terminal(target)
+    if ticket_state == "complete":
+        return None, ticket_reason, True
+    if ticket_state == "blocked":
+        if baseline_preflight_needed(target):
+            return "integrator", (
+                "ticket campaign is blocked, but baseline verification may be repairable; "
+                "running clean-HEAD preflight"
+            ), False
+        blocked_baseline_route = baseline_repair_route(target, state)
+        if blocked_baseline_route:
+            return blocked_baseline_route
+        return None, ticket_reason, True
+
     if not target_has_multi_role(target):
         return "single_lane", "multi-role files not found; running single-lane wrapper", False
 
     queue_depth = len(queued_manifests(target))
     if queue_depth:
         return "integrator", f"{queue_depth} queued role patch(es) need integration", False
+
+    if baseline_preflight_needed(target):
+        return "integrator", "baseline verification ledger is missing or stale; running clean-HEAD preflight", False
+
+    baseline_route = baseline_repair_route(target, state)
+    if baseline_route:
+        return baseline_route
+
+    duplicate_builder = duplicate_builder_deferral_info(target)
+    if duplicate_builder:
+        return (
+            "integrator",
+            (
+                f"duplicate builder deferred patches need triage before more builder work: "
+                f"{duplicate_builder['count']} patch(es), {duplicate_builder['signature']}, {duplicate_builder['files']}"
+            ),
+            False,
+        )
+
+    if str(state.get("last_completed_role") or "") == "integrator":
+        builder_followup = builder_triage_followup_info(target)
+        if builder_followup:
+            return (
+                "planner",
+                (
+                    f"builder deferred patch triaged as {builder_followup['triage_status']}; "
+                    f"planner should choose retry, supersede, or replace-from-current-HEAD for {builder_followup['run_id']}"
+                ),
+                False,
+            )
 
     if no_progress_active(state, no_progress_threshold):
         info = no_progress_info(state)
@@ -599,6 +920,26 @@ def conveyor_decision_queue(
     queue_depth = len(queued_manifests(target))
     if queue_depth:
         add("integrator", "ready", f"{queue_depth} queued role patch(es) need integration")
+
+    duplicate_builder = duplicate_builder_deferral_info(target)
+    if duplicate_builder:
+        add(
+            "integrator",
+            "ready",
+            (
+                f"duplicate builder deferred patches need triage: {duplicate_builder['count']} patch(es), "
+                f"{duplicate_builder['signature']}, {duplicate_builder['files']}"
+            ),
+        )
+
+    if str(state.get("last_completed_role") or "") == "integrator":
+        builder_followup = builder_triage_followup_info(target)
+        if builder_followup:
+            add(
+                "planner",
+                "ready",
+                f"builder deferred patch triaged as {builder_followup['triage_status']}; choose retry, supersede, or replace-from-current-HEAD",
+            )
 
     if no_progress_active(state, no_progress_threshold):
         info = no_progress_info(state)
@@ -866,6 +1207,7 @@ def main() -> int:
     lock_path = target / "target" / "automation_conveyor.lock"
     state = load_state(state_path)
     role, reason, stop = choose_next(target, state, args.planner_interval_seconds, args.no_progress_threshold)
+    ticket_state, ticket_reason = ticket_campaign_terminal(target)
 
     if args.dry_run:
         queue = conveyor_decision_queue(
@@ -886,7 +1228,9 @@ def main() -> int:
                     "decision_queue": queue,
                     "queued_patch_count": len(queued_manifests(target)),
                     "automation_status": automation_status(target),
+                    "baseline_verification": baseline_record(target),
                     "integrator_no_progress": no_progress_info(state),
+                    "ticket_campaign": {"status": ticket_state or "active", "reason": ticket_reason},
                 },
                 indent=2,
                 sort_keys=True,
@@ -920,6 +1264,8 @@ def main() -> int:
             print(f"CONVEYOR_DECISION role={role or 'idle'} reason={reason}", flush=True)
 
             if stop:
+                if reason in {"ticket campaign complete", "ticket campaign blocked"}:
+                    finalize_ticket_campaign(target)
                 return 0
             if role is None:
                 if args.once:

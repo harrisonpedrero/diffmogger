@@ -26,7 +26,7 @@ Continuous conveyor:
 One local dispatcher chooses the next runnable lane as soon as the previous lane exits.
 ```
 
-Good when you want work-conserving local automation instead of exact role times after the target has an initial git commit. The conveyor prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It records state in `target/automation_conveyor_state.json`, including the active role run and next decision queue, and uses `target/automation_conveyor.lock` so only one dispatcher runs.
+Good when you want work-conserving local automation instead of exact role times after the target has an initial git commit. The conveyor prioritizes queued integration first, clean-HEAD baseline verification preflight or repair routing when needed, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It records state in `target/automation_conveyor_state.json`, including the active role run and next decision queue, and uses `target/automation_conveyor.lock` so only one dispatcher runs.
 
 45 minutes:
 
@@ -105,6 +105,8 @@ com.diffmogger.automation.<target-name>.<hash>.conveyor
 ```
 
 The job points at `scripts/run_conveyor_automation.sh`, sets `RunAtLoad`, and does not use `StartInterval` or `StartCalendarInterval` because the dispatcher stays running until paused, removed, blocked, or stopped by a critical status.
+
+In `ticket_campaign` mode, the conveyor also exits when `scripts/ticket_run.py` determines that every ticket in `docs/TICKET_RUN.md` is done with evidence or that all remaining tickets are blocked. It finalizes the local report and sends a native desktop notification, or records a durable fallback in `docs/HUMAN_OUTBOX.md`, before stopping.
 
 Logs are written under the target repo:
 

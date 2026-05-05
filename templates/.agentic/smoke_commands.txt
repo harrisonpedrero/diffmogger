@@ -1,0 +1,4 @@
+# Optional patch-scoped checks for multi-role integration.
+# Use plain commands for all queued patches, or selector lines:
+# role:builder | npm test -- --runInBand
+# path:src/** | npm test -- --runInBand

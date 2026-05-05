@@ -2,9 +2,11 @@
 
 A Markdown-first operating system for recurring AI coding agents.
 
-Diffmogger is for solo and small-team projects that want recurring Codex automation to compound instead of restarting from scratch. It externalizes agent state into repo-local Markdown so scheduled runs can preserve context, verify their own work, ask for human unlocks asynchronously, and keep moving around blockers.
+It can run as a single scheduled lane or as a continuous conveyor that dispatches local planner, builder, hardener, and integrator role agents.
 
-It is different from a pile of prompt files or a basic scheduled agent run because it includes the operating plumbing around the agent: task state, guardrails, inbox/outbox files, archives, lock files, worker reports, validation markers, and a local optional human bridge. The goal is not enterprise autonomy infrastructure. Diffmogger is alpha, local-first, git-diffable workflow scaffolding for ambitious personal and small-team engineering work.
+Diffmogger is for solo and small-team projects that want recurring Codex automation to compound instead of restarting from scratch. It externalizes agent state into repo-local Markdown so single-lane scheduled runs or conveyor-dispatched role lanes can preserve context, verify their own work, ask for human unlocks asynchronously, and keep moving around blockers.
+
+It is different from a pile of prompt files or a basic scheduled agent run because it includes the operating plumbing around the agent: task state, guardrails, inbox/outbox files, archives, lock files, conveyor state, role queues, worker reports, validation markers, observatory/dashboard review surfaces, ticket-run helpers, and an optional local human bridge. The goal is not enterprise autonomy infrastructure. Diffmogger is alpha, local-first, git-diffable workflow scaffolding for ambitious personal and small-team engineering work.
 
 Model/runtime note: Diffmogger was designed and tested with Codex running GPT-5.5. Other Codex models or non-Codex agent runtimes may work, but they have not been validated and may require prompt or workflow tuning. The templates are intentionally local-first and text-based so they can be adapted over time.
 
@@ -31,7 +33,9 @@ Diffmogger splits recurring agent work into stable instructions and mutable stat
 - Verification: tests, builds, demos, screenshots, reports, or an honest note about what could not run.
 - Lock files: reduce overlapping scheduled mutations of the same checkout.
 - Worker helpers: bounded reports by default, optional bounded write workers as acceleration when explicitly enabled, integrated by the main agent.
-- Multi-role mode: optional local-only planner, builder, hardener, and integrator schedules with isolated worktrees and FIFO patch integration.
+- Conveyor scheduling: optional dispatcher that reads local state and chooses the next useful single-lane or role-lane run.
+- Multi-role mode: optional local-only planner, builder, hardener, and integrator lanes with isolated worktrees, FIFO patch integration, and local checkpoint commits.
+- Ticket campaigns: optional bounded ticket source with evidence-based completion, blocked-state reporting, and a local stop condition.
 - Human bridge: manual Markdown queues first, optional local notifier later.
 
 The operating model is:
@@ -43,7 +47,10 @@ stable automation prompt
 + scheduled sprint runs
 + verification
 + lock files
++ optional continuous conveyor dispatcher
++ optional role lanes and patch queue
 + optional bounded worker agents
++ optional ticket campaign boundary
 + optional decoupled human bridge
 ```
 
@@ -64,22 +71,24 @@ CRITICAL_STOP
 | Compared with | Practical difference |
 | --- | --- |
 | `AGENTS.md`, `.cursorrules`, and static prompt files | Those are mostly static instructions. Diffmogger adds dynamic state plumbing: task file, inbox, archive, lock, compaction, worker reports, and validation. |
-| Codex Automations and scheduled-run features | Those provide a scheduler. Diffmogger provides an operating model for making scheduled runs compound: externalized state, sprint sizing, status model, human bridge protocol, worker-agent conventions, verification, and backlog rewriting. |
+| Codex Automations and scheduled-run features | Those provide a scheduler. Diffmogger provides an operating model for making scheduled runs compound: externalized state, conveyor dispatch, sprint sizing, status model, human bridge protocol, worker-agent conventions, role-lane integration, verification, and backlog rewriting. |
 | Interactive agents such as Cursor, Cline, and Aider | Those assume a human is in the loop every turn. Diffmogger targets unattended recurring runs where the agent must preserve state, verify, ask for unlocks asynchronously, and continue around blockers. |
 | Agent frameworks such as LangGraph, CrewAI, AutoGen, and AutoGPT | Those are runtimes and frameworks. Diffmogger is a workflow scaffold layered on top of an existing CLI agent, with no new runtime lock-in. |
 | Hosted autonomy tools | Hosted systems may hide state or bind users to a vendor workflow. Diffmogger is local-first, repo-local, and git-diffable. |
 
 ## What Is Novel Here
 
-The individual ingredients are familiar: Markdown files, scheduled runs, lock files, worker agents, validation scripts, and human handoff queues. Diffmogger's useful claim is about the system boundary: it packages those ingredients into one local, reviewable control loop for recurring Codex work.
+The individual ingredients are familiar: Markdown files, scheduled runs, lock files, worker agents, validation scripts, role-lane dispatch, ticket-run boundaries, observability pages, and human handoff queues. Diffmogger's useful claim is about the system boundary: it packages those ingredients into one local, reviewable control loop for recurring Codex work.
 
 The design choices that matter are:
 
 - Markdown-first state is the shared substrate: stable behavior is separated from mutable state, so the recurring prompt stays durable while `docs/CODEX_AUTOMATION_TASKS.md` carries current blockers, checks, human requests, horizon state, and the next sprint.
-- The run lifecycle is explicit: acquire a lock, read state, choose a sprint-sized milestone, decide whether workers are useful, implement, verify, update artifacts, rewrite state, and leave a clear continuation point.
+- The run lifecycle is explicit: acquire a lock, read state, choose a sprint-sized milestone or conveyor lane, decide whether workers are useful, implement, verify, update artifacts, rewrite state, and leave a clear continuation point.
 - Worker parallelism is bounded: read-only worker reports are the default, while write-capable workers require explicit intake opt-in, reviewable ownership, lightweight coordination, and main-agent integration.
-- Multi-role automation is opt-in and local-only: role work happens in isolated git worktrees, the integrator owns the main checkout, and no generated role may push, fetch, pull, or configure remotes.
-- Decoupled human bridge behavior is asynchronous and operationalized. File-only queues work without credentials, while the optional notifier keeps SMS/WhatsApp credentials in a separate service and forces delivery failures to be recorded instead of hand-waved.
+- Multi-role automation is opt-in and local-only: the conveyor or fixed schedules dispatch planner, builder, hardener, and integrator lanes; role work happens in isolated git worktrees, the integrator owns the main checkout, and no generated role may push, fetch, pull, or configure remotes.
+- Conveyor state is inspectable: `target/automation_conveyor_state.json`, the dashboard, and the observatory show the active role, queued or deferred patches, recent outcomes, signal nudges, baseline verification state, and the likely next lane.
+- Ticket campaigns give bounded runs a finish line: `docs/TICKET_RUN.md` is the local source of truth, completion requires evidence, and terminal completion or blockage produces a local report instead of inventing new roadmap work.
+- Decoupled human bridge behavior is asynchronous and operationalized. File-only queues work without credentials, while the optional notifier keeps Discord credentials and local desktop delivery in a separate service and forces delivery failures to be recorded instead of hand-waved.
 - Explicit failure modes are part of the contract. `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP` let the automation keep working around partial blockers while still making hard stops visible.
 - Marker-enforced contracts keep the scaffold honest by checking load-bearing prompt, template, schema, and documentation expectations during local validation.
 - The generated project is meant to stand on its own. Target repos get local scripts, guardrails, task files, worker conventions, compaction helpers, and validation markers instead of depending on the Diffmogger checkout at runtime.
@@ -126,6 +135,7 @@ These are observations from private repositories that ran on Diffmogger. They ar
 - continuous conveyor wrapper: `scripts/run_conveyor_automation.sh`, `scripts/run_conveyor_automation.py`
 - local observatory page: `scripts/run_observatory.py`
 - managed browser runtime helper: `scripts/diffmogger_browser.py`
+- bounded ticket-campaign helper: `scripts/ticket_run.py`
 - local environment repair helper: `scripts/repair_environment.py`
 - optional automation signal helper: `scripts/update_automation_signals.py`
 - worker helper scripts: `scripts/spawn_worker_agent.sh`, `scripts/summarize_worker_outputs.py`
@@ -145,7 +155,7 @@ templates/                    Files scaffolded into target projects.
 examples/                     Example intake briefs.
 schemas/                      Reference JSON Schemas.
 scripts/                      Validation, scaffolding, lock, worker, and compaction helpers.
-services/agentic-notifier/    Reusable local SMS/WhatsApp bridge.
+services/agentic-notifier/    Reusable Discord and local desktop notification bridge.
 services/agentic-dashboard/   Standalone local configuration wizard and dashboard.
 ```
 
@@ -178,7 +188,7 @@ After bootstrap or before a demo, use one local review path instead of hunting t
 4. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
 5. Review the first-review readiness, safety status, validation state, active role or queue, known issues, next sprint recommendation, and next-run worker strategy in the observatory, Markdown export, or dashboard **Worker Strategy Controls** panel.
 
-The generated target includes local runtime scripts under `scripts/`. After the first bootstrap produces a runnable baseline, use the target repo's own `scripts/run_codex_automation.sh` for recurring Codex automation.
+The generated target includes local runtime scripts under `scripts/`. After the first bootstrap produces a runnable baseline, use the target repo's own `scripts/run_codex_automation.sh` for single-lane recurring Codex automation. If the intake enables continuous conveyor or multi-role mode, use dashboard scheduling or `scripts/run_conveyor_automation.sh` so the next lane is chosen from local state.
 
 The dashboard records **Run Safety Check** results in the selected target's gitignored
 `target/integration_safety_check.json`; the exported review bundle reads that marker so the
@@ -198,7 +208,7 @@ It supports:
 
 - a configuration wizard backed by `schemas/project_intake.schema.json`
 - fresh-project and existing-project modes
-- the full project intake, including constraints, safety rules, automation prohibitions, human bridge choices, worker-agent settings, deliverable definition, and beyond-MVP direction
+- the full project intake, including constraints, safety rules, automation prohibitions, human bridge choices, worker-agent settings, deliverable definition, and long-run direction
 - optional bounded write-worker settings with a capped count and guidance text
 - optional automation signals for recurring local review nudges
 - optional multi-role automation mode with fixed role-specific launchd jobs, continuous conveyor scheduling, and local-only git guards
@@ -210,9 +220,9 @@ It supports:
 - a single `Scaffold & Bootstrap` pipeline
 - gated `Start Scheduled Automation` and `Pause Scheduled Automation` launchd controls after bootstrap completes
 - `Open Diffmogger Project` for reopening a target with existing dashboard state or launchd automation
-- prerequisite checks for Python, Tkinter, Codex CLI, shell tools, permissions, and optional notifier health
+- prerequisite checks for Python, Tkinter, Codex CLI, shell tools, permissions, optional notifier health, and optional ticket-completion desktop notifications
 - a compact automation monitor for selected Markdown files
-- file-only messages to the next automation run when SMS/WhatsApp is disabled or unavailable
+- file-only messages to the next automation run when notifier delivery is disabled or unavailable
 
 For existing projects, select the existing repo directory and choose existing-project mode in the wizard. Frame the intake as an integration task: describe the current stack, the existing commands to preserve, and the first meaningful integrated deliverable. Diffmogger adds or updates managed sections in existing `AGENTS.md` and `docs/DEVELOPMENT.md` instead of replacing those files outright.
 
@@ -257,7 +267,7 @@ python -m pip install -r requirements.txt
 python -m pytest
 ```
 
-Tests use fake Twilio clients and dry-run paths. They do not require real credentials, ngrok, or real SMS.
+Tests use fake Discord senders and dry-run local-notification paths. They do not require real Discord credentials or desktop notification delivery.
 
 ## Worker Agents
 
@@ -346,11 +356,13 @@ Planner, builder, and hardener start from the latest main `HEAD` in isolated wor
 
 Alternatively, continuous conveyor scheduling writes one LaunchAgent that runs `scripts/run_conveyor_automation.sh`, records state under `target/automation_conveyor_state.json`, and chooses the next runnable lane as soon as the previous lane exits. It requires an initialized git repo with an initial commit, then prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state includes the active role run and a small future decision queue; `scripts/run_observatory.py` also reads `target/automation_signals.json` so the dashboard-launched observatory can show what is running now, what signal nudges are due, and what is likely next. Use `python3 scripts/list_deferred_patches.py . --markdown` for a grouped local triage view of deferred queue manifests, or add `--decision-template` for a per-manifest worksheet during integrator cleanup.
 
+For bounded startup-ticket runs, set `automation_run_mode` to `ticket_campaign` in the target intake or enable Ticket Campaign mode in the dashboard. The generated `docs/TICKET_RUN.md` becomes the local source of truth, and `scripts/ticket_run.py` writes a completion report plus a native desktop notification or durable fallback state when every ticket is done or terminally blocked. Diffmogger still creates local commits only; pushing or opening a PR remains a manual review step.
+
 Multi-role mode is local-only. Role prompts and scripts prohibit pushes, fetches, pulls, remote configuration, upstream tracking, and remote-affecting git commands. Scripts refuse to run with configured remotes unless `MULTI_ROLE_ALLOW_REMOTES=1` is set, and the integrator refuses executable git hooks containing `git push`.
 
 ## Human Bridge
 
-Diffmogger supports two modes.
+Diffmogger supports four modes.
 
 Mode A: manual file-only bridge.
 
@@ -358,19 +370,30 @@ Mode A: manual file-only bridge.
 - The human manually replies in `docs/HUMAN_INBOX.md`.
 - The next automation run consumes handled replies, removes them from the inbox, and archives concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
 
-This mode needs no SMS, no webhook, and no credentials. It is a valid long-term mode.
+This mode needs no Discord bot, webhook, notifier API, or credentials. It is a valid long-term mode.
 
-In file-only mode, status or summary requests are satisfied locally in Markdown or app artifacts. The automation should not try to send SMS/WhatsApp unless the project is explicitly switched to notifier mode.
+In file-only mode, status or summary requests are satisfied locally in Markdown or app artifacts. The automation should not try to call notifier APIs unless the project is explicitly switched to notifier mode.
 
-Mode B: local notifier API.
+Mode B: local notifier API with desktop notifications.
 
 - Target project calls `POST http://127.0.0.1:8765/api/notify`.
-- `services/agentic-notifier` owns Twilio credentials.
-- Twilio inbound webhook goes to `http://127.0.0.1:8787/twilio/inbound` through ngrok.
-- The notifier writes replies to target `docs/HUMAN_INBOX.md`.
+- `services/agentic-notifier` owns native macOS desktop notification delivery.
+- Direct messages and ticket completion events can raise local notifications.
+- The notifier writes outbound results to target `docs/HUMAN_OUTBOX.md`.
 - Target automation resolves and archives handled replies.
 
-Notifier provider failures return structured JSON and write `PROVIDER_SEND_FAILED` to `docs/HUMAN_OUTBOX.md` when target paths are configured. If the notifier API itself is unreachable, target automations should record `NOTIFIER_UNREACHABLE` and keep working where possible.
+Mode C: Discord notifier API.
+
+- Progress events route to the configured Discord progress channel.
+- Direct human messages route to the configured Discord messaging channel.
+- Multi-role integrator commits trigger brief progress-channel updates with the commit subject and work summary.
+- Human-unlock requests, blockers that need user input, and replies to user messages use the messaging channel.
+- Local desktop notifications are optional.
+- Bot mentions or replies in the messaging channel are captured into target `docs/HUMAN_INBOX.md`.
+
+Mode D: disabled bridge. Generated automations do not create human request queues unless later reconfigured.
+
+Notifier delivery failures return structured JSON and write statuses such as `DISCORD_SEND_FAILED`, `LOCAL_NOTIFICATION_FAILED`, or `NOTIFIER_UNREACHABLE` to `docs/HUMAN_OUTBOX.md` when target paths are configured.
 
 ## Notifier Setup
 
@@ -390,26 +413,14 @@ python -m pytest
 python -m agentic_notifier.run_service
 ```
 
-Real Twilio values belong only in `services/agentic-notifier/.env`. Keep secrets out of target project docs, prompts, task files, and examples.
+Real Discord values belong only in `services/agentic-notifier/.env`. Keep secrets out of target project docs, prompts, task files, and examples.
 The example config starts with `DRY_RUN=true`; change it only when you intentionally want a real outbound send.
 
-Expose only the webhook port with ngrok:
+Discord setup needs `DISCORD_BOT_TOKEN`, `DISCORD_PROGRESS_CHANNEL_ID`, `DISCORD_MESSAGING_CHANNEL_ID`, and `LOCAL_NOTIFICATIONS_ENABLED=true|false` in the notifier `.env`. Under **Bot -> Privileged Gateway Intents**, turn on only Message Content Intent; leave Presence Intent and Server Members Intent off. In the OAuth2 URL Generator, check only the `bot` scope. After `bot` is checked, use the separate **Bot Permissions** section to select View Channels, Send Messages, and Read Message History, then open the generated URL to invite the bot to your server.
 
-```bash
-ngrok http 8787
-```
+To get channel IDs, enable **User Settings -> Advanced -> Developer Mode** in Discord, then right-click each channel and choose **Copy Channel ID**.
 
-Do not expose the local notify API unless you know why.
-
-Practical SMS notes:
-
-- `TWILIO_MESSAGING_SERVICE_SID` is supported.
-- If set, the notifier sends with `messaging_service_sid` and does not pass `from_`.
-- If absent, the notifier falls back to `TWILIO_FROM`.
-- SMS via +1 10DLC may require A2P 10DLC approval.
-- Twilio error `30034` usually means the sender or campaign is not registered or ready.
-- WhatsApp sandbox can be used as an alternative if configured.
-- Diffmogger does not require SMS to work.
+Bind the local notify API to `127.0.0.1` unless `LOCAL_NOTIFY_API_TOKEN` is configured.
 
 ## Lock Files And State Compaction
 
@@ -476,7 +487,7 @@ The script preserves unresolved human requests and deferred multi-role manifests
 - alpha and local-first
 - Codex behavior can vary
 - scheduled runs still need review
-- Twilio/A2P setup can block SMS
+- Discord bot setup is optional but must be verified before real sends
 - JSON schemas may be reference-only where runtime enforcement is not wired yet
 - state compaction should be reviewed
 - worker agents can create noise if overused
@@ -490,8 +501,8 @@ The script preserves unresolved human requests and deferred multi-role manifests
 - better state compaction
 - example target projects
 - richer case studies
-- local dashboard for automation state
-- more notifier channels such as Slack, email, and Discord
+- richer dashboard and observatory controls for live automation state
+- more notifier channels beyond the current Discord and local desktop paths
 
 ## Example Validation
 

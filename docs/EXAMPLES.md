@@ -12,6 +12,10 @@ The dashboard can add supplemental context files at setup time. Those files are 
 
 Use `examples/trendlab-signal-intelligence/project_intake.md` to exercise a more involved fictional product brief. It keeps the workflow reusable while covering fixture data, scoring, reports, and human-in-the-loop requests.
 
+## Ticket Campaign
+
+Use `examples/ticket-campaign/project_intake.md` to exercise bounded ticket-campaign mode. It checks that generated automation uses ticket-run phases, treats `docs/TICKET_RUN.md` as scope, and avoids open-ended roadmap language.
+
 ## Smoke Test
 
 ```bash

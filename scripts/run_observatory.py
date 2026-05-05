@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 
 ROLES = ("planner", "builder", "hardener", "integrator")
-QUEUE_STATUSES = ("queued", "deferred", "applied", "failed", "skipped")
+QUEUE_STATUSES = ("queued", "deferred", "applied", "failed", "skipped", "superseded")
 MAX_MANIFESTS = 18
 MAX_OUTCOMES = 12
 MAX_HISTORY = 80
@@ -54,6 +54,7 @@ DEFERRAL_REASON_ACTIONS = {
     "conflict": "Inspect the listed files and replace the patch with a freshly reconciled local change.",
     "verification_failure": "Re-run the failing command locally, fix the source or test issue, then submit a new verified patch.",
     "verification_environment_failure": "Repair project-local tooling or fixtures first, then rerun verification before retrying.",
+    "baseline_verification_blocker": "Repair the clean-HEAD full-suite baseline, then retry full-suite-required patches.",
     "guardrail_violation": "Do not apply as-is; replace it with a guardrail-compliant local patch or archive it.",
     "other": "Inspect the manifest and summary, then choose retry, replacement, archival, or documentation.",
 }
@@ -533,6 +534,9 @@ def queue_snapshot(target: Path) -> dict[str, Any]:
                 "timestamp": clean_text(timestamp, limit=80),
                 "summary": clean_text(manifest.get("summary") or "No summary.", limit=180),
                 "deferral_reason": clean_text(manifest.get("deferral_reason"), limit=80),
+                "deferral_root_cause": clean_text(manifest.get("deferral_root_cause"), limit=180),
+                "baseline_status": clean_text(manifest.get("baseline_status"), limit=80),
+                "baseline_failure_signature": clean_text(manifest.get("baseline_failure_signature"), limit=120),
                 "changed_files": [
                     clean_text(item, limit=80)
                     for item in list(manifest.get("changed_files") or [])[:5]
@@ -556,6 +560,30 @@ def queue_snapshot(target: Path) -> dict[str, Any]:
             key=lambda item: str(item.get("timestamp") or item.get("created_at") or ""),
             reverse=True,
         )[:MAX_OUTCOMES],
+    }
+
+
+def baseline_verification_snapshot(target: Path) -> dict[str, Any]:
+    record = read_json(target / "target" / "baseline_verification.json")
+    if not record:
+        return {
+            "status": "not_recorded",
+            "summary": "No clean-HEAD baseline verification ledger is recorded yet.",
+            "next_action": "Run the integrator lane once to record baseline verification.",
+        }
+    status = clean_text(record.get("status") or "unknown", limit=80)
+    root = clean_text(record.get("root_cause") or "No root cause recorded.", limit=300)
+    next_action = clean_text(record.get("next_action") or "Inspect baseline verification before full-suite gates.", limit=300)
+    return {
+        "status": status,
+        "category": clean_text(record.get("category") or "", limit=80),
+        "root_cause": root,
+        "failure_signature": clean_text(record.get("failure_signature") or "", limit=140),
+        "head": clean_text(record.get("head") or "", limit=80),
+        "last_seen_at": clean_text(record.get("last_seen_at") or "", limit=80),
+        "repair_attempted": bool(record.get("repair_attempted")),
+        "next_action": next_action,
+        "summary": f"{status}: {root}",
     }
 
 
@@ -1571,7 +1599,7 @@ def scorecard_action_plan(
             "why": "A pending human request remains the highest-order local bridge item.",
             "next_steps": [
                 "Keep reversible local work moving if it does not depend on the reply.",
-                "Do not use notifier, SMS, WhatsApp, or external channels in file-only mode.",
+                "Do not use Discord, notifier APIs, or external channels in file-only mode.",
                 "Resume the blocked path after the human response is archived.",
             ],
         }
@@ -1916,6 +1944,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
     generated_at = utc_now()
     conveyor = read_json(target / "target" / "automation_conveyor_state.json")
     queue = queue_snapshot(target)
+    baseline_verification = baseline_verification_snapshot(target)
     task = parse_task_state(target)
     progress_text = read_text(target / "docs" / "MULTI_ROLE_PROGRESS.md", limit=40_000)
     progress = progress_snapshot(progress_text)
@@ -1974,6 +2003,17 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         recommendation_history=recommendation_history,
         worker_strategy=worker_strategy,
     )
+    review_items = review.get("items") if isinstance(review.get("items"), list) else []
+    review_items.append(
+        {
+            "label": "Baseline verification",
+            "body": (
+                f"{baseline_verification.get('summary') or 'No baseline verification ledger recorded yet.'} "
+                f"Next: {baseline_verification.get('next_action') or 'Run integrator baseline preflight.'}"
+            ),
+        },
+    )
+    review["items"] = review_items
     return {
         "schema_version": 1,
         "generated_at": generated_at,
@@ -1982,6 +2022,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "human": human,
         "git": git_snapshot(target),
         "queue": queue,
+        "baseline_verification": baseline_verification,
         "signals": signals,
         "conveyor": conveyor_state,
         "progress": progress,
@@ -2447,6 +2488,8 @@ HTML_TEMPLATE = r"""<!doctype html>
       row.appendChild(title);
       row.appendChild(el("div", "", item.summary || "No summary."));
       if (item.deferral_reason) row.appendChild(el("div", "muted", "deferral: " + item.deferral_reason));
+      if (item.deferral_root_cause) row.appendChild(el("div", "muted", "root cause: " + item.deferral_root_cause));
+      if (item.baseline_status) row.appendChild(el("div", "muted", "baseline: " + item.baseline_status + (item.baseline_failure_signature ? " / " + item.baseline_failure_signature : "")));
       const chips = el("div", "chips");
       (item.changed_files || []).forEach(file => chips.appendChild(el("span", "chip", file)));
       if (chips.children.length) row.appendChild(chips);
@@ -3448,6 +3491,9 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
         else {}
     )
     worker_strategy = snapshot.get("worker_strategy") if isinstance(snapshot.get("worker_strategy"), dict) else {}
+    baseline_verification = (
+        snapshot.get("baseline_verification") if isinstance(snapshot.get("baseline_verification"), dict) else {}
+    )
     empty_states = snapshot.get("empty_states") if isinstance(snapshot.get("empty_states"), dict) else {}
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
@@ -3611,6 +3657,15 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     recorded_text = clean_text(integration_safety.get("recorded_text") or "", limit=420)
     if recorded_text:
         lines.append(f"- recorded_check: {recorded_text}")
+
+    lines.extend(["", "## Baseline Verification", ""])
+    lines.append(f"- status: {clean_text(baseline_verification.get('status') or 'not_recorded', limit=80)}")
+    lines.append(
+        f"- root_cause: {clean_text(baseline_verification.get('root_cause') or baseline_verification.get('summary') or 'No baseline verification ledger recorded yet.', limit=500)}"
+    )
+    lines.append(
+        f"- next_action: {clean_text(baseline_verification.get('next_action') or 'Run integrator baseline preflight.', limit=500)}"
+    )
 
     lines.extend(["", "## First Review Readiness", ""])
     lines.append(f"- status: {clean_text(first_review.get('status') or 'unknown', limit=80)}")

@@ -25,6 +25,14 @@ configure_diffmogger_browser() {
 
 configure_diffmogger_browser
 
+maybe_finalize_ticket_campaign() {
+  if [ -f "scripts/ticket_run.py" ]; then
+    python3 scripts/ticket_run.py . should-halt --finalize
+    return "$?"
+  fi
+  return 1
+}
+
 CODEX_PARENT_ARGS=()
 if [ "${CODEX_ENABLE_NESTED_CLI_HOME:-true}" = "true" ] && [ -n "${HOME:-}" ]; then
   export CODEX_NESTED_CLI_HOME="${CODEX_NESTED_CLI_HOME:-$HOME/.codex}"
@@ -59,6 +67,10 @@ target_name="$(basename "$TARGET")"
 lock_context="${CODEX_LOCK_CONTEXT:-${target_name} scheduled sprint}"
 bash scripts/acquire_codex_lock.sh "$lock_context" || exit 0
 export CODEX_LOCK_ALREADY_ACQUIRED="true"
+
+if maybe_finalize_ticket_campaign; then
+  exit 0
+fi
 
 if [ -f "scripts/update_automation_signals.py" ] && [ -f "docs/AUTOMATION_SIGNALS.md" ]; then
   python3 scripts/update_automation_signals.py . --refresh --summary || true
@@ -125,6 +137,10 @@ EOF
     cat "$rerun_stdout"
     cat "$rerun_stderr" >&2
   fi
+fi
+
+if [ "$exit_code" = "0" ] && maybe_finalize_ticket_campaign; then
+  exit 0
 fi
 
 exit "$exit_code"

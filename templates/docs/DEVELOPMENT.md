@@ -14,13 +14,27 @@ Document local setup here after bootstrap.
 
 ## Verification
 
+Full-suite commands are stored in:
+
+```text
+.agentic/verification_commands.txt
+```
+
+Patch-scoped multi-role smoke checks may be configured in:
+
+```text
+.agentic/smoke_commands.txt
+```
+
 Preferred commands:
 
 ```text
 {{VERIFICATION_COMMANDS}}
 ```
 
-Update this section when commands change.
+Update this section and `.agentic/verification_commands.txt` when full-suite commands change.
+
+The integrator records clean-HEAD full-suite baseline verification in `target/baseline_verification.json`. If that baseline fails before a queued patch is applied, normal hardener/finalization patches are deferred as `baseline_verification_blocker`; builder/planner patches can still integrate when focused checks pass and the failure is unrelated. Baseline repair patches should include `Verification scope: baseline_repair` in the role summary. Local service failures that the repo can reasonably repair, such as a missing local PostgreSQL test database with Prisma/Postgres configuration, should be classified as `repairable_local_service` and routed to a harness/setup patch before `BLOCKED_ON_ENVIRONMENT`.
 
 ## Automation
 
@@ -66,7 +80,7 @@ python3 scripts/run_observatory.py --open
 
 Continuous conveyor scheduling requires this target to be an initialized git repo with an initial commit.
 
-The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_signals.json` to show active signal nudges, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
+The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_signals.json` and `target/baseline_verification.json` to show active signal nudges, baseline verification state, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
 
 ## Managed Browser Runtime
 
@@ -83,6 +97,10 @@ The helper checks `DIFFMOGGER_BROWSER_PATH`, `CHROME_PATH`, and the managed cach
 the managed path for child Codex runs when it exists, and dashboard-managed LaunchAgents
 inherit the same environment. Do not make browser smoke checks depend only on system
 Chrome; use `python3 scripts/diffmogger_browser.py resolve` or the exported `CHROME_PATH`.
+
+## Ticket Campaigns
+
+{{TICKET_CAMPAIGN_DEVELOPMENT_SECTION}}
 
 For a durable first-run review bundle, render the same local state to HTML and Markdown:
 

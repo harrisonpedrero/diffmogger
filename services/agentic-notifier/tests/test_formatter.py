@@ -46,3 +46,21 @@ def test_format_notify_message_supports_direct_status_message() -> None:
     assert message.startswith("Project update:")
     assert "Need input" not in message
     assert len(message) < 900
+
+
+def test_format_notify_message_preserves_ticket_summary_lines() -> None:
+    request = NotifyRequest(
+        request_id="TICKET-run-1",
+        type="ticket_campaign_complete",
+        priority="normal",
+        summary="Ticket campaign complete",
+        message_body="**Ticket campaign run-1: COMPLETE**\n\n**Tickets**\n- #42 [DONE] Rich metadata\n  Evidence: checks passed",
+        dedupe_key="TICKET-run-1:complete",
+        expects_reply=False,
+    )
+
+    message = format_notify_message(request)
+
+    assert "**Tickets**" in message
+    assert "\n- #42 [DONE] Rich metadata" in message
+    assert "Evidence: checks passed" in message

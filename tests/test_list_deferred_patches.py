@@ -204,7 +204,7 @@ class ListDeferredPatchTests(unittest.TestCase):
                     self.assertIn("# Deferred Patch Decision Worksheet", worksheet)
                     self.assertIn(
                         "decision_options: archive, replace_from_current_head, retry_after_fix, "
-                        "retry_after_environment_repair, retry_as_is, keep_deferred",
+                        "retry_after_environment_repair, retry_after_baseline_repair, retry_as_is, keep_deferred",
                         worksheet,
                     )
                     self.assertIn("### builder `run-conflict`", worksheet)

@@ -5,6 +5,8 @@ The generation prompt should produce:
 ```text
 AGENTS.md
 .agentic/automation_prompt.md
+.agentic/smoke_commands.txt
+.agentic/verification_commands.txt
 docs/INITIAL_BOOTSTRAP_PROMPT.md
 docs/PROJECT_CONTEXT.md
 docs/CODEX_AUTOMATION_TASKS.md
@@ -23,6 +25,7 @@ scripts/run_conveyor_automation.py
 scripts/run_conveyor_automation.sh
 scripts/run_observatory.py
 scripts/diffmogger_browser.py
+scripts/ticket_run.py
 scripts/repair_environment.py
 scripts/update_automation_signals.py
 scripts/spawn_worker_agent.sh
@@ -32,4 +35,4 @@ scripts/compact_agent_state.py
 
 The bootstrap prompt should identify this as `fresh_project` mode and ask Codex to create a local-first web app with seed data, a weekly board, task completion, daily summary, and verification commands.
 
-The recurring automation prompt should keep improving the planning workflow beyond the first demo, record a Codex CLI worker decision each run, use target-local automation scripts, and handle file-only human inbox requests without SMS/notifier language.
+The recurring automation prompt should keep improving the planning workflow after the first demo, record intake-derived horizons for weekly boards, daily summaries, review capsules, and optional adapters, record a Codex CLI worker decision each run, use target-local automation scripts, and handle file-only human inbox requests without notifier API language.

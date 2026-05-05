@@ -30,7 +30,9 @@ Own the main checkout. Apply clean queued role patches FIFO, verify them, create
 - Batch apply all patches that pass `git apply --check`, run full verification once, then commit accepted patches as separate local commits.
 - If batch verification fails, reset to the pre-batch head and verify patches individually.
 - Defer stale, conflicting, guardrail-violating, or verification-failing patches with machine-readable reasons.
+- Treat missing project-local services, such as an unavailable local PostgreSQL test database, as `repairable_local_service` baseline evidence when the repo has enough schema/test configuration to create a local harness. Route `verification_scope=baseline_repair` work before declaring `BLOCKED_ON_ENVIRONMENT`.
 - Review active integrator-owned automation signals when present, especially queue, progress, and compaction health signals.
+- In `ticket_campaign` mode, after accepting queued patches, run `python3 scripts/ticket_run.py . should-halt --finalize`; if it reports completion or blockage, stop the campaign instead of launching more work.
 - Never discard, revert, push, or force-merge changes.
 
 ## Script Entry Point

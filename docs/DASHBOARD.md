@@ -23,6 +23,7 @@ The dashboard checks and lists prerequisites before the combined scaffold/bootst
 - Codex home availability for nested workers
 - macOS Full Disk Access advisory when a target lives under `~/Documents`
 - optional local notifier health when `local_notifier` mode is selected
+- optional macOS desktop notification command when ticket completion notifications are enabled
 
 If a required check fails, the dashboard will not start the bootstrap run.
 
@@ -56,12 +57,13 @@ It collects the same project intake fields supported by `schemas/project_intake.
 - scheduling strategy: periodic sprint, fixed multi-role cadence, or continuous conveyor
 - whether the human bridge is enabled
 - human bridge mode
-- whether freeform human requests should receive SMS/WhatsApp responses when the notifier is available
+- whether freeform human requests should receive direct notifier messages when the notifier is available
 - worker-agent settings, including optional bounded write-worker acceleration disabled by default
 - optional recurring local automation signals, disabled by default
+- optional ticket-campaign mode, including the target-relative ticket Markdown file and local desktop completion notification toggle
 - advanced multi-role automation settings, disabled by default, including a local-only remote opt-in for repos that already have git remotes configured
 - meaningful deliverable
-- beyond-MVP direction
+- long-run direction
 - assumptions
 
 ## Fresh Or Existing Projects
@@ -115,10 +117,15 @@ It performs the setup pipeline:
 1. writes `.agentic/project_intake.json` in the target
 2. copies selected context files into `docs/context/`
 3. scaffolds target automation docs and scripts
-4. runs `scripts/check_required_files.py`
-5. starts the initial `codex exec --full-auto --skip-git-repo-check` bootstrap run
+4. writes Diffmogger scaffold/runtime paths to the target repo's local `.git/info/exclude` when the target is a Git worktree
+5. runs `scripts/check_required_files.py`
+6. starts the initial `codex exec --full-auto --skip-git-repo-check` bootstrap run
 
 The scaffold script remains the source of truth for generated files. The dashboard is a convenience layer over that contract.
+
+Use **Environment Access** to choose whether automation may open local `.env*` files directly. The default keeps direct env-file reads off and lets project commands load env normally; the direct mode is for disposable local DBs or explicitly approved live-provider tests. Both modes still forbid printing, storing, or committing secret values.
+
+When **Ticket Campaign** mode is enabled in Run Config, the dashboard scaffolds the ticket source file, usually `docs/TICKET_RUN.md`. Edit that file's fenced JSON block with ticket IDs, acceptance criteria, verification commands, evidence, and blockers before starting unattended work.
 
 The dashboard keeps its visible run log bounded and starts dashboard-launched subprocesses in their own process group. When a bootstrap/check command exits or is cancelled, the dashboard terminates lingering child processes from that group so a temporary dev server started for smoke testing does not keep running after the dashboard run finishes.
 
@@ -159,7 +166,7 @@ If the strategy is **Continuous conveyor**, the dashboard writes one LaunchAgent
 bash scripts/run_conveyor_automation.sh
 ```
 
-The conveyor sets `RunAtLoad`, keeps running locally, and chooses the next runnable lane instead of using exact role times. It requires an initialized git repo with an initial commit because role worktrees and conveyor preflight need `HEAD`. It prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state stays in `target/automation_conveyor_state.json`; its duplicate-dispatcher lock is `target/automation_conveyor.lock`.
+The conveyor sets `RunAtLoad`, keeps running locally, and chooses the next runnable lane instead of using exact role times. It requires an initialized git repo with an initial commit because role worktrees and conveyor preflight need `HEAD`. It prioritizes queued integration first, clean-HEAD baseline verification preflight or repair routing when needed, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state stays in `target/automation_conveyor_state.json`; its duplicate-dispatcher lock is `target/automation_conveyor.lock`.
 
 The monitor tab can also launch:
 
@@ -168,7 +175,7 @@ Launch Observatory
 Export Review Bundle
 ```
 
-**Launch Observatory** opens a local browser page backed by `scripts/run_observatory.py`. The page is meant for live demos and reviews: it shows active signal nudges, conveyor health, no-progress circuit breaker state, the active role, upcoming lanes, queued and deferred patches, recent outcomes, progress pulse, and bounded log tails. It reads only target-local files and does not require external services.
+**Launch Observatory** opens a local browser page backed by `scripts/run_observatory.py`. The page is meant for live demos and reviews: it shows active signal nudges, clean-HEAD baseline verification state, conveyor health, no-progress circuit breaker state, the active role, upcoming lanes, queued and deferred patches, recent outcomes, progress pulse, and bounded log tails. It reads only target-local files and does not require external services.
 
 The observatory also includes a compact self-review panel and scorecard that pull from local task state, role progress metrics, signal state, queue manifests, conveyor circuit-breaker state, and human bridge files. Use it as the first stop in a local review: it summarizes the current assessment, validation results, the latest recorded integration-safety check result, accepted and deferred patch pressure, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, recent recommendation-history records, the next-run worker strategy, active nudges, queue/conveyor state, known issues, and next sprint recommendation without requiring a tour through every Markdown file.
 
@@ -259,7 +266,7 @@ It also shows a compact status summary from the task file, including automation 
 
 ## Messages
 
-When SMS/WhatsApp is disabled or unavailable, use the Messages tab to write to the next automation run. The dashboard uses friendly labels:
+When notifier delivery is disabled or unavailable, use the Messages tab to write to the next automation run. The dashboard uses friendly labels:
 
 - Requests From Automation
 - Messages Waiting For Next Run
@@ -274,7 +281,7 @@ docs/HUMAN_INBOX.md
 
 The next automation run should process that inbox entry, remove it only after the requested action is complete or intentionally deferred, and archive a concise note in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
 
-For `local_notifier` mode, the dashboard can check whether the notifier health endpoint is reachable, but Twilio credentials still belong only in:
+For `local_notifier` and `discord_notifier` modes, the dashboard can check whether the notifier health endpoint is reachable, whether Discord is configured, and whether local desktop notifications are enabled. Discord credentials still belong only in:
 
 ```text
 services/agentic-notifier/.env

@@ -11,6 +11,8 @@ from pathlib import Path
 BASE_REQUIRED = [
     "AGENTS.md",
     ".agentic/automation_prompt.md",
+    ".agentic/verification_commands.txt",
+    ".agentic/smoke_commands.txt",
     "scripts/acquire_codex_lock.sh",
     "scripts/release_codex_lock.sh",
     "scripts/run_codex_automation.sh",
@@ -19,6 +21,7 @@ BASE_REQUIRED = [
     "scripts/run_observatory.py",
     "scripts/build_replay.py",
     "scripts/diffmogger_browser.py",
+    "scripts/ticket_run.py",
     "scripts/repair_environment.py",
     "scripts/update_automation_signals.py",
     "scripts/spawn_worker_agent.sh",
@@ -35,6 +38,10 @@ BASE_REQUIRED = [
 
 AUTOMATION_SIGNALS_REQUIRED = [
     "docs/AUTOMATION_SIGNALS.md",
+]
+
+TICKET_CAMPAIGN_REQUIRED = [
+    "docs/TICKET_RUN.md",
 ]
 
 HUMAN_REQUIRED = [
@@ -71,14 +78,20 @@ TASK_REQUIRED_STRINGS = [
     "## Human Messages Sent",
     "## Best Next Milestone",
     "## Suggested Next Sprint-Sized Task",
-    "## Ambitious Ideas Backlog",
     "## Continue/Block/Critical-Stop Rationale",
+]
+
+TASK_BACKLOG_HEADINGS = [
+    "## Improvement Backlog",
+    "## Deferred / Follow-Up Tickets",
+    "## Ambitious Ideas Backlog",
 ]
 
 DEVELOPMENT_REQUIRED_STRINGS = [
     "First Review Checklist",
     "bash scripts/validate_starter_kit.sh",
     "python3 scripts/diffmogger_browser.py doctor --launch",
+    "python3 scripts/ticket_run.py . status --json",
     "Run Safety Check",
     "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
     "Diffmogger-observatory.html",
@@ -97,6 +110,8 @@ AUTOMATION_REQUIRED_STRINGS = [
     "--dangerously-bypass-approvals-and-sandbox",
     "ACTIVE_WITH_PENDING_USER_INPUT",
     "BLOCKED_ON_USER",
+    "ticket_campaign",
+    "scripts/ticket_run.py",
 ]
 
 RUNNER_REQUIRED_STRINGS = [
@@ -111,6 +126,7 @@ RUNNER_REQUIRED_STRINGS = [
     "--skip-git-repo-check",
     "update_automation_signals.py",
     "repair_environment.py",
+    "ticket_run.py",
     "child_pid",
     "forward_signal",
 ]
@@ -129,6 +145,8 @@ CONVEYOR_REQUIRED_STRINGS = [
     "active_role_run",
     "decision_queue",
     "planner deferred patch resolved",
+    "ticket campaign complete",
+    "ticket campaign blocked",
 ]
 
 OBSERVATORY_REQUIRED_STRINGS = [
@@ -171,6 +189,25 @@ BROWSER_HELPER_REQUIRED_STRINGS = [
     "DevTools listening on",
 ]
 
+TICKET_HELPER_REQUIRED_STRINGS = [
+    "json ticket-run",
+    "should-halt",
+    "target/ticket_run_completion.json",
+    "target/ticket_run_reports",
+    "api/notify",
+    "event_kind",
+    "local_notify",
+    "NOTIFIER_UNREACHABLE",
+]
+
+TICKET_RUN_REQUIRED_STRINGS = [
+    "json ticket-run",
+    "halt_when_complete",
+    "notify_on_complete",
+    "candidate_done",
+    "target/ticket_run_reports",
+]
+
 WRITE_WORKER_AUTOMATION_REQUIRED_STRINGS = [
     "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS",
     "Parallelism budget:",
@@ -195,7 +232,7 @@ FILE_ONLY_AUTOMATION_REQUIRED_STRINGS = [
     "Remove handled",
     "docs/HUMAN_RESPONSES_ARCHIVE.md",
     "docs/HUMAN_REQUESTS.md",
-    "Do not attempt to send a text message",
+    "Do not use Discord or notifier APIs",
 ]
 
 LOCAL_NOTIFIER_AUTOMATION_REQUIRED_STRINGS = [
@@ -207,8 +244,20 @@ LOCAL_NOTIFIER_AUTOMATION_REQUIRED_STRINGS = [
     "docs/HUMAN_OUTBOX.md",
     "NOTIFIER_UNREACHABLE",
     "message_body",
-    "send me",
-    "text me",
+    "event_kind",
+    "desktop notifications",
+]
+
+DISCORD_NOTIFIER_AUTOMATION_REQUIRED_STRINGS = [
+    "Human bridge mode: `discord_notifier`",
+    "POST http://127.0.0.1:8765/api/notify",
+    "event_kind",
+    "progress",
+    "message",
+    "Local automation commits trigger",
+    "docs/HUMAN_INBOX.md",
+    "docs/HUMAN_OUTBOX.md",
+    "NOTIFIER_UNREACHABLE",
 ]
 
 MULTI_ROLE_AUTOMATION_REQUIRED_STRINGS = [
@@ -282,7 +331,9 @@ INTEGRATOR_REQUIRED_STRINGS = [
     "semantic_commit_message",
     "parse_commit_intent",
     "semantic_changed_files",
-    "chore(integrator): checkpoint dirty main",
+    "notify_commit_progress",
+    "automation_commit_progress",
+    "chore(integrator): checkpoint preexisting local changes",
     "repair_environment.py",
     "worktree",
     "prune",
@@ -318,7 +369,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--human-bridge-mode",
-        choices=["file_only", "local_notifier", "disabled"],
+        choices=["file_only", "local_notifier", "discord_notifier", "disabled"],
         default=None,
         help="Validate mode-specific human bridge markers.",
     )
@@ -337,6 +388,11 @@ def main() -> int:
         action="store_true",
         help="Validate optional automation signal definitions and markers.",
     )
+    parser.add_argument(
+        "--ticket-campaign-enabled",
+        action="store_true",
+        help="Validate optional ticket-campaign source file and markers.",
+    )
     args = parser.parse_args()
 
     root = Path(args.target).resolve()
@@ -348,6 +404,8 @@ def main() -> int:
         required.extend(MULTI_ROLE_REQUIRED)
     if args.automation_signals_enabled:
         required.extend(AUTOMATION_SIGNALS_REQUIRED)
+    if args.ticket_campaign_enabled:
+        required.extend(TICKET_CAMPAIGN_REQUIRED)
 
     problems: list[str] = []
     for rel in required:
@@ -361,6 +419,10 @@ def main() -> int:
         for marker in TASK_REQUIRED_STRINGS:
             if marker not in task_text:
                 problems.append(f"docs/CODEX_AUTOMATION_TASKS.md: missing marker {marker!r}")
+        if not any(marker in task_text for marker in TASK_BACKLOG_HEADINGS):
+            problems.append(
+                "docs/CODEX_AUTOMATION_TASKS.md: missing a recognized backlog heading"
+            )
 
     development_path = root / "docs/DEVELOPMENT.md"
     if development_path.exists() and development_path.is_file():
@@ -377,12 +439,23 @@ def main() -> int:
             mode_markers = FILE_ONLY_AUTOMATION_REQUIRED_STRINGS
         elif mode == "local_notifier":
             mode_markers = LOCAL_NOTIFIER_AUTOMATION_REQUIRED_STRINGS
+        elif mode == "discord_notifier":
+            mode_markers = DISCORD_NOTIFIER_AUTOMATION_REQUIRED_STRINGS
         write_worker_markers = WRITE_WORKER_AUTOMATION_REQUIRED_STRINGS if args.write_workers_enabled else []
         multi_role_markers = MULTI_ROLE_AUTOMATION_REQUIRED_STRINGS if args.multi_role_enabled else []
         signal_markers = ["Automation signals enabled: true", "target/automation_signals.json"] if args.automation_signals_enabled else []
-        for marker in AUTOMATION_REQUIRED_STRINGS + mode_markers + write_worker_markers + multi_role_markers + signal_markers:
+        ticket_markers = ["Automation run mode: `ticket_campaign`", "docs/TICKET_RUN.md"] if args.ticket_campaign_enabled else []
+        for marker in AUTOMATION_REQUIRED_STRINGS + mode_markers + write_worker_markers + multi_role_markers + signal_markers + ticket_markers:
             if marker not in automation_text:
                 problems.append(f".agentic/automation_prompt.md: missing marker {marker!r}")
+
+    if args.ticket_campaign_enabled:
+        ticket_run_path = root / "docs/TICKET_RUN.md"
+        if ticket_run_path.exists() and ticket_run_path.is_file():
+            ticket_text = ticket_run_path.read_text(encoding="utf-8")
+            for marker in TICKET_RUN_REQUIRED_STRINGS:
+                if marker not in ticket_text:
+                    problems.append(f"docs/TICKET_RUN.md: missing marker {marker!r}")
 
     if args.multi_role_enabled:
         guardrails_path = root / "docs/CODEX_AUTOMATION_GUARDRAILS.md"
@@ -455,6 +528,13 @@ def main() -> int:
         for marker in BROWSER_HELPER_REQUIRED_STRINGS:
             if marker not in browser_helper_text:
                 problems.append(f"scripts/diffmogger_browser.py: missing marker {marker!r}")
+
+    ticket_helper_path = root / "scripts/ticket_run.py"
+    if ticket_helper_path.exists() and ticket_helper_path.is_file():
+        ticket_helper_text = ticket_helper_path.read_text(encoding="utf-8")
+        for marker in TICKET_HELPER_REQUIRED_STRINGS:
+            if marker not in ticket_helper_text:
+                problems.append(f"scripts/ticket_run.py: missing marker {marker!r}")
 
     if args.multi_role_enabled:
         run_role_path = root / "scripts/run_role_automation.sh"

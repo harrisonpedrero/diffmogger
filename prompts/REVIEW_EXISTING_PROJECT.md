@@ -39,6 +39,6 @@ The first task file should honestly describe:
 
 If the repo has unclear setup, create a human request only when the owner must act. Otherwise infer and document safe assumptions.
 
-The recurring automation prompt must distinguish structured human replies from freeform commands. In `file_only` mode, summary/status requests should be satisfied locally in Markdown or app artifacts. In `local_notifier` mode, if the human asks to be texted, messaged, or sent a status update, the automation should use `POST http://127.0.0.1:8765/api/notify` when available and should record `NOTIFIER_UNREACHABLE` in `docs/HUMAN_OUTBOX.md` when unavailable.
+The recurring automation prompt must distinguish structured human replies from freeform commands. In `file_only` mode, summary/status requests should be satisfied locally in Markdown or app artifacts. In `local_notifier` or `discord_notifier` mode, if the human asks to be messaged, replied to, or sent a status update, the automation should use `POST http://127.0.0.1:8765/api/notify` with `event_kind: "message"` when available and should record `NOTIFIER_UNREACHABLE` in `docs/HUMAN_OUTBOX.md` when unavailable.
 
 Run available validation commands if safe. Update the task file with results.

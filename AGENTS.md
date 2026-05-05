@@ -113,12 +113,17 @@ docs/HUMAN_RESPONSES_ARCHIVE.md
 - Multi-role automations allowed: true; role profile: planner_builder_hardener_integrator.
 - Process human inbox messages, including freeform commands.
 - If the human asks for a summary, status update, explanation, or report, satisfy it locally in Markdown or app artifacts.
-- Do not use SMS, WhatsApp, Twilio, or notifier APIs unless the human explicitly changes bridge mode.
+- Do not use Discord or notifier APIs unless the human explicitly changes bridge mode.
 - Process handled human inbox messages only after completing or intentionally deferring the requested action, then archive concise notes.
 - Record `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` every automation run.
 - Update `docs/CODEX_AUTOMATION_TASKS.md` at the end of every automation run.
 
 ### Verification
+
+Full-suite commands are configured in `.agentic/verification_commands.txt`.
+Use them for hardener/finalization or when explicitly required; builder/planner patches may use narrower checks from `.agentic/smoke_commands.txt` or the role manifest.
+The integrator records clean-HEAD baseline verification in `target/baseline_verification.json`; unrelated focused patches should not be rejected solely because that baseline is already failing.
+Hardener may add, rewrite, or remove obsolete tests when it improves verification quality, but must include `Test change rationale:` for removed or substantially rewritten tests and must not delete tests merely to pass checks.
 
 Preferred commands:
 

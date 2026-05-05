@@ -8,6 +8,8 @@ target/
 
 # Local Diffmogger automation state for this checkout.
 .agentic/
+!templates/.agentic/
+!templates/.agentic/**
 docs/AUTONOMY_EXPERIMENT_LOG.md
 docs/CODEX_AUTOMATION_GUARDRAILS.md
 docs/CODEX_AUTOMATION_TASKS.md

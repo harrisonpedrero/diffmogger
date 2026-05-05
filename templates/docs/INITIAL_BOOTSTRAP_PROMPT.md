@@ -64,6 +64,10 @@ Desired first demo: {{DESIRED_FIRST_DEMO}}
 
 {{AUTOMATION_SIGNALS_BOOTSTRAP_SECTION}}
 
+## Ticket Campaign Mode
+
+{{TICKET_CAMPAIGN_TASK_NOTES}}
+
 ## Build Requirements
 
 Create an initial local-first baseline with:
@@ -79,6 +83,8 @@ Create an initial local-first baseline with:
 
 ## Verification
 
+Record full-suite commands in `.agentic/verification_commands.txt`. Keep broad suites there for hardener/finalization, and use `.agentic/smoke_commands.txt` for narrower multi-role patch checks when useful.
+
 Preferred commands:
 
 ```text
@@ -89,6 +95,6 @@ Run the commands that exist or that you create. Do not claim checks passed unles
 
 ## End
 
-Update `docs/CODEX_AUTOMATION_TASKS.md` with current repo state, product horizon state, H1 advancement evidence, completed work, checks, generated artifacts, Codex CLI worker decision, worker activity, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status.
+Update `docs/CODEX_AUTOMATION_TASKS.md` with current repo state, product horizon state, {{INITIAL_PROGRESS_EVIDENCE_LABEL}}, completed work, checks, generated artifacts, Codex CLI worker decision, worker activity, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status.
 
-Do not stop merely because a basic demo exists. This is the first horizon, not the final product.
+{{BOOTSTRAP_END_NOTE}}

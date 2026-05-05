@@ -10,11 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TWILIO_ACCOUNT_SID = re.compile(r"\bAC[0-9a-fA-F]{32}\b")
-LIVE_NGROK_URL = re.compile(r"https://[a-z0-9][a-z0-9-]*\.ngrok(?:-free)?\.app", re.I)
+DISCORD_BOT_TOKEN = re.compile(r"\b[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{24,}\b")
 PHONE_NUMBER = re.compile(r"(?<![\w+])\+1\d{10}(?!\w)")
 PLACEHOLDER_PHONES = {"+15555555555", "+14155238886"}
-PLACEHOLDER_NGROK_URLS = {"https://example.ngrok-free.app"}
 
 
 @dataclass(frozen=True)
@@ -77,12 +75,8 @@ def scan_for_live_secrets_or_urls(root: Path, problems: list[Problem]) -> None:
         except UnicodeDecodeError:
             continue
 
-        for match in TWILIO_ACCOUNT_SID.findall(text):
-            problems.append(Problem(rel, f"contains a concrete-looking Twilio Account SID: {match}"))
-
-        for match in LIVE_NGROK_URL.findall(text):
-            if match not in PLACEHOLDER_NGROK_URLS:
-                problems.append(Problem(rel, f"contains a non-placeholder ngrok URL: {match}"))
+        for match in DISCORD_BOT_TOKEN.findall(text):
+            problems.append(Problem(rel, f"contains a concrete-looking Discord bot token: {match}"))
 
         for match in PHONE_NUMBER.findall(text):
             if match not in PLACEHOLDER_PHONES:
@@ -100,8 +94,8 @@ def check_integration_safety(root: Path) -> list[Problem]:
         ),
         (
             "services/agentic-notifier/agentic_notifier/config.py",
-            'webhook_host: str = "127.0.0.1"',
-            "webhook receiver must default to loopback",
+            "discord_bot_token: str = \"\"",
+            "Discord token must default to empty configuration",
         ),
         (
             "services/agentic-notifier/agentic_notifier/config.py",
@@ -125,8 +119,8 @@ def check_integration_safety(root: Path) -> list[Problem]:
         ),
         (
             "services/agentic-notifier/.env.example",
-            "WEBHOOK_HOST=127.0.0.1",
-            "example webhook host must be loopback",
+            "DISCORD_BOT_TOKEN=replace-with-your-discord-bot-token",
+            "example notifier config must use a placeholder Discord token",
         ),
         (
             "services/agentic-notifier/agentic_notifier/api_app.py",
@@ -150,8 +144,8 @@ def check_integration_safety(root: Path) -> list[Problem]:
         ),
         (
             "services/agentic-notifier/README.md",
-            "Do not expose `http://127.0.0.1:8765/api/notify` through ngrok.",
-            "notifier docs must forbid exposing the local notify API",
+            "Bind the API to `127.0.0.1` unless `LOCAL_NOTIFY_API_TOKEN` is configured.",
+            "notifier docs must document local API binding and token safety",
         ),
         (
             "scripts/scaffold_project_docs.py",
@@ -160,7 +154,7 @@ def check_integration_safety(root: Path) -> list[Problem]:
         ),
         (
             "docs/HUMAN_BRIDGE_SETUP.md",
-            "No SMS, WhatsApp, Twilio, webhook, ngrok, notifier API, or messaging credentials are used in this mode.",
+            "No Discord, webhook, notifier API, or messaging credentials are used in this mode.",
             "current file-only bridge docs must forbid notifier and messaging side effects",
         ),
         (

@@ -1,0 +1,20 @@
+# Expected Generated Files: PatchQueue
+
+The generation prompt should produce the standard automation file set plus the ticket source:
+
+```text
+AGENTS.md
+.agentic/automation_prompt.md
+docs/INITIAL_BOOTSTRAP_PROMPT.md
+docs/PROJECT_CONTEXT.md
+docs/CODEX_AUTOMATION_TASKS.md
+docs/CODEX_AUTOMATION_GUARDRAILS.md
+docs/TICKET_RUN.md
+scripts/ticket_run.py
+```
+
+The generated recurring prompt should use bounded ticket-run phases: ticket-run readiness, ticket implementation, verification and hardening, completion report, and stop.
+
+The generated task file should keep `## Product Horizon State` for compatibility, but its current horizon should be a ticket-run phase and its backlog section should be `## Deferred / Follow-Up Tickets`.
+
+The generated prompt and task file should not use product-roadmap language such as `MVP`, `Beyond MVP`, or `Ambitious extensions`. `docs/TICKET_RUN.md` is the source of truth for scope, and automation should stop launching new work after all tickets are done or blocked.

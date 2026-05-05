@@ -18,7 +18,7 @@
     "received_at": { "type": "string", "format": "date-time" },
     "channel": {
       "type": "string",
-      "enum": ["manual", "sms", "whatsapp", "email", "slack", "other"]
+      "enum": ["manual", "discord", "local_notification", "email", "slack", "other"]
     },
     "from": { "type": "string" },
     "request_id": { "type": "string", "minLength": 1 },
@@ -26,7 +26,7 @@
       "type": "string",
       "enum": ["done", "approve", "reject", "skip", "info", "unknown"]
     },
-    "message_sid": { "type": "string" },
+    "message_id": { "type": "string" },
     "body": { "type": "string" },
     "status": {
       "type": "string",

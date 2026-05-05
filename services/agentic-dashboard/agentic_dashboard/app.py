@@ -61,6 +61,13 @@ SCHEDULE_STRATEGY_LABELS = {
     SCHEDULE_STRATEGY_CONVEYOR: "Continuous conveyor",
 }
 SCHEDULE_STRATEGY_BY_LABEL = {label: key for key, label in SCHEDULE_STRATEGY_LABELS.items()}
+ENV_ACCESS_PROJECT_COMMANDS_ONLY = "project_commands_only"
+ENV_ACCESS_DIRECT = "direct_env_files_allowed"
+ENV_ACCESS_LABELS = {
+    ENV_ACCESS_PROJECT_COMMANDS_ONLY: "Project commands only",
+    ENV_ACCESS_DIRECT: "Allow direct .env reads",
+}
+ENV_ACCESS_BY_LABEL = {label: key for key, label in ENV_ACCESS_LABELS.items()}
 MAX_DASHBOARD_LOG_LINES = 1200
 MAX_DASHBOARD_LOG_LINE_CHARS = 4000
 DASHBOARD_STATE_FILE = ".agentic/dashboard_state.json"
@@ -256,6 +263,18 @@ def schedule_strategy_from_value(value: Any, *, multi_role_enabled: bool = False
     return SCHEDULE_STRATEGY_FIXED_MULTI_ROLE if multi_role_enabled else SCHEDULE_STRATEGY_SINGLE
 
 
+def env_access_policy_from_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if text in ENV_ACCESS_LABELS:
+        return text
+    if text in ENV_ACCESS_BY_LABEL:
+        return ENV_ACCESS_BY_LABEL[text]
+    normalized = text.lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"direct_env_files_allowed", "allow_direct_env_files", "allow_env_files"}:
+        return ENV_ACCESS_DIRECT
+    return ENV_ACCESS_PROJECT_COMMANDS_ONLY
+
+
 def write_worker_count_from_text(value: Any, *, enabled: bool) -> int:
     if not enabled:
         return 0
@@ -263,6 +282,19 @@ def write_worker_count_from_text(value: Any, *, enabled: bool) -> int:
     match = re.search(r"\d+", text)
     count = int(match.group(0)) if match else DEFAULT_WRITE_WORKER_COUNT
     return min(MAX_WRITE_WORKER_COUNT, max(1, count))
+
+
+def bool_from_value(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def format_interval(seconds: int) -> str:
@@ -484,7 +516,13 @@ def fetch_notifier_health(timeout: float = 0.6) -> tuple[bool, str]:
             body = response.read().decode("utf-8", errors="replace")
         payload = json.loads(body)
         configured = payload.get("target_repo_configured")
-        return True, f"agentic-notifier is reachable; target_repo_configured={configured}."
+        discord = payload.get("discord_configured")
+        local = payload.get("local_notifications_enabled")
+        return True, (
+            "agentic-notifier is reachable; "
+            f"target_repo_configured={configured}; discord_configured={discord}; "
+            f"local_notifications_enabled={local}."
+        )
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
         return False, f"agentic-notifier is not reachable on 127.0.0.1:8765 ({exc})."
 
@@ -566,7 +604,7 @@ def check_prerequisites(target: Path, human_bridge_mode: str) -> list[Prerequisi
             )
         )
 
-    if human_bridge_mode == "local_notifier":
+    if human_bridge_mode in {"local_notifier", "discord_notifier"}:
         notifier_ok, notifier_detail = fetch_notifier_health()
         items.append(
             PrerequisiteItem(
@@ -1012,7 +1050,7 @@ def append_manual_inbox_entry(
 - to: automation
 - request_id: {safe_request_id}
 - parsed_intent: {parsed_intent.strip() or "info"}
-- message_sid: manual-dashboard-{now.strftime("%Y%m%d%H%M%S")}
+    - message_id: manual-dashboard-{now.strftime("%Y%m%d%H%M%S")}
 - status: unhandled
 
 ### Body
@@ -1050,6 +1088,7 @@ if TK_AVAILABLE:
             self.human_bridge_enabled_var = tk.BooleanVar(value=True)
             self.bridge_mode_var = tk.StringVar(value="file_only")
             self.human_text_responses_var = tk.BooleanVar(value=True)
+            self.local_notifications_enabled_var = tk.BooleanVar(value=True)
             self.cadence_var = tk.StringVar(value=str(DEFAULT_CADENCE_MINUTES))
             self.schedule_strategy_var = tk.StringVar(value=SCHEDULE_STRATEGY_LABELS[SCHEDULE_STRATEGY_SINGLE])
             self.force_var = tk.BooleanVar(value=False)
@@ -1058,11 +1097,15 @@ if TK_AVAILABLE:
             self.write_worker_agents_var = tk.BooleanVar(value=False)
             self.max_write_worker_count_var = tk.StringVar(value=str(DEFAULT_WRITE_WORKER_COUNT))
             self.automation_signals_enabled_var = tk.BooleanVar(value=False)
+            self.env_access_policy_var = tk.StringVar(value=ENV_ACCESS_LABELS[ENV_ACCESS_PROJECT_COMMANDS_ONLY])
             self.multi_role_automations_var = tk.BooleanVar(value=False)
             self.automation_role_profile_var = tk.StringVar(value="single_lane")
             self.automation_checkpoint_commits_var = tk.BooleanVar(value=True)
             self.multi_role_base_cadence_var = tk.StringVar(value=str(DEFAULT_MULTI_ROLE_BASE_CADENCE_MINUTES))
             self.multi_role_allow_remotes_var = tk.BooleanVar(value=False)
+            self.ticket_campaign_enabled_var = tk.BooleanVar(value=False)
+            self.ticket_run_file_var = tk.StringVar(value="docs/TICKET_RUN.md")
+            self.ticket_completion_notify_var = tk.BooleanVar(value=True)
             self.status_var = tk.StringVar(value="No target loaded.")
             self.schedule_status_var = tk.StringVar(value="Schedule: target not loaded.")
             self.worker_strategy_var = tk.StringVar(value="Next worker strategy: not loaded.")
@@ -1222,15 +1265,32 @@ if TK_AVAILABLE:
                 rules,
                 row,
                 "Safety Constraints",
-                "- Do not read .env\n- Do not send notifications externally in the first demo\n- Do not publish or deploy without approval",
+                "- Do not send notifications externally in the first demo\n- Do not publish or deploy without approval\n- Never print, store, or commit secrets",
                 help_text="List safety rules that should guide implementation. Include privacy, security, external side effects, compliance, or domain-risk limits.",
                 height=4,
             )
+            ttk.Label(rules, text="Environment Access", style="Section.TLabel").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=6)
+            env_frame = ttk.Frame(rules)
+            env_frame.grid(row=row, column=1, sticky="ew", pady=6)
+            env_combo = ttk.Combobox(
+                env_frame,
+                textvariable=self.env_access_policy_var,
+                values=list(ENV_ACCESS_LABELS.values()),
+                state="readonly",
+                width=28,
+            )
+            env_combo.pack(side="left")
+            ttk.Label(
+                env_frame,
+                text="Use direct .env only for disposable or explicitly approved local/live test runs.",
+                style="Help.TLabel",
+            ).pack(side="left", padx=(8, 0))
+            row += 1
             row = self._add_text(
                 rules,
                 row,
                 "External Services",
-                "- Optional calendar integration later\n- Optional SMS/email reminders later",
+                "- Optional calendar integration later\n- Optional Discord or email notifications later",
                 help_text="List integrations that may matter now or later. Say whether each is required, optional, mocked, dry-run only, or blocked until human approval.",
                 height=4,
             )
@@ -1238,7 +1298,7 @@ if TK_AVAILABLE:
                 rules,
                 row,
                 "Automation Must Never Do",
-                "- Never read secrets or .env files\n- Never spend money, deploy publicly, publish externally, or contact real users without explicit approval\n- Never delete user data or rewrite history without approval",
+                "- Never print, store, or commit secrets\n- Never spend money, deploy publicly, publish externally, or contact real users without explicit approval\n- Never delete user data or rewrite history without approval",
                 help_text="List absolute prohibitions. These become generated guardrails, so write them as direct commands.",
                 height=4,
             )
@@ -1286,7 +1346,7 @@ if TK_AVAILABLE:
             ttk.Label(bridge_label_frame, text="Human Bridge Mode", style="Section.TLabel").pack(anchor="w")
             ttk.Label(
                 bridge_label_frame,
-                text="Choose file-only for manual dashboard/Markdown replies, local notifier for SMS/WhatsApp, or disabled for no human queue.",
+                text="Choose file-only for Markdown replies, local notifier for desktop notifications, Discord notifier for channel updates, or disabled for no human queue.",
                 style="Help.TLabel",
                 wraplength=260,
                 justify="left",
@@ -1294,7 +1354,7 @@ if TK_AVAILABLE:
             bridge = ttk.Combobox(
                 automation,
                 textvariable=self.bridge_mode_var,
-                values=["file_only", "local_notifier", "disabled"],
+                values=["file_only", "local_notifier", "discord_notifier", "disabled"],
                 state="readonly",
             )
             bridge.grid(row=row, column=1, sticky="ew", pady=6)
@@ -1306,8 +1366,19 @@ if TK_AVAILABLE:
             ttk.Label(automation, text="Notifier Text Responses", style="Section.TLabel").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=6)
             ttk.Checkbutton(
                 text_response_frame,
-                text="Freeform human requests should receive SMS/WhatsApp responses when the notifier is available",
+                text="Freeform human requests should receive direct notifier messages when the notifier is available",
                 variable=self.human_text_responses_var,
+            ).pack(side="left")
+            row += 1
+
+            local_notify_frame = ttk.Frame(automation)
+            local_notify_frame.grid(row=row, column=1, sticky="w", pady=6)
+            ttk.Label(automation, text="Local Notifications", style="Section.TLabel").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=6)
+            ttk.Checkbutton(
+                local_notify_frame,
+                text="Enable native desktop notifications for notifier modes",
+                variable=self.local_notifications_enabled_var,
+                command=self.refresh_prerequisites,
             ).pack(side="left")
             row += 1
 
@@ -1357,6 +1428,31 @@ if TK_AVAILABLE:
                 help_text="Optional project-specific guidance for write-capable workers. Keep it generic and focused on useful parallelism, ownership boundaries, integration, and verification.",
                 height=3,
             )
+            ticket_campaign = ttk.LabelFrame(automation, text="Ticket Campaign")
+            ticket_campaign.grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
+            ticket_campaign.columnconfigure(1, weight=1)
+            ttk.Checkbutton(
+                ticket_campaign,
+                text="Enable bounded ticket campaign mode",
+                variable=self.ticket_campaign_enabled_var,
+                command=self.refresh_prerequisites,
+            ).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 4))
+            ttk.Label(ticket_campaign, text="Ticket file").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+            ttk.Entry(ticket_campaign, textvariable=self.ticket_run_file_var).grid(row=1, column=1, sticky="ew", padx=8, pady=4)
+            ttk.Checkbutton(
+                ticket_campaign,
+                text="Send native macOS desktop notification when the ticket run halts",
+                variable=self.ticket_completion_notify_var,
+                command=self.refresh_prerequisites,
+            ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=4)
+            ttk.Label(
+                ticket_campaign,
+                text="Tickets are edited in the generated Markdown file. Populate the fenced JSON block with ticket IDs, acceptance criteria, verification commands, evidence, and blockers before leaving automation unattended.",
+                style="Help.TLabel",
+                wraplength=680,
+                justify="left",
+            ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 8))
+            row += 1
             multi_role = ttk.LabelFrame(automation, text="Multi-Role Automation")
             multi_role.grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
             multi_role.columnconfigure(1, weight=1)
@@ -1419,9 +1515,9 @@ if TK_AVAILABLE:
             row = self._add_text(
                 progression,
                 row,
-                "Beyond MVP",
+                "Long-Run Direction",
                 "Add recurring review capsules, local import/export, richer planning views, and optional notification adapters behind feature gates.",
-                help_text="Describe what the automation should aim for after the first demo works. Mention product horizons, quality bar, integrations, polish, or ambitious extensions.",
+                help_text="Describe what the automation should aim for after the initial scope. Ticket campaigns can leave this empty.",
                 height=4,
             )
             row = self._add_text(
@@ -1671,7 +1767,7 @@ if TK_AVAILABLE:
             compose.columnconfigure(1, weight=1)
             ttk.Label(
                 compose,
-                text="Write a message for the next automation run. This is the dashboard-friendly way to reply when SMS/WhatsApp is disabled or unavailable.",
+                text="Write a message for the next automation run. This is the dashboard-friendly way to reply when notifier delivery is disabled or unavailable.",
                 wraplength=980,
                 style="Help.TLabel",
             ).grid(row=0, column=0, columnspan=4, sticky="w", padx=8, pady=(8, 4))
@@ -2027,18 +2123,21 @@ if TK_AVAILABLE:
             self._set_text_field("External Services", intake.get("external_services", []))
             self._set_text_field("Verification Commands", intake.get("verification_commands", []))
             self._set_text_field("Automation Must Never Do", intake.get("automation_must_never_do", []))
+            env_policy = env_access_policy_from_value(intake.get("env_access_policy"))
+            self.env_access_policy_var.set(ENV_ACCESS_LABELS[env_policy])
             self._set_text_field("Meaningful Deliverable", intake.get("meaningful_deliverable", ""))
-            self._set_text_field("Beyond MVP", intake.get("beyond_mvp", ""))
+            self._set_text_field("Long-Run Direction", intake.get("beyond_mvp", ""))
             self._set_text_field("Assumptions", intake.get("assumptions", []))
             self._set_text_field("Write Worker Guidance", intake.get("write_worker_guidance", ""))
 
             mode = str(intake.get("human_bridge_mode") or "file_only")
-            if mode not in {"file_only", "local_notifier", "disabled"}:
+            if mode not in {"file_only", "local_notifier", "discord_notifier", "disabled"}:
                 mode = "file_only"
             enabled = bool(intake.get("human_bridge_enabled", mode != "disabled")) and mode != "disabled"
             self.human_bridge_enabled_var.set(enabled)
             self.bridge_mode_var.set(mode if enabled else "disabled")
             self.human_text_responses_var.set(bool(intake.get("human_requested_text_responses", True)))
+            self.local_notifications_enabled_var.set(bool_from_value(intake.get("local_notifications_enabled"), True))
             self.worker_agents_var.set(bool(intake.get("worker_agents_allowed", True)))
             self.codex_workers_var.set(bool(intake.get("codex_cli_workers_expected_on_broad_runs", True)))
             self.automation_signals_enabled_var.set(bool(intake.get("automation_signals_enabled", False)))
@@ -2058,6 +2157,10 @@ if TK_AVAILABLE:
             self.automation_checkpoint_commits_var.set(bool(intake.get("automation_checkpoint_commits", True)))
             self.multi_role_base_cadence_var.set(str(multi_role_cadence_minutes_from_text(intake.get("multi_role_base_cadence_minutes"))))
             self.multi_role_allow_remotes_var.set(bool(intake.get("multi_role_allow_remotes", False)))
+            automation_run_mode = str(intake.get("automation_run_mode") or "continuous_improvement").strip()
+            self.ticket_campaign_enabled_var.set(automation_run_mode == "ticket_campaign")
+            self.ticket_run_file_var.set(str(intake.get("ticket_run_file") or "docs/TICKET_RUN.md"))
+            self.ticket_completion_notify_var.set(bool_from_value(intake.get("ticket_completion_notify"), True))
             strategy = schedule_strategy_from_value(intake.get("automation_schedule_strategy"), multi_role_enabled=multi_role_enabled)
             self.schedule_strategy_var.set(SCHEDULE_STRATEGY_LABELS[strategy])
             self.cadence_var.set(str(cadence_minutes_from_text(intake.get("desired_cadence"))))
@@ -2078,6 +2181,11 @@ if TK_AVAILABLE:
                 )
             if "automation_signals_enabled" in state:
                 self.automation_signals_enabled_var.set(bool(state.get("automation_signals_enabled")))
+            if "local_notifications_enabled" in state:
+                self.local_notifications_enabled_var.set(bool_from_value(state.get("local_notifications_enabled"), True))
+            if "env_access_policy" in state:
+                env_policy = env_access_policy_from_value(state.get("env_access_policy"))
+                self.env_access_policy_var.set(ENV_ACCESS_LABELS[env_policy])
             if "multi_role_automations_allowed" in state:
                 multi_role_enabled = bool(state.get("multi_role_automations_allowed"))
                 self.multi_role_automations_var.set(multi_role_enabled)
@@ -2086,6 +2194,12 @@ if TK_AVAILABLE:
                 self.automation_checkpoint_commits_var.set(bool(state.get("automation_checkpoint_commits", True)))
                 self.multi_role_base_cadence_var.set(str(multi_role_cadence_minutes_from_text(state.get("multi_role_base_cadence_minutes"))))
                 self.multi_role_allow_remotes_var.set(bool(state.get("multi_role_allow_remotes", False)))
+            if "automation_run_mode" in state:
+                self.ticket_campaign_enabled_var.set(str(state.get("automation_run_mode")) == "ticket_campaign")
+            if "ticket_run_file" in state:
+                self.ticket_run_file_var.set(str(state.get("ticket_run_file") or "docs/TICKET_RUN.md"))
+            if "ticket_completion_notify" in state:
+                self.ticket_completion_notify_var.set(bool_from_value(state.get("ticket_completion_notify"), True))
             if "automation_schedule_strategy" in state:
                 strategy = schedule_strategy_from_value(
                     state.get("automation_schedule_strategy"),
@@ -2138,6 +2252,8 @@ if TK_AVAILABLE:
                 "human_bridge_enabled": bool(self.human_bridge_enabled_var.get()),
                 "human_bridge_mode": self.bridge_mode_var.get(),
                 "human_requested_text_responses": bool(self.human_text_responses_var.get()),
+                "local_notifications_enabled": bool(self.local_notifications_enabled_var.get()),
+                "env_access_policy": env_access_policy_from_value(self.env_access_policy_var.get()),
                 "worker_agents_allowed": bool(self.worker_agents_var.get()),
                 "codex_cli_workers_expected_on_broad_runs": bool(self.codex_workers_var.get()),
                 "automation_signals_enabled": bool(self.automation_signals_enabled_var.get()),
@@ -2151,6 +2267,9 @@ if TK_AVAILABLE:
                 "automation_checkpoint_commits": bool(self.automation_checkpoint_commits_var.get()),
                 "multi_role_base_cadence_minutes": multi_role_cadence_minutes_from_text(self.multi_role_base_cadence_var.get()),
                 "multi_role_allow_remotes": bool(self.multi_role_allow_remotes_var.get()),
+                "automation_run_mode": "ticket_campaign" if bool(self.ticket_campaign_enabled_var.get()) else "continuous_improvement",
+                "ticket_run_file": self.ticket_run_file_var.get().strip() or "docs/TICKET_RUN.md",
+                "ticket_completion_notify": bool(self.ticket_completion_notify_var.get()),
                 "overwrite_existing_scaffold_files": bool(self.force_var.get()),
                 "last_action": last_action,
                 "automation_ready": ready,
@@ -2242,6 +2361,7 @@ if TK_AVAILABLE:
             multi_role_enabled = bool(self.multi_role_automations_var.get())
             multi_role_cadence = multi_role_cadence_minutes_from_text(self.multi_role_base_cadence_var.get())
             schedule_strategy = self.schedule_strategy()
+            ticket_file = self.ticket_run_file_var.get().strip() or "docs/TICKET_RUN.md"
             return {
                 "project_name": self.project_name_var.get().strip() or "New Project",
                 "project_mode": "existing_project" if bool(self.existing_project_var.get()) else "fresh_project",
@@ -2253,11 +2373,13 @@ if TK_AVAILABLE:
                 "safety_constraints": split_lines(self._text_value("Safety Constraints")),
                 "automation_must_never_do": split_lines(self._text_value("Automation Must Never Do")),
                 "external_services": split_lines(self._text_value("External Services")),
+                "env_access_policy": env_access_policy_from_value(self.env_access_policy_var.get()),
                 "verification_commands": split_lines(self._text_value("Verification Commands")),
                 "desired_cadence": f"every {cadence_minutes} minutes",
                 "human_bridge_enabled": bridge_enabled,
                 "human_bridge_mode": mode if bridge_enabled else "disabled",
                 "human_requested_text_responses": bool(self.human_text_responses_var.get()),
+                "local_notifications_enabled": bool(self.local_notifications_enabled_var.get()),
                 "worker_agents_allowed": bool(self.worker_agents_var.get()),
                 "codex_cli_workers_expected_on_broad_runs": bool(self.codex_workers_var.get()),
                 "automation_signals_enabled": bool(self.automation_signals_enabled_var.get()),
@@ -2270,8 +2392,11 @@ if TK_AVAILABLE:
                 "multi_role_base_cadence_minutes": multi_role_cadence,
                 "automation_schedule_strategy": schedule_strategy,
                 "multi_role_allow_remotes": bool(self.multi_role_allow_remotes_var.get()),
+                "automation_run_mode": "ticket_campaign" if bool(self.ticket_campaign_enabled_var.get()) else "continuous_improvement",
+                "ticket_run_file": ticket_file,
+                "ticket_completion_notify": bool(self.ticket_completion_notify_var.get()),
                 "meaningful_deliverable": self._text_value("Meaningful Deliverable"),
-                "beyond_mvp": self._text_value("Beyond MVP"),
+                "beyond_mvp": self._text_value("Long-Run Direction"),
                 "assumptions": split_lines(self._text_value("Assumptions")),
                 "additional_context_files": context_names,
             }
@@ -2281,6 +2406,19 @@ if TK_AVAILABLE:
             target = Path(target_text).expanduser()
             mode = self.bridge_mode_var.get() if self.human_bridge_enabled_var.get() else "disabled"
             items = check_prerequisites(target, mode)
+            if (
+                bool(self.local_notifications_enabled_var.get())
+                and mode in {"local_notifier", "discord_notifier"}
+            ):
+                osascript_path = shutil.which("osascript")
+                items.append(
+                    PrerequisiteItem(
+                        "macOS desktop notifications",
+                        bool(osascript_path),
+                        False,
+                        osascript_path or "osascript unavailable; notifier delivery will record LOCAL_NOTIFICATION_FAILED in docs/HUMAN_OUTBOX.md.",
+                    )
+                )
             self._show_prerequisites(items)
 
         def _show_prerequisites(self, items: list[PrerequisiteItem]) -> None:
@@ -2429,6 +2567,8 @@ if TK_AVAILABLE:
                     check_cmd.insert(-1, "--write-workers-enabled")
                 if intake.get("multi_role_automations_allowed"):
                     check_cmd.insert(-1, "--multi-role-enabled")
+                if intake.get("automation_run_mode") == "ticket_campaign":
+                    check_cmd.insert(-1, "--ticket-campaign-enabled")
                 check_code = self._run_command(check_cmd, cwd=KIT_ROOT)
                 if check_code != 0:
                     raise RuntimeError("Required-file check failed; bootstrap was not started.")
@@ -3022,6 +3162,8 @@ if TK_AVAILABLE:
                         target / "scripts" / "list_deferred_patches.py",
                     ]
                 )
+            if self._target_ticket_campaign_enabled(target):
+                required.append(target / "docs" / "TICKET_RUN.md")
             missing = [path.relative_to(target).as_posix() for path in required if not path.exists()]
             if missing:
                 return False, "Missing " + ", ".join(missing)
@@ -3077,7 +3219,7 @@ if TK_AVAILABLE:
                     intake = json.loads(intake_path.read_text(encoding="utf-8"))
                     mode = str(intake.get("human_bridge_mode") or "disabled")
                     enabled = bool(intake.get("human_bridge_enabled", mode != "disabled"))
-                    return mode if enabled and mode in {"file_only", "local_notifier"} else "disabled"
+                    return mode if enabled and mode in {"file_only", "local_notifier", "discord_notifier"} else "disabled"
                 except (OSError, json.JSONDecodeError):
                     pass
             return self.bridge_mode_var.get() if self.human_bridge_enabled_var.get() else "disabled"
@@ -3108,6 +3250,57 @@ if TK_AVAILABLE:
                     if "Multi-role automations allowed: false" in text:
                         return False
             return bool(self.multi_role_automations_var.get())
+
+        def _target_ticket_campaign_enabled(self, target: Path) -> bool:
+            intake_path = target / ".agentic" / "project_intake.json"
+            if intake_path.exists():
+                try:
+                    intake = json.loads(intake_path.read_text(encoding="utf-8"))
+                    return str(intake.get("automation_run_mode") or "continuous_improvement") == "ticket_campaign"
+                except (OSError, json.JSONDecodeError):
+                    pass
+            state_path = dashboard_state_path(target)
+            if state_path.exists():
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    return str(state.get("automation_run_mode") or "continuous_improvement") == "ticket_campaign"
+                except (OSError, json.JSONDecodeError):
+                    pass
+            return bool(self.ticket_campaign_enabled_var.get())
+
+        def _target_ticket_completion_notify_enabled(self, target: Path) -> bool:
+            intake_path = target / ".agentic" / "project_intake.json"
+            if intake_path.exists():
+                try:
+                    intake = json.loads(intake_path.read_text(encoding="utf-8"))
+                    return bool_from_value(intake.get("ticket_completion_notify"), True)
+                except (OSError, json.JSONDecodeError):
+                    pass
+            state_path = dashboard_state_path(target)
+            if state_path.exists():
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    return bool_from_value(state.get("ticket_completion_notify"), True)
+                except (OSError, json.JSONDecodeError):
+                    pass
+            return bool(self.ticket_completion_notify_var.get())
+
+        def _target_local_notifications_enabled(self, target: Path) -> bool:
+            intake_path = target / ".agentic" / "project_intake.json"
+            if intake_path.exists():
+                try:
+                    intake = json.loads(intake_path.read_text(encoding="utf-8"))
+                    return bool_from_value(intake.get("local_notifications_enabled"), True)
+                except (OSError, json.JSONDecodeError):
+                    pass
+            state_path = dashboard_state_path(target)
+            if state_path.exists():
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    return bool_from_value(state.get("local_notifications_enabled"), True)
+                except (OSError, json.JSONDecodeError):
+                    pass
+            return bool(self.local_notifications_enabled_var.get())
 
         def _target_schedule_strategy(self, target: Path) -> str:
             state_path = dashboard_state_path(target)
@@ -3218,6 +3411,19 @@ if TK_AVAILABLE:
                         has_initial_commit,
                         True,
                         "Target has an initial git commit." if has_initial_commit else "Run `git init`, `git add .`, and `git commit -m 'chore: initial commit'` before starting multi-role or conveyor scheduling.",
+                    )
+                )
+            if (
+                self._target_human_bridge_mode(target) in {"local_notifier", "discord_notifier"}
+                and self._target_local_notifications_enabled(target)
+            ):
+                osascript_path = shutil.which("osascript")
+                items.append(
+                    PrerequisiteItem(
+                        "macOS desktop notifications",
+                        bool(osascript_path),
+                        False,
+                        osascript_path or "osascript unavailable; notifier delivery will record LOCAL_NOTIFICATION_FAILED in docs/HUMAN_OUTBOX.md.",
                     )
                 )
             return items

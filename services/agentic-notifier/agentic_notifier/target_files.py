@@ -117,8 +117,9 @@ class TargetFiles:
         dry_run: bool,
         dedupe_key: str,
         status: str = "outbound_recorded",
-        provider_error_code: str | None = None,
-        provider_error_message: str | None = None,
+        delivery_error_code: str | None = None,
+        delivery_error_message: str | None = None,
+        delivery_results: dict[str, Any] | None = None,
         sent_at: datetime | None = None,
     ) -> None:
         self.ensure_all()
@@ -133,13 +134,14 @@ class TargetFiles:
 - request_id: {request.request_id}
 - short_request_id: {derive_short_request_id(request.request_id)}
 - type: {_one_line(request.type)}
+- event_kind: {_one_line(request.event_kind)}
 - priority: {_one_line(request.priority)}
 - dedupe_key: {_one_line(dedupe_key)}
 - sent: {str(sent).lower()}
 - dry_run: {str(dry_run).lower()}
 - status: {_one_line(status)}
-{f"- provider_error_code: {_one_line(provider_error_code)}" if provider_error_code else ""}
-{f"- provider_error_message: {_one_line(provider_error_message)}" if provider_error_message else ""}
+{f"- delivery_error_code: {_one_line(delivery_error_code)}" if delivery_error_code else ""}
+{f"- delivery_error_message: {_one_line(delivery_error_message)}" if delivery_error_message else ""}
 
 ### Summary
 
@@ -148,6 +150,12 @@ class TargetFiles:
 ### Message
 
 {message}
+
+### Delivery Results
+
+```json
+{json.dumps(delivery_results or {}, indent=2, sort_keys=True)}
+```
 
 ### Unblocked Work Remaining
 
@@ -168,13 +176,15 @@ class TargetFiles:
                 "request_id": request.request_id,
                 "short_request_id": derive_short_request_id(request.request_id),
                 "type": request.type,
+                "event_kind": request.event_kind,
                 "priority": request.priority,
                 "dedupe_key": dedupe_key,
                 "sent": sent,
                 "dry_run": dry_run,
                 "status": status,
-                "provider_error_code": provider_error_code,
-                "provider_error_message": provider_error_message,
+                "delivery_error_code": delivery_error_code,
+                "delivery_error_message": delivery_error_message,
+                "delivery_results": delivery_results or {},
                 "summary": request.summary,
                 "message": message,
                 "unblocked_work_remaining": request.unblocked_work_remaining,
@@ -270,17 +280,16 @@ class TargetFiles:
             },
         )
 
-    def append_inbound_message(
+    def append_discord_inbound_message(
         self,
         *,
-        from_value: str,
-        to_value: str,
+        author_name: str,
+        author_id: str,
+        channel_id: str,
+        message_id: str,
         body: str,
-        message_sid: str,
-        wa_id: str | None,
         request_id: str | None,
-        parsed_intent: str,
-        channel: str,
+        capture_reason: str,
         received_at: datetime | None = None,
     ) -> str:
         self.ensure_all()
@@ -289,13 +298,13 @@ class TargetFiles:
         entry = f"""## {inbox_id}
 
 - received_at: {timestamp.isoformat(timespec="seconds")}
-- channel: {_one_line(channel)}
-- from: {_one_line(from_value)}
-- to: {_one_line(to_value)}
+- channel: discord
+- discord_channel_id: {_one_line(channel_id)}
+- discord_author: {_one_line(author_name)}
+- discord_author_id: {_one_line(author_id)}
+- discord_message_id: {_one_line(message_id)}
+- capture_reason: {_one_line(capture_reason)}
 - request_id: {_one_line(request_id) or "unknown"}
-- parsed_intent: {_one_line(parsed_intent)}
-- message_sid: {_one_line(message_sid)}
-- wa_id: {_one_line(wa_id) or "none"}
 - status: unhandled
 
 ### Body
@@ -318,13 +327,13 @@ The next target project automation run should handle this message, update any re
                 "event": "inbound_response",
                 "inbox_id": inbox_id,
                 "received_at": timestamp.isoformat(timespec="seconds"),
-                "channel": channel,
-                "from": from_value,
-                "to": to_value,
+                "channel": "discord",
+                "discord_channel_id": channel_id,
+                "discord_author": author_name,
+                "discord_author_id": author_id,
+                "discord_message_id": message_id,
+                "capture_reason": capture_reason,
                 "request_id": request_id or "unknown",
-                "parsed_intent": parsed_intent,
-                "message_sid": message_sid,
-                "wa_id": wa_id,
                 "status": "unhandled",
                 "body": body,
             },

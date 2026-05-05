@@ -44,7 +44,7 @@ For existing-project integration, the first runnable demo means a meaningful int
 
 The generated `docs/PROJECT_CONTEXT.md` should index supplemental project context when provided, such as PDFs, research notes, design docs, CSVs, or Markdown notes. It must warn not to include secrets, credentials, paid-account exports, or private production data.
 
-The generated `.agentic/automation_prompt.md` is used for recurring automation. It should be durable and behavioral. It must tell Codex to read the dynamic task file and guardrails every run, continue beyond MVP, support worker agents, support the human bridge, use lock files, compact state when needed, verify work, and update state.
+The generated `.agentic/automation_prompt.md` is used for recurring automation. It should be durable and behavioral. It must tell Codex to read the dynamic task file and guardrails every run, follow the mode-aware progression plan, support worker agents, support the human bridge, use lock files, compact state when needed, verify work, and update state.
 
 It must explicitly read and follow:
 
@@ -84,10 +84,10 @@ The task file must include:
 - pending human requests
 - best next milestone
 - suggested next sprint-sized task
-- ambitious ideas backlog
+- mode-appropriate backlog or deferred/follow-up ticket section
 - continue/block/critical-stop rationale
 
-The product horizon state must include current horizon, horizon goal, advancement criteria, evidence gathered this run, advancement decision (`stay`, `advance`, or `defer`), next horizon candidate, and remaining work before advancement. The automation prompt must tell Codex to advance to the next horizon only when criteria are met and to append evidence to the horizon transition log when advancement happens.
+The product horizon state must include current horizon, horizon goal, advancement criteria, evidence gathered this run, advancement decision (`stay`, `advance`, or `defer`), next horizon candidate, and remaining work before advancement. The automation prompt must tell Codex to advance to the next horizon only when criteria are met and to append evidence to the horizon transition log when advancement happens. For `ticket_campaign`, the generated horizons should be bounded ticket-run phases and must not tell Codex to invent open-ended roadmap work after all tickets are done or blocked.
 
 The guardrails file must stay lean and include:
 
@@ -100,19 +100,20 @@ The guardrails file must stay lean and include:
 - status policy
 - context-bloat policy
 
-The human bridge docs and automation prompt must support three modes:
+The human bridge docs and automation prompt must support four modes:
 
 1. disabled
 2. local-file-only mode
-3. Diffmogger local notifier service mode: `POST http://127.0.0.1:8765/api/notify`
+3. local desktop notifier mode: `POST http://127.0.0.1:8765/api/notify`
+4. Discord notifier mode: `POST http://127.0.0.1:8765/api/notify`
 
-For `file_only`, the generated docs must say the human manually reads `docs/HUMAN_REQUESTS.md`, replies in `docs/HUMAN_INBOX.md`, and summary/status requests are satisfied locally in Markdown or app artifacts. It must not tell Codex to send SMS, WhatsApp, or notifier messages in file-only mode.
+For `file_only`, the generated docs must say the human manually reads `docs/HUMAN_REQUESTS.md`, replies in `docs/HUMAN_INBOX.md`, and summary/status requests are satisfied locally in Markdown or app artifacts. It must not tell Codex to call Discord or notifier APIs in file-only mode.
 
-For `local_notifier`, the generated automation prompt must say that if the notifier is unavailable, Codex should fall back to `docs/HUMAN_REQUESTS.md`, continue useful work, and use `ACTIVE_WITH_PENDING_USER_INPUT` unless no useful work remains.
+For `local_notifier`, the generated automation prompt must say the notifier is for local desktop notifications only. For `discord_notifier`, it must say progress uses `event_kind: "progress"`, direct human messages use `event_kind: "message"`, local automation commits trigger brief progress-channel notifications with the commit subject and work summary, and Discord credentials stay only in `services/agentic-notifier/.env`. If the notifier is unavailable in either notifier mode, Codex should fall back to `docs/HUMAN_REQUESTS.md`, continue useful work, and use `ACTIVE_WITH_PENDING_USER_INPUT` unless no useful work remains.
 
 The generated automation prompt must read `docs/HUMAN_INBOX.md` at the start of each run, remove handled inbox messages, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
 
-The generated automation prompt must classify freeform human inbox commands. In `local_notifier` mode, if the human asks to `send me`, `text me`, `message me`, `reply with`, provide a `status update`, explain `what have you done so far?`, or `summarize progress`, the automation must send a concise SMS/WhatsApp response through the local notifier when available. It must not satisfy that request only by writing Markdown. If the notifier is unavailable, it must record the intended outbound message in `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and continue useful work.
+The generated automation prompt must classify freeform human inbox commands. In notifier modes, if the human asks to `send me`, `message me`, `reply with`, provide a `status update`, explain `what have you done so far?`, or `summarize progress`, the automation must send a concise `event_kind: "message"` notification through the local notifier when available. Human-unlock requests, blockers requiring user input, and replies to user messages also use `event_kind: "message"`. It must not satisfy that request only by writing Markdown. If the notifier is unavailable, it must record the intended outbound message in `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and continue useful work.
 
 For direct human-requested outbound responses, include this payload option if the notifier supports it:
 
@@ -122,7 +123,8 @@ For direct human-requested outbound responses, include this payload option if th
   "type": "human_requested_summary",
   "priority": "normal",
   "summary": "Progress summary requested by human",
-  "message_body": "<concise phone-friendly response>",
+  "event_kind": "message",
+  "message_body": "<concise direct response>",
   "minimum_user_action": "None.",
   "reply_format": "Optional follow-up request.",
   "dedupe_key": "MSG-YYYY-MM-DD-001:v1",

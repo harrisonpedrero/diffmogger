@@ -31,6 +31,8 @@ Maintain stable planning continuity for the next builder and hardener cycles. Pl
 - Queue small, concrete planner-owned patch output when planning docs need to change.
 - Prefer clarifying the next builder/hardener work over broad replanning.
 - If deferred patches are stale, recommend replacement work from fresh main `HEAD`.
+- If `target/baseline_verification.json` reports `repairable_local_service`, plan a concrete `verification_scope=baseline_repair` task that creates or wires a safe project-local service harness instead of asking the human to start it manually.
+- In `ticket_campaign` mode, plan only from `docs/TICKET_RUN.md`; clarify or split listed tickets, but do not invent unrelated backlog after the campaign is terminal.
 
 ## Worktree Behavior
 

@@ -52,7 +52,7 @@ class IntegrationSafetyCheckTests(unittest.TestCase):
             '\n'.join(
                 [
                     'notifier_api_host: str = "127.0.0.1"',
-                    'webhook_host: str = "127.0.0.1"',
+                    'discord_bot_token: str = ""',
                     "dry_run: bool = True",
                     'dry_run=_truthy(os.getenv("DRY_RUN", "true"))',
                 ]
@@ -63,12 +63,10 @@ class IntegrationSafetyCheckTests(unittest.TestCase):
             "services/agentic-notifier/.env.example",
             '\n'.join(
                 [
-                    "TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-                    "TWILIO_FROM=+15555555555",
-                    "HUMAN_TO=+15555555555",
+                    "DISCORD_BOT_TOKEN=replace-with-your-discord-bot-token",
+                    "DISCORD_PROGRESS_CHANNEL_ID=123456789012345678",
+                    "DISCORD_MESSAGING_CHANNEL_ID=123456789012345679",
                     "NOTIFIER_API_HOST=127.0.0.1",
-                    "WEBHOOK_HOST=127.0.0.1",
-                    "WEBHOOK_PUBLIC_BASE_URL=https://example.ngrok-free.app",
                     "DRY_RUN=true",
                 ]
             ),
@@ -88,13 +86,13 @@ class IntegrationSafetyCheckTests(unittest.TestCase):
             root,
             "services/agentic-notifier/README.md",
             "The example config starts with `DRY_RUN=true`\n"
-            "Do not expose `http://127.0.0.1:8765/api/notify` through ngrok.\n",
+            "Bind the API to `127.0.0.1` unless `LOCAL_NOTIFY_API_TOKEN` is configured.\n",
         )
         self.write_text(root, "scripts/scaffold_project_docs.py", 'return "file_only"\n')
         self.write_text(
             root,
             "docs/HUMAN_BRIDGE_SETUP.md",
-            "No SMS, WhatsApp, Twilio, webhook, ngrok, notifier API, or messaging credentials are used in this mode.\n",
+            "No Discord, webhook, notifier API, or messaging credentials are used in this mode.\n",
         )
         self.write_text(
             root,
@@ -108,21 +106,20 @@ class IntegrationSafetyCheckTests(unittest.TestCase):
         problems = self.module.check_integration_safety(ROOT)
         self.assertEqual([], problems)
 
-    def test_detects_realistic_secret_and_non_placeholder_url(self) -> None:
+    def test_detects_realistic_discord_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self.seed_minimal_safe_tree(target)
             self.write_text(
                 target,
                 "docs/HUMAN_BRIDGE.md",
-                "Live bad values: AC" "0123456789abcdef0123456789abcdef and https://team.ngrok-free.app\n",
+                "Live bad value: MDEyMzQ1Njc4OTAxMjM0NTY3ODkw.AbcDef.GhijklmnopqrstuvwxyzABCDEF\n",
             )
 
             problems = self.module.check_integration_safety(target)
 
             details = "\n".join(problem.detail for problem in problems)
-            self.assertIn("concrete-looking Twilio Account SID", details)
-            self.assertIn("non-placeholder ngrok URL", details)
+            self.assertIn("concrete-looking Discord bot token", details)
 
     def test_detects_missing_dry_run_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

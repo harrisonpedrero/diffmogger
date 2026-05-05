@@ -20,10 +20,9 @@ Do not build unrelated apps or large unrelated systems.
 
 ## Secrets Policy
 
-- Do not read `.env` files.
-- Do not request, print, store, or commit secrets.
+{{ENV_ACCESS_GUARDRAILS_POLICY}}
 - Use placeholders in docs and examples.
-- If credentials are needed, create a human request and continue with mock/local work.
+- If credentials are needed but direct env access is not enabled or the value is unavailable, create a human request and continue with mock/local work.
 
 ## External Side Effects Policy
 
@@ -34,10 +33,11 @@ Do not build unrelated apps or large unrelated systems.
 ## Quality Policy
 
 - Run relevant checks when possible.
-- Diagnose missing local tooling or dependency failures and attempt safe project-local repair before declaring `BLOCKED_ON_ENVIRONMENT`.
+- Diagnose missing local tooling, dependencies, or repairable project-local services before declaring `BLOCKED_ON_ENVIRONMENT`; missing local databases with project-owned test configuration should become baseline repair work, not a terminal human blocker.
 - Do not install dependencies globally; use ignored local venvs, `node_modules`, or other project-local runtime state.
 - For browser-backed smoke checks, visual QA, or documentation research, prefer `scripts/diffmogger_browser.py` and the exported `DIFFMOGGER_BROWSER_PATH`/`CHROME_PATH` over ambient system Chrome.
 - If repeated browser launches fail before DevTools is ready, record `BLOCKED_ON_ENVIRONMENT` with diagnostics and use an equivalent manual or managed-browser QA path instead of looping on the same launch command.
+- In `ticket_campaign` mode, do not expand scope after the listed tickets are done or blocked; run `scripts/ticket_run.py` finalization and leave push/PR creation to the human.
 - Do not delete tests just to pass checks.
 - Do not hide broad classes of errors with blanket suppressions.
 - Keep changes scoped to the current sprint.
@@ -54,7 +54,8 @@ Do not build unrelated apps or large unrelated systems.
 - Record worker outputs under `target/agent_runs/<run_id>/`.
 - Use local `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helpers when available; otherwise use equivalent bounded nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` commands from inside the scheduled parent run.
 - Do not create unbounded recursive agent loops.
-- Workers must not send SMS/WhatsApp messages, touch `.env`, handle credentials, spawn additional workers, or use network unless explicitly approved for that run.
+- Workers must not send Discord, notifier, email, or other external messages, spawn additional workers, or use network unless explicitly approved for that run.
+- {{WORKER_ENV_ACCESS_RULE}}
 {{WRITE_WORKER_GUARDRAILS_POLICY}}
 
 ## Multi-Role Automation Policy

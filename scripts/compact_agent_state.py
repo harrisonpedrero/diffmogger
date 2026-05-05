@@ -6,7 +6,7 @@ What this script compacts:
   entries into docs/HUMAN_RESPONSES_ARCHIVE.md as concise rollups.
 - docs/HUMAN_REQUESTS.md: preserves active/awaiting/unresolved requests and moves
   resolved/skipped/cancelled requests into the archive as concise rollups.
-- docs/HUMAN_OUTBOX.md: preserves recent entries and all notifier/provider
+- docs/HUMAN_OUTBOX.md: preserves recent entries and all notifier delivery
   failures; older successful entries become archive rollups.
 - docs/HUMAN_RESPONSES_ARCHIVE.md: keeps recent archive entries and replaces
   older entries with a concise compaction rollup.
@@ -38,7 +38,8 @@ ACTIVE_STATUS_WORDS = {
     "unresolved",
     "pending",
     "notifier_unreachable",
-    "provider_send_failed",
+    "discord_send_failed",
+    "local_notification_failed",
     "blocked",
 }
 
@@ -188,7 +189,7 @@ def compact_active_queue(
     recent_boundary = max(len(entries) - keep_latest, 0)
     for index, entry in enumerate(entries):
         active = is_active_entry(entry, default_active=True)
-        failure = bool(status_words(entry) & {"notifier_unreachable", "provider_send_failed"})
+        failure = bool(status_words(entry) & {"notifier_unreachable", "discord_send_failed", "local_notification_failed"})
         recent = index >= recent_boundary
         if active or recent or (preserve_failures and failure):
             kept.append(entry)

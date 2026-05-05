@@ -59,6 +59,7 @@ required_files=(
   "templates/scripts/run_observatory.py"
   "templates/scripts/build_replay.py"
   "templates/scripts/diffmogger_browser.py"
+  "templates/scripts/ticket_run.py"
   "templates/scripts/repair_environment.py"
   "templates/scripts/update_automation_signals.py"
   "templates/scripts/run_role_automation.sh"
@@ -72,6 +73,7 @@ required_files=(
   "tests/test_repair_environment.py"
   "tests/test_integrate_role_outputs.py"
   "tests/test_list_deferred_patches.py"
+  "tests/test_ticket_run.py"
   "tests/test_check_integration_safety.py"
   "tests/test_check_required_files.py"
   "tests/test_summarize_worker_outputs.py"
@@ -79,6 +81,8 @@ required_files=(
   "examples/generic-web-app/expected_generated_files.md"
   "examples/trendlab-signal-intelligence/project_intake.md"
   "examples/trendlab-signal-intelligence/expected_generated_files.md"
+  "examples/ticket-campaign/project_intake.md"
+  "examples/ticket-campaign/expected_generated_files.md"
   "schemas/project_intake.schema.json"
   "schemas/automation_signals.schema.json"
   "schemas/human_request.schema.json"
@@ -95,6 +99,7 @@ required_files=(
   "scripts/run_observatory.py"
   "scripts/build_replay.py"
   "scripts/diffmogger_browser.py"
+  "scripts/ticket_run.py"
   "scripts/repair_environment.py"
   "scripts/update_automation_signals.py"
   "scripts/run_role_automation.sh"
@@ -112,22 +117,20 @@ required_files=(
   "services/agentic-notifier/agentic_notifier/config.py"
   "services/agentic-notifier/agentic_notifier/models.py"
   "services/agentic-notifier/agentic_notifier/formatter.py"
-  "services/agentic-notifier/agentic_notifier/parser.py"
   "services/agentic-notifier/agentic_notifier/dedupe.py"
   "services/agentic-notifier/agentic_notifier/target_files.py"
-  "services/agentic-notifier/agentic_notifier/twilio_client.py"
+  "services/agentic-notifier/agentic_notifier/discord_bot.py"
+  "services/agentic-notifier/agentic_notifier/local_notifications.py"
   "services/agentic-notifier/agentic_notifier/api_app.py"
-  "services/agentic-notifier/agentic_notifier/webhook_app.py"
   "services/agentic-notifier/agentic_notifier/run_service.py"
   "services/agentic-notifier/scripts/send_test_notification.py"
   "services/agentic-notifier/scripts/dry_run_inbound.py"
   "services/agentic-notifier/tests/test_formatter.py"
-  "services/agentic-notifier/tests/test_parser.py"
   "services/agentic-notifier/tests/test_dedupe.py"
   "services/agentic-notifier/tests/test_target_files.py"
   "services/agentic-notifier/tests/test_api_notify.py"
-  "services/agentic-notifier/tests/test_webhook_inbound.py"
-  "services/agentic-notifier/tests/test_twilio_client.py"
+  "services/agentic-notifier/tests/test_discord_bot.py"
+  "services/agentic-notifier/tests/test_local_notifications.py"
   "services/agentic-notifier/tests/test_schema_alignment.py"
   "services/agentic-dashboard/README.md"
   "services/agentic-dashboard/agentic_dashboard/__init__.py"
@@ -169,6 +172,12 @@ for marker in [
     "continuous_conveyor",
     "multi_role_allow_remotes",
     "automation_signals_enabled",
+    "automation_run_mode",
+    "ticket_campaign",
+    "ticket_run_file",
+    "ticket_completion_notify",
+    "discord_notifier",
+    "local_notifications_enabled",
 ]:
     if marker not in project_schema:
         print(f"Project intake schema missing write-worker marker: {marker}", file=sys.stderr)
@@ -279,7 +288,8 @@ task_markers = [
     "## Human Messages Sent",
     "## Best Next Milestone",
     "## Suggested Next Sprint-Sized Task",
-    "## Ambitious Ideas Backlog",
+    "{{BACKLOG_SECTION_HEADING}}",
+    "{{BACKLOG_SECTION_BODY}}",
     "## Continue/Block/Critical-Stop Rationale",
 ]
 task = Path("templates/docs/CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
@@ -348,7 +358,8 @@ for marker in [
     "{{HUMAN_PROTOCOL}}",
     "{{WRITE_WORKER_ORCHESTRATION}}",
     "{{MULTI_ROLE_AUTOMATION_SECTION}}",
-    "advancement decision: `stay`, `advance`, or `defer`",
+    "{{TICKET_CAMPAIGN_SECTION}}",
+    "{{PRODUCT_HORIZON_GUIDANCE}}",
     "## Product Horizon State",
     "## Horizon Transition Log",
 ]:
@@ -368,6 +379,7 @@ for marker in [
     "--skip-git-repo-check",
     "update_automation_signals.py",
     "repair_environment.py",
+    "ticket_run.py",
     "child_pid",
     "forward_signal",
 ]:
@@ -391,6 +403,21 @@ for marker in [
         print(f"Browser helper template missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
+ticket_helper = Path("templates/scripts/ticket_run.py").read_text(encoding="utf-8")
+for marker in [
+    "json ticket-run",
+    "should-halt",
+    "target/ticket_run_completion.json",
+    "target/ticket_run_reports",
+    "api/notify",
+    "event_kind",
+    "local_notify",
+    "NOTIFIER_UNREACHABLE",
+]:
+    if marker not in ticket_helper:
+        print(f"Ticket run helper template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
 conveyor = Path("templates/scripts/run_conveyor_automation.py").read_text(encoding="utf-8")
 for marker in [
     "automation_conveyor.lock",
@@ -404,6 +431,8 @@ for marker in [
     "accepted_by_role",
     "deferred_delta_by_role",
     "planner deferred patch resolved",
+    "ticket campaign complete",
+    "ticket campaign blocked",
     "builder-first policy",
 ]:
     if marker not in conveyor:
@@ -514,7 +543,7 @@ for marker in [
     "verification_failure",
     "MULTI_ROLE_ALLOW_REMOTES",
     "semantic_commit_message",
-    "chore(integrator): checkpoint dirty main",
+    "chore(integrator): checkpoint preexisting local changes",
     "repair_environment.py",
     "git push",
     "worktree",
@@ -555,6 +584,8 @@ for path in [
     Path("templates/scripts/run_observatory.py"),
     Path("scripts/diffmogger_browser.py"),
     Path("templates/scripts/diffmogger_browser.py"),
+    Path("scripts/ticket_run.py"),
+    Path("templates/scripts/ticket_run.py"),
     Path("scripts/repair_environment.py"),
     Path("templates/scripts/repair_environment.py"),
     Path("scripts/integrate_role_outputs.py"),
@@ -690,15 +721,20 @@ for path, markers in first_review_markers.items():
 notifier_readme = Path("services/agentic-notifier/README.md").read_text(encoding="utf-8")
 for marker in [
     "POST http://127.0.0.1:8765/api/notify",
-    "POST http://127.0.0.1:8787/twilio/inbound",
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_PROGRESS_CHANNEL_ID",
+    "DISCORD_MESSAGING_CHANNEL_ID",
+    "LOCAL_NOTIFICATIONS_ENABLED",
+    "Message Content Intent",
+    "View Channels",
+    "Send Messages",
+    "Read Message History",
     "DRY_RUN=true",
-    "ngrok http 8787",
+    "event_kind",
     "message_body",
     "expects_reply",
-    "TWILIO_MESSAGING_SERVICE_SID",
-    "A2P 10DLC",
-    "30034",
-    "PROVIDER_SEND_FAILED",
+    "DISCORD_SEND_FAILED",
+    "LOCAL_NOTIFICATION_FAILED",
 ]:
     if marker not in notifier_readme:
         print(f"Notifier README missing marker: {marker}", file=sys.stderr)
@@ -734,8 +770,8 @@ for marker in [
     "Explicit failure modes",
     "MIT License",
     "https://github.com/harrisonpedrero/diffmogger.git",
-    "TWILIO_MESSAGING_SERVICE_SID",
-    "A2P 10DLC",
+    "DISCORD_BOT_TOKEN",
+    "LOCAL_NOTIFICATIONS_ENABLED",
     "scripts/acquire_codex_lock.sh",
     "scripts/spawn_worker_agent.sh",
     "write_worker_agents_allowed",
@@ -769,7 +805,7 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_list_deferred_patches.py tests/test_check_integration_safety.py tests/test_check_required_files.py tests/test_summarize_worker_outputs.py
+python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_list_deferred_patches.py tests/test_ticket_run.py tests/test_check_integration_safety.py tests/test_check_required_files.py tests/test_summarize_worker_outputs.py
 
 python3 scripts/check_integration_safety.py >/tmp/Diffmogger-integration-safety.log
 
@@ -796,7 +832,7 @@ rm -rf "$lock_smoke_dir"
 tmp_dir="$(mktemp -d)"
 python3 scripts/scaffold_project_docs.py --intake examples/generic-web-app/project_intake.md --target "$tmp_dir" >/tmp/Diffmogger-scaffold.log
 python3 scripts/check_required_files.py --human-bridge-mode file_only "$tmp_dir" >/tmp/Diffmogger-check.log
-if grep -R "POST http://127.0.0.1:8765/api/notify\\|NOTIFIER_UNREACHABLE\\|message_body" "$tmp_dir/.agentic" "$tmp_dir/docs" >/tmp/Diffmogger-file-only-grep.log 2>&1; then
+if grep -R "POST http://127.0.0.1:8765/api/notify\\|NOTIFIER_UNREACHABLE\\|message_body\\|discord_notifier\\|DISCORD_" "$tmp_dir/.agentic" "$tmp_dir/docs" >/tmp/Diffmogger-file-only-grep.log 2>&1; then
     echo "File-only scaffold unexpectedly contains notifier-only markers" >&2
     cat /tmp/Diffmogger-file-only-grep.log >&2
     rm -rf "$tmp_dir"
@@ -814,7 +850,137 @@ if ! grep "CODEX_LOCK_CONTEXT" "$tmp_dir/scripts/run_codex_automation.sh" >/tmp/
     rm -rf "$tmp_dir"
     exit 1
 fi
+if [ -f "$tmp_dir/docs/TICKET_RUN.md" ]; then
+    echo "Default scaffold unexpectedly generated ticket campaign source" >&2
+    rm -rf "$tmp_dir"
+    exit 1
+fi
+for marker in \
+    "H2 Local-first demo" \
+    "weekly board" \
+    "Long-run direction" \
+    "recurring review capsules" \
+    "## Improvement Backlog"; do
+    if ! grep -R -- "$marker" "$tmp_dir/.agentic" "$tmp_dir/docs/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-mode-horizon-grep.log 2>&1; then
+        echo "Continuous-improvement scaffold missing mode-aware horizon marker: $marker" >&2
+        cat /tmp/Diffmogger-mode-horizon-grep.log >&2
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+done
 rm -rf "$tmp_dir"
+
+tmp_dir="$(mktemp -d)"
+tmp_intake="$(mktemp /tmp/Diffmogger-local-excludes.XXXXXX)"
+cat >"$tmp_intake" <<'JSON'
+{
+  "project_name": "Existing Local Excludes Smoke",
+  "project_mode": "existing_project",
+  "product_goal": "Integrate automation without polluting product git status.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "Generated local automation state is ignored.",
+  "human_bridge_enabled": true,
+  "human_bridge_mode": "file_only",
+  "multi_role_automations_allowed": true,
+  "automation_role_profile": "planner_builder_hardener_integrator",
+  "automation_run_mode": "ticket_campaign",
+  "verification_commands": ["npm test"]
+}
+JSON
+(
+  cd "$tmp_dir"
+  git init >/tmp/Diffmogger-local-excludes-git-init.log
+  git config user.name "Diffmogger Validation"
+  git config user.email "diffmogger-validation@example.invalid"
+  mkdir -p docs scripts
+  printf '# Product Doc\n' > docs/product.md
+  printf '#!/usr/bin/env bash\n' > scripts/product.sh
+  git add docs/product.md scripts/product.sh
+  git commit -m "product base" >/tmp/Diffmogger-local-excludes-commit.log
+)
+python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-local-excludes-scaffold.log
+for ignored_path in ".agentic/automation_prompt.md" "docs/CODEX_AUTOMATION_TASKS.md" "docs/TICKET_RUN.md" "scripts/run_role_automation.sh" "target/agent_runs/run-1/summary.md" "target/prisma-cache/node/cache-file"; do
+    if ! git -C "$tmp_dir" check-ignore -q -- "$ignored_path"; then
+        echo "Existing-project scaffold failed to locally ignore Diffmogger path: $ignored_path" >&2
+        cat "$tmp_dir/.git/info/exclude" >&2
+        rm -rf "$tmp_dir" "$tmp_intake"
+        exit 1
+    fi
+done
+for product_path in "docs/product.md" "scripts/product.sh"; do
+    if git -C "$tmp_dir" check-ignore -q -- "$product_path"; then
+        echo "Existing-project scaffold unexpectedly ignored product path: $product_path" >&2
+        cat "$tmp_dir/.git/info/exclude" >&2
+        rm -rf "$tmp_dir" "$tmp_intake"
+        exit 1
+    fi
+done
+rm -rf "$tmp_dir" "$tmp_intake"
+
+tmp_dir="$(mktemp -d)"
+tmp_intake="$(mktemp /tmp/Diffmogger-ticket-campaign.XXXXXX)"
+cat >"$tmp_intake" <<'JSON'
+{
+  "project_name": "Ticket Campaign Smoke",
+  "product_goal": "Run bounded local tickets on a fork.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "A completed local ticket campaign report.",
+  "human_bridge_enabled": true,
+  "human_bridge_mode": "local_notifier",
+  "automation_run_mode": "ticket_campaign",
+  "ticket_completion_notify": true,
+  "verification_commands": ["npm test"]
+}
+JSON
+python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-ticket-campaign.log
+python3 scripts/check_required_files.py --human-bridge-mode local_notifier --ticket-campaign-enabled "$tmp_dir" >/tmp/Diffmogger-check-ticket-campaign.log
+if ! grep -R "Automation run mode: \`ticket_campaign\`\\|docs/TICKET_RUN.md\\|scripts/ticket_run.py" "$tmp_dir/.agentic" "$tmp_dir/docs" "$tmp_dir/scripts" >/tmp/Diffmogger-ticket-campaign-grep.log 2>&1; then
+    echo "Ticket-campaign scaffold missing mode markers" >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+for marker in \
+    "T1 Ticket-run readiness" \
+    "T4 Completion report and stop" \
+    "## Deferred / Follow-Up Tickets"; do
+    if ! grep -R -- "$marker" "$tmp_dir/.agentic" "$tmp_dir/docs/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-ticket-horizon-grep.log 2>&1; then
+        echo "Ticket-campaign scaffold missing ticket progression marker: $marker" >&2
+        cat /tmp/Diffmogger-ticket-horizon-grep.log >&2
+        rm -rf "$tmp_dir" "$tmp_intake"
+        exit 1
+    fi
+done
+if grep -R -E "MVP|Beyond MVP|Ambitious extensions" "$tmp_dir/.agentic/automation_prompt.md" "$tmp_dir/docs/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-ticket-roadmap-language.log 2>&1; then
+    echo "Ticket-campaign prompt/task unexpectedly contains product-roadmap language" >&2
+    cat /tmp/Diffmogger-ticket-roadmap-language.log >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+rm -rf "$tmp_dir" "$tmp_intake"
+
+tmp_dir="$(mktemp -d)"
+tmp_intake="$(mktemp /tmp/Diffmogger-discord-notifier.XXXXXX)"
+cat >"$tmp_intake" <<'JSON'
+{
+  "project_name": "Discord Notifier Smoke",
+  "product_goal": "Build a Discord notifier scaffold smoke target.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "Generated docs only.",
+  "human_bridge_enabled": true,
+  "human_bridge_mode": "discord_notifier",
+  "local_notifications_enabled": true,
+  "verification_commands": ["npm test"]
+}
+JSON
+python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-discord-notifier.log
+python3 scripts/check_required_files.py --human-bridge-mode discord_notifier "$tmp_dir" >/tmp/Diffmogger-check-discord-notifier.log
+if ! grep -R "discord_notifier\\|event_kind\\|progress\\|message\\|POST http://127.0.0.1:8765/api/notify" "$tmp_dir/.agentic" "$tmp_dir/docs" >/tmp/Diffmogger-discord-notifier-grep.log 2>&1; then
+    echo "Discord-notifier scaffold missing notifier routing markers" >&2
+    cat /tmp/Diffmogger-discord-notifier-grep.log >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+rm -rf "$tmp_dir" "$tmp_intake"
 
 tmp_dir="$(mktemp -d)"
 tmp_intake="$(mktemp /tmp/Diffmogger-write-workers.XXXXXX)"
@@ -1776,7 +1942,7 @@ import os
 import subprocess
 import sys
 
-required = ["fastapi", "twilio", "pytest", "httpx", "uvicorn"]
+required = ["fastapi", "discord", "pytest", "httpx", "uvicorn"]
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     print(

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,13 +25,18 @@ HUMAN_BRIDGE_FILES = {
 AUTOMATION_SIGNAL_FILES = {
     "docs/AUTOMATION_SIGNALS.md",
 }
-VALID_HUMAN_BRIDGE_MODES = {"disabled", "file_only", "local_notifier"}
+VALID_HUMAN_BRIDGE_MODES = {"disabled", "file_only", "local_notifier", "discord_notifier"}
 VALID_PROJECT_MODES = {"fresh_project", "existing_project"}
+VALID_ENV_ACCESS_POLICIES = {"project_commands_only", "direct_env_files_allowed"}
 MAX_WRITE_WORKER_COUNT = 10
 DEFAULT_MAX_WRITE_WORKER_COUNT = 3
 VALID_ROLE_PROFILES = {"single_lane", "planner_builder_hardener_integrator"}
 VALID_SCHEDULE_STRATEGIES = {"single_lane_interval", "fixed_multi_role", "continuous_conveyor"}
+VALID_AUTOMATION_RUN_MODES = {"continuous_improvement", "ticket_campaign"}
 DEFAULT_MULTI_ROLE_CADENCE_MINUTES = 30
+TICKET_RUN_FILES = {
+    "docs/TICKET_RUN.md",
+}
 MULTI_ROLE_FILES = {
     ".agentic/roles/planner.md",
     ".agentic/roles/builder.md",
@@ -45,6 +51,22 @@ MANAGED_EXISTING_PROJECT_FILES = {
     "AGENTS.md": "AGENTS",
     "docs/DEVELOPMENT.md": "DEVELOPMENT",
 }
+
+DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS = [
+    "/scripts/__pycache__/",
+    "/target/agent_runs/",
+    "/target/automation_conveyor.lock",
+    "/target/automation_conveyor_state.json",
+    "/target/automation_logs/",
+    "/target/automation_queue/",
+    "/target/automation_signals.json",
+    "/target/automation_venvs/",
+    "/target/automation_worktrees/",
+    "/target/codex_automation.lock",
+    "/target/prisma-cache/",
+    "/target/ticket_run_completion.json",
+    "/target/ticket_run_reports/",
+]
 
 
 HEADING_TO_KEY = {
@@ -107,8 +129,24 @@ HEADING_TO_KEY = {
     "automation pulse": "automation_signals_enabled",
     "automation pulses": "automation_signals_enabled",
     "automation signal system": "automation_signals_enabled",
+    "automation run mode": "automation_run_mode",
+    "run mode": "automation_run_mode",
+    "ticket run file": "ticket_run_file",
+    "ticket file": "ticket_run_file",
+    "ticket completion notify": "ticket_completion_notify",
+    "ticket notification": "ticket_completion_notify",
+    "environment access": "env_access_policy",
+    "env access": "env_access_policy",
+    "env access policy": "env_access_policy",
+    "environment access policy": "env_access_policy",
     "meaningful deliverable": "meaningful_deliverable",
     "beyond mvp": "beyond_mvp",
+    "beyond-mvp": "beyond_mvp",
+    "long-run direction": "beyond_mvp",
+    "long run direction": "beyond_mvp",
+    "after initial scope": "beyond_mvp",
+    "after first demo": "beyond_mvp",
+    "future direction": "beyond_mvp",
     "assumptions": "assumptions",
 }
 
@@ -142,6 +180,24 @@ def normalize_lines(value: Any, fallback: str) -> str:
         return "\n".join(f"- {item}" for item in value) or fallback
     text = str(value).strip()
     return text or fallback
+
+
+def inline_text(value: Any, fallback: str) -> str:
+    text = normalize_lines(value, fallback)
+    cleaned: list[str] = []
+    for line in text.splitlines():
+        line = re.sub(r"^[-*]\s+", "", line.strip())
+        if line:
+            cleaned.append(line)
+    return re.sub(r"\s+", " ", " ".join(cleaned)).strip()
+
+
+def inline_phrase(value: Any, fallback: str) -> str:
+    return inline_text(value, fallback).rstrip(".")
+
+
+def table_cell(value: str) -> str:
+    return re.sub(r"\s+", " ", value.replace("|", "/")).strip()
 
 
 def normalize_int(value: Any, default: int) -> int:
@@ -193,6 +249,279 @@ def normalize_schedule_strategy(value: Any, multi_role_enabled: bool) -> str:
     return "fixed_multi_role" if multi_role_enabled else "single_lane_interval"
 
 
+def normalize_automation_run_mode(value: Any) -> str:
+    text = str(value or "continuous_improvement").strip().lower()
+    text = text.replace("-", "_").replace(" ", "_")
+    return text if text in VALID_AUTOMATION_RUN_MODES else "continuous_improvement"
+
+
+def ticket_run_values(data: dict[str, Any]) -> dict[str, str]:
+    mode = normalize_automation_run_mode(data.get("automation_run_mode"))
+    ticket_file = str(data.get("ticket_run_file") or "docs/TICKET_RUN.md").strip() or "docs/TICKET_RUN.md"
+    notify = normalize_bool(data.get("ticket_completion_notify"), True)
+    if mode == "ticket_campaign":
+        section = f"""Automation run mode: `ticket_campaign`
+
+Use `{ticket_file}` as the bounded ticket source of truth. Do not invent new backlog after listed tickets are done or blocked. When every ticket is done, or when all remaining tickets are blocked, run:
+
+```bash
+python3 scripts/ticket_run.py . should-halt --finalize
+```
+
+Then stop launching new work. Diffmogger writes a local report, sends a native desktop notification when enabled, records fallback outbox state if notification delivery fails, and leaves remote push/PR creation to the human."""
+        task_notes = f"""Ticket campaign mode: `ticket_campaign`
+
+- Ticket source: `{ticket_file}`
+- Halt when every ticket is done or all remaining tickets are blocked.
+- Completion report is written under `target/ticket_run_reports/`.
+- Completion notification uses the local desktop notification system when enabled.
+- Remote push/PR creation is manual."""
+        development = f"""Ticket campaign mode is enabled. Edit `{ticket_file}` with concrete local tickets before starting unattended automation.
+
+```bash
+python3 scripts/ticket_run.py . status --json
+python3 scripts/ticket_run.py . should-halt --finalize
+```
+
+The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in `docs/HUMAN_OUTBOX.md`."""
+    else:
+        section = """Automation run mode: `continuous_improvement`
+
+Use the normal horizon/backlog loop. Ticket-campaign halting is inactive unless the project intake explicitly sets `automation_run_mode: ticket_campaign` and provides `docs/TICKET_RUN.md`. The helper `scripts/ticket_run.py` is available for future bounded ticket runs."""
+        task_notes = """Ticket campaign mode: disabled.
+
+- Use the normal continuous-improvement horizon loop."""
+        development = """Ticket campaign mode is disabled by default. To run against bounded tickets later, set `automation_run_mode` to `ticket_campaign` in `.agentic/project_intake.json` and add `docs/TICKET_RUN.md`.
+
+```bash
+python3 scripts/ticket_run.py . status --json
+python3 scripts/ticket_run.py . should-halt --finalize
+```"""
+    return {
+        "AUTOMATION_RUN_MODE": mode,
+        "TICKET_RUN_FILE": ticket_file,
+        "TICKET_COMPLETION_NOTIFY": "true" if notify else "false",
+        "TICKET_CAMPAIGN_SECTION": section.strip(),
+        "TICKET_CAMPAIGN_TASK_NOTES": task_notes.strip(),
+        "TICKET_CAMPAIGN_DEVELOPMENT_SECTION": development.strip(),
+    }
+
+
+def markdown_table(rows: list[tuple[str, str, str]]) -> str:
+    lines = [
+        "| Horizon | Goal | Advance when |",
+        "| --- | --- | --- |",
+    ]
+    for horizon, goal, advance in rows:
+        lines.append(f"| {table_cell(horizon)} | {table_cell(goal)} | {table_cell(advance)} |")
+    return "\n".join(lines)
+
+
+def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str]:
+    mode = normalize_automation_run_mode(data.get("automation_run_mode"))
+    product_goal = inline_phrase(
+        data.get("product_goal"),
+        "Build a useful local-first product from the intake brief.",
+    )
+    target_user = inline_phrase(
+        data.get("target_user"),
+        "the primary user described in the intake brief",
+    )
+    first_demo = inline_phrase(
+        data.get("desired_first_demo"),
+        "a runnable local demo that proves the core workflow",
+    )
+    external_services = inline_phrase(data.get("external_services"), "optional integrations")
+    deliverable = inline_phrase(
+        data.get("meaningful_deliverable"),
+        "a runnable, verified increment",
+    )
+    long_run = inline_phrase(
+        data.get("beyond_mvp"),
+        "continue improving core value, demo quality, integrations, and automation reliability",
+    )
+    ticket_file = str(data.get("ticket_run_file") or "docs/TICKET_RUN.md").strip() or "docs/TICKET_RUN.md"
+
+    if mode == "ticket_campaign":
+        rows = [
+            (
+                "T1 Ticket-run readiness",
+                f"Confirm `{ticket_file}`, local setup, and verification are ready for `{project_name}`.",
+                "The ticket source exists, setup expectations are clear, and at least one useful verification path is available or honestly blocked.",
+            ),
+            (
+                "T2 Ticket implementation",
+                "Work through pending tickets with local, reviewable patches and evidence.",
+                "Acted-on tickets have implementation notes, changed files, evidence, or a recorded blocker.",
+            ),
+            (
+                "T3 Verification and hardening",
+                "Verify candidate tickets, repair failures, and record acceptance evidence.",
+                "Completed tickets have acceptance and verification evidence; blocked tickets explain the missing human or environment action.",
+            ),
+            (
+                "T4 Completion report and stop",
+                "Finalize when every ticket is done or all remaining tickets are blocked.",
+                "`scripts/ticket_run.py . should-halt --finalize` writes the report and completion state, then automation stops launching new work.",
+            ),
+        ]
+        guidance = f"""Progression is mode-aware for this target. Because `automation_run_mode` is `ticket_campaign`, use the bounded ticket-run phases below instead of a product roadmap. `{ticket_file}` is the source of truth for scope; do not invent new roadmap work after listed tickets are done or blocked.
+
+{markdown_table(rows)}
+
+At the end of every run, update `## Product Horizon State` with:
+
+- current horizon or ticket-run phase
+- horizon goal
+- advancement criteria
+- evidence gathered this run
+- advancement decision: `stay`, `advance`, or `defer`
+- next horizon candidate
+- remaining work before advancement
+
+If the phase criteria are met, update the current horizon to the next ticket-run phase and append a dated note to `## Horizon Transition Log` with the previous phase, new phase, evidence, and checks. When every ticket is done, or when all remaining tickets are blocked, finalize the ticket run and stop launching new work."""
+        return {
+            "PRODUCT_HORIZON_GUIDANCE": guidance.strip(),
+            "CURRENT_HORIZON": "T1 Ticket-run readiness",
+            "HORIZON_GOAL": f"Confirm `{ticket_file}`, local setup, and verification are ready for `{project_name}`.",
+            "HORIZON_ADVANCEMENT_CRITERIA": "\n".join(
+                [
+                    f"  - `{ticket_file}` exists and contains the bounded ticket source of truth.",
+                    "  - Local setup and verification expectations are documented.",
+                    "  - The first ticket implementation run can start safely, or an environment blocker is documented.",
+                ]
+            ),
+            "NEXT_HORIZON_CANDIDATE": "T2 Ticket implementation",
+            "REMAINING_WORK_BEFORE_ADVANCEMENT": "\n".join(
+                [
+                    f"  - Populate or confirm `{ticket_file}`.",
+                    "  - Run the bootstrap prompt, verify local setup, and record ticket-readiness evidence.",
+                ]
+            ),
+            "INITIAL_KNOWN_ISSUES": "\n".join(
+                [
+                    "- Ticket source still needs to be populated or confirmed.",
+                    "- Verification commands may need adjustment after bootstrap.",
+                    "- Scheduled runs should use `scripts/run_codex_automation.sh`, which wraps local lock acquire/release before code mutation.",
+                    "- Optional continuous conveyor scheduling should use `scripts/run_conveyor_automation.sh`, which records local scheduler state and delegates to the target-local wrappers.",
+                ]
+            ),
+            "BEST_NEXT_MILESTONE": f"Complete T1 Ticket-run readiness for `{project_name}` and record whether ticket implementation can start.",
+            "SUGGESTED_NEXT_SPRINT_TASK": f"Run `docs/INITIAL_BOOTSTRAP_PROMPT.md` in Codex, confirm `{ticket_file}`, setup docs, checks, automation state, and ticket-readiness evidence.",
+            "BACKLOG_SECTION_HEADING": "Deferred / Follow-Up Tickets",
+            "BACKLOG_SECTION_BODY": "\n".join(
+                [
+                    "- Keep follow-up work in `docs/TICKET_RUN.md` or a new local ticket file.",
+                    "- Record blocked tickets with the exact missing human or environment action.",
+                    "- Do not create open-ended roadmap work after the bounded ticket set is finalized.",
+                ]
+            ),
+            "CONTINUE_RATIONALE": "Continue. The ticket campaign has a bounded local source of truth and no active blocker.",
+            "AGENTS_PROGRESS_RULE": "Treat the ticket source as a bounded execution queue; finish, verify, report, and stop when it is complete or fully blocked.",
+            "INITIAL_PROGRESS_EVIDENCE_LABEL": "ticket-readiness evidence",
+            "BOOTSTRAP_END_NOTE": "Use the ticket source as the first bounded phase. Do not create extra roadmap work after every ticket is done or blocked.",
+        }
+
+    rows = [
+        (
+            "H1 Runnable baseline",
+            f"Create or confirm setup, local run path, and verification for `{project_name}`.",
+            "Setup, a local run or demo command, and at least one useful verification path exist or an environment blocker is documented.",
+        ),
+        (
+            "H2 Local-first demo",
+            f"Make the desired first demo usable with local data: {first_demo}.",
+            "A human can follow a documented local path through the core demo without live external services.",
+        ),
+        (
+            "H3 Core workflow depth",
+            f"Replace placeholders with meaningful behavior for: {product_goal}.",
+            "The core workflow has representative data, real behavior, and targeted tests or smoke checks.",
+        ),
+        (
+            "H4 Evidence and review surface",
+            f"Add review, reporting, scoring, summaries, or comparison surfaces around: {deliverable}.",
+            "The project can produce a useful decision-support or review artifact from local data.",
+        ),
+        (
+            "H5 Safe optional integrations",
+            f"Prepare optional integration paths without unsafe side effects: {external_services}.",
+            "External adapters are mocked, gated, documented, and keep secrets outside the repo.",
+        ),
+        (
+            "H6 Review-ready quality",
+            f"Improve reliability, docs, and first-impression workflow for {target_user}.",
+            "The review path is polished enough to inspect confidently and has no obvious broken first-impression workflow.",
+        ),
+        (
+            "H7 Long-run direction",
+            f"Implement high-value next capabilities from the long-run direction: {long_run}.",
+            "At least one high-leverage extension is implemented, verified, and connected to the product narrative or backlog.",
+        ),
+        (
+            "H8 Automation process improvement",
+            "Improve the recurring automation workflow based on actual run evidence.",
+            "The workflow has been reviewed, simplified, strengthened, or compacted based on real automation evidence.",
+        ),
+    ]
+    guidance = f"""Product horizons are explicit state, not just inspiration. At the start of each run, read the `## Product Horizon State` section in `docs/CODEX_AUTOMATION_TASKS.md`. Choose work that advances the current horizon unless a regression, blocker, or human instruction requires a different focus.
+
+These horizons were scaffolded from the project intake:
+
+{markdown_table(rows)}
+
+At the end of every run, update `## Product Horizon State` with:
+
+- current horizon
+- horizon goal
+- advancement criteria
+- evidence gathered this run
+- advancement decision: `stay`, `advance`, or `defer`
+- next horizon candidate
+- remaining work before advancement
+
+If the advancement criteria are met, update the current horizon to the next horizon and append a dated note to `## Horizon Transition Log` with the previous horizon, new horizon, evidence, and checks. Do not advance merely because a demo exists; advance when the criteria are satisfied enough that the next horizon is now the highest-leverage work. It is acceptable to advance with minor known issues if they are documented and do not undermine the next horizon. If a later regression undermines an earlier horizon, keep the current horizon but make the regression the next sprint-sized task.
+
+Long-run direction: {long_run}"""
+    return {
+        "PRODUCT_HORIZON_GUIDANCE": guidance.strip(),
+        "CURRENT_HORIZON": "H1 Runnable baseline",
+        "HORIZON_GOAL": f"Create or confirm setup, local run path, and verification for `{project_name}`.",
+        "HORIZON_ADVANCEMENT_CRITERIA": "\n".join(
+            [
+                "  - Setup path is documented.",
+                "  - A local run or demo command exists.",
+                "  - At least one useful verification command exists and has run, or an environment blocker is documented.",
+            ]
+        ),
+        "NEXT_HORIZON_CANDIDATE": "H2 Local-first demo",
+        "REMAINING_WORK_BEFORE_ADVANCEMENT": "  - Run the bootstrap prompt, create or inspect the baseline, and record verification results.",
+        "INITIAL_KNOWN_ISSUES": "\n".join(
+            [
+                "- Product baseline still needs to be created or inspected.",
+                "- Verification commands may need adjustment after bootstrap.",
+                "- Scheduled runs should use `scripts/run_codex_automation.sh`, which wraps local lock acquire/release before code mutation.",
+                "- Optional continuous conveyor scheduling should use `scripts/run_conveyor_automation.sh`, which records local scheduler state and delegates to the target-local wrappers.",
+            ]
+        ),
+        "BEST_NEXT_MILESTONE": f"Complete H1 Runnable baseline for `{project_name}` and record whether the project is ready to advance to H2 Local-first demo.",
+        "SUGGESTED_NEXT_SPRINT_TASK": "Run `docs/INITIAL_BOOTSTRAP_PROMPT.md` in Codex to scaffold the first demo, setup docs, checks, automation state, and H1 advancement evidence.",
+        "BACKLOG_SECTION_HEADING": "Improvement Backlog",
+        "BACKLOG_SECTION_BODY": "\n".join(
+            [
+                f"- Improve the first demo until {target_user} can understand it quickly.",
+                "- Add an evaluation, reporting, or review layer once the baseline works.",
+                f"- Prepare safe optional integration paths for: {external_services}.",
+                f"- Use the long-run direction as future backlog seed: {long_run}.",
+            ]
+        ),
+        "CONTINUE_RATIONALE": "Continue. The project has a clear mission and no active blocker.",
+        "AGENTS_PROGRESS_RULE": "Treat the first working baseline as an early milestone, not the finish line.",
+        "INITIAL_PROGRESS_EVIDENCE_LABEL": "H1 advancement evidence",
+        "BOOTSTRAP_END_NOTE": "Do not stop merely because a basic demo exists. This is the first horizon, not the final product.",
+    }
+
+
 def normalize_mode(value: Any) -> str | None:
     if value is None:
         return None
@@ -215,7 +544,9 @@ def human_bridge_mode(data: dict[str, Any]) -> str:
         return "disabled"
     if "file" in bridge_text or "manual" in bridge_text:
         return "file_only"
-    if "notifier" in bridge_text or "sms" in bridge_text or "whatsapp" in bridge_text:
+    if "discord" in bridge_text:
+        return "discord_notifier"
+    if "notifier" in bridge_text or "local notification" in bridge_text:
         return "local_notifier"
     if normalize_bool(data.get("human_bridge_enabled"), False):
         return "file_only"
@@ -230,6 +561,42 @@ def project_mode(data: dict[str, Any]) -> str:
     if any(term in text for term in ("existing", "integrat", "retrofit", "current_repo", "current")):
         return "existing_project"
     return "fresh_project"
+
+
+def env_access_policy(data: dict[str, Any]) -> str:
+    raw = str(data.get("env_access_policy") or data.get("environment_access_policy") or "").strip().lower()
+    text = raw.replace("-", "_").replace(" ", "_")
+    direct_aliases = {
+        "direct_env_files_allowed",
+        "allow_direct_env_files",
+        "allow_env_files",
+        "read_env_files_allowed",
+        "direct",
+        "allowed",
+        "allow",
+    }
+    command_only_aliases = {
+        "project_commands_only",
+        "commands_only",
+        "no_direct_env_files",
+        "safe",
+        "disabled",
+        "off",
+    }
+    if text in direct_aliases:
+        return "direct_env_files_allowed"
+    if text in command_only_aliases or text in VALID_ENV_ACCESS_POLICIES:
+        return text
+
+    combined_parts: list[str] = []
+    for key in ("hard_constraints", "safety_constraints", "automation_must_never_do", "external_services"):
+        raw_value = data.get(key)
+        values = raw_value if isinstance(raw_value, list) else [raw_value]
+        combined_parts.extend(str(item) for item in values if item)
+    combined = "\n".join(combined_parts).lower()
+    if any(marker in combined for marker in ("may read .env", "can read .env", "allowed to read .env")):
+        return "direct_env_files_allowed"
+    return "project_commands_only"
 
 
 def project_mode_label(mode: str) -> str:
@@ -250,478 +617,60 @@ def project_mode_guidance(mode: str) -> str:
     )
 
 
-def bridge_values(mode: str, text_responses: bool) -> dict[str, str]:
-    enabled = mode != "disabled"
-    file_reads = ""
-    if enabled:
-        file_reads = """docs/HUMAN_REQUESTS.md
-docs/HUMAN_INBOX.md
-docs/HUMAN_OUTBOX.md
-docs/HUMAN_RESPONSES_ARCHIVE.md"""
-
-    if mode == "local_notifier":
-        agents_read = """If human bridge files exist, also read:
-
-```text
-docs/HUMAN_REQUESTS.md
-docs/HUMAN_INBOX.md
-docs/HUMAN_OUTBOX.md
-docs/HUMAN_RESPONSES_ARCHIVE.md
-```"""
-        agents_rules = """- Process human inbox messages, including freeform commands.
-- If the human asks to be texted, messaged, or sent a status update, use the local notifier when available instead of only writing Markdown.
-- Process handled human inbox messages only after completing or intentionally deferring the requested action, then archive concise notes."""
-        run_steps = """1. Classify and handle new human inbox messages, including freeform commands.
-1. If a human message asks to be texted, messaged, or sent a summary/status update, send a concise SMS/WhatsApp response through the local notifier service; do not merely write a local Markdown summary.
-1. Resolve any handled human replies from `docs/HUMAN_INBOX.md`.
-1. Remove handled messages from `docs/HUMAN_INBOX.md` only after the requested action has actually been completed or intentionally deferred.
-1. Archive concise notes to `docs/HUMAN_RESPONSES_ARCHIVE.md`."""
-        protocol = """Human bridge enabled: true
-
-Human bridge mode: `local_notifier`
-
-Use the human owner as an asynchronous resource for manual unlocks and high-leverage direction, not as an implementation worker.
-
-This project may use a separate local notifier service if it is running:
-
-```text
-POST http://127.0.0.1:8765/api/notify
-```
-
-The notifier owns SMS/WhatsApp credentials, Twilio webhook handling, and reply writing. This target project must not inspect, clone, import, or modify the notifier service during normal automation runs. This project must not handle messaging credentials.
-
-### Human Inbox Interpretation
-
-At the beginning of every run, read `docs/HUMAN_INBOX.md`.
-
-Human inbox entries can be structured replies such as `HR-001 DONE` or freeform instructions such as `send me a summary of what you've accomplished so far`. Interpret natural language intent; do not treat every freeform message as a request to create a local file.
-
-If the human says any of the following, the expected behavior is to send a text message through the local notifier service:
-
-- `send me ...`
-- `text me ...`
-- `message me ...`
-- `reply with ...`
-- `give me a quick summary`
-- `what have you done so far?`
-- `summarize progress`
-- `status update`
-- `how is it going?`
-
-For those requests, create a concise phone-friendly response and send it via `POST http://127.0.0.1:8765/api/notify`. Do not satisfy a `send me` request only by writing a local Markdown file. You may also update local docs, but the primary requested action is outbound messaging.
-
-If the human explicitly asks for a local document, report, Markdown file, artifact, or dashboard page, create the local artifact. Text only if the human also asked for a text response.
-
-### Outbound Text Style
-
-SMS/WhatsApp responses should be concise but useful:
-
-- target 300-900 characters
-- maximum 5 short bullets
-- no long reports
-- no raw stack traces unless urgently needed
-- no embedded URLs unless explicitly necessary and allowed by the messaging setup
-- no secrets or sensitive environment details
-
-Default summary shape:
-
-```text
-{{PROJECT_NAME}} update: Built X, Y, Z. Checks passing: A/B/C. Current blocker: none / one-line blocker. Next sprint: <short next task>. Full details are in docs/CODEX_AUTOMATION_TASKS.md.
-```
-
-When input is needed:
-
-1. Create or update `docs/HUMAN_REQUESTS.md`.
-2. Include request id, type, priority, context, recommendation, minimum action, reply format, and dedupe key.
-3. If the local notifier is running, call `POST http://127.0.0.1:8765/api/notify`.
-4. If the notifier is unavailable or rejects the request, fall back to writing/updating `docs/HUMAN_REQUESTS.md` and continue.
-5. Continue other useful work in the same run.
-6. Use `ACTIVE_WITH_PENDING_USER_INPUT` when work can continue and `BLOCKED_ON_USER` only when it cannot.
-
-Payload shape for direct human-requested outbound responses, if the notifier supports `message_body`:
-
-```json
-{
-  "request_id": "MSG-YYYY-MM-DD-001",
-  "type": "human_requested_summary",
-  "priority": "normal",
-  "summary": "Progress summary requested by human",
-  "message_body": "{{PROJECT_NAME}} update: <concise summary body>",
-  "agent_recommendation": "No action needed unless you want to review the generated artifacts.",
-  "minimum_user_action": "None.",
-  "reply_format": "Optional: reply with a follow-up request.",
-  "unblocked_work_remaining": ["Continue current automation sprint"],
-  "dedupe_key": "MSG-YYYY-MM-DD-001:v1",
-  "expects_reply": false
-}
-```
-
-If the notifier is not reachable:
-
-1. Do not claim a text was sent.
-2. Write the intended outbound message to `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`.
-3. Keep or annotate the inbox entry as unresolved if a response is required.
-4. Continue useful offline/product work.
-5. Set status to `ACTIVE_WITH_PENDING_USER_INPUT` only if the unresolved item matters and useful work remains."""
-        guardrails = """- Ask the human only for meaningful unlocks.
-- For reversible choices, choose a safe default and document it.
-- Use `ACTIVE_WITH_PENDING_USER_INPUT` when work can continue around a pending request.
-- Use `POST http://127.0.0.1:8765/api/notify` when the local notifier is available; otherwise fall back to `docs/HUMAN_REQUESTS.md`.
-- The notifier owns messaging credentials. This repo must not import notifier code or read notifier `.env` files.
-- If the human asks to be texted, messaged, or sent a summary/status update, send a concise SMS/WhatsApp response through the notifier rather than only writing Markdown.
-- If the notifier is unreachable, do not claim a text was sent. Record `NOTIFIER_UNREACHABLE` in `docs/HUMAN_OUTBOX.md` and continue useful work.
-- Remove handled entries from `docs/HUMAN_INBOX.md` only after the requested action is complete or intentionally deferred, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`."""
-        task_notes = """Human bridge mode: `local_notifier`
-
-- The automation must read `docs/HUMAN_INBOX.md` at run start, interpret structured replies and freeform commands, remove handled entries only after completion or intentional deferral, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
-- If the local notifier is running, this project may call `POST http://127.0.0.1:8765/api/notify`.
-- If a human asks to be texted, messaged, or sent a status update, the automation should use the local notifier rather than only writing Markdown.
-- If the notifier is unavailable, record the intended outbound message in `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and continue useful work."""
-        inbox = """# Human Inbox
-
-Active inbox for replies from the human owner.
-
-The separate local notifier service may write inbound SMS/WhatsApp replies here. The human may also paste replies here manually.
-
-At the start of every automation run, Codex should:
-
-1. read this file
-2. handle any `status: unhandled` messages, including structured replies and freeform commands
-3. update related requests in `docs/HUMAN_REQUESTS.md`
-4. send a notifier response if the human asked to be texted, messaged, or sent a status update
-5. remove handled messages from this file only after the requested action is complete or intentionally deferred
-6. append concise records to `docs/HUMAN_RESPONSES_ARCHIVE.md`
-
-Freeform messages such as `send me a summary`, `text me the blockers`, `status update`, or `what have you done so far?` should result in a concise SMS/WhatsApp response through `POST http://127.0.0.1:8765/api/notify` when the notifier is available. Do not satisfy those messages only by writing local Markdown.
-
-If the notifier is unavailable, record the attempted outbound response in `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`.
-
-Keep this file short. It is not a permanent log.
-
-## Active Inbound Messages
-
-None.
-
-## Entry Template
-
-```markdown
-### INBOX-YYYY-MM-DD-001
-
-- received_at: YYYY-MM-DDTHH:MM:SS
-- channel: sms
-- from: +15555555555
-- request_id: HR-YYYY-MM-DD-001
-- parsed_intent: done
-- message_sid: SMxxxxxxxxxxxxxxxx
-- status: unhandled
-
-#### Body
-
-HR-001 DONE. Key added locally.
-```"""
-        outbox = """# Human Outbox
-
-Lightweight audit log of outbound human requests sent or attempted through the local notifier service.
-
-Use this file for:
-
-- human-unlock requests sent through the notifier
-- direct status/update responses sent because the human asked to be texted
-- failed notifier attempts with status `NOTIFIER_UNREACHABLE`
-
-Do not write secrets, raw stack traces, or long reports here.
-
-## Outbound Notifications
-
-None yet.
-
-## Entry Template
-
-```markdown
-### OUTBOX-YYYY-MM-DD-001
-
-- sent_at: YYYY-MM-DDTHH:MM:SS
-- request_id: MSG-YYYY-MM-DD-001
-- type: human_requested_summary
-- status: sent | dry_run | NOTIFIER_UNREACHABLE
-- dedupe_key: MSG-YYYY-MM-DD-001:v1
-
-#### Message
-
-Concise phone-friendly message body.
-```"""
-        setup = """# Human Bridge Setup
-
-This project uses local notifier mode.
-
-## Local Diffmogger Notifier Mode
-
-Advanced users may run Diffmogger's bundled local notifier service separately:
-
-```text
-services/agentic-notifier/
-```
-
-Project automation calls:
-
-```text
-POST http://127.0.0.1:8765/api/notify
-```
-
-The notifier sends SMS/WhatsApp through Twilio and writes replies to this target project file:
-
-```text
-docs/HUMAN_INBOX.md
-```
-
-The notifier owns credentials, dedupe state, optional JSONL queues, and external webhooks. This repo must not read notifier `.env` files or handle Twilio credentials.
-
-The target automation must read `docs/HUMAN_INBOX.md` at the start of each run, remove handled inbox entries, and archive concise resolution notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
-
-If a human inbox message asks the automation to `send me`, `text me`, `message me`, `reply with`, provide a `status update`, or summarize progress, the target automation should send a concise SMS/WhatsApp response through the notifier. It should not satisfy that request only by writing Markdown.
-
-If the notifier is unavailable, the automation must not claim a text was sent. It should write the intended outbound message to `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`, keep unresolved inbox entries active when needed, and continue safe work.
-
-Twilio sender notes:
-
-- Prefer `TWILIO_MESSAGING_SERVICE_SID` when using a Twilio Messaging Service; the notifier will send with `messaging_service_sid` and omit `TWILIO_FROM`.
-- If no Messaging Service SID is configured, the notifier falls back to `TWILIO_FROM`.
-- SMS via +1 10DLC may require A2P 10DLC approval before outbound messages work.
-- Twilio error `30034` usually means the sender or A2P campaign is not registered or ready.
-- WhatsApp sandbox can be used instead of SMS when configured.
-
-## Inbox Handling Rules
-
-- Treat `docs/HUMAN_INBOX.md` as an active queue, not a permanent log.
-- Handle structured replies such as `HR-001 DONE` and freeform commands.
-- Remove handled inbox entries only after the requested action is complete or intentionally deferred.
-- Archive concise resolution notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
-- Record outbound messages and notifier failures in `docs/HUMAN_OUTBOX.md`.
-
-## Notifier Safety
-
-- Bind local notify API to `127.0.0.1`.
-- Expose only the inbound webhook receiver through ngrok or another tunnel.
-- Do not expose `http://127.0.0.1:8765/api/notify` through ngrok.
-- Validate Twilio webhook signatures with the official SDK.
-- Dedupe outbound requests and inbound webhook retries.
-- Support dry-run mode."""
-    elif mode == "file_only":
-        agents_read = """If human bridge files exist, also read:
-
-```text
-docs/HUMAN_REQUESTS.md
-docs/HUMAN_INBOX.md
-docs/HUMAN_OUTBOX.md
-docs/HUMAN_RESPONSES_ARCHIVE.md
-```"""
-        agents_rules = """- Process human inbox messages, including freeform commands.
-- If the human asks for a summary, status update, explanation, or report, satisfy it locally in Markdown or app artifacts.
-- Do not use SMS, WhatsApp, Twilio, or notifier APIs unless the human explicitly changes bridge mode.
-- Process handled human inbox messages only after completing or intentionally deferring the requested action, then archive concise notes."""
-        run_steps = """1. Classify and handle new human inbox messages, including freeform commands.
-1. Resolve any handled human replies from `docs/HUMAN_INBOX.md`.
-1. Remove handled messages from `docs/HUMAN_INBOX.md` only after the requested action has actually been completed or intentionally deferred.
-1. Archive concise notes to `docs/HUMAN_RESPONSES_ARCHIVE.md`."""
-        protocol = """Human bridge enabled: true
-
-Human bridge mode: `file_only`
-
-Use file-only human intervention. Do not use SMS, WhatsApp, Twilio, or the local notifier service for this project unless the human explicitly changes the bridge mode later.
-
-The human owner will periodically inspect `docs/HUMAN_REQUESTS.md`, perform any manual action, and reply in `docs/HUMAN_INBOX.md`.
-
-Use the human owner as an asynchronous resource for manual unlocks and high-leverage direction, not as an implementation worker.
-
-### Human Inbox Interpretation
-
-At the beginning of every run, read `docs/HUMAN_INBOX.md`.
-
-Human inbox entries can be structured replies such as `HR-001 DONE` or freeform instructions such as `try a different direction` or `focus on real data next`. Interpret natural language intent.
-
-If the human asks for a summary, status update, explanation, local report, or decision record, satisfy that request locally by updating the relevant Markdown file or app artifact. Do not attempt to send a text message.
-
-After handling an inbox entry:
-
-1. Complete or intentionally defer the requested action.
-2. Archive a concise note in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
-3. Remove the handled entry from `docs/HUMAN_INBOX.md`.
-4. Note the resolved message in `docs/CODEX_AUTOMATION_TASKS.md`.
-
-If the inbox entry cannot be resolved yet, leave it in `docs/HUMAN_INBOX.md` with a brief annotation or carry it forward in `docs/CODEX_AUTOMATION_TASKS.md`.
-
-### Human Requests
-
-When input is needed:
-
-1. Create or update `docs/HUMAN_REQUESTS.md`.
-2. Include request id, type, priority, context, recommendation, minimum action, reply format, and dedupe key.
-3. Continue other useful work in the same run.
-4. Use `ACTIVE_WITH_PENDING_USER_INPUT` when work can continue and `BLOCKED_ON_USER` only when it cannot."""
-        guardrails = """- Ask the human only for meaningful unlocks.
-- For reversible choices, choose a safe default and document it.
-- Use `ACTIVE_WITH_PENDING_USER_INPUT` when work can continue around a pending request.
-- Use file-only handoff files: write requests to `docs/HUMAN_REQUESTS.md`, read replies from `docs/HUMAN_INBOX.md`, and archive handled replies in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
-- Do not use SMS, WhatsApp, Twilio, or notifier APIs unless the human explicitly changes the bridge mode.
-- If the human asks for a summary or status update, answer locally in the requested Markdown/app artifact.
-- Remove handled entries from `docs/HUMAN_INBOX.md` only after the requested action is complete or intentionally deferred."""
-        task_notes = """Human bridge mode: `file_only`
-
-- The automation must read `docs/HUMAN_INBOX.md` at run start, interpret structured replies and freeform commands, remove handled entries only after completion or intentional deferral, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
-- The human manually inspects `docs/HUMAN_REQUESTS.md` and replies in `docs/HUMAN_INBOX.md`.
-- Do not use SMS, WhatsApp, Twilio, or notifier APIs in this mode."""
-        inbox = """# Human Inbox
-
-Active inbox for replies from the human owner.
-
-In file-only mode, the human manually pastes replies here after reading `docs/HUMAN_REQUESTS.md`.
-
-At the start of every automation run, Codex should:
-
-1. read this file
-2. handle any `status: unhandled` messages, including structured replies and freeform commands
-3. update related requests in `docs/HUMAN_REQUESTS.md`
-4. satisfy summary/status/report requests locally in Markdown or app artifacts
-5. remove handled messages from this file only after the requested action is complete or intentionally deferred
-6. append concise records to `docs/HUMAN_RESPONSES_ARCHIVE.md`
-
-Do not use SMS, WhatsApp, Twilio, or notifier APIs in file-only mode.
-
-Keep this file short. It is not a permanent log.
-
-## Active Inbound Messages
-
-None.
-
-## Entry Template
-
-```markdown
-### INBOX-YYYY-MM-DD-001
-
-- received_at: YYYY-MM-DDTHH:MM:SS
-- channel: manual
-- request_id: HR-YYYY-MM-DD-001
-- parsed_intent: done
-- status: unhandled
-
-#### Body
-
-HR-001 DONE. Key added locally.
-```"""
-        outbox = """# Human Outbox
-
-File-only audit log of local outbound human-facing notes.
-
-Use this file for concise records of local status summaries, request notices, or artifacts produced because the human asked for an update. Do not use it as an SMS/WhatsApp delivery log in file-only mode.
-
-Do not write secrets, raw stack traces, or long reports here.
-
-## Outbound Records
-
-None yet.
-
-## Entry Template
-
-```markdown
-### OUTBOX-YYYY-MM-DD-001
-
-- created_at: YYYY-MM-DDTHH:MM:SS
-- request_id: MSG-YYYY-MM-DD-001
-- type: human_requested_summary
-- status: local_record
-- dedupe_key: MSG-YYYY-MM-DD-001:v1
-
-#### Message
-
-Concise local summary or pointer to the generated artifact.
-```"""
-        setup = """# Human Bridge Setup
-
-This project uses file-only human intervention.
-
-## Local-File-Only Mode
-
-Files:
-
-```text
-docs/HUMAN_REQUESTS.md
-docs/HUMAN_INBOX.md
-docs/HUMAN_OUTBOX.md
-docs/HUMAN_RESPONSES_ARCHIVE.md
-```
-
-The automation writes active requests to `docs/HUMAN_REQUESTS.md`. The human manually replies in `docs/HUMAN_INBOX.md`. The next run consumes handled replies and archives concise notes.
-
-No SMS, WhatsApp, Twilio, webhook, ngrok, notifier API, or messaging credentials are used in this mode.
-
-If a human inbox message asks for a summary, status update, report, explanation, or decision record, the automation should satisfy it locally by updating the relevant Markdown file or app artifact.
-
-## Inbox Handling Rules
-
-- Treat `docs/HUMAN_INBOX.md` as an active queue, not a permanent log.
-- Handle structured replies such as `HR-001 DONE` and freeform commands.
-- Remove handled inbox entries only after the requested action is complete or intentionally deferred.
-- Archive concise resolution notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
-- Keep active inbox files short.
-"""
+def env_access_values(data: dict[str, Any]) -> dict[str, str]:
+    policy = env_access_policy(data)
+    if policy == "direct_env_files_allowed":
+        agents_rule = (
+            "Local `.env*` files may be read when needed for approved local verification, "
+            "disposable database work, or explicitly enabled live-provider tests. Never print, "
+            "copy, summarize, store, or commit secret values."
+        )
+        guardrails = "\n".join(
+            [
+                "- Local `.env*` files may be read when needed for approved local verification, disposable database work, or explicitly enabled live-provider tests.",
+                "- Never print, copy, summarize, store, or commit secret values.",
+                "- Prefer project commands that load environment values naturally; inspect values only when the approved local workflow requires it.",
+                "- Keep docs, examples, reports, and commits free of real credentials.",
+            ]
+        )
+        worker_rule = (
+            "Local `.env*` files may be read when needed for the assigned approved verification "
+            "or integration task, but never print, copy, store, or commit secret values."
+        )
+        must_never_default = (
+            "Never print, store, or commit secrets; local `.env*` files may be read only when "
+            "the intake or human instructions approve live/local integration testing."
+        )
     else:
-        agents_read = "Human bridge files are not required unless the human later enables the bridge."
-        agents_rules = "- Human bridge is disabled; do not create human request queues unless the human later enables the bridge."
-        run_steps = "1. Skip human inbox processing because the human bridge is disabled for this project."
-        protocol = """Human bridge enabled: false
-
-Human bridge mode: `disabled`
-
-Do not create human requests or wait for human replies during normal automation runs. If work becomes unsafe or impossible without the human, record the blocker in `docs/CODEX_AUTOMATION_TASKS.md` and use `BLOCKED_ON_USER` only when no useful work can continue."""
-        guardrails = """- Human bridge is disabled.
-- Do not create human request queues during normal runs.
-- For reversible choices, choose a safe default and document it.
-- Use `BLOCKED_ON_USER` only when no valuable work can continue without the human."""
-        task_notes = "Human bridge mode: `disabled`. No human request queue is active."
-        inbox = "# Human Inbox\n\nHuman bridge disabled for this project.\n"
-        outbox = "# Human Outbox\n\nHuman bridge disabled for this project.\n"
-        setup = "# Human Bridge Setup\n\nHuman bridge disabled for this project.\n"
-
-    end_requirements = "- human requests created or resolved\n"
-    if mode == "local_notifier":
-        end_requirements += "- human messages sent, including whether notifier delivery succeeded, failed, or was unavailable\n"
-    elif mode == "file_only":
-        end_requirements += "- human inbox messages handled and local response artifacts created\n"
-    else:
-        end_requirements = ""
-
-    development = f"""Human bridge enabled: {str(enabled).lower()}
-
-Human bridge mode: `{mode}`
-
-{('The human reads `docs/HUMAN_REQUESTS.md` and replies in `docs/HUMAN_INBOX.md`. The automation handles replies on later runs and archives them in `docs/HUMAN_RESPONSES_ARCHIVE.md`.' if mode == 'file_only' else 'The project may call `POST http://127.0.0.1:8765/api/notify` when the local notifier service is running. Keep notifier credentials outside this repo.' if mode == 'local_notifier' else 'No human bridge files are required for normal runs.')}
-"""
-
-    bootstrap = f"""Human bridge enabled: {str(enabled).lower()}
-
-Human bridge mode: `{mode}`
-
-{('Use file-only mode. Create project-side human bridge files and do not use SMS, WhatsApp, Twilio, or notifier APIs unless the human explicitly changes mode later.' if mode == 'file_only' else 'Use local notifier mode. This repo may call `POST http://127.0.0.1:8765/api/notify` when the separate notifier service is running, but must not handle messaging credentials.' if mode == 'local_notifier' else 'Human bridge disabled. Do not create human request queues unless the human later enables the bridge.')}
-"""
-
+        agents_rule = (
+            "Do not open local `.env*` files. Project commands may load environment values "
+            "normally; if a value is unavailable, use mocks/fixtures or ask for the specific "
+            "missing variable name. Never print, copy, store, or commit secrets."
+        )
+        guardrails = "\n".join(
+            [
+                "- Do not open local `.env*` files.",
+                "- Project commands may load environment values normally.",
+                "- If a credential value is unavailable, use mocks/fixtures or ask for the specific missing variable name; do not ask for the secret value itself.",
+                "- Never print, copy, summarize, store, or commit secret values.",
+            ]
+        )
+        worker_rule = (
+            "Do not open local `.env*` files. Project commands may load environment values "
+            "normally; never print, copy, store, or commit secret values."
+        )
+        must_never_default = (
+            "Never print, store, or commit secrets; project commands may load local env values "
+            "normally, but do not open local `.env*` files unless env access is explicitly enabled."
+        )
     return {
-        "HUMAN_BRIDGE_ENABLED": str(enabled).lower(),
-        "HUMAN_BRIDGE_MODE": mode,
-        "HUMAN_FILE_READS": file_reads,
-        "HUMAN_AGENTS_READ_BLOCK": agents_read,
-        "HUMAN_AGENTS_RULES": agents_rules,
-        "HUMAN_RUN_STEPS": run_steps,
-        "HUMAN_PROTOCOL": protocol,
-        "HUMAN_GUARDRAILS_POLICY": guardrails,
-        "HUMAN_TASK_NOTES": task_notes,
-        "HUMAN_INBOX_CONTENT": inbox,
-        "HUMAN_OUTBOX_CONTENT": outbox,
-        "HUMAN_BRIDGE_SETUP_CONTENT": setup,
-        "HUMAN_END_REQUIREMENTS": end_requirements.rstrip(),
-        "HUMAN_DEVELOPMENT_SECTION": development.strip(),
-        "HUMAN_BOOTSTRAP_SECTION": bootstrap.strip(),
-        "HUMAN_REQUESTED_TEXT_RESPONSES": str(text_responses).lower(),
+        "ENV_ACCESS_POLICY": policy,
+        "ENV_ACCESS_AGENTS_RULE": agents_rule,
+        "ENV_ACCESS_GUARDRAILS_POLICY": guardrails,
+        "WORKER_ENV_ACCESS_RULE": worker_rule,
+        "AUTOMATION_MUST_NEVER_DO_DEFAULT": must_never_default,
     }
+
 
 
 def worker_values(data: dict[str, Any]) -> dict[str, str]:
@@ -800,7 +749,8 @@ Every write-worker assignment must tell the worker:
 - Modify only your assigned files/modules or scratch area.
 - Do not revert unrelated edits or changes made by others.
 - Adjust your implementation to documented contracts and other workers' outputs.
-- Do not spawn workers, use network, touch `.env`, handle credentials, send messages, or run destructive cleanup.
+- Follow the generated environment-access policy. Never print, copy, store, or commit secret values.
+- Do not spawn workers, use network, send messages, or run destructive cleanup.
 - Stop after the bounded assignment and write `target/agent_runs/<run_id>/worker_<role>.md`.
 - List changed files, checks run, integration notes, and risks.
 
@@ -1071,11 +1021,327 @@ def parse_intake(path: Path) -> dict[str, Any]:
     return parse_markdown_intake(path)
 
 
+def bridge_values(mode: str, text_responses: bool) -> dict[str, str]:
+    enabled = mode != "disabled"
+    file_reads = ""
+    if enabled:
+        file_reads = """docs/HUMAN_REQUESTS.md
+docs/HUMAN_INBOX.md
+docs/HUMAN_OUTBOX.md
+docs/HUMAN_RESPONSES_ARCHIVE.md"""
+
+    if mode in {"local_notifier", "discord_notifier"}:
+        channel_note = (
+            "Discord notifier mode posts progress updates to the configured progress channel, "
+            "direct human messages to the configured messaging channel, and captures only bot mentions/replies "
+            "from the messaging channel into `docs/HUMAN_INBOX.md`. Local automation commits trigger brief "
+            "`event_kind: \"progress\"` updates with the commit subject and work summary."
+            if mode == "discord_notifier"
+            else "Local notifier mode uses the same loopback API for native desktop notifications only; Discord is not required."
+        )
+        agents_read = """If human bridge files exist, also read:
+
+```text
+docs/HUMAN_REQUESTS.md
+docs/HUMAN_INBOX.md
+docs/HUMAN_OUTBOX.md
+docs/HUMAN_RESPONSES_ARCHIVE.md
+```"""
+        agents_rules = """- Process human inbox messages, including freeform commands.
+- If the human asks to be messaged or sent a status update, use the local notifier API when available instead of only writing Markdown.
+- Process handled human inbox messages only after completing or intentionally deferring the requested action, then archive concise notes."""
+        run_steps = """1. Classify and handle new human inbox messages, including freeform commands.
+1. If a human message asks to be messaged, replied to, or sent a summary/status update, send a concise `event_kind: "message"` notification through the local notifier API.
+1. Resolve any handled human replies from `docs/HUMAN_INBOX.md`.
+1. Remove handled messages from `docs/HUMAN_INBOX.md` only after the requested action has actually been completed or intentionally deferred.
+1. Archive concise notes to `docs/HUMAN_RESPONSES_ARCHIVE.md`."""
+        protocol = f"""Human bridge enabled: true
+
+Human bridge mode: `{mode}`
+
+Use the human owner as an asynchronous resource for manual unlocks and high-leverage direction, not as an implementation worker.
+
+This project may use a separate local notifier service if it is running:
+
+```text
+POST http://127.0.0.1:8765/api/notify
+```
+
+{channel_note} This target project must not inspect, clone, import, or modify the notifier service during normal automation runs. This project must not handle Discord credentials.
+
+### Human Inbox Interpretation
+
+At the beginning of every run, read `docs/HUMAN_INBOX.md`.
+
+Human inbox entries can be structured replies such as `HR-001 DONE` or freeform instructions such as `send me a summary of what you've accomplished so far`. Interpret natural language intent; do not treat every freeform message as a request to create a local file.
+
+If the human asks to be messaged, replied to, or sent a summary/status update, create a concise response and send it via `POST http://127.0.0.1:8765/api/notify` with `event_kind: "message"`. Human-unlock requests, blockers that need human input, and replies to user messages also use `event_kind: "message"` so they route to the messaging channel. Do not satisfy that request only by writing a local Markdown file. You may also update local docs, but the primary requested action is outbound notification.
+
+If the human explicitly asks for a local document, report, Markdown file, artifact, or dashboard page, create the local artifact. Send a notifier message only if the human also asked for a direct message.
+
+### Outbound Message Style
+
+Notifier responses should be concise but useful: summarize the work done, checks run, current blocker, and next step. Avoid secrets, raw stack traces, and long reports.
+
+Progress-only updates should use `event_kind: "progress"`. Direct human messages, blockers, human-unlock requests, and replies to user messages should use `event_kind: "message"`. In `discord_notifier` mode, `scripts/integrate_role_outputs.py` sends a brief progress-channel notification after each local automation commit it creates.
+
+Payload shape for direct human-requested outbound responses:
+
+```json
+{{
+  "request_id": "MSG-YYYY-MM-DD-001",
+  "type": "human_requested_summary",
+  "priority": "normal",
+  "summary": "Progress summary requested by human",
+  "event_kind": "message",
+  "message_body": "{{PROJECT_NAME}} update: <concise summary body>",
+  "agent_recommendation": "No action needed unless you want to review the generated artifacts.",
+  "minimum_user_action": "None.",
+  "reply_format": "Optional: reply with a follow-up request.",
+  "unblocked_work_remaining": ["Continue current automation sprint"],
+  "dedupe_key": "MSG-YYYY-MM-DD-001:v1",
+  "expects_reply": false
+}}
+```
+
+If the notifier is not reachable:
+
+1. Do not claim a message was delivered.
+2. Write the intended outbound message to `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`.
+3. Keep or annotate the inbox entry as unresolved if a response is required.
+4. Continue useful offline/product work.
+5. Set status to `ACTIVE_WITH_PENDING_USER_INPUT` only if the unresolved item matters and useful work remains."""
+        guardrails = """- Ask the human only for meaningful unlocks.
+- For reversible choices, choose a safe default and document it.
+- Use `ACTIVE_WITH_PENDING_USER_INPUT` when work can continue around a pending request.
+- Use `POST http://127.0.0.1:8765/api/notify` when the local notifier is available; otherwise fall back to `docs/HUMAN_REQUESTS.md`.
+- The notifier owns Discord credentials and local notification delivery. This repo must not import notifier code or print, copy, store, or commit notifier credential values.
+- If the human asks to be messaged or sent a summary/status update, send a concise notifier response rather than only writing Markdown.
+- If the notifier is unreachable, do not claim delivery. Record `NOTIFIER_UNREACHABLE` in `docs/HUMAN_OUTBOX.md` and continue useful work.
+- Remove handled entries from `docs/HUMAN_INBOX.md` only after the requested action is complete or intentionally deferred, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`."""
+        task_notes = f"""Human bridge mode: `{mode}`
+
+- The automation must read `docs/HUMAN_INBOX.md` at run start, interpret structured replies and freeform commands, remove handled entries only after completion or intentional deferral, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
+- If the local notifier is running, this project may call `POST http://127.0.0.1:8765/api/notify`.
+- Direct human messages should use `event_kind: "message"`; progress updates should use `event_kind: "progress"`.
+- In `discord_notifier` mode, each local automation commit created by the multi-role integrator sends a brief `event_kind: "progress"` update with the commit subject and work summary.
+- If the notifier is unavailable, record the intended outbound message in `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and continue useful work."""
+        inbox = f"""# Human Inbox
+
+Active inbox for replies from the human owner.
+
+{('The Discord notifier writes captured bot mentions/replies from the messaging channel here. The human may also paste replies here manually.' if mode == 'discord_notifier' else 'The human may paste replies here manually. Local notifier mode does not require Discord inbound replies.')}
+
+At the start of every automation run, Codex should:
+
+1. read this file
+2. handle any `status: unhandled` messages, including structured replies and freeform commands
+3. update related requests in `docs/HUMAN_REQUESTS.md`
+4. send a notifier response if the human asked to be messaged or sent a status update
+5. remove handled messages from this file only after the requested action is complete or intentionally deferred
+6. append concise records to `docs/HUMAN_RESPONSES_ARCHIVE.md`
+
+Keep this file short. It is not a permanent log.
+
+## Active Inbound Messages
+
+None.
+
+## Entry Template
+
+```markdown
+### INBOX-YYYY-MM-DD-001
+
+- received_at: YYYY-MM-DDTHH:MM:SS
+- channel: discord
+- request_id: HR-YYYY-MM-DD-001
+- status: unhandled
+
+#### Body
+
+HR-001 DONE. Key added locally.
+```"""
+        outbox = """# Human Outbox
+
+Lightweight audit log of outbound human notifications sent or attempted through the local notifier service.
+
+Use this file for:
+
+- human-unlock requests sent through the notifier
+- direct status/update responses sent because the human asked to be messaged
+- failed notifier attempts with status `NOTIFIER_UNREACHABLE`, `DISCORD_SEND_FAILED`, or `LOCAL_NOTIFICATION_FAILED`
+
+Do not write secrets, raw stack traces, or long reports here.
+
+## Outbound Notifications
+
+None yet.
+"""
+        setup = f"""# Human Bridge Setup
+
+This project uses `{mode}` mode.
+
+Run Diffmogger's bundled local notifier service separately:
+
+```text
+services/agentic-notifier/
+```
+
+Project automation calls:
+
+```text
+POST http://127.0.0.1:8765/api/notify
+```
+
+{channel_note}
+
+The notifier owns credentials, dedupe state, optional JSONL queues, Discord inbound handling, and native desktop notification delivery. This repo must not print, copy, store, or commit notifier credential values.
+
+## Inbox Handling Rules
+
+- Treat `docs/HUMAN_INBOX.md` as an active queue, not a permanent log.
+- Handle structured replies such as `HR-001 DONE` and freeform commands.
+- Remove handled inbox entries only after the requested action is complete or intentionally deferred.
+- Archive concise resolution notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
+- Record outbound messages and notifier failures in `docs/HUMAN_OUTBOX.md`.
+"""
+    elif mode == "file_only":
+        agents_read = """If human bridge files exist, also read:
+
+```text
+docs/HUMAN_REQUESTS.md
+docs/HUMAN_INBOX.md
+docs/HUMAN_OUTBOX.md
+docs/HUMAN_RESPONSES_ARCHIVE.md
+```"""
+        agents_rules = """- Process human inbox messages, including freeform commands.
+- If the human asks for a summary, status update, explanation, or report, satisfy it locally in Markdown or app artifacts.
+- Do not use Discord or notifier APIs unless the human explicitly changes bridge mode.
+- Process handled human inbox messages only after completing or intentionally deferring the requested action, then archive concise notes."""
+        run_steps = """1. Classify and handle new human inbox messages, including freeform commands.
+1. Resolve any handled human replies from `docs/HUMAN_INBOX.md`.
+1. Remove handled messages from `docs/HUMAN_INBOX.md` only after the requested action has actually been completed or intentionally deferred.
+1. Archive concise notes to `docs/HUMAN_RESPONSES_ARCHIVE.md`."""
+        protocol = """Human bridge enabled: true
+
+Human bridge mode: `file_only`
+
+Use file-only human intervention. Do not use Discord or notifier APIs for this project unless the human explicitly changes the bridge mode later.
+
+The human owner will periodically inspect `docs/HUMAN_REQUESTS.md`, perform any manual action, and reply in `docs/HUMAN_INBOX.md`. If the human asks for a summary, status update, explanation, local report, or decision record, satisfy that request locally by updating the relevant Markdown file or app artifact."""
+        guardrails = """- Ask the human only for meaningful unlocks.
+- For reversible choices, choose a safe default and document it.
+- Use `ACTIVE_WITH_PENDING_USER_INPUT` when work can continue around a pending request.
+- Use file-only handoff files: write requests to `docs/HUMAN_REQUESTS.md`, read replies from `docs/HUMAN_INBOX.md`, and archive handled replies in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
+- Do not use Discord or notifier APIs unless the human explicitly changes the bridge mode.
+- If the human asks for a summary or status update, answer locally in the requested Markdown/app artifact.
+- Remove handled entries from `docs/HUMAN_INBOX.md` only after the requested action is complete or intentionally deferred."""
+        task_notes = """Human bridge mode: `file_only`
+
+- The automation must read `docs/HUMAN_INBOX.md` at run start, interpret structured replies and freeform commands, remove handled entries only after completion or intentional deferral, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
+- The human manually inspects `docs/HUMAN_REQUESTS.md` and replies in `docs/HUMAN_INBOX.md`.
+- Do not use Discord or notifier APIs in this mode."""
+        inbox = """# Human Inbox
+
+Active inbox for replies from the human owner.
+
+In file-only mode, the human manually pastes replies here after reading `docs/HUMAN_REQUESTS.md`. Do not use Discord or notifier APIs in file-only mode.
+
+## Active Inbound Messages
+
+None.
+"""
+        outbox = """# Human Outbox
+
+File-only audit log of local outbound human-facing notes.
+
+Use this file for concise records of local status summaries, request notices, or artifacts produced because the human asked for an update. Do not use it as a notifier delivery log in file-only mode.
+
+## Outbound Records
+
+None yet.
+"""
+        setup = """# Human Bridge Setup
+
+This project uses file-only human intervention.
+
+The automation writes active requests to `docs/HUMAN_REQUESTS.md`. The human manually replies in `docs/HUMAN_INBOX.md`. The next run consumes handled replies and archives concise notes.
+
+No Discord, webhook, notifier API, or messaging credentials are used in this mode.
+"""
+    else:
+        agents_read = "Human bridge files are not required unless the human later enables the bridge."
+        agents_rules = "- Human bridge is disabled; do not create human request queues unless the human later enables the bridge."
+        run_steps = "1. Skip human inbox processing because the human bridge is disabled for this project."
+        protocol = """Human bridge enabled: false
+
+Human bridge mode: `disabled`
+
+Do not create human requests or wait for human replies during normal automation runs. If work becomes unsafe or impossible without the human, record the blocker in `docs/CODEX_AUTOMATION_TASKS.md` and use `BLOCKED_ON_USER` only when no useful work can continue."""
+        guardrails = """- Human bridge is disabled.
+- Do not create human request queues during normal runs.
+- For reversible choices, choose a safe default and document it.
+- Use `BLOCKED_ON_USER` only when no valuable work can continue without the human."""
+        task_notes = "Human bridge mode: `disabled`. No human request queue is active."
+        inbox = "# Human Inbox\n\nHuman bridge disabled for this project.\n"
+        outbox = "# Human Outbox\n\nHuman bridge disabled for this project.\n"
+        setup = "# Human Bridge Setup\n\nHuman bridge disabled for this project.\n"
+
+    if mode in {"local_notifier", "discord_notifier"}:
+        end_requirements = "- human requests created or resolved\n- human messages sent, including notifier delivery result\n"
+        delivery_sentence = (
+            "The project may call `POST http://127.0.0.1:8765/api/notify`; the notifier handles Discord/local notification delivery and credentials."
+        )
+        bootstrap_sentence = (
+            "Use notifier mode. This repo may call `POST http://127.0.0.1:8765/api/notify` when the separate notifier service is running, but must not handle messaging credentials."
+        )
+    elif mode == "file_only":
+        end_requirements = "- human inbox messages handled and local response artifacts created\n"
+        delivery_sentence = "The human reads `docs/HUMAN_REQUESTS.md` and replies in `docs/HUMAN_INBOX.md`. The automation handles replies on later runs and archives them in `docs/HUMAN_RESPONSES_ARCHIVE.md`."
+        bootstrap_sentence = "Use file-only mode. Create project-side human bridge files and do not use Discord or notifier APIs unless the human explicitly changes mode later."
+    else:
+        end_requirements = ""
+        delivery_sentence = "No human bridge files are required for normal runs."
+        bootstrap_sentence = "Human bridge disabled. Do not create human request queues unless the human later enables the bridge."
+
+    development = f"""Human bridge enabled: {str(enabled).lower()}
+
+Human bridge mode: `{mode}`
+
+{delivery_sentence}
+"""
+
+    bootstrap = f"""Human bridge enabled: {str(enabled).lower()}
+
+Human bridge mode: `{mode}`
+
+{bootstrap_sentence}
+"""
+
+    return {
+        "HUMAN_BRIDGE_ENABLED": str(enabled).lower(),
+        "HUMAN_BRIDGE_MODE": mode,
+        "HUMAN_FILE_READS": file_reads,
+        "HUMAN_AGENTS_READ_BLOCK": agents_read,
+        "HUMAN_AGENTS_RULES": agents_rules,
+        "HUMAN_RUN_STEPS": run_steps,
+        "HUMAN_PROTOCOL": protocol,
+        "HUMAN_GUARDRAILS_POLICY": guardrails,
+        "HUMAN_TASK_NOTES": task_notes,
+        "HUMAN_INBOX_CONTENT": inbox,
+        "HUMAN_OUTBOX_CONTENT": outbox,
+        "HUMAN_BRIDGE_SETUP_CONTENT": setup,
+        "HUMAN_END_REQUIREMENTS": end_requirements.rstrip(),
+        "HUMAN_DEVELOPMENT_SECTION": development.strip(),
+        "HUMAN_BOOTSTRAP_SECTION": bootstrap.strip(),
+    }
+
+
 def placeholders(data: dict[str, Any]) -> dict[str, str]:
     project_name = str(data.get("project_name") or data.get("summary") or "New Project").strip()
     mode = project_mode(data)
     bridge_mode = human_bridge_mode(data)
-    text_responses = bridge_mode == "local_notifier" and normalize_bool(
+    text_responses = bridge_mode in {"local_notifier", "discord_notifier"} and normalize_bool(
         data.get("human_requested_text_responses"),
         True,
     )
@@ -1083,6 +1349,7 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
         data.get("verification_commands"),
         "Add project-specific test, lint, build, or demo commands during bootstrap.",
     )
+    env_values = env_access_values(data)
     values = {
         "PROJECT_NAME": project_name,
         "PROJECT_SLUG": slugify(project_name),
@@ -1095,19 +1362,24 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
         "TECH_PREFERENCES": normalize_lines(data.get("tech_preferences"), "Use the existing repo stack or choose a simple, well-supported default."),
         "HARD_CONSTRAINTS": normalize_lines(data.get("hard_constraints"), "Keep the first demo local-first and reviewable."),
         "SAFETY_CONSTRAINTS": normalize_lines(data.get("safety_constraints"), "No secrets, paid actions, public deploys, or real-world side effects without approval."),
-        "AUTOMATION_MUST_NEVER_DO": normalize_lines(data.get("automation_must_never_do"), "Never read secrets, spend money, deploy publicly, publish externally, contact real users, or trigger real-world side effects without explicit approval."),
+        "AUTOMATION_MUST_NEVER_DO": normalize_lines(data.get("automation_must_never_do"), env_values["AUTOMATION_MUST_NEVER_DO_DEFAULT"]),
         "EXTERNAL_SERVICES": normalize_lines(data.get("external_services"), "None required for the first demo."),
         "ADDITIONAL_CONTEXT_FILES": normalize_lines(data.get("additional_context_files"), "No additional context files provided."),
         "VERIFICATION_COMMANDS": verification,
+        "VERIFICATION_COMMANDS_INLINE": re.sub(r"\s+", " ", verification.replace("`", "")).strip(),
         "CADENCE": normalize_lines(data.get("desired_cadence"), "every 60 minutes"),
         "MEANINGFUL_DELIVERABLE": normalize_lines(data.get("meaningful_deliverable"), "A runnable, verified increment."),
         "BEYOND_MVP": normalize_lines(data.get("beyond_mvp"), "Continue improving core value, demo quality, integrations, and automation reliability."),
+        "LONG_RUN_DIRECTION": normalize_lines(data.get("beyond_mvp"), "Continue improving core value, demo quality, integrations, and automation reliability."),
         "ASSUMPTIONS": normalize_lines(data.get("assumptions"), "Assumptions should be documented during bootstrap."),
         "CREATED_AT": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    values.update(progression_values(data, project_name))
     values.update(worker_values(data))
+    values.update(env_values)
     values.update(multi_role_values(data))
     values.update(automation_signal_values(data))
+    values.update(ticket_run_values(data))
     values.update(bridge_values(bridge_mode, text_responses))
     return values
 
@@ -1123,6 +1395,87 @@ def render_template(text: str, values: dict[str, str]) -> str:
         if text == before:
             break
     return text
+
+
+def diffmogger_local_exclude_patterns(values: dict[str, str]) -> list[str]:
+    patterns: set[str] = set(DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS)
+    for template_path in sorted(TEMPLATE_ROOT.rglob("*")):
+        if template_path.is_dir():
+            continue
+        if "__pycache__" in template_path.parts or template_path.suffix == ".pyc":
+            continue
+        rel = template_path.relative_to(TEMPLATE_ROOT).as_posix()
+        if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel in HUMAN_BRIDGE_FILES:
+            continue
+        if values.get("AUTOMATION_SIGNALS_ENABLED") != "true" and rel in AUTOMATION_SIGNAL_FILES:
+            continue
+        if values.get("AUTOMATION_RUN_MODE") != "ticket_campaign" and rel in TICKET_RUN_FILES:
+            continue
+        if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and rel in MULTI_ROLE_FILES:
+            continue
+        if rel.startswith(".agentic/"):
+            patterns.add("/.agentic/")
+        else:
+            patterns.add(f"/{rel}")
+    patterns.add("/.pnpm-store/")
+    return sorted(patterns)
+
+
+def git_path(target: Path, path: str) -> Path | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-path", path],
+        cwd=target,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    resolved = Path(raw)
+    if not resolved.is_absolute():
+        resolved = target / resolved
+    return resolved
+
+
+def install_diffmogger_local_excludes(target: Path, values: dict[str, str]) -> list[str]:
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=target,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or result.stdout.strip() != "true":
+        return []
+    exclude = git_path(target, "info/exclude")
+    if exclude is None:
+        return []
+    patterns = diffmogger_local_exclude_patterns(values)
+    try:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    except OSError:
+        return []
+    lines = existing.splitlines()
+    changed = False
+    if "# Diffmogger local automation scaffold/runtime" not in lines:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("# Diffmogger local automation scaffold/runtime")
+        changed = True
+    for pattern in patterns:
+        if pattern not in lines:
+            lines.append(pattern)
+            changed = True
+    if changed:
+        try:
+            exclude.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        except OSError:
+            return []
+    return patterns
 
 
 def managed_section_bounds(kind: str) -> tuple[str, str]:
@@ -1182,6 +1535,8 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
             continue
         if values.get("AUTOMATION_SIGNALS_ENABLED") != "true" and rel.as_posix() in AUTOMATION_SIGNAL_FILES:
             continue
+        if values.get("AUTOMATION_RUN_MODE") != "ticket_campaign" and rel.as_posix() in TICKET_RUN_FILES:
+            continue
         if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and rel.as_posix() in MULTI_ROLE_FILES:
             continue
         dest = target / rel
@@ -1200,6 +1555,7 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
         if rel.parts and rel.parts[0] == "scripts" and dest.suffix in {".sh", ".py"}:
             dest.chmod(0o755)
         written.append(dest)
+    install_diffmogger_local_excludes(target, values)
     return written
 
 

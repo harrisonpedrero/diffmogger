@@ -25,9 +25,9 @@ docs/CODEX_AUTOMATION_GUARDRAILS.md
 ## Working Rules
 
 - Build the product; do not only write plans.
-- Treat MVP as an early milestone, not the finish line.
+- {{AGENTS_PROGRESS_RULE}}
 - Use safe local defaults, fixtures, mocks, or seed data unless the task explicitly enables external integration.
-- Do not read `.env` files or handle secrets.
+- {{ENV_ACCESS_AGENTS_RULE}}
 - Do not spend money, deploy publicly, or trigger real-world side effects without explicit approval.
 - Use worker agents only for bounded work and record their outputs.
 - Write-capable worker agents allowed: {{WRITE_WORKER_AGENTS_ALLOWED}}; max write workers: {{MAX_WRITE_WORKER_COUNT}}.
@@ -38,6 +38,11 @@ docs/CODEX_AUTOMATION_GUARDRAILS.md
 - Update `docs/CODEX_AUTOMATION_TASKS.md` at the end of every automation run.
 
 ## Verification
+
+Full-suite commands are configured in `.agentic/verification_commands.txt`.
+Use them for hardener/finalization or when explicitly required; builder/planner patches may use narrower checks from `.agentic/smoke_commands.txt` or the role manifest.
+The integrator records clean-HEAD baseline verification in `target/baseline_verification.json`; unrelated focused patches should not be rejected solely because that baseline is already failing.
+Hardener may add, rewrite, or remove obsolete tests when it improves verification quality, but must include `Test change rationale:` for removed or substantially rewritten tests and must not delete tests merely to pass checks.
 
 Preferred commands:
 

@@ -59,6 +59,12 @@
       "items": { "type": "string" },
       "default": []
     },
+    "env_access_policy": {
+      "type": "string",
+      "description": "Whether automation may directly open local .env files, or may only rely on project commands that load env values normally.",
+      "enum": ["project_commands_only", "direct_env_files_allowed"],
+      "default": "project_commands_only"
+    },
     "additional_context_files": {
       "type": "array",
       "description": "Optional project context files or copied target-relative context paths such as PDFs, research notes, or design docs. Do not include secrets.",
@@ -81,8 +87,13 @@
     },
     "human_bridge_mode": {
       "type": "string",
-      "enum": ["disabled", "file_only", "local_notifier"],
+      "enum": ["disabled", "file_only", "local_notifier", "discord_notifier"],
       "default": "file_only"
+    },
+    "local_notifications_enabled": {
+      "type": "boolean",
+      "description": "Whether notifier modes should also use native local desktop notifications.",
+      "default": true
     },
     "human_requested_text_responses": {
       "type": "boolean",
@@ -141,6 +152,22 @@
       "enum": ["single_lane_interval", "fixed_multi_role", "continuous_conveyor"],
       "default": "single_lane_interval"
     },
+    "automation_run_mode": {
+      "type": "string",
+      "description": "Whether recurring automation should continuously improve the project or halt after a bounded local ticket campaign.",
+      "enum": ["continuous_improvement", "ticket_campaign"],
+      "default": "continuous_improvement"
+    },
+    "ticket_run_file": {
+      "type": "string",
+      "description": "Target-relative Markdown file containing the ticket-campaign JSON block.",
+      "default": "docs/TICKET_RUN.md"
+    },
+    "ticket_completion_notify": {
+      "type": "boolean",
+      "description": "Whether ticket-campaign finalization should send a native local desktop notification or record a fallback outbox entry.",
+      "default": true
+    },
     "multi_role_allow_remotes": {
       "type": "boolean",
       "description": "Whether dashboard-managed local-only multi-role or conveyor jobs may set MULTI_ROLE_ALLOW_REMOTES=1 when the repo has configured git remotes. This does not permit pushes, fetches, pulls, or remote configuration.",
@@ -157,6 +184,7 @@
     },
     "beyond_mvp": {
       "type": "string",
+      "description": "Legacy field name for the neutral long-run direction used by continuous-improvement scaffolds. Ticket campaigns may leave this empty.",
       "default": "Continue improving core value, demo quality, integrations, and automation reliability."
     },
     "assumptions": {

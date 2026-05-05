@@ -14,10 +14,10 @@ This checklist records the release checks for the current public-alpha pass. It 
 - [x] `.env` ignored.
 - [x] Public positioning is honest alpha.
 - [x] Known limitations documented.
-- [x] No real Twilio credentials.
-- [x] No personal phone numbers.
-- [x] No ngrok URLs except placeholders.
+- [x] No real Discord bot tokens.
+- [x] No personal contact details.
+- [x] No live tunnel URLs.
 - [x] No local macOS user-home absolute paths.
 - [x] No stale workspace, personal-path, or product-specific positioning in Diffmogger README.
 
-The secret/PII grep can match placeholder variable names, placeholder phone numbers, placeholder ngrok domains, or ordinary words containing `sk-`. Treat those as review prompts; remove any real credential, live URL, personal phone number, or local machine path before release.
+The secret/PII grep can match placeholder variable names, placeholder channel ids, or ordinary words containing `sk-`. Treat those as review prompts; remove any real credential, live URL, personal contact detail, or local machine path before release.

@@ -7,7 +7,7 @@ This is the operator manual for Diffmogger.
 - Git.
 - Python 3.10 or newer.
 - Codex CLI installed and authenticated.
-- Optional: Twilio account, Twilio SMS or WhatsApp sender, and ngrok for phone-based human replies.
+- Optional: Discord bot configuration for progress/message channels, plus macOS local desktop notifications.
 
 Keep secrets outside target repos. Do not paste API keys into prompts, task files, inbox files, or generated docs.
 
@@ -242,7 +242,7 @@ Rules:
 - one generation of workers by default
 - read-only reports first
 - implementation workers need disjoint write scopes or isolation
-- workers do not send SMS/WhatsApp messages
+- workers do not send Discord/local notifier messages
 - workers do not touch `.env`, credentials, or external services
 - main agent owns integration
 - task file records worker activity
@@ -263,7 +263,7 @@ The automation writes requests. The human manually replies in `HUMAN_INBOX.md`. 
 
 Use this mode first. It has no credentials and no webhook.
 
-Freeform inbox commands still matter in file-only mode. If the human writes `send me a summary`, `status update`, or similar, the automation should answer locally in Markdown or an app artifact. It should not send SMS/WhatsApp or record `NOTIFIER_UNREACHABLE` unless Mode B is configured.
+Freeform inbox commands still matter in file-only mode. If the human writes `send me a summary`, `status update`, or similar, the automation should answer locally in Markdown or an app artifact. It should not call notifier APIs or record `NOTIFIER_UNREACHABLE` unless notifier mode is configured.
 
 ## Human Bridge Mode B: Bundled Notifier
 
@@ -286,6 +286,10 @@ cp .env.example .env
 Configure `.env`:
 
 ```text
+DISCORD_BOT_TOKEN=replace-with-your-discord-bot-token
+DISCORD_PROGRESS_CHANNEL_ID=123456789012345678
+DISCORD_MESSAGING_CHANNEL_ID=123456789012345679
+LOCAL_NOTIFICATIONS_ENABLED=true
 TARGET_REPO_DIR=/absolute/path/to/target-project
 TARGET_HUMAN_INBOX_PATH=/absolute/path/to/target-project/docs/HUMAN_INBOX.md
 TARGET_HUMAN_REQUESTS_PATH=/absolute/path/to/target-project/docs/HUMAN_REQUESTS.md
@@ -305,30 +309,11 @@ Default endpoints:
 ```text
 GET  http://127.0.0.1:8765/health
 POST http://127.0.0.1:8765/api/notify
-POST http://127.0.0.1:8787/twilio/inbound
 ```
 
-Expose only the webhook port:
+Discord mode posts `event_kind: "progress"` notifications to the configured progress channel and `event_kind: "message"` notifications to the configured messaging channel. It writes captured bot mentions/replies from the messaging channel to the target project's `docs/HUMAN_INBOX.md`. The target automation consumes and clears handled entries.
 
-```bash
-ngrok http 8787
-```
-
-Configure Twilio inbound webhook:
-
-```text
-https://<ngrok-domain>/twilio/inbound
-```
-
-Set:
-
-```text
-WEBHOOK_PUBLIC_BASE_URL=https://<ngrok-domain>
-```
-
-The notifier writes inbound replies to the target project's `docs/HUMAN_INBOX.md`. The target automation consumes and clears handled entries.
-
-The target project stays decoupled from the notifier. It calls the loopback API and reads/writes target docs only. It should not import notifier code, inspect notifier internals during normal runs, or handle Twilio credentials.
+The target project stays decoupled from the notifier. It calls the loopback API and reads/writes target docs only. It should not import notifier code, inspect notifier internals during normal runs, or handle Discord credentials.
 
 ## Notifier Tests
 
@@ -340,7 +325,7 @@ python -m pip install -r requirements.txt
 python -m pytest
 ```
 
-Tests do not send real SMS and do not require real Twilio credentials.
+Tests use fake Discord senders and dry-run local-notification paths. They do not require real Discord credentials.
 
 ## Target Project Notify Call
 
@@ -391,7 +376,7 @@ If the notifier is unavailable, the target automation should write/update `docs/
 - Target automations must not read `.env`.
 - Notifier `.env` is local and ignored.
 - Use read-only/data-only keys when possible.
-- Do not include credentials in SMS replies.
+- Do not include credentials in notifier messages.
 - Do not commit runtime queue files.
 
 ## Context Hygiene
@@ -423,7 +408,7 @@ Automation never asks the human:
 Add a pending unlock in the task file and use the human bridge protocol.
 
 Notifier outbound works but inbound does not:
-Check ngrok target port, Twilio webhook URL, `WEBHOOK_PUBLIC_BASE_URL`, Twilio signature validation, and target inbox path.
+Check the Discord messaging channel id, Message Content Intent, bot permissions, bot mention/reply capture behavior, target inbox path, and inbound dedupe state.
 
 Codex cannot read/write files:
 Check current working directory, sandbox mode, approval policy, file permissions, and nested `AGENTS.md` instructions.

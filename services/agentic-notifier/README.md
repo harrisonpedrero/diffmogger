@@ -1,11 +1,11 @@
 # Diffmogger Agentic Notifier
 
-Agentic Notifier is Diffmogger's reusable local SMS/WhatsApp bridge. A target project can call a loopback HTTP API when its Codex automation needs human input; this service owns Twilio credentials, webhook handling, duplicate suppression, and writes replies back into the target project's handoff files.
+Agentic Notifier is Diffmogger's reusable local Discord and desktop notification bridge. A target project can call a loopback HTTP API when its Codex automation needs to post progress, message the human owner, or record an inbound Discord reply. This service owns Discord credentials, channel routing, duplicate suppression, native local notifications, and writes replies back into the target project's handoff files.
 
 Target projects should not import this code. They only need:
 
 - `POST http://127.0.0.1:8765/api/notify`
-- the target markdown paths where requests, outbox entries, and inbound replies are written
+- the target Markdown paths where requests, outbox entries, and inbound replies are written
 
 ## Install
 
@@ -25,11 +25,86 @@ Create local configuration:
 cp .env.example .env
 ```
 
-Edit `.env` locally. Real Twilio values belong in this service's local `.env`, never in a generated target project and never in Codex-visible task files.
+Real Discord values belong in this service's local `.env`, never in a generated target project and never in Codex-visible task files. Use a virtual environment; do not install packages into Homebrew/system Python if it reports an externally managed environment.
 
-The example config starts with `DRY_RUN=true`. Leave it enabled until you intentionally test a real outbound send with approved Twilio sender setup.
+## Discord Setup
 
-Use a virtual environment. Do not install packages into Homebrew/system Python if it reports an externally managed environment.
+1. Create an application in the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Add a bot user and copy the bot token into `DISCORD_BOT_TOKEN`.
+3. Enable Message Content Intent for inbound replies. Leave Presence Intent and Server Members Intent off.
+4. Create two server channels, for example `#diffmogger-progress` and `#diffmogger-messages`.
+5. Copy their channel IDs into `DISCORD_PROGRESS_CHANNEL_ID` and `DISCORD_MESSAGING_CHANNEL_ID`.
+6. Invite the bot with the OAuth2 URL Generator. For Diffmogger, check only the `bot` scope. After you check `bot`, Discord reveals a separate **Bot Permissions** section below the scopes list. In that permissions section, check View Channels, Send Messages, and Read Message History.
+7. Copy the generated URL, open it in your browser, choose your Discord server, and authorize the bot. You need permission to add apps/bots to that server.
+
+### Channel ID Checklist
+
+Discord only shows channel IDs when Developer Mode is enabled:
+
+1. In Discord, open **User Settings -> Advanced**.
+2. Turn on **Developer Mode**.
+3. Go to your server and right-click the progress channel, for example `#diffmogger-progress`.
+4. Click **Copy Channel ID** and paste it into `DISCORD_PROGRESS_CHANNEL_ID`.
+5. Right-click the messaging channel, for example `#diffmogger-messages`.
+6. Click **Copy Channel ID** and paste it into `DISCORD_MESSAGING_CHANNEL_ID`.
+
+Channel IDs are long numeric strings. They are not secrets, but keep them in `services/agentic-notifier/.env` with the rest of the notifier configuration so target projects stay generic.
+
+### OAuth2 URL Generator Checklist
+
+In the Developer Portal, open your application, then go to **OAuth2 -> URL Generator**.
+
+Under **Scopes**, check:
+
+```text
+bot
+```
+
+Do not check `identify`, `email`, `guilds`, `messages.read`, `webhook.incoming`, or `applications.commands` for the basic Diffmogger notifier. Those are OAuth2 scopes, not the normal server/channel permissions Diffmogger needs. In particular, `messages.read` is not the same as the **Read Message History** bot permission.
+
+After checking `bot`, scroll down to the **Bot Permissions** section. That section is not visible until `bot` is selected. Check:
+
+```text
+View Channels
+Send Messages
+Read Message History
+```
+
+In Discord's permission groups, **View Channels** is under general permissions. **Send Messages** and **Read Message History** are under text permissions.
+
+Do not check `Administrator`. The minimum permission integer for those three permissions is `68608`, so a manually inspected invite URL may contain:
+
+```text
+scope=bot&permissions=68608
+```
+
+Copy the generated URL at the bottom of the page, open it, select the server, and approve the install. After installation, confirm the bot can see both configured channels. If either channel has custom permission overwrites, grant the bot or its role View Channel, Send Messages, and Read Message History in that channel.
+
+Message Content Intent is not part of the OAuth2 URL. Enable it separately under **Bot -> Privileged Gateway Intents** so Diffmogger can capture reply messages that do not mention the bot directly.
+
+### Privileged Gateway Intents Checklist
+
+In the Developer Portal, open your application, then go to **Bot -> Privileged Gateway Intents**.
+
+Turn on:
+
+```text
+Message Content Intent
+```
+
+Leave these off:
+
+```text
+Presence Intent
+Server Members Intent
+```
+
+Diffmogger does not read presence updates or member lists. It does request message content through `discord.py` so it can capture human replies in the messaging channel. If Message Content Intent is off while `DRY_RUN=false`, Discord may reject the bot connection with a privileged-intents error.
+
+References:
+
+- [Discord bot docs](https://docs.discord.com/developers/bots)
+- [Discord OAuth2 and permissions docs](https://docs.discord.com/developers/platform/oauth2-and-permissions)
 
 ## Target Project Paths
 
@@ -60,30 +135,13 @@ Default one-process runner:
 python -m agentic_notifier.run_service
 ```
 
-Default ports:
-
-- Local target-project API: `http://127.0.0.1:8765`
-- Twilio webhook receiver: `http://127.0.0.1:8787`
-
-## Twilio Sender Configuration
-
-The notifier supports either a Twilio Messaging Service SID or a direct sender:
+Default local API:
 
 ```text
-TWILIO_MESSAGING_SERVICE_SID=MGxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_FROM=+15555555555
+http://127.0.0.1:8765
 ```
 
-If `TWILIO_MESSAGING_SERVICE_SID` is set, outbound sends use `messaging_service_sid` and do not pass `from_`. If it is empty, sends fall back to `TWILIO_FROM`.
-
-SMS via US +1 10DLC may require A2P 10DLC approval before real outbound sends work. Twilio error `30034` usually means the sender or campaign is not registered or ready. File-only mode, `DRY_RUN=true`, or WhatsApp sandbox mode are valid while SMS setup is pending.
-
-If you prefer separate processes:
-
-```bash
-python -m agentic_notifier.api_app
-python -m agentic_notifier.webhook_app
-```
+The Discord bot and API run in the same process. In `DRY_RUN=true`, API calls write target files and report dry-run deliveries without sending Discord or desktop notifications.
 
 ## Health
 
@@ -91,12 +149,51 @@ python -m agentic_notifier.webhook_app
 curl http://127.0.0.1:8765/health
 ```
 
+The health response includes whether the target repo is configured, Discord token/channel settings are present, local notifications are enabled, and dry-run mode is active.
+
 ## Notify API
 
 Target projects call:
 
 ```text
 POST http://127.0.0.1:8765/api/notify
+```
+
+Progress payload:
+
+```json
+{
+  "request_id": "PROG-2026-04-29-001",
+  "type": "automation_progress",
+  "priority": "normal",
+  "summary": "Builder integrated one patch",
+  "event_kind": "progress",
+  "message_body": "Builder integrated one patch and verification passed.",
+  "dedupe_key": "PROG-2026-04-29-001:v1",
+  "expects_reply": false,
+  "local_notify": false
+}
+```
+
+Direct human-message payload:
+
+```json
+{
+  "request_id": "MSG-2026-04-29-001",
+  "type": "human_requested_summary",
+  "priority": "normal",
+  "summary": "Progress summary requested by human",
+  "event_kind": "message",
+  "message_body": "Project update: Built X, Y, and Z. Checks passing: tests/build. Current blocker: none.",
+  "agent_recommendation": "No action needed unless you want to review the generated artifacts.",
+  "minimum_user_action": "None.",
+  "reply_format": "Optional follow-up request.",
+  "unblocked_work_remaining": [
+    "Continue current automation sprint"
+  ],
+  "dedupe_key": "MSG-2026-04-29-001:v1",
+  "expects_reply": false
+}
 ```
 
 Human-unlock request payload:
@@ -107,6 +204,7 @@ Human-unlock request payload:
   "type": "api_key_setup",
   "priority": "unlocking",
   "summary": "Add Service X read-only API key",
+  "event_kind": "message",
   "context": "This unlocks the next source adapter while offline fixtures remain available.",
   "agent_recommendation": "Use read-only/data-only access. Do not grant write, billing, admin, or production permissions.",
   "minimum_user_action": "Add SERVICE_X_API_KEY to your local secret store and reply HR-001 DONE.",
@@ -119,57 +217,38 @@ Human-unlock request payload:
 }
 ```
 
-Direct human-requested status/update payload:
-
-```json
-{
-  "request_id": "MSG-2026-04-29-001",
-  "type": "human_requested_summary",
-  "priority": "normal",
-  "summary": "Progress summary requested by human",
-  "message_body": "Project update: Built X, Y, and Z. Checks passing: tests/build. Current blocker: none. Next sprint: improve the report path.",
-  "agent_recommendation": "No action needed unless you want to review the generated artifacts.",
-  "minimum_user_action": "None.",
-  "reply_format": "Optional follow-up request.",
-  "unblocked_work_remaining": [
-    "Continue current automation sprint"
-  ],
-  "dedupe_key": "MSG-2026-04-29-001:v1",
-  "expects_reply": false
-}
-```
-
-Use `message_body` for concise SMS/WhatsApp responses to freeform human requests such as "send me a status update". Use `expects_reply: false` when the outbound message is a response, not a new request to track in `docs/HUMAN_REQUESTS.md`.
-
 Response:
 
 ```json
 {
   "ok": true,
-  "request_id": "HR-2026-04-29-001",
+  "request_id": "MSG-2026-04-29-001",
   "sent": true,
   "dry_run": false,
   "deduped": false,
-  "message_preview": "Need input: HR-001 ..."
-}
-```
-
-Provider/config failures return structured JSON and are recorded in the target outbox when target paths are configured:
-
-```json
-{
-  "detail": {
-    "ok": false,
-    "error_type": "provider_send_failed",
-    "provider": "twilio",
-    "provider_error_code": "30034",
-    "message": "Twilio rejected the message because the A2P 10DLC campaign is not ready or the sender is not registered for this route.",
-    "hint": "Twilio error 30034 usually means the A2P 10DLC campaign is not ready or the sender is not registered for this route."
+  "message_preview": "Project update: Built X, Y, and Z...",
+  "deliveries": {
+    "discord": {
+      "enabled": true,
+      "ok": true,
+      "sent": true,
+      "dry_run": false,
+      "status": "sent",
+      "detail": ""
+    },
+    "local": {
+      "enabled": true,
+      "ok": true,
+      "sent": true,
+      "dry_run": false,
+      "status": "sent",
+      "detail": "macOS desktop notification delivered"
+    }
   }
 }
 ```
 
-The outbox status for provider failures is `PROVIDER_SEND_FAILED`; target automations should not claim a text was sent.
+Delivery failures are recorded in the target outbox with generic statuses such as `DISCORD_SEND_FAILED`, `LOCAL_NOTIFICATION_FAILED`, or `NOTIFIER_UNREACHABLE`. Target automations should not claim delivery unless the notifier response shows success or dry-run intent.
 
 If `LOCAL_NOTIFY_API_TOKEN` is set, include:
 
@@ -179,99 +258,46 @@ Authorization: Bearer <token>
 
 Without a token, the API must remain bound to loopback.
 
-## Dry-Run Outbound Test
+## Channel Routing
 
-The default `.env.example` and no-env configuration use `DRY_RUN=true`. You can also use the test script, which forces `"dry_run": true` unless `--real-send` is passed:
+- `event_kind: "progress"` posts to `DISCORD_PROGRESS_CHANNEL_ID`.
+- `event_kind: "message"` posts to `DISCORD_MESSAGING_CHANNEL_ID`.
+- Generated multi-role targets in `discord_notifier` mode send `progress` notifications after local automation commits, including the commit subject and short work summary.
+- Blockers that need user input, human-unlock requests, and replies to user messages should use `message`.
+- Direct user messages default to local desktop notifications when `LOCAL_NOTIFICATIONS_ENABLED=true`.
+- Completion/progress events can set `local_notify: true` when they should also alert locally.
+
+## Discord Inbound Replies
+
+The bot only reads the configured messaging channel. It ignores bot messages and captures human messages only when they mention the bot or reply to a bot-authored message.
+
+Captured messages are appended to:
+
+```text
+docs/HUMAN_INBOX.md
+```
+
+Inbound messages are deduped by Discord message ID. The next target automation run should handle the inbox entry, remove it only after the requested action is complete or intentionally deferred, and archive a concise note.
+
+## Dry-Run Tests
+
+The default `.env.example` uses `DRY_RUN=true`. The example config starts with `DRY_RUN=true`.
 
 ```bash
+python scripts/send_test_notification.py --progress
 python scripts/send_test_notification.py
+python scripts/dry_run_inbound.py "@Diffmogger HR-001 DONE. Key added locally."
 ```
 
-Test the direct status/update payload:
+Use `--real-send` only after Discord channels, bot permissions, and target files are verified.
 
-```bash
-python scripts/send_test_notification.py --direct
-```
+## Safety
 
-This writes target Markdown handoff files and does not send real SMS.
-
-## Inbound Webhook
-
-Expose only the webhook port:
-
-```bash
-ngrok http 8787
-```
-
-Configure the Twilio inbound webhook to:
-
-```text
-https://<ngrok-domain>/twilio/inbound
-```
-
-Set:
-
-```text
-WEBHOOK_PUBLIC_BASE_URL=https://<ngrok-domain>
-```
-
-Do not expose `http://127.0.0.1:8765/api/notify` through ngrok.
-
-The webhook endpoint is:
-
-```text
-POST http://127.0.0.1:8787/twilio/inbound
-```
-
-It validates Twilio signatures, parses the reply, dedupes by `MessageSid`, and appends unhandled entries to `docs/HUMAN_INBOX.md`.
-
-## Dry-Run Inbound Test
-
-Exercise inbox writing without Twilio or ngrok:
-
-```bash
-python scripts/dry_run_inbound.py "HR-001 DONE. Key added locally."
-```
-
-To test the HTTP webhook locally, set `AGENTIC_NOTIFIER_TEST_MODE=true` and post form fields with:
-
-```text
-X-Agentic-Notifier-Test-Bypass: true
-```
-
-## Reply Parsing
-
-Supported examples:
-
-- `HR-001 DONE`
-- `HR-2026-04-29-001 DONE`
-- `DONE HR-001`
-- `skip HR-001`
-- `approve HR-001`
-- `reject HR-001`
-- free text containing a request id
-
-Parsed intents:
-
-```text
-done
-skip
-approve
-reject
-info
-unknown
-```
-
-## Duplicate Suppression
-
-Runtime state lives under:
-
-```text
-runtime/sent_notifications.jsonl
-runtime/inbound_message_sids.jsonl
-```
-
-Outbound notifications dedupe by `dedupe_key`. Inbound webhook retries dedupe by `MessageSid`.
+- Keep Discord tokens only in `services/agentic-notifier/.env`.
+- Bind the API to `127.0.0.1` unless `LOCAL_NOTIFY_API_TOKEN` is configured.
+- Do not put Discord tokens or channel IDs in target-project task files or prompts.
+- Use `DRY_RUN=true` until setup is verified.
+- Keep target projects decoupled from notifier implementation internals.
 
 ## Tests
 
@@ -279,12 +305,4 @@ Outbound notifications dedupe by `dedupe_key`. Inbound webhook retries dedupe by
 python -m pytest
 ```
 
-Tests use fake Twilio clients or test bypasses. They do not require real credentials, ngrok, or real SMS.
-
-## Security Notes
-
-- Do not commit `.env`.
-- Do not print secrets.
-- Keep the notify API bound to `127.0.0.1` unless you configure a token and understand the risk.
-- Expose only the webhook port through ngrok.
-- Use dry-run mode while wiring a new target project.
+Tests use fake Discord senders and local-notification dry-run/failure paths. They do not require real Discord credentials.

@@ -16,6 +16,11 @@
     "type": { "type": "string", "minLength": 1 },
     "priority": { "type": "string", "minLength": 1 },
     "summary": { "type": "string", "minLength": 1 },
+    "event_kind": {
+      "type": "string",
+      "enum": ["progress", "message"],
+      "default": "message"
+    },
     "context": { "type": "string", "default": "" },
     "message_body": { "type": ["string", "null"], "default": null },
     "agent_recommendation": { "type": "string", "default": "" },
@@ -30,6 +35,10 @@
     "expects_reply": {
       "type": "boolean",
       "default": true
+    },
+    "local_notify": {
+      "type": ["boolean", "null"],
+      "default": null
     },
     "dry_run": {
       "type": "boolean",

@@ -15,7 +15,7 @@ docs/HUMAN_RESPONSES_ARCHIVE.md
 
 The automation writes active requests to `docs/HUMAN_REQUESTS.md`. The human manually replies in `docs/HUMAN_INBOX.md`. The next run consumes handled replies and archives concise notes.
 
-No SMS, WhatsApp, Twilio, webhook, ngrok, notifier API, or messaging credentials are used in this mode.
+No Discord, webhook, notifier API, or messaging credentials are used in this mode.
 
 If a human inbox message asks for a summary, status update, report, explanation, or decision record, the automation should satisfy it locally by updating the relevant Markdown file or app artifact.
 
