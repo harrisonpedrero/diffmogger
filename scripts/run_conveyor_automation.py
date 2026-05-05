@@ -36,6 +36,10 @@ STATE_HISTORY_LIMIT = 60
 NO_PROGRESS_STATE_KEY = "integrator_no_progress"
 DECISION_QUEUE_LIMIT = 8
 BASELINE_VERIFICATION_RELATIVE = Path("target/baseline_verification.json")
+FINAL_VERIFICATION_RE = re.compile(
+    r"\b(hardener|final(?:ization)?|final\s+verification|verified\s+by\s+hardener|acceptance\s+verification)\b",
+    re.IGNORECASE,
+)
 
 CHILD: subprocess.Popen[str] | None = None
 TERMINATE_REQUESTED = False
@@ -381,6 +385,66 @@ def queued_manifests(target: Path) -> list[Path]:
     return manifests
 
 
+def role_manifest_records(target: Path, role: str, statuses: set[str] | None = None) -> list[tuple[Path, dict[str, Any]]]:
+    queue_root = target / "target" / "automation_queue" / role
+    records: list[tuple[Path, dict[str, Any]]] = []
+    for path in sorted(queue_root.glob("*/manifest.json")):
+        data = read_json(path)
+        if str(data.get("role") or role) != role:
+            continue
+        status = str(data.get("status") or "")
+        if statuses is not None and status not in statuses:
+            continue
+        records.append((path, data))
+    return sorted(
+        records,
+        key=lambda item: (
+            str(item[1].get("integrated_at") or item[1].get("created_at") or ""),
+            str(item[1].get("run_id") or item[0].parent.name),
+        ),
+    )
+
+
+def manifest_file_list(manifest: dict[str, Any]) -> list[str]:
+    files: list[str] = []
+    seen: set[str] = set()
+    for key in ("changed_files", "runtime_state_changed_files"):
+        for item in manifest.get(key) or []:
+            text = str(item).strip()
+            if text and text not in seen:
+                seen.add(text)
+                files.append(text)
+    return files
+
+
+def manifest_summary_line(manifest: dict[str, Any]) -> str:
+    for raw in str(manifest.get("summary") or "").splitlines():
+        line = re.sub(r"\s+", " ", raw).strip().lstrip("-*#> `")
+        if line and not line.lower().startswith(("commit type:", "commit scope:", "commit subject:")):
+            return line[:160]
+    return ""
+
+
+def format_file_list(files: list[str], limit: int = 4) -> str:
+    if not files:
+        return "unrecorded files"
+    suffix = "" if len(files) <= limit else f", +{len(files) - limit} more"
+    return ", ".join(files[:limit]) + suffix
+
+
+def latest_applied_role_manifest_info(target: Path, role: str) -> dict[str, Any] | None:
+    records = role_manifest_records(target, role, {"applied"})
+    if not records:
+        return None
+    path, manifest = records[-1]
+    return {
+        "path": str(path),
+        "run_id": str(manifest.get("run_id") or path.parent.name),
+        "files": manifest_file_list(manifest),
+        "summary": manifest_summary_line(manifest),
+    }
+
+
 TICKET_FENCE_RE = re.compile(r"```(?:json\s+ticket-run|ticket-run-json)\s*\n(.*?)\n```", re.DOTALL)
 
 
@@ -426,6 +490,114 @@ def ticket_has_evidence(ticket: dict[str, Any]) -> bool:
         if isinstance(value, str) and value.strip():
             return True
     return False
+
+
+def list_text_values(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def ticket_identifier(ticket: dict[str, Any], index: int) -> str:
+    ticket_id = str(ticket.get("id") or "").strip()
+    return ticket_id or f"ticket[{index}]"
+
+
+def ticket_has_hardener_or_final_verification(ticket: dict[str, Any]) -> bool:
+    for key in ("hardener_evidence", "final_evidence", "verification_evidence"):
+        if list_text_values(ticket.get(key)):
+            return True
+    evidence_text = "\n".join(
+        item
+        for key in ("evidence", "checks_run", "related_commits")
+        for item in list_text_values(ticket.get(key))
+    )
+    return bool(FINAL_VERIFICATION_RE.search(evidence_text))
+
+
+def ticket_search_tokens(ticket: dict[str, Any]) -> list[str]:
+    tokens: list[str] = []
+    ticket_id = str(ticket.get("id") or "").strip()
+    if ticket_id:
+        tokens.append(ticket_id.lower())
+    summary = re.sub(r"\s+", " ", str(ticket.get("summary") or "")).strip().lower()
+    if len(summary) >= 16:
+        tokens.append(summary[:120])
+    for key in ("evidence", "checks_run", "related_commits"):
+        for value in list_text_values(ticket.get(key)):
+            lowered = value.lower()
+            if len(lowered) >= 16:
+                tokens.append(lowered[:120])
+    return tokens
+
+
+def manifest_references_ticket(manifest: dict[str, Any], ticket: dict[str, Any]) -> bool:
+    tokens = ticket_search_tokens(ticket)
+    if not tokens:
+        return False
+    haystack = "\n".join(
+        [
+            str(manifest.get("summary") or ""),
+            "\n".join(manifest_file_list(manifest)),
+        ]
+    ).lower()
+    return any(token in haystack for token in tokens)
+
+
+def find_builder_manifest_for_ticket(target: Path, ticket: dict[str, Any]) -> dict[str, Any] | None:
+    for _path, manifest in reversed(role_manifest_records(target, "builder", {"applied"})):
+        if manifest_references_ticket(manifest, ticket):
+            return manifest
+    return None
+
+
+def unverified_candidate_done_cluster_info(target: Path) -> dict[str, Any] | None:
+    data = load_ticket_run(target)
+    if not data:
+        return None
+    raw_tickets = data.get("tickets")
+    items = [item for item in raw_tickets if isinstance(item, dict)] if isinstance(raw_tickets, list) else []
+    unverified = [
+        (index, item)
+        for index, item in enumerate(items)
+        if ticket_status(item) == "candidate_done" and not ticket_has_hardener_or_final_verification(item)
+    ]
+    if not unverified:
+        return None
+    first_index, first_ticket = unverified[0]
+    manifest = find_builder_manifest_for_ticket(target, first_ticket)
+    cluster = [(first_index, first_ticket)]
+    if manifest:
+        matching = [(index, item) for index, item in unverified if manifest_references_ticket(manifest, item)]
+        cluster = matching or cluster
+    ticket_ids = [ticket_identifier(item, index) for index, item in cluster]
+    info: dict[str, Any] = {
+        "ticket_ids": ticket_ids,
+        "count": len(ticket_ids),
+    }
+    if manifest:
+        info.update(
+            {
+                "builder_run_id": str(manifest.get("run_id") or "unknown"),
+                "files": manifest_file_list(manifest),
+                "summary": manifest_summary_line(manifest),
+            }
+        )
+    return info
+
+
+def candidate_done_hardener_catchup_reason(info: dict[str, Any]) -> str:
+    tickets = ", ".join(str(item) for item in info.get("ticket_ids") or []) or "oldest candidate_done ticket"
+    builder_run = str(info.get("builder_run_id") or "")
+    if builder_run:
+        files = [str(item) for item in info.get("files") or []]
+        return (
+            f"candidate_done ticket cluster needs hardener verification: {tickets}; "
+            f"oldest cluster traces to builder {builder_run} ({format_file_list(files)})"
+        )
+    return f"candidate_done ticket needs hardener verification: {tickets}"
 
 
 def ticket_campaign_terminal(target: Path) -> tuple[str | None, str]:
@@ -745,6 +917,38 @@ def last_integrator_accepted_by_role(state: dict[str, Any]) -> dict[str, int] | 
     return {role: int(raw.get(role, 0) or 0) for role in ("planner", "builder", "hardener")}
 
 
+def post_builder_hardener_pending(state: dict[str, Any]) -> bool:
+    history = state.get("history")
+    if not isinstance(history, list):
+        return False
+    for entry in reversed(history):
+        if not isinstance(entry, dict):
+            continue
+        role = str(entry.get("role") or "")
+        if role == "hardener":
+            return False
+        if role != "integrator":
+            continue
+        if int(entry.get("exit_code") or 0) != 0:
+            continue
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        accepted = metadata.get("accepted_by_role") if isinstance(metadata.get("accepted_by_role"), dict) else {}
+        if int(accepted.get("builder") or 0) > 0:
+            return True
+    return False
+
+
+def post_builder_hardener_reason(target: Path) -> str:
+    info = latest_applied_role_manifest_info(target, "builder")
+    if not info:
+        return "builder patch integrated; hardener gets one post-builder verification pass"
+    files = [str(item) for item in info.get("files") or []]
+    return (
+        f"builder patch integrated; hardener gets one post-builder verification pass for "
+        f"{info['run_id']} ({format_file_list(files)})"
+    )
+
+
 def planner_fast_follow_reason_after_deferral_change(state: dict[str, Any]) -> str | None:
     if str(state.get("last_completed_role") or "") != "integrator":
         return None
@@ -767,6 +971,8 @@ def planner_fast_follow_after_deferral(state: dict[str, Any]) -> bool:
 
 
 def role_after_integrator(state: dict[str, Any]) -> tuple[str, str]:
+    if post_builder_hardener_pending(state):
+        return "hardener", "builder patch integrated; hardener gets one post-builder verification pass"
     accepted_by_role = last_integrator_accepted_by_role(state)
     if not accepted_by_role:
         return "builder", "builder-first policy: last integration has no source-role metadata"
@@ -855,6 +1061,13 @@ def choose_next(
     if unhandled_human_inbox_count(target) and planner_due(state, min(planner_interval_seconds, 900)):
         return "planner", "unhandled human inbox message(s) need triage", False
 
+    if post_builder_hardener_pending(state):
+        return "hardener", post_builder_hardener_reason(target), False
+
+    candidate_catchup = unverified_candidate_done_cluster_info(target)
+    if candidate_catchup:
+        return "hardener", candidate_done_hardener_catchup_reason(candidate_catchup), False
+
     fast_follow_reason = planner_fast_follow_reason_after_deferral_change(state)
     if fast_follow_reason:
         return "planner", fast_follow_reason, False
@@ -913,6 +1126,22 @@ def conveyor_decision_queue(
         add(None, "blocked", f"main automation lock active: {detail}")
         return entries[:DECISION_QUEUE_LIMIT]
 
+    ticket_state, ticket_reason = ticket_campaign_terminal(target)
+    if ticket_state == "complete":
+        add(None, "blocked", ticket_reason)
+        return entries[:DECISION_QUEUE_LIMIT]
+    if ticket_state == "blocked":
+        if baseline_preflight_needed(target):
+            add("integrator", "ready", "ticket campaign is blocked, but baseline verification may be repairable")
+        else:
+            blocked_baseline_route = baseline_repair_route(target, state)
+            if blocked_baseline_route:
+                role, reason, _stop = blocked_baseline_route
+                add(role, "ready" if role else "blocked", reason)
+            else:
+                add(None, "blocked", ticket_reason)
+        return entries[:DECISION_QUEUE_LIMIT]
+
     if not target_has_multi_role(target):
         add("single_lane", "ready", "multi-role files not found; running single-lane wrapper")
         return entries[:DECISION_QUEUE_LIMIT]
@@ -956,6 +1185,13 @@ def conveyor_decision_queue(
             add("planner", "ready", fast_follow_reason)
         elif planner_due(state, planner_interval_seconds):
             add("planner", "ready", "planner interval elapsed")
+
+    if post_builder_hardener_pending(state):
+        add("hardener", "planned", post_builder_hardener_reason(target))
+    else:
+        candidate_catchup = unverified_candidate_done_cluster_info(target)
+        if candidate_catchup:
+            add("hardener", "planned", candidate_done_hardener_catchup_reason(candidate_catchup))
 
     last_role = str(state.get("last_completed_role") or "")
     if last_role == "integrator":

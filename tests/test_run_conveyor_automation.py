@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import signal
 import subprocess
 import sys
@@ -55,6 +56,39 @@ class ConveyorDecisionTests(unittest.TestCase):
         self.write_text(root, "scripts/run_role_automation.sh", "#!/usr/bin/env bash\n")
         for role in ("planner", "builder", "hardener", "integrator"):
             self.write_text(root, f".agentic/roles/{role}.md", f"# {role}\n")
+
+    def write_manifest(
+        self,
+        root: Path,
+        *,
+        role: str,
+        run_id: str,
+        status: str,
+        summary: str = "",
+        changed_files: list[str] | None = None,
+        runtime_state_changed_files: list[str] | None = None,
+    ) -> Path:
+        path = root / "target" / "automation_queue" / role / run_id / "manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "role": role,
+                    "run_id": run_id,
+                    "status": status,
+                    "summary": summary,
+                    "changed_files": changed_files or [],
+                    "runtime_state_changed_files": runtime_state_changed_files or [],
+                    "created_at": "2026-05-04T00:00:00+00:00",
+                    "integrated_at": "2026-05-04T00:00:00+00:00",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return path
 
     def conveyor_state(
         self,
@@ -138,6 +172,137 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertEqual(role, "hardener")
                     self.assertIn("builder patch integrated", reason)
                     self.assertFalse(stop)
+
+    def test_post_builder_hardener_survives_noop_baseline_preflight(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    state = self.conveyor_state(
+                        module,
+                        accepted_by_role={"planner": 0, "builder": 1, "hardener": 0},
+                    )
+                    state["history"].append(
+                        {
+                            "role": "integrator",
+                            "exit_code": 0,
+                            "metadata": {
+                                "accepted_by_role": {"planner": 0, "builder": 0, "hardener": 0},
+                                "deferred_delta_by_role": {"planner": 0, "builder": 0, "hardener": 0},
+                            },
+                        }
+                    )
+
+                    role, reason, stop = module.choose_next(target, state, 3600, 2)
+
+                    self.assertEqual("hardener", role)
+                    self.assertIn("post-builder verification pass", reason)
+                    self.assertFalse(stop)
+
+    def test_hardener_attempt_after_builder_integration_clears_pending_pass(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    state = self.conveyor_state(
+                        module,
+                        accepted_by_role={"planner": 0, "builder": 1, "hardener": 0},
+                    )
+                    state["history"].append({"role": "hardener", "exit_code": 1})
+                    state["last_completed_role"] = "hardener"
+
+                    role, reason, stop = module.choose_next(target, state, 3600, 2)
+
+                    self.assertEqual("builder", role)
+                    self.assertIn("builder lane is next", reason)
+                    self.assertFalse(stop)
+
+    def test_queued_patches_preempt_pending_post_builder_hardener(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_manifest(target, role="builder", run_id="run-queued", status="queued")
+                    state = self.conveyor_state(
+                        module,
+                        accepted_by_role={"planner": 0, "builder": 1, "hardener": 0},
+                    )
+
+                    role, reason, stop = module.choose_next(target, state, 3600, 2)
+
+                    self.assertEqual("integrator", role)
+                    self.assertIn("queued role patch", reason)
+                    self.assertFalse(stop)
+
+    def test_stale_baseline_preflight_preempts_pending_post_builder_hardener(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "python3 -m pytest\n")
+                    state = self.conveyor_state(
+                        module,
+                        accepted_by_role={"planner": 0, "builder": 1, "hardener": 0},
+                    )
+
+                    role, reason, stop = module.choose_next(target, state, 3600, 2)
+
+                    self.assertEqual("integrator", role)
+                    self.assertIn("baseline verification ledger", reason)
+                    self.assertFalse(stop)
+
+    def test_candidate_done_without_final_evidence_gets_hardener_catchup(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-active",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "candidate_done", "summary": "Add saved searches", "evidence": ["builder implemented local UI"]},
+                            {"id": "T-2", "status": "pending", "summary": "Add exports"}
+                          ]
+                        }
+                        """,
+                    )
+                    state = self.conveyor_state(module)
+
+                    role, reason, stop = module.choose_next(target, state, 3600, 2)
+
+                    self.assertEqual("hardener", role)
+                    self.assertIn("candidate_done ticket", reason)
+                    self.assertIn("T-1", reason)
+                    self.assertFalse(stop)
+
+    def test_decision_queue_plans_post_builder_hardener_after_baseline_preflight(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "python3 -m pytest\n")
+                    state = self.conveyor_state(
+                        module,
+                        accepted_by_role={"planner": 0, "builder": 1, "hardener": 0},
+                    )
+                    role, reason, _stop = module.choose_next(target, state, 3600, 2)
+
+                    queue = module.conveyor_decision_queue(target, state, role, reason, 3600, 2)
+
+                    self.assertEqual("integrator", queue[0]["role"])
+                    self.assertTrue(
+                        any(item["role"] == "hardener" and item["state"] == "planned" for item in queue),
+                        queue,
+                    )
 
     def test_decision_queue_exposes_planner_fast_follow(self) -> None:
         for path, module in self.modules:
