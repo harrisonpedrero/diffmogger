@@ -87,7 +87,7 @@ The task file must include:
 - mode-appropriate backlog or deferred/follow-up ticket section
 - continue/block/critical-stop rationale
 
-The product horizon state must include current horizon, horizon goal, advancement criteria, evidence gathered this run, advancement decision (`stay`, `advance`, or `defer`), next horizon candidate, and remaining work before advancement. The automation prompt must tell Codex to advance to the next horizon only when criteria are met and to append evidence to the horizon transition log when advancement happens. For `ticket_campaign`, the generated horizons should be bounded ticket-run phases and must not tell Codex to invent open-ended roadmap work after all tickets are done or blocked.
+The product horizon state must include current horizon, horizon goal, advancement criteria, evidence gathered this run, advancement decision (`stay`, `advance`, or `defer`), next horizon candidate, and remaining work before advancement. The automation prompt must tell Codex to advance to the next horizon only when criteria are met and to append evidence to the horizon transition log when advancement happens. For `ticket_campaign`, the generated horizons should be bounded ticket-run phases, bootstrap must be readiness-only, normal runs should use dependency-aware `scripts/ticket_run.py . next --json` selection for one ticket per run, and prompts must not tell Codex to invent open-ended roadmap work after all tickets are done or blocked.
 
 The guardrails file must stay lean and include:
 

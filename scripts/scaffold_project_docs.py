@@ -262,7 +262,19 @@ def ticket_run_values(data: dict[str, Any]) -> dict[str, str]:
     if mode == "ticket_campaign":
         section = f"""Automation run mode: `ticket_campaign`
 
-Use `{ticket_file}` as the bounded ticket source of truth. Do not invent new backlog after listed tickets are done or blocked. When every ticket is done, or when all remaining tickets are blocked, run:
+Use `{ticket_file}` as the bounded ticket source of truth. Do not invent new backlog after listed tickets are done or blocked.
+
+Before choosing ticket work in any normal campaign run, run:
+
+```bash
+python3 scripts/ticket_run.py . next --json
+```
+
+Use that dependency-aware selection as the only ticket scope for the run. Act on at most one selected ticket per run, preserving file order as the human's priority order when dependencies allow. A single-lane run may implement and verify that one ticket, but must not continue into another ticket after it is completed, blocked, or marked `candidate_done`.
+
+If `next --json` reports placeholder tickets, missing dependencies, duplicate ticket IDs, dependency cycles, blocked dependencies, or no actionable ticket, record the structured blocker in `docs/CODEX_AUTOMATION_TASKS.md` instead of guessing or reordering the campaign by hand.
+
+When every ticket is done, or when all remaining tickets are blocked, run:
 
 ```bash
 python3 scripts/ticket_run.py . should-halt --finalize
@@ -272,18 +284,22 @@ Then stop launching new work. Diffmogger writes a local report, sends a native d
         task_notes = f"""Ticket campaign mode: `ticket_campaign`
 
 - Ticket source: `{ticket_file}`
+- Bootstrap boundary: readiness-only; do not implement tickets during bootstrap.
+- Normal campaign runs select one dependency-ready ticket with `python3 scripts/ticket_run.py . next --json`.
+- Optional dependencies: use `depends_on` arrays in `{ticket_file}` when one ticket must wait for another.
 - Halt when every ticket is done or all remaining tickets are blocked.
 - Completion report is written under `target/ticket_run_reports/`.
 - Completion notification uses the local desktop notification system when enabled.
 - Remote push/PR creation is manual."""
-        development = f"""Ticket campaign mode is enabled. Edit `{ticket_file}` with concrete local tickets before starting unattended automation.
+        development = f"""Ticket campaign mode is enabled. Edit `{ticket_file}` with concrete local tickets before starting unattended automation. Use optional `depends_on` arrays when one ticket must wait for another ticket to be `done` with evidence.
 
 ```bash
 python3 scripts/ticket_run.py . status --json
+python3 scripts/ticket_run.py . next --json
 python3 scripts/ticket_run.py . should-halt --finalize
 ```
 
-The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in `docs/HUMAN_OUTBOX.md`."""
+Bootstrap is readiness-only in ticket-campaign mode: it should confirm setup, ticket shape, and verification commands, but it must not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, or finalize the campaign. Normal campaign runs should act on at most one `next --json` selection. The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in `docs/HUMAN_OUTBOX.md`."""
     else:
         section = """Automation run mode: `continuous_improvement`
 
@@ -351,8 +367,8 @@ def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str
             ),
             (
                 "T2 Ticket implementation",
-                "Work through pending tickets with local, reviewable patches and evidence.",
-                "Acted-on tickets have implementation notes, changed files, evidence, or a recorded blocker.",
+                "Use `scripts/ticket_run.py . next --json` to implement one dependency-ready ticket per run.",
+                "The selected ticket has implementation notes, changed files, evidence, `candidate_done`, or a recorded blocker.",
             ),
             (
                 "T3 Verification and hardening",
@@ -365,7 +381,7 @@ def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str
                 "`scripts/ticket_run.py . should-halt --finalize` writes the report and completion state, then automation stops launching new work.",
             ),
         ]
-        guidance = f"""Progression is mode-aware for this target. Because `automation_run_mode` is `ticket_campaign`, use the bounded ticket-run phases below instead of a product roadmap. `{ticket_file}` is the source of truth for scope; do not invent new roadmap work after listed tickets are done or blocked.
+        guidance = f"""Progression is mode-aware for this target. Because `automation_run_mode` is `ticket_campaign`, use the bounded ticket-run phases below instead of a product roadmap. `{ticket_file}` is the source of truth for scope; do not invent new roadmap work after listed tickets are done or blocked. After T1 readiness, select ticket work with `python3 scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run.
 
 {markdown_table(rows)}
 
@@ -387,6 +403,7 @@ If the phase criteria are met, update the current horizon to the next ticket-run
             "HORIZON_ADVANCEMENT_CRITERIA": "\n".join(
                 [
                     f"  - `{ticket_file}` exists and contains the bounded ticket source of truth.",
+                    "  - `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` can parse the ticket file, or an honest blocker is documented.",
                     "  - Local setup and verification expectations are documented.",
                     "  - The first ticket implementation run can start safely, or an environment blocker is documented.",
                 ]
@@ -395,7 +412,8 @@ If the phase criteria are met, update the current horizon to the next ticket-run
             "REMAINING_WORK_BEFORE_ADVANCEMENT": "\n".join(
                 [
                     f"  - Populate or confirm `{ticket_file}`.",
-                    "  - Run the bootstrap prompt, verify local setup, and record ticket-readiness evidence.",
+                    "  - Run the readiness-only bootstrap prompt, verify local setup, and record ticket-readiness evidence.",
+                    "  - Do not implement ticket acceptance criteria during bootstrap.",
                 ]
             ),
             "INITIAL_KNOWN_ISSUES": "\n".join(
@@ -406,8 +424,8 @@ If the phase criteria are met, update the current horizon to the next ticket-run
                     "- Optional continuous conveyor scheduling should use `scripts/run_conveyor_automation.sh`, which records local scheduler state and delegates to the target-local wrappers.",
                 ]
             ),
-            "BEST_NEXT_MILESTONE": f"Complete T1 Ticket-run readiness for `{project_name}` and record whether ticket implementation can start.",
-            "SUGGESTED_NEXT_SPRINT_TASK": f"Run `docs/INITIAL_BOOTSTRAP_PROMPT.md` in Codex, confirm `{ticket_file}`, setup docs, checks, automation state, and ticket-readiness evidence.",
+            "BEST_NEXT_MILESTONE": f"Complete T1 readiness-only ticket bootstrap for `{project_name}` and record whether one-ticket campaign runs can start.",
+            "SUGGESTED_NEXT_SPRINT_TASK": f"Run `docs/INITIAL_BOOTSTRAP_PROMPT.md` in Codex, confirm `{ticket_file}`, run ticket status/next parsing, setup docs, checks, automation state, and ticket-readiness evidence without implementing tickets.",
             "BACKLOG_SECTION_HEADING": "Deferred / Follow-Up Tickets",
             "BACKLOG_SECTION_BODY": "\n".join(
                 [
@@ -417,9 +435,10 @@ If the phase criteria are met, update the current horizon to the next ticket-run
                 ]
             ),
             "CONTINUE_RATIONALE": "Continue. The ticket campaign has a bounded local source of truth and no active blocker.",
-            "AGENTS_PROGRESS_RULE": "Treat the ticket source as a bounded execution queue; finish, verify, report, and stop when it is complete or fully blocked.",
+            "AGENTS_PROGRESS_RULE": "Treat the ticket source as a bounded, dependency-aware execution queue; after readiness, act on at most one `scripts/ticket_run.py . next --json` selection per run.",
             "INITIAL_PROGRESS_EVIDENCE_LABEL": "ticket-readiness evidence",
-            "BOOTSTRAP_END_NOTE": "Use the ticket source as the first bounded phase. Do not create extra roadmap work after every ticket is done or blocked.",
+            "BOOTSTRAP_SCOPE_BOUNDARY": "Ticket-campaign bootstrap is readiness-only: inspect the repo, confirm the ticket file parses, run `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` when possible, configure docs/checks, and update task state. If the ticket file is missing, placeholder-only, malformed, or ambiguous, record `ACTIVE_WITH_PENDING_USER_INPUT` or an honest blocker instead of solving tickets. Do not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, finalize the campaign, or continue into the first ticket.",
+            "BOOTSTRAP_END_NOTE": "Use the ticket source as the first bounded readiness phase. Do not implement tickets during bootstrap, and do not create extra roadmap work after every ticket is done or blocked.",
         }
 
     rows = [
@@ -518,6 +537,7 @@ Long-run direction: {long_run}"""
         "CONTINUE_RATIONALE": "Continue. The project has a clear mission and no active blocker.",
         "AGENTS_PROGRESS_RULE": "Treat the first working baseline as an early milestone, not the finish line.",
         "INITIAL_PROGRESS_EVIDENCE_LABEL": "H1 advancement evidence",
+        "BOOTSTRAP_SCOPE_BOUNDARY": "During bootstrap, create or confirm the first runnable baseline and automation state for the current horizon.",
         "BOOTSTRAP_END_NOTE": "Do not stop merely because a basic demo exists. This is the first horizon, not the final product.",
     }
 

@@ -106,7 +106,7 @@ com.diffmogger.automation.<target-name>.<hash>.conveyor
 
 The job points at `scripts/run_conveyor_automation.sh`, sets `RunAtLoad`, and does not use `StartInterval` or `StartCalendarInterval` because the dispatcher stays running until paused, removed, blocked, or stopped by a critical status.
 
-In `ticket_campaign` mode, the conveyor also exits when `scripts/ticket_run.py` determines that every ticket in `docs/TICKET_RUN.md` is done with evidence or that all remaining tickets are blocked. It finalizes the local report and sends a native desktop notification, or records a durable fallback in `docs/HUMAN_OUTBOX.md`, before stopping.
+In `ticket_campaign` mode, normal runs use `scripts/ticket_run.py . next --json` to select one dependency-ready ticket per run. The conveyor also exits when `scripts/ticket_run.py` determines that every ticket in `docs/TICKET_RUN.md` is done with evidence or that all remaining tickets are blocked. It finalizes the local report and sends a native desktop notification, or records a durable fallback in `docs/HUMAN_OUTBOX.md`, before stopping.
 
 Logs are written under the target repo:
 

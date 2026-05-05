@@ -69,4 +69,4 @@ Before starting automation, the dashboard checks for:
 - explicit local-only remote opt-in before multi-role or conveyor scheduling in repos with configured git remotes
 
 The dashboard keeps notifier credentials out of target projects. In notifier modes, use `services/agentic-notifier/` for Discord and local desktop notification configuration.
-Ticket campaign setup lives in Run Config, but tickets themselves are populated in the generated Markdown file, usually `docs/TICKET_RUN.md`.
+Ticket campaign setup lives in Run Config, but tickets themselves are populated in the generated Markdown file, usually `docs/TICKET_RUN.md`. Ticket-campaign bootstrap is readiness-only; scheduled runs use dependency-aware `next --json` selection and act on one ticket per run.

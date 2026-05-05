@@ -17,6 +17,7 @@ if the laptop notification path is unavailable.
     {
       "id": "TICKET-001",
       "summary": "Replace this sample with the first startup ticket.",
+      "depends_on": [],
       "status": "pending",
       "acceptance_criteria": [
         "The requested behavior is implemented locally.",
@@ -40,6 +41,17 @@ if the laptop notification path is unavailable.
 - Use `candidate_done` when implementation exists but hardening or final verification remains.
 - Use `done` only after acceptance criteria and verification evidence are recorded.
 - Use `blocked` when no safe local work can complete the ticket without human action.
+
+Use optional `depends_on` arrays to require another ticket ID to be `done` with
+evidence before this ticket can be selected. Normal campaign runs use:
+
+```bash
+python3 scripts/ticket_run.py . next --json
+```
+
+That command preserves file order as the human priority order, while skipping
+tickets whose dependencies are not ready. Each normal run should act on at most
+one selected ticket.
 
 When every ticket is `done`, or when all remaining tickets are `blocked`, the
 automation writes the final report and stops launching new work.

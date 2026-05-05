@@ -79,7 +79,7 @@ For bounded ticket work, enable **Ticket Campaign** in the dashboard run config 
 }
 ```
 
-The dashboard scaffolds `docs/TICKET_RUN.md` but does not edit tickets directly. Populate that Markdown file with ticket IDs, acceptance criteria, verification commands, evidence fields, and blockers before leaving automation unattended. Completion notifications use the laptop's native desktop notification system when enabled; failures are recorded in `docs/HUMAN_OUTBOX.md`.
+The dashboard scaffolds `docs/TICKET_RUN.md` but does not edit tickets directly. Bootstrap is readiness-only in ticket-campaign mode: it should confirm setup, ticket parsing, and verification, not implement the tickets. Populate that Markdown file with ticket IDs, optional `depends_on` arrays, acceptance criteria, verification commands, evidence fields, and blockers before leaving automation unattended. Normal campaign runs use `python3 scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run. Completion notifications use the laptop's native desktop notification system when enabled; failures are recorded in `docs/HUMAN_OUTBOX.md`.
 
 For CLI validation of a ticket-campaign target, add `--ticket-campaign-enabled` to `scripts/check_required_files.py`.
 

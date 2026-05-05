@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -159,6 +160,195 @@ class TicketRunTests(unittest.TestCase):
 
                     with self.assertRaises(SystemExit):
                         module.load_ticket_run(target)
+
+    def run_next_json(self, script_path: Path, target: Path) -> dict[str, object]:
+        result = subprocess.run(
+            [sys.executable, str(script_path), str(target), "next", "--json"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode)
+        data = json.loads(result.stdout)
+        self.assertIsInstance(data, dict)
+        return data
+
+    def test_next_selects_dependency_ready_ticket_in_file_order(self) -> None:
+        for path, _module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_ticket_run(
+                        target,
+                        {
+                            "run_id": "run-next-order",
+                            "tickets": [
+                                {"id": "T-2", "status": "pending", "depends_on": ["T-1"]},
+                                {"id": "T-1", "status": "pending"},
+                            ],
+                        },
+                    )
+
+                    result = self.run_next_json(path, target)
+
+                    self.assertEqual("selected", result["status"])
+                    self.assertEqual("implement_pending", result["action"])
+                    self.assertEqual("T-1", result["ticket"]["id"])
+                    self.assertEqual(
+                        [{"ticket_id": "T-2", "depends_on": "T-1", "dependency_status": "pending"}],
+                        result["waiting_on_dependencies"],
+                    )
+
+    def test_next_skips_ticket_with_blocked_dependency(self) -> None:
+        for path, _module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_ticket_run(
+                        target,
+                        {
+                            "run_id": "run-next-blocked",
+                            "tickets": [
+                                {"id": "T-1", "status": "blocked", "blocker": "needs human"},
+                                {"id": "T-2", "status": "pending", "depends_on": ["T-1"]},
+                                {"id": "T-3", "status": "pending"},
+                            ],
+                        },
+                    )
+
+                    result = self.run_next_json(path, target)
+
+                    self.assertEqual("selected", result["status"])
+                    self.assertEqual("T-3", result["ticket"]["id"])
+                    self.assertEqual([{"ticket_id": "T-2", "depends_on": "T-1"}], result["blocked_dependencies"])
+
+    def test_next_prefers_candidate_verification(self) -> None:
+        for path, _module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_ticket_run(
+                        target,
+                        {
+                            "run_id": "run-next-candidate",
+                            "tickets": [
+                                {"id": "T-1", "status": "pending"},
+                                {"id": "T-2", "status": "candidate_done"},
+                            ],
+                        },
+                    )
+
+                    result = self.run_next_json(path, target)
+
+                    self.assertEqual("selected", result["status"])
+                    self.assertEqual("verify_candidate", result["action"])
+                    self.assertEqual("T-2", result["ticket"]["id"])
+
+    def test_next_reports_missing_dependency(self) -> None:
+        for path, _module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_ticket_run(
+                        target,
+                        {
+                            "run_id": "run-next-missing",
+                            "tickets": [{"id": "T-1", "status": "pending", "depends_on": ["T-missing"]}],
+                        },
+                    )
+
+                    result = self.run_next_json(path, target)
+
+                    self.assertEqual("blocked", result["status"])
+                    self.assertEqual("missing ticket dependency", result["reason"])
+                    self.assertEqual([{"ticket_id": "T-1", "depends_on": "T-missing"}], result["missing_dependencies"])
+                    self.assertIsNone(result["ticket"])
+
+    def test_next_reports_dependency_cycle_when_no_ticket_is_actionable(self) -> None:
+        for path, _module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_ticket_run(
+                        target,
+                        {
+                            "run_id": "run-next-cycle",
+                            "tickets": [
+                                {"id": "T-1", "status": "pending", "depends_on": ["T-2"]},
+                                {"id": "T-2", "status": "pending", "depends_on": ["T-1"]},
+                            ],
+                        },
+                    )
+
+                    result = self.run_next_json(path, target)
+
+                    self.assertEqual("blocked", result["status"])
+                    self.assertEqual("dependency cycle", result["reason"])
+                    self.assertEqual([["T-1", "T-2", "T-1"]], result["dependency_cycles"])
+                    self.assertIsNone(result["ticket"])
+
+    def test_next_reports_no_actionable_ticket(self) -> None:
+        for path, _module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_ticket_run(target, {"run_id": "run-next-empty", "tickets": []})
+
+                    result = self.run_next_json(path, target)
+
+                    self.assertEqual("blocked", result["status"])
+                    self.assertEqual("ticket source has no tickets", result["reason"])
+                    self.assertIsNone(result["ticket"])
+
+    def test_next_reports_placeholder_only_ticket_source(self) -> None:
+        for path, _module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_ticket_run(
+                        target,
+                        {
+                            "run_id": "run-next-placeholder",
+                            "tickets": [
+                                {
+                                    "id": "TICKET-001",
+                                    "summary": "Replace this sample with the first startup ticket.",
+                                    "status": "pending",
+                                }
+                            ],
+                        },
+                    )
+
+                    result = self.run_next_json(path, target)
+
+                    self.assertEqual("blocked", result["status"])
+                    self.assertEqual("ticket source still contains placeholder tickets", result["reason"])
+                    self.assertEqual("TICKET-001", result["placeholder_tickets"][0]["id"])
+                    self.assertIsNone(result["ticket"])
+
+    def test_next_reports_duplicate_ticket_ids_as_ambiguous(self) -> None:
+        for path, _module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_ticket_run(
+                        target,
+                        {
+                            "run_id": "run-next-duplicates",
+                            "tickets": [
+                                {"id": "T-1", "status": "pending"},
+                                {"id": "T-1", "status": "pending"},
+                            ],
+                        },
+                    )
+
+                    result = self.run_next_json(path, target)
+
+                    self.assertEqual("blocked", result["status"])
+                    self.assertEqual("duplicate ticket ids", result["reason"])
+                    self.assertEqual(["T-1"], result["duplicate_ticket_ids"])
+                    self.assertIsNone(result["ticket"])
 
 
 if __name__ == "__main__":

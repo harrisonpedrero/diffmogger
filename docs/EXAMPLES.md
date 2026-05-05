@@ -14,7 +14,7 @@ Use `examples/trendlab-signal-intelligence/project_intake.md` to exercise a more
 
 ## Ticket Campaign
 
-Use `examples/ticket-campaign/project_intake.md` to exercise bounded ticket-campaign mode. It checks that generated automation uses ticket-run phases, treats `docs/TICKET_RUN.md` as scope, and avoids open-ended roadmap language.
+Use `examples/ticket-campaign/project_intake.md` to exercise bounded ticket-campaign mode. It checks that generated automation uses ticket-run phases, treats `docs/TICKET_RUN.md` as scope, keeps bootstrap readiness-only, supports dependency-aware `depends_on` ordering, and avoids open-ended roadmap language.
 
 ## Smoke Test
 

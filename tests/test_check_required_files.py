@@ -96,11 +96,16 @@ class RequiredFilesCheckTests(unittest.TestCase):
 
             self.scaffold_target(target, Path(intake.name))
             prompt = (target / ".agentic" / "automation_prompt.md").read_text(encoding="utf-8")
+            bootstrap = (target / "docs" / "INITIAL_BOOTSTRAP_PROMPT.md").read_text(encoding="utf-8")
             task = (target / "docs" / "CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
-            combined = prompt + "\n" + task
+            combined = prompt + "\n" + bootstrap + "\n" + task
 
             self.assertIn("T1 Ticket-run readiness", combined)
             self.assertIn("T4 Completion report and stop", combined)
+            self.assertIn("Ticket-campaign bootstrap is readiness-only", bootstrap)
+            self.assertIn("Do not implement ticket acceptance criteria", bootstrap)
+            self.assertIn("python3 scripts/ticket_run.py . next --json", prompt)
+            self.assertIn("act on at most one dependency-ready ticket per run", prompt)
             self.assertIn("## Deferred / Follow-Up Tickets", task)
             for forbidden in ["MVP", "Beyond MVP", "Ambitious extensions"]:
                 self.assertNotIn(forbidden, combined)
@@ -120,6 +125,19 @@ class RequiredFilesCheckTests(unittest.TestCase):
 
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
+
+            inferred_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECK_SCRIPT),
+                    "--ticket-campaign-enabled",
+                    str(target),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual("", inferred_result.stderr)
+            self.assertEqual(0, inferred_result.returncode)
 
     def test_missing_development_file_fails_required_files_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

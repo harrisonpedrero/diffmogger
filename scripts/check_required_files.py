@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -191,6 +192,10 @@ BROWSER_HELPER_REQUIRED_STRINGS = [
 
 TICKET_HELPER_REQUIRED_STRINGS = [
     "json ticket-run",
+    "next",
+    "depends_on",
+    "placeholder_tickets",
+    "dependency_cycles",
     "should-halt",
     "target/ticket_run_completion.json",
     "target/ticket_run_reports",
@@ -202,6 +207,8 @@ TICKET_HELPER_REQUIRED_STRINGS = [
 
 TICKET_RUN_REQUIRED_STRINGS = [
     "json ticket-run",
+    "depends_on",
+    "next --json",
     "halt_when_complete",
     "notify_on_complete",
     "candidate_done",
@@ -359,6 +366,30 @@ def check_file(path: Path) -> str | None:
     return None
 
 
+def project_intake(root: Path) -> dict[str, object]:
+    path = root / ".agentic" / "project_intake.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def inferred_human_bridge_mode(root: Path) -> str:
+    intake_mode = str(project_intake(root).get("human_bridge_mode") or "").strip()
+    if intake_mode:
+        return intake_mode
+    for rel in [".agentic/automation_prompt.md", "docs/CODEX_AUTOMATION_TASKS.md"]:
+        try:
+            text = (root / rel).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for mode in ["disabled", "file_only", "local_notifier", "discord_notifier"]:
+            if f"Human bridge mode: `{mode}`" in text:
+                return mode
+    return "file_only"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", nargs="?", default=".", help="Target project directory")
@@ -396,7 +427,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(args.target).resolve()
-    mode = args.human_bridge_mode or ("disabled" if args.no_human_bridge else "file_only")
+    mode = args.human_bridge_mode or ("disabled" if args.no_human_bridge else inferred_human_bridge_mode(root))
     required = list(BASE_REQUIRED)
     if mode != "disabled":
         required.extend(HUMAN_REQUIRED)

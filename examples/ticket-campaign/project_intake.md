@@ -18,7 +18,7 @@ Maintainers who want Codex to finish a known queue without inventing new roadmap
 
 ## Desired First Demo
 
-All listed tickets are completed or blocked with evidence, verification notes, and a local final report.
+A readiness-only bootstrap followed by one dependency-aware ticket run, with evidence, verification notes, and local final reporting when the campaign eventually completes.
 
 ## Tech Preferences
 
@@ -28,6 +28,8 @@ All listed tickets are completed or blocked with evidence, verification notes, a
 ## Constraints
 
 - Local-only work.
+- Bootstrap must not implement tickets.
+- Normal campaign runs should act on one dependency-ready ticket at a time.
 - Do not create new tickets after the listed queue is complete.
 
 ## Safety Rules
@@ -75,7 +77,7 @@ Allowed for read-only test-gap and risk reviews.
 
 ## Meaningful Deliverable
 
-A completed or honestly blocked ticket with evidence and verification notes.
+A completed or honestly blocked selected ticket with evidence and verification notes.
 
 ## Long-Run Direction
 
@@ -84,3 +86,4 @@ None. Stop when the bounded ticket run is complete or fully blocked.
 ## Assumptions
 
 - Tickets are local and do not require network access.
+- If a ticket depends on another ticket, it uses `depends_on` in `docs/TICKET_RUN.md`.

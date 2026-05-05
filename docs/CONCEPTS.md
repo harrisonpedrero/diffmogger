@@ -49,7 +49,7 @@ Diffmogger scaffolds mode-aware horizons from the project intake. Continuous-imp
 7. H7 Long-run direction aligned with the mission.
 8. H8 Automation process improvement.
 
-Ticket-campaign projects use bounded ticket-run phases instead: ticket-run readiness, ticket implementation, verification and hardening, completion report, and stop. In that mode `docs/TICKET_RUN.md` remains the source of truth and the automation should not invent open-ended roadmap work after the listed tickets are complete or blocked.
+Ticket-campaign projects use bounded ticket-run phases instead: ticket-run readiness, ticket implementation, verification and hardening, completion report, and stop. In that mode bootstrap is readiness-only, `docs/TICKET_RUN.md` remains the source of truth, optional `depends_on` arrays define ticket prerequisites, and normal campaign runs use `python3 scripts/ticket_run.py . next --json` to act on one dependency-ready ticket at a time. The automation should not invent open-ended roadmap work after the listed tickets are complete or blocked.
 
 When a horizon's advancement criteria are met, the automation should update the current horizon to the next horizon and append evidence to the transition log. If a later regression undermines an earlier horizon, the automation should keep the current horizon but make the regression the next sprint-sized task.
 

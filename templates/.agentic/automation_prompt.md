@@ -42,7 +42,7 @@ A strong run usually combines implementation, tests or fixtures, integration int
 
 A weak run is one that only reads files and summarizes, makes a tiny doc-only change when implementation work is available, adds a placeholder without wiring it into the product, avoids Codex CLI worker usage on a broad task without explaining why, or updates the task file without improving the app, tests, reports, or automation process.
 
-Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. Do not invent new backlog after every ticket is `done` or `blocked`; finalize the ticket run and stop only after remaining blockers are not repairable baseline/service setup work.
+Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. Use `python3 scripts/ticket_run.py . next --json` to select one dependency-ready ticket, treat that single selection as the run's implementation scope, and do not continue into another ticket after it is completed, blocked, or marked `candidate_done`. If the command reports placeholder tickets, missing dependencies, duplicate ticket IDs, cycles, blocked dependencies, or no actionable ticket, record that structured blocker instead of guessing. Do not invent new backlog after every ticket is `done` or `blocked`; finalize the ticket run and stop only after remaining blockers are not repairable baseline/service setup work.
 
 ## Run Structure
 

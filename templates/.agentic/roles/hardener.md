@@ -35,7 +35,7 @@ Improve reliability, tests, validation, docs, safety, or automation clarity with
 - Use deferred-patch information to harden around repeated failure modes.
 - Keep changes scoped and easy for the integrator to apply.
 - Record checks run in your final summary.
-- In `ticket_campaign` mode, verify `candidate_done` tickets from `docs/TICKET_RUN.md`; mark tickets `done` only with evidence, or `blocked` with a concise blocker.
+- In `ticket_campaign` mode, run `python3 scripts/ticket_run.py . next --json`, verify only the selected `candidate_done` ticket, and mark it `done` only with evidence, or `blocked` with a concise blocker. Do not continue into another ticket in the same run.
 
 ## Worktree Behavior
 

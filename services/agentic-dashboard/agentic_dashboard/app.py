@@ -1447,7 +1447,7 @@ if TK_AVAILABLE:
             ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=4)
             ttk.Label(
                 ticket_campaign,
-                text="Tickets are edited in the generated Markdown file. Populate the fenced JSON block with ticket IDs, acceptance criteria, verification commands, evidence, and blockers before leaving automation unattended.",
+                text="Tickets are edited in the generated Markdown file. Bootstrap is readiness-only; normal campaign runs use dependency-aware one-ticket selection. Populate the fenced JSON block with ticket IDs, optional depends_on arrays, acceptance criteria, verification commands, evidence, and blockers before leaving automation unattended.",
                 style="Help.TLabel",
                 wraplength=680,
                 justify="left",

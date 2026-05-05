@@ -406,6 +406,10 @@ for marker in [
 ticket_helper = Path("templates/scripts/ticket_run.py").read_text(encoding="utf-8")
 for marker in [
     "json ticket-run",
+    "next",
+    "depends_on",
+    "placeholder_tickets",
+    "dependency_cycles",
     "should-halt",
     "target/ticket_run_completion.json",
     "target/ticket_run_reports",
@@ -942,8 +946,12 @@ fi
 for marker in \
     "T1 Ticket-run readiness" \
     "T4 Completion report and stop" \
+    "Ticket-campaign bootstrap is readiness-only" \
+    "python3 scripts/ticket_run.py . next --json" \
+    "at most one dependency-ready ticket per run" \
+    "depends_on" \
     "## Deferred / Follow-Up Tickets"; do
-    if ! grep -R -- "$marker" "$tmp_dir/.agentic" "$tmp_dir/docs/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-ticket-horizon-grep.log 2>&1; then
+    if ! grep -R -- "$marker" "$tmp_dir/.agentic" "$tmp_dir/docs/CODEX_AUTOMATION_TASKS.md" "$tmp_dir/docs/INITIAL_BOOTSTRAP_PROMPT.md" "$tmp_dir/docs/TICKET_RUN.md" >/tmp/Diffmogger-ticket-horizon-grep.log 2>&1; then
         echo "Ticket-campaign scaffold missing ticket progression marker: $marker" >&2
         cat /tmp/Diffmogger-ticket-horizon-grep.log >&2
         rm -rf "$tmp_dir" "$tmp_intake"

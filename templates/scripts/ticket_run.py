@@ -22,6 +22,8 @@ NOTIFIER_URL = "http://127.0.0.1:8765/api/notify"
 TICKET_STATUSES = {"pending", "in_progress", "candidate_done", "done", "blocked"}
 TERMINAL_STATUSES = {"done", "blocked"}
 FENCE_RE = re.compile(r"```(?:json\s+ticket-run|ticket-run-json)\s*\n(.*?)\n```", re.DOTALL)
+PLACEHOLDER_TICKET_ID = "TICKET-001"
+PLACEHOLDER_TICKET_SUMMARY = "Replace this sample with the first startup ticket."
 
 
 def utc_now() -> str:
@@ -148,6 +150,212 @@ def ticket_summary(data: dict[str, Any], target: Path | None = None) -> dict[str
         "done_missing_evidence": done_missing_evidence,
         "should_halt": status in {"complete", "blocked"} and bool_value(data.get("halt_when_complete"), True),
         "reason": f"ticket campaign {status}" if status in {"complete", "blocked"} else "ticket campaign active",
+    }
+
+
+def ticket_identifier(ticket: dict[str, Any], index: int) -> str:
+    ticket_id = str(ticket.get("id") or "").strip()
+    return ticket_id or f"ticket[{index}]"
+
+
+def ticket_dependency_ids(ticket: dict[str, Any]) -> list[str]:
+    return list_value(ticket.get("depends_on"))
+
+
+def dependency_satisfied(ticket: dict[str, Any]) -> bool:
+    return normalize_status(ticket.get("status")) == "done" and has_verification_evidence(ticket)
+
+
+def ticket_brief(ticket: dict[str, Any], index: int) -> dict[str, Any]:
+    return {
+        "index": index,
+        "id": ticket_identifier(ticket, index),
+        "summary": str(ticket.get("summary") or "").strip(),
+        "status": normalize_status(ticket.get("status")),
+        "depends_on": ticket_dependency_ids(ticket),
+    }
+
+
+def is_placeholder_ticket(ticket: dict[str, Any]) -> bool:
+    ticket_id = str(ticket.get("id") or "").strip()
+    summary = str(ticket.get("summary") or "").strip()
+    return ticket_id == PLACEHOLDER_TICKET_ID and summary == PLACEHOLDER_TICKET_SUMMARY
+
+
+def dependency_report(data: dict[str, Any]) -> dict[str, Any]:
+    items = tickets(data)
+    id_to_ticket: dict[str, dict[str, Any]] = {}
+    duplicate_ids: list[str] = []
+    for item in items:
+        ticket_id = str(item.get("id") or "").strip()
+        if not ticket_id:
+            continue
+        if ticket_id in id_to_ticket and ticket_id not in duplicate_ids:
+            duplicate_ids.append(ticket_id)
+        id_to_ticket[ticket_id] = item
+
+    missing: list[dict[str, str]] = []
+    waiting: list[dict[str, Any]] = []
+    blocked: list[dict[str, str]] = []
+    done_missing_evidence: list[dict[str, str]] = []
+    open_graph: dict[str, list[str]] = {}
+
+    for index, item in enumerate(items):
+        ticket_id = ticket_identifier(item, index)
+        status = normalize_status(item.get("status"))
+        dependencies = ticket_dependency_ids(item)
+        if status in TERMINAL_STATUSES:
+            continue
+        for dependency_id in dependencies:
+            dependency = id_to_ticket.get(dependency_id)
+            if dependency is None:
+                missing.append({"ticket_id": ticket_id, "depends_on": dependency_id})
+                continue
+            dependency_status = normalize_status(dependency.get("status"))
+            if dependency_status == "blocked":
+                blocked.append({"ticket_id": ticket_id, "depends_on": dependency_id})
+            elif dependency_status == "done" and not has_verification_evidence(dependency):
+                done_missing_evidence.append({"ticket_id": ticket_id, "depends_on": dependency_id})
+            elif dependency_status != "done":
+                waiting.append(
+                    {
+                        "ticket_id": ticket_id,
+                        "depends_on": dependency_id,
+                        "dependency_status": dependency_status,
+                    }
+                )
+            if dependency_status not in TERMINAL_STATUSES and str(item.get("id") or "").strip():
+                open_graph.setdefault(ticket_id, []).append(dependency_id)
+
+    return {
+        "duplicate_ticket_ids": duplicate_ids,
+        "placeholder_tickets": [
+            ticket_brief(item, index) for index, item in enumerate(items) if is_placeholder_ticket(item)
+        ],
+        "missing_dependencies": missing,
+        "blocked_dependencies": blocked,
+        "done_dependencies_missing_evidence": done_missing_evidence,
+        "waiting_on_dependencies": waiting,
+        "dependency_cycles": dependency_cycles(open_graph),
+    }
+
+
+def dependency_cycles(graph: dict[str, list[str]]) -> list[list[str]]:
+    cycles: list[list[str]] = []
+    visiting: list[str] = []
+    visited: set[str] = set()
+    seen: set[tuple[str, ...]] = set()
+
+    def visit(node: str) -> None:
+        if node in visiting:
+            cycle = visiting[visiting.index(node) :] + [node]
+            key = tuple(cycle)
+            if key not in seen:
+                seen.add(key)
+                cycles.append(cycle)
+            return
+        if node in visited:
+            return
+        visiting.append(node)
+        for dependency_id in graph.get(node, []):
+            if dependency_id in graph:
+                visit(dependency_id)
+        visiting.pop()
+        visited.add(node)
+
+    for node in graph:
+        visit(node)
+    return cycles
+
+
+def dependencies_are_satisfied(ticket: dict[str, Any], id_to_ticket: dict[str, dict[str, Any]]) -> bool:
+    for dependency_id in ticket_dependency_ids(ticket):
+        dependency = id_to_ticket.get(dependency_id)
+        if dependency is None or not dependency_satisfied(dependency):
+            return False
+    return True
+
+
+def next_ticket_selection(data: dict[str, Any]) -> dict[str, Any]:
+    items = tickets(data)
+    id_to_ticket = {
+        str(item.get("id") or "").strip(): item for item in items if str(item.get("id") or "").strip()
+    }
+    report = dependency_report(data)
+    order = [
+        ("candidate_done", "verify_candidate"),
+        ("in_progress", "resume_in_progress"),
+        ("pending", "implement_pending"),
+    ]
+    if report["duplicate_ticket_ids"]:
+        return {
+            "status": "blocked",
+            "reason": "duplicate ticket ids",
+            "ticket": None,
+            "selection_order": [entry[0] for entry in order],
+            **report,
+        }
+    if not items:
+        return {
+            "status": "blocked",
+            "reason": "ticket source has no tickets",
+            "ticket": None,
+            "selection_order": [entry[0] for entry in order],
+            **report,
+        }
+    if len(report["placeholder_tickets"]) == len(items):
+        return {
+            "status": "blocked",
+            "reason": "ticket source still contains placeholder tickets",
+            "ticket": None,
+            "selection_order": [entry[0] for entry in order],
+            **report,
+        }
+    for status, action in order:
+        for index, item in enumerate(items):
+            if normalize_status(item.get("status")) != status:
+                continue
+            if is_placeholder_ticket(item):
+                continue
+            if not dependencies_are_satisfied(item, id_to_ticket):
+                continue
+            return {
+                "status": "selected",
+                "reason": f"selected {status} ticket",
+                "action": action,
+                "ticket": ticket_brief(item, index),
+                "selection_order": [entry[0] for entry in order],
+                **report,
+            }
+
+    summary = ticket_summary(data)
+    if summary["status"] in {"complete", "blocked"}:
+        reason = summary["reason"]
+        status = summary["status"]
+    elif report["missing_dependencies"]:
+        reason = "missing ticket dependency"
+        status = "blocked"
+    elif report["dependency_cycles"]:
+        reason = "dependency cycle"
+        status = "blocked"
+    elif report["blocked_dependencies"]:
+        reason = "dependency blocked"
+        status = "blocked"
+    elif report["done_dependencies_missing_evidence"]:
+        reason = "dependency done without verification evidence"
+        status = "waiting"
+    elif report["waiting_on_dependencies"]:
+        reason = "waiting on dependencies"
+        status = "waiting"
+    else:
+        reason = "no actionable ticket"
+        status = "waiting"
+    return {
+        "status": status,
+        "reason": reason,
+        "ticket": None,
+        "selection_order": [entry[0] for entry in order],
+        **report,
     }
 
 
@@ -409,6 +617,21 @@ def command_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_next(args: argparse.Namespace) -> int:
+    target = Path(args.target).expanduser().resolve()
+    data, path, _text = load_ticket_run(target, Path(args.ticket_file).resolve() if args.ticket_file else None)
+    payload = {"ticket_file": str(path), **next_ticket_selection(data)}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        ticket = payload.get("ticket")
+        if isinstance(ticket, dict):
+            print(f"{payload['action']}: {ticket['id']}")
+        else:
+            print(str(payload["reason"]))
+    return 0
+
+
 def command_should_halt(args: argparse.Namespace) -> int:
     target = Path(args.target).expanduser().resolve()
     path = Path(args.ticket_file).resolve() if args.ticket_file else ticket_file_path(target)
@@ -445,6 +668,10 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="Summarize the ticket campaign.")
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=command_status)
+
+    next_parser = subparsers.add_parser("next", help="Select the next dependency-ready ticket without writing files.")
+    next_parser.add_argument("--json", action="store_true")
+    next_parser.set_defaults(func=command_next)
 
     should_halt = subparsers.add_parser("should-halt", help="Exit 0 when the campaign should halt.")
     should_halt.add_argument("--finalize", action="store_true")

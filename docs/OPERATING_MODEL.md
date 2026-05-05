@@ -28,7 +28,7 @@ As an alternative, the dashboard can install one continuous conveyor LaunchAgent
 
 Generated targets also include an optional automation signal helper. When `automation_signals_enabled` is true, `docs/AUTOMATION_SIGNALS.md` defines recurring local nudges and `target/automation_signals.json` records due/completed state. Signals never override guardrails or task state.
 
-When `automation_run_mode` is `ticket_campaign`, generated targets also use `docs/TICKET_RUN.md` and `scripts/ticket_run.py`. The conveyor and single-lane wrapper stop launching new work after all tickets are done with evidence, or after all remaining tickets are blocked, then write `target/ticket_run_completion.json`, a Markdown completion report, and a native desktop notification or durable fallback record. Remote push/PR creation remains manual.
+When `automation_run_mode` is `ticket_campaign`, generated targets also use `docs/TICKET_RUN.md` and `scripts/ticket_run.py`. Bootstrap is readiness-only in this mode. Normal campaign runs use `python3 scripts/ticket_run.py . next --json` to select one dependency-ready ticket, preserve file order as the human priority order, and avoid continuing into the next ticket in the same run. The conveyor and single-lane wrapper stop launching new work after all tickets are done with evidence, or after all remaining tickets are blocked, then write `target/ticket_run_completion.json`, a Markdown completion report, and a native desktop notification or durable fallback record. Remote push/PR creation remains manual.
 
 Planner, builder, and hardener start from the current main `HEAD` in isolated worktrees under `target/automation_worktrees/<role>/<run_id>/` and queue patches under `target/automation_queue/<role>/<run_id>/`. Seeing partially integrated state from earlier patches in the same cycle is accepted behavior.
 
@@ -51,7 +51,7 @@ Multi-role mode is local-only. Role prompts prohibit pushes, fetches, pulls, rem
 - `.agentic/roles/*.md`: optional static role prompts for multi-role mode.
 - `scripts/run_conveyor_automation.py`: optional work-conserving local scheduler.
 - `scripts/run_observatory.py`: optional local browser observatory for signal, conveyor, queue, log, and progress state.
-- `scripts/ticket_run.py`: bounded ticket-campaign status, halt, report, and local desktop notification helper.
+- `scripts/ticket_run.py`: bounded ticket-campaign status, dependency-aware next-ticket selection, halt, report, and local desktop notification helper.
 - `scripts/repair_environment.py`: local environment diagnosis and safe repair helper.
 - `scripts/update_automation_signals.py`: optional recurring signal refresher and completion helper.
 - `docs/CODEX_AUTOMATION_GUARDRAILS.md`: static boundaries.
@@ -83,7 +83,7 @@ The task file owns the current product horizon or ticket-run phase. Each run sho
 
 When the current horizon is satisfied, the run should move `Current horizon` to the next horizon and append a dated note to `## Horizon Transition Log` with the previous horizon, new horizon, evidence, and checks. If a later regression undermines an earlier horizon, do not reset the current horizon; make the regression the next sprint-sized task and document the risk.
 
-Generated horizons are mode-aware. Continuous-improvement targets use intake-derived product horizons. Ticket-campaign targets use bounded phases around `docs/TICKET_RUN.md`, ticket implementation, verification, final reporting, and stopping new launches.
+Generated horizons are mode-aware. Continuous-improvement targets use intake-derived product horizons. Ticket-campaign targets use bounded phases around readiness-only bootstrap, dependency-aware one-ticket implementation, verification, final reporting, and stopping new launches.
 
 ## State Compaction
 

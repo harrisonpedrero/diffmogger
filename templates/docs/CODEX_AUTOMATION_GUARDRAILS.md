@@ -37,7 +37,7 @@ Do not build unrelated apps or large unrelated systems.
 - Do not install dependencies globally; use ignored local venvs, `node_modules`, or other project-local runtime state.
 - For browser-backed smoke checks, visual QA, or documentation research, prefer `scripts/diffmogger_browser.py` and the exported `DIFFMOGGER_BROWSER_PATH`/`CHROME_PATH` over ambient system Chrome.
 - If repeated browser launches fail before DevTools is ready, record `BLOCKED_ON_ENVIRONMENT` with diagnostics and use an equivalent manual or managed-browser QA path instead of looping on the same launch command.
-- In `ticket_campaign` mode, do not expand scope after the listed tickets are done or blocked; run `scripts/ticket_run.py` finalization and leave push/PR creation to the human.
+- In `ticket_campaign` mode, do not implement tickets during bootstrap, use `scripts/ticket_run.py . next --json` for dependency-aware ticket selection, act on at most one selected ticket per normal run, and do not expand scope after the listed tickets are done or blocked; run `scripts/ticket_run.py` finalization and leave push/PR creation to the human.
 - Do not delete tests just to pass checks.
 - Do not hide broad classes of errors with blanket suppressions.
 - Keep changes scoped to the current sprint.

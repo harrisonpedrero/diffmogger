@@ -72,6 +72,8 @@ Desired first demo: {{DESIRED_FIRST_DEMO}}
 
 Create an initial local-first baseline with:
 
+{{BOOTSTRAP_SCOPE_BOUNDARY}}
+
 - runnable setup
 - first demo path
 - clear repo structure
