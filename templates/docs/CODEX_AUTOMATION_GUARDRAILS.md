@@ -29,6 +29,7 @@ Do not build unrelated apps or large unrelated systems.
 - Do not spend money, deploy publicly, publish externally, contact real users, or trigger real-world side effects without explicit approval.
 - Prefer fixtures, mocks, local seed data, and dry-run modes.
 - External integrations must be optional, documented, and testable without live credentials.
+- Optional MCP servers must never be required for progress. Context7 auth errors, startup failures, timeouts, empty results, or tool errors should fall back to normal web search, repo docs, package metadata, or existing knowledge.
 
 ## Quality Policy
 
@@ -36,6 +37,7 @@ Do not build unrelated apps or large unrelated systems.
 - Diagnose missing local tooling, dependencies, or repairable project-local services before declaring `BLOCKED_ON_ENVIRONMENT`; missing local databases with project-owned test configuration should become baseline repair work, not a terminal human blocker.
 - Do not install dependencies globally; use ignored local venvs, `node_modules`, or other project-local runtime state.
 - For browser-backed smoke checks, visual QA, or documentation research, prefer `scripts/diffmogger_browser.py` and the exported `DIFFMOGGER_BROWSER_PATH`/`CHROME_PATH` over ambient system Chrome.
+- If Playwright MCP is enabled, use it only for local browser validation and save deferred UI failure screenshots under `docs/backlog/ui_artifacts/<run_id>/` with Markdown links in task/progress state.
 - If repeated browser launches fail before DevTools is ready, record `BLOCKED_ON_ENVIRONMENT` with diagnostics and use an equivalent manual or managed-browser QA path instead of looping on the same launch command.
 - In `ticket_campaign` mode, do not implement tickets during bootstrap, use `scripts/ticket_run.py . next --json` for dependency-aware ticket selection, act on at most one selected ticket per normal run, and do not expand scope after the listed tickets are done or blocked; run `scripts/ticket_run.py` finalization and leave push/PR creation to the human.
 - Do not delete tests just to pass checks.

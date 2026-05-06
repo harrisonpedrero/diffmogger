@@ -13,7 +13,6 @@ cd "$TARGET" || exit 1
 configure_diffmogger_browser() {
   if [ -n "${DIFFMOGGER_BROWSER_PATH:-}" ] && [ -z "${CHROME_PATH:-}" ]; then
     export CHROME_PATH="$DIFFMOGGER_BROWSER_PATH"
-    return
   fi
   if [ -z "${DIFFMOGGER_BROWSER_PATH:-}" ] && [ -z "${CHROME_PATH:-}" ] && [ -f "scripts/diffmogger_browser.py" ]; then
     browser_env="$(python3 scripts/diffmogger_browser.py env 2>/dev/null || true)"
@@ -21,6 +20,12 @@ configure_diffmogger_browser() {
       eval "$browser_env"
     fi
   fi
+  if [ -n "${DIFFMOGGER_BROWSER_PATH:-}" ]; then
+    export PLAYWRIGHT_MCP_EXECUTABLE_PATH="${PLAYWRIGHT_MCP_EXECUTABLE_PATH:-$DIFFMOGGER_BROWSER_PATH}"
+  elif [ -n "${CHROME_PATH:-}" ]; then
+    export PLAYWRIGHT_MCP_EXECUTABLE_PATH="${PLAYWRIGHT_MCP_EXECUTABLE_PATH:-$CHROME_PATH}"
+  fi
+  export PLAYWRIGHT_MCP_OUTPUT_DIR="${PLAYWRIGHT_MCP_OUTPUT_DIR:-docs/backlog/ui_artifacts/$CODEX_RUN_ID}"
 }
 
 configure_diffmogger_browser
@@ -34,6 +39,55 @@ maybe_finalize_ticket_campaign() {
 }
 
 CODEX_PARENT_ARGS=()
+toml_quote() {
+  value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
+append_context7_mcp_args() {
+  CODEX_PARENT_ARGS+=(
+    -c 'mcp_servers.context7.command="npx"'
+    -c 'mcp_servers.context7.args=["-y","@upstash/context7-mcp"]'
+    -c 'mcp_servers.context7.enabled=true'
+    -c 'mcp_servers.context7.required=false'
+    -c 'mcp_servers.context7.startup_timeout_sec=20'
+    -c 'mcp_servers.context7.tool_timeout_sec=60'
+    -c 'mcp_servers.context7.env_vars=["CONTEXT7_API_KEY"]'
+  )
+}
+
+append_playwright_mcp_args() {
+  CODEX_PARENT_ARGS+=(
+    -c 'mcp_servers.playwright.command="bash"'
+    -c 'mcp_servers.playwright.args=["scripts/run_playwright_mcp.sh"]'
+    -c 'mcp_servers.playwright.enabled=true'
+    -c 'mcp_servers.playwright.required=false'
+    -c 'mcp_servers.playwright.disabled_tools=["browser_run_code_unsafe","browser_file_upload"]'
+    -c 'mcp_servers.playwright.startup_timeout_sec=20'
+    -c 'mcp_servers.playwright.tool_timeout_sec=60'
+    -c "mcp_servers.playwright.env.PLAYWRIGHT_MCP_OUTPUT_DIR=$(toml_quote "$PLAYWRIGHT_MCP_OUTPUT_DIR")"
+  )
+  if [ -n "${PLAYWRIGHT_MCP_EXECUTABLE_PATH:-}" ]; then
+    CODEX_PARENT_ARGS+=(
+      -c "mcp_servers.playwright.env.PLAYWRIGHT_MCP_EXECUTABLE_PATH=$(toml_quote "$PLAYWRIGHT_MCP_EXECUTABLE_PATH")"
+    )
+  fi
+}
+
+if [ -f ".codex/config.toml" ]; then
+  CODEX_PARENT_ARGS+=(
+    -c 'mcp_servers.context7.enabled=false'
+    -c 'mcp_servers.playwright.enabled=false'
+  )
+  if grep -q "mcp_servers.context7" ".codex/config.toml"; then
+    append_context7_mcp_args
+  fi
+  if grep -q "mcp_servers.playwright" ".codex/config.toml"; then
+    append_playwright_mcp_args
+  fi
+fi
 if [ "${CODEX_ENABLE_NESTED_CLI_HOME:-true}" = "true" ] && [ -n "${HOME:-}" ]; then
   export CODEX_NESTED_CLI_HOME="${CODEX_NESTED_CLI_HOME:-$HOME/.codex}"
   if mkdir -p "$CODEX_NESTED_CLI_HOME"; then

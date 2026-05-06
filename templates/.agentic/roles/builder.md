@@ -26,6 +26,8 @@ Implement one scoped product or code increment that advances the current project
 ## Responsibilities
 
 - Choose builder work from the current plan, task file, and deferred backlog.
+- If Context7 MCP is mounted, use it only for documentation-assisted implementation. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, do not halt or mark the run blocked; immediately fall back to normal web search, repo docs, package metadata, or existing knowledge and continue the sprint.
+- Do not use Playwright MCP for implementation-time browsing; browser validation belongs to Hardener and Integrator workflows.
 - Consider active builder-owned automation signals when present, but only act when they have clear implementation scope.
 - Keep ownership narrow enough for clean integration.
 - Add or update tests, fixtures, demo paths, or docs that belong with the implementation.

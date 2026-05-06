@@ -15,7 +15,7 @@ It opens a native desktop window using Python's standard-library Tkinter runtime
 - collects a project intake
 - splits intake into Basics, Product, Rules, Run Config, Progression, and Context steps instead of a long scroll
 - supports fresh-project and existing-project integration modes
-- covers constraints, safety rules, automation prohibitions, human bridge choices, worker settings, optional bounded write-worker acceleration settings, optional automation signals, optional ticket-campaign mode, optional multi-role automation, deliverable definition, and long-run direction
+- covers constraints, safety rules, automation prohibitions, human bridge choices, worker settings, optional bounded write-worker acceleration settings, optional automation signals, optional ticket-campaign mode, optional multi-role automation, optional Context7/Playwright MCP integrations, deliverable definition, and long-run direction
 - copies optional context files into `docs/context/`
 - writes `docs/PROJECT_CONTEXT.md`
 - scaffolds Diffmogger target-project files
@@ -67,6 +67,8 @@ Before starting automation, the dashboard checks for:
 - optional macOS desktop notification command when local notifications are enabled
 - initialized git repo with an initial commit before starting multi-role or conveyor scheduling
 - explicit local-only remote opt-in before multi-role or conveyor scheduling in repos with configured git remotes
+- optional Node/npx, Codex MCP visibility, and managed browser advisories when Context7 or Playwright MCP is selected
 
 The dashboard keeps notifier credentials out of target projects. In notifier modes, use `services/agentic-notifier/` for Discord and local desktop notification configuration.
 Ticket campaign setup lives in Run Config, but tickets themselves are populated in the generated Markdown file, usually `docs/TICKET_RUN.md`. Ticket-campaign bootstrap is readiness-only; scheduled runs use dependency-aware `next --json` selection and act on one ticket per run.
+Optional MCP setup is project-scoped and advisory. The dashboard never runs MCP install/login commands or edits user/global Codex config. When Context7 is selected, the generated config inherits `CONTEXT7_API_KEY` if it is present, but never stores the key.

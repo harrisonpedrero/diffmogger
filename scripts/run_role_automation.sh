@@ -74,6 +74,11 @@ elif [[ -z "${DIFFMOGGER_BROWSER_PATH:-}" && -z "${CHROME_PATH:-}" && -f "script
     eval "$browser_env"
   fi
 fi
+if [[ -n "${DIFFMOGGER_BROWSER_PATH:-}" ]]; then
+  export PLAYWRIGHT_MCP_EXECUTABLE_PATH="${PLAYWRIGHT_MCP_EXECUTABLE_PATH:-$DIFFMOGGER_BROWSER_PATH}"
+elif [[ -n "${CHROME_PATH:-}" ]]; then
+  export PLAYWRIGHT_MCP_EXECUTABLE_PATH="${PLAYWRIGHT_MCP_EXECUTABLE_PATH:-$CHROME_PATH}"
+fi
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "Multi-role automation requires an initialized git repo: $target_abs" >&2
@@ -203,6 +208,7 @@ context_paths=(
   ".agentic/smoke_commands.txt"
   ".agentic/verification_commands.txt"
   ".agentic/roles"
+  ".codex/config.toml"
   "docs/CODEX_AUTOMATION_TASKS.md"
   "docs/MULTI_ROLE_PROGRESS.md"
   "docs/CODEX_AUTOMATION_GUARDRAILS.md"
@@ -215,6 +221,8 @@ context_paths=(
   "docs/HUMAN_OUTBOX.md"
   "docs/HUMAN_REQUESTS.md"
   "docs/HUMAN_RESPONSES_ARCHIVE.md"
+  "docs/backlog/README.md"
+  "scripts/run_playwright_mcp.sh"
   "target/automation_signals.json"
   "target/baseline_verification.json"
 )
@@ -237,11 +245,12 @@ explicit_paths = [
     ".agentic/automation_prompt.md",
     ".agentic/smoke_commands.txt",
     ".agentic/verification_commands.txt",
-    ".agentic/roles/planner.md",
-    ".agentic/roles/builder.md",
-    ".agentic/roles/hardener.md",
-    ".agentic/roles/integrator.md",
-    "docs/HUMAN_INBOX.md",
+  ".agentic/roles/planner.md",
+  ".agentic/roles/builder.md",
+  ".agentic/roles/hardener.md",
+  ".agentic/roles/integrator.md",
+  ".codex/config.toml",
+  "docs/HUMAN_INBOX.md",
     "docs/HUMAN_RESPONSES_ARCHIVE.md",
     "docs/HUMAN_REQUESTS.md",
     "docs/HUMAN_OUTBOX.md",
@@ -255,6 +264,7 @@ deny_parts = {
     ".git",
     ".hg",
     ".svn",
+    ".codex",
     ".venv",
     "venv",
     "node_modules",
@@ -401,6 +411,59 @@ done
 for rel in "${runtime_state_paths[@]}"; do
   seed_context_path "$rel"
 done
+
+export PLAYWRIGHT_MCP_OUTPUT_DIR="${PLAYWRIGHT_MCP_OUTPUT_DIR:-$worktree_dir/docs/backlog/ui_artifacts/$run_id}"
+
+CODEX_ROLE_ARGS=(--add-dir "$HOME/.codex")
+toml_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
+append_context7_mcp_args() {
+  CODEX_ROLE_ARGS+=(
+    -c 'mcp_servers.context7.command="npx"'
+    -c 'mcp_servers.context7.args=["-y","@upstash/context7-mcp"]'
+    -c 'mcp_servers.context7.enabled=true'
+    -c 'mcp_servers.context7.required=false'
+    -c 'mcp_servers.context7.startup_timeout_sec=20'
+    -c 'mcp_servers.context7.tool_timeout_sec=60'
+    -c 'mcp_servers.context7.env_vars=["CONTEXT7_API_KEY"]'
+  )
+}
+
+append_playwright_mcp_args() {
+  CODEX_ROLE_ARGS+=(
+    -c 'mcp_servers.playwright.command="bash"'
+    -c 'mcp_servers.playwright.args=["scripts/run_playwright_mcp.sh"]'
+    -c 'mcp_servers.playwright.enabled=true'
+    -c 'mcp_servers.playwright.required=false'
+    -c 'mcp_servers.playwright.disabled_tools=["browser_run_code_unsafe","browser_file_upload"]'
+    -c 'mcp_servers.playwright.startup_timeout_sec=20'
+    -c 'mcp_servers.playwright.tool_timeout_sec=60'
+    -c "mcp_servers.playwright.env.PLAYWRIGHT_MCP_OUTPUT_DIR=$(toml_quote "$PLAYWRIGHT_MCP_OUTPUT_DIR")"
+  )
+  if [[ -n "${PLAYWRIGHT_MCP_EXECUTABLE_PATH:-}" ]]; then
+    CODEX_ROLE_ARGS+=(
+      -c "mcp_servers.playwright.env.PLAYWRIGHT_MCP_EXECUTABLE_PATH=$(toml_quote "$PLAYWRIGHT_MCP_EXECUTABLE_PATH")"
+    )
+  fi
+}
+
+if [[ -f "$worktree_dir/.codex/config.toml" ]]; then
+  CODEX_ROLE_ARGS+=(
+    -c 'mcp_servers.context7.enabled=false'
+    -c 'mcp_servers.playwright.enabled=false'
+  )
+  if [[ "$role" == "planner" || "$role" == "builder" ]] && grep -q "mcp_servers.context7" "$worktree_dir/.codex/config.toml"; then
+    append_context7_mcp_args
+  fi
+  if [[ "$role" == "hardener" || "$role" == "integrator" ]] && grep -q "mcp_servers.playwright" "$worktree_dir/.codex/config.toml"; then
+    append_playwright_mcp_args
+  fi
+fi
 
 python3 - "$target_abs" "$runtime_state_start_path" "${runtime_state_paths[@]}" <<'PY'
 import hashlib
@@ -640,7 +703,7 @@ EOF
 } >"$runtime_prompt_path"
 
 set +e
-codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" -C "$worktree_dir" "$(cat "$runtime_prompt_path")" >"$run_stdout" 2>"$run_stderr"
+codex exec --full-auto --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")" >"$run_stdout" 2>"$run_stderr"
 codex_status=$?
 set -e
 critical_stop_detected=0
@@ -715,7 +778,7 @@ for item in data.get("path_prepend") or []:
 PY
 )
     set +e
-    codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" -C "$worktree_dir" "$(cat "$runtime_prompt_path")" >"$rerun_stdout" 2>"$rerun_stderr"
+    codex exec --full-auto --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")" >"$rerun_stdout" 2>"$rerun_stderr"
     rerun_status=$?
     set -e
     {

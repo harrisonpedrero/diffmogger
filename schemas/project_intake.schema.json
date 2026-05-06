@@ -178,6 +178,16 @@
       "description": "Whether generated projects include optional recurring automation signal definitions for local role-owned nudges.",
       "default": false
     },
+    "optional_mcp_servers": {
+      "type": "array",
+      "description": "Optional project-scoped MCP servers to configure for role-scoped Codex automation. Missing or unauthenticated MCP servers remain advisory and must not block overnight runs.",
+      "items": {
+        "type": "string",
+        "enum": ["context7", "playwright"]
+      },
+      "uniqueItems": true,
+      "default": []
+    },
     "meaningful_deliverable": {
       "type": "string",
       "default": "A runnable, verified change that improves the product or developer workflow."

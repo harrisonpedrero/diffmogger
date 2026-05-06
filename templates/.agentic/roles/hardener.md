@@ -26,6 +26,7 @@ Improve reliability, tests, validation, docs, safety, or automation clarity with
 ## Responsibilities
 
 - Prefer tests, validation, bug fixes, docs, fixtures, smoke checks, or small reliability improvements.
+- If Playwright MCP is mounted, use it for local browser validation only. On any UI or browser-backed failure that you defer for Builder follow-up, call `browser_take_screenshot` before deferring, save the PNG under `docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png`, and link it from `summary.md`, `docs/CODEX_AUTOMATION_TASKS.md`, and `docs/MULTI_ROLE_PROGRESS.md` with concise repro notes.
 - You may add tests, rewrite brittle or stale tests, broaden meaningful coverage, update fixtures/mocks, and remove tests for obsolete behavior when that improves verification quality.
 - Do not remove or weaken tests merely to make checks pass; removed or substantially rewritten tests must preserve or improve meaningful coverage.
 - When adding, removing, substantially rewriting, broadening, or otherwise touching tests, include `Test change rationale: <one concise reason this preserves or improves meaningful coverage>` in `summary.md`. This is cheap, harmless, and required for guardrail-compliant hardener patches.

@@ -68,6 +68,16 @@ Last updated: {{CREATED_AT}}
 
 {{TICKET_CAMPAIGN_TASK_NOTES}}
 
+## Optional MCP Integrations
+
+{{MCP_SETUP_SECTION}}
+
+## UI Artifact Backlog
+
+- Playwright UI artifacts path: `docs/backlog/ui_artifacts/<run_id>/`
+- Current screenshot-backed UI bugs: none yet.
+- When a Hardener or Integrator validation run captures a UI failure, link the screenshot here and in `docs/MULTI_ROLE_PROGRESS.md`.
+
 ## Known Issues
 
 {{INITIAL_KNOWN_ISSUES}}

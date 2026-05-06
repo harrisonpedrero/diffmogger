@@ -14,5 +14,10 @@ elif [ -z "${DIFFMOGGER_BROWSER_PATH:-}" ] && [ -z "${CHROME_PATH:-}" ] && [ -f 
     eval "$browser_env"
   fi
 fi
+if [ -n "${DIFFMOGGER_BROWSER_PATH:-}" ]; then
+  export PLAYWRIGHT_MCP_EXECUTABLE_PATH="${PLAYWRIGHT_MCP_EXECUTABLE_PATH:-$DIFFMOGGER_BROWSER_PATH}"
+elif [ -n "${CHROME_PATH:-}" ]; then
+  export PLAYWRIGHT_MCP_EXECUTABLE_PATH="${PLAYWRIGHT_MCP_EXECUTABLE_PATH:-$CHROME_PATH}"
+fi
 
 exec python3 scripts/run_conveyor_automation.py --target "$TARGET" "$@"

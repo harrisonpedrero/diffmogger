@@ -62,6 +62,7 @@ It collects the same project intake fields supported by `schemas/project_intake.
 - optional recurring local automation signals, disabled by default
 - optional ticket-campaign mode, including the target-relative ticket Markdown file and local desktop completion notification toggle
 - advanced multi-role automation settings, disabled by default, including a local-only remote opt-in for repos that already have git remotes configured
+- optional Context7 and Playwright MCP integrations, disabled by default and shown as advisory prerequisites
 - meaningful deliverable
 - long-run direction
 - assumptions
@@ -126,6 +127,8 @@ The scaffold script remains the source of truth for generated files. The dashboa
 Use **Environment Access** to choose whether automation may open local `.env*` files directly. The default keeps direct env-file reads off and lets project commands load env normally; the direct mode is for disposable local DBs or explicitly approved live-provider tests. Both modes still forbid printing, storing, or committing secret values.
 
 When **Ticket Campaign** mode is enabled in Run Config, the dashboard scaffolds the ticket source file, usually `docs/TICKET_RUN.md`. The initial scaffold/bootstrap run is readiness-only for ticket campaigns: it confirms setup, ticket parsing, and verification state but should not implement ticket acceptance criteria. Edit the ticket file's fenced JSON block with ticket IDs, optional `depends_on` arrays, acceptance criteria, verification commands, evidence, and blockers before starting unattended work. Normal campaign runs use `python3 scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run.
+
+When optional MCP integrations are enabled, the dashboard writes only project-scoped setup. It does not run `codex mcp add`, `codex mcp login`, or mutate user/global Codex config. Context7 is scoped to Planner/Builder and inherits `CONTEXT7_API_KEY` when present; Playwright MCP is scoped to Hardener/Integrator validation, and missing or unauthenticated MCP remains an optional warning.
 
 The dashboard keeps its visible run log bounded and starts dashboard-launched subprocesses in their own process group. When a bootstrap/check command exits or is cancelled, the dashboard terminates lingering child processes from that group so a temporary dev server started for smoke testing does not keep running after the dashboard run finishes.
 

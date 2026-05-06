@@ -83,6 +83,16 @@ The dashboard scaffolds `docs/TICKET_RUN.md` but does not edit tickets directly.
 
 For CLI validation of a ticket-campaign target, add `--ticket-campaign-enabled` to `scripts/check_required_files.py`.
 
+Optional MCP servers are opt-in through `optional_mcp_servers`:
+
+```json
+{
+  "optional_mcp_servers": ["context7", "playwright"]
+}
+```
+
+Diffmogger generates project-scoped `.codex/config.toml` and `docs/MCP_INTEGRATIONS.md`, but never runs `codex mcp add`, `codex mcp login`, or edits user/global Codex config. Context7 uses stdio `npx -y @upstash/context7-mcp` by default and inherits `CONTEXT7_API_KEY` when that environment variable is present; the key itself is never stored in generated files. Remote OAuth setup is manual/optional. Planner/Builder wrappers mount Context7 only; Hardener/Integrator wrappers mount Playwright MCP only. Context7 auth failures, startup failures, timeouts, empty results, and tool errors are fallback-only events, not blockers. Playwright UI failure screenshots belong under `docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png`.
+
 ## 2. Validate The Scaffold
 
 ```bash

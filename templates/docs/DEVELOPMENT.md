@@ -98,6 +98,24 @@ the managed path for child Codex runs when it exists, and dashboard-managed Laun
 inherit the same environment. Do not make browser smoke checks depend only on system
 Chrome; use `python3 scripts/diffmogger_browser.py resolve` or the exported `CHROME_PATH`.
 
+## Optional MCP Integrations
+
+Optional MCP servers:
+
+```text
+{{OPTIONAL_MCP_SERVERS}}
+```
+
+When optional MCP is enabled, project-scoped config lives in `.codex/config.toml`. Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config.
+
+Context7 is documentation-only and should fall back to normal web search, repo docs, package metadata, or existing knowledge on auth errors, startup failures, timeouts, empty results, or tool errors. The generated MCP config inherits `CONTEXT7_API_KEY` when it is present for higher rate limits, but never stores the key.
+
+Playwright MCP uses Diffmogger's managed browser when available. UI failure screenshots should be saved under:
+
+```text
+docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png
+```
+
 ## Ticket Campaigns
 
 {{TICKET_CAMPAIGN_DEVELOPMENT_SECTION}}

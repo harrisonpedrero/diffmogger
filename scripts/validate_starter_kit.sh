@@ -32,6 +32,7 @@ required_files=(
   "prompts/HUMAN_BRIDGE_SETUP_PROMPT.md"
   "prompts/WORKER_AGENT_PROMPTS.md"
   "templates/AGENTS.md"
+  "templates/.codex/config.toml"
   "templates/.agentic/automation_prompt.md"
   "templates/.agentic/roles/planner.md"
   "templates/.agentic/roles/builder.md"
@@ -50,6 +51,8 @@ required_files=(
   "templates/docs/HUMAN_OUTBOX.md"
   "templates/docs/HUMAN_RESPONSES_ARCHIVE.md"
   "templates/docs/HUMAN_BRIDGE_SETUP.md"
+  "templates/docs/MCP_INTEGRATIONS.md"
+  "templates/docs/backlog/README.md"
   "templates/docs/DEVELOPMENT.md"
   "templates/scripts/acquire_codex_lock.sh"
   "templates/scripts/release_codex_lock.sh"
@@ -63,6 +66,7 @@ required_files=(
   "templates/scripts/repair_environment.py"
   "templates/scripts/update_automation_signals.py"
   "templates/scripts/run_role_automation.sh"
+  "templates/scripts/run_playwright_mcp.sh"
   "templates/scripts/integrate_role_outputs.py"
   "templates/scripts/list_deferred_patches.py"
   "templates/scripts/spawn_worker_agent.sh"
@@ -104,6 +108,7 @@ required_files=(
   "scripts/repair_environment.py"
   "scripts/update_automation_signals.py"
   "scripts/run_role_automation.sh"
+  "scripts/run_playwright_mcp.sh"
   "scripts/integrate_role_outputs.py"
   "scripts/list_deferred_patches.py"
   "scripts/spawn_worker_agent.sh"
@@ -179,6 +184,9 @@ for marker in [
     "ticket_completion_notify",
     "discord_notifier",
     "local_notifications_enabled",
+    "optional_mcp_servers",
+    "context7",
+    "playwright",
 ]:
     if marker not in project_schema:
         print(f"Project intake schema missing write-worker marker: {marker}", file=sys.stderr)
@@ -259,6 +267,7 @@ automation_sections = [
     "## Product Horizons",
     "## Worker-Agent Orchestration",
     "## Multi-Role Automation",
+    "## Optional MCP Integrations",
     "## Automation Signals",
     "## Human-Intervention Protocol",
     "## Lock-File Behavior",
@@ -289,6 +298,8 @@ task_markers = [
     "## Human Messages Sent",
     "## Best Next Milestone",
     "## Suggested Next Sprint-Sized Task",
+    "## Optional MCP Integrations",
+    "## UI Artifact Backlog",
     "{{BACKLOG_SECTION_HEADING}}",
     "{{BACKLOG_SECTION_BODY}}",
     "## Continue/Block/Critical-Stop Rationale",
@@ -316,6 +327,8 @@ guardrail_markers = [
     "{{WRITE_WORKER_GUARDRAILS_POLICY}}",
     "## Multi-Role Automation Policy",
     "{{MULTI_ROLE_GUARDRAILS_POLICY}}",
+    "Optional MCP servers must never be required for progress",
+    "docs/backlog/ui_artifacts/<run_id>/",
     "## Lock-File Policy",
     "## Human-Intervention Policy",
     "## Status Policy",
@@ -359,6 +372,9 @@ for marker in [
     "{{HUMAN_PROTOCOL}}",
     "{{WRITE_WORKER_ORCHESTRATION}}",
     "{{MULTI_ROLE_AUTOMATION_SECTION}}",
+    "{{MCP_SETUP_SECTION}}",
+    "expired auth",
+    "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png",
     "{{TICKET_CAMPAIGN_SECTION}}",
     "{{PRODUCT_HORIZON_GUIDANCE}}",
     "## Product Horizon State",
@@ -375,6 +391,12 @@ for marker in [
     "$HOME/.codex",
     "diffmogger_browser.py",
     "DIFFMOGGER_BROWSER_PATH",
+    "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
+    "PLAYWRIGHT_MCP_OUTPUT_DIR",
+    "mcp_servers.context7.command",
+    "mcp_servers.context7.env_vars",
+    "mcp_servers.playwright.command",
+    "mcp_servers.playwright.disabled_tools",
     "--add-dir",
     "codex exec --full-auto",
     "--skip-git-repo-check",
@@ -390,6 +412,42 @@ for marker in [
 if "Diffmogger Self Improvement scheduled sprint" in runner:
     print("Scheduled runner template contains self-run lock context", file=sys.stderr)
     raise SystemExit(1)
+
+mcp_config = Path("templates/.codex/config.toml").read_text(encoding="utf-8")
+for marker in [
+    "Diffmogger optional MCP configuration",
+    "{{MCP_CODEX_CONFIG}}",
+    "temporary per-role `codex exec -c` overrides",
+]:
+    if marker not in mcp_config:
+        print(f"MCP config template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+mcp_docs = Path("templates/docs/MCP_INTEGRATIONS.md").read_text(encoding="utf-8")
+for marker in [
+    "# Optional MCP Integrations",
+    "{{MCP_SETUP_SECTION}}",
+    "Role wrappers apply temporary `codex exec -c` MCP overrides",
+    "CONTEXT7_API_KEY",
+    "browser_take_screenshot",
+]:
+    if marker not in mcp_docs:
+        print(f"MCP docs template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+playwright_mcp_helper = Path("templates/scripts/run_playwright_mcp.sh").read_text(encoding="utf-8")
+for marker in [
+    "@playwright/mcp@latest",
+    "--headless",
+    "--isolated",
+    "--codegen",
+    "--output-dir",
+    "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
+    "docs/backlog/ui_artifacts",
+]:
+    if marker not in playwright_mcp_helper:
+        print(f"Playwright MCP helper template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
 
 browser_helper = Path("templates/scripts/diffmogger_browser.py").read_text(encoding="utf-8")
 for marker in [
@@ -506,6 +564,10 @@ for role in ["planner", "builder", "hardener", "integrator"]:
     ]
     if role != "integrator":
         markers.extend(["Commit subject:", "Do not use generic subjects"])
+    if role in {"planner", "builder"}:
+        markers.extend(["Context7", "auth errors", "do not halt"])
+    if role in {"hardener", "integrator"}:
+        markers.extend(["browser_take_screenshot", "docs/backlog/ui_artifacts"])
     for marker in markers:
         if marker not in role_prompt:
             print(f"Role prompt template {role} missing marker: {marker}", file=sys.stderr)
@@ -516,6 +578,12 @@ for marker in [
     "--role",
     "planner|builder|hardener|integrator",
     "MULTI_ROLE_ALLOW_REMOTES",
+    "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
+    "PLAYWRIGHT_MCP_OUTPUT_DIR",
+    "mcp_servers.context7.command",
+    "mcp_servers.context7.env_vars",
+    "mcp_servers.playwright.command",
+    "mcp_servers.playwright.disabled_tools",
     "git remote -v",
     "git worktree add",
     "git ls-files --others --exclude-standard -z",
@@ -534,6 +602,8 @@ for marker in [
     "allowed_runtime_path",
     ".agentic/automation_prompt.md",
     ".agentic/roles/builder.md",
+    ".codex/config.toml",
+    "scripts/run_playwright_mcp.sh",
     "Runtime Summary Contract",
     "Commit subject:",
 ]:
@@ -575,6 +645,7 @@ for marker in [
     "## Recent Activity Log",
     "## Historical Summary",
     "## Deferred-Patch Backlog",
+    "## UI Artifact Backlog",
     "## Architectural Decisions",
     "## Role Health",
     "fast-follow replanning",
@@ -618,6 +689,11 @@ for marker in [
     "continuous_conveyor",
     "multi_role_allow_remotes",
     "automation_signals_enabled",
+    "optional_mcp_servers",
+    "Optional MCP Integrations",
+    "codex_mcp_detail",
+    "CONTEXT7_API_KEY",
+    "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
     "planner_builder_hardener_integrator",
     "write_role_launchd_plist",
     "write_conveyor_launchd_plist",
@@ -861,6 +937,17 @@ if [ -f "$tmp_dir/docs/TICKET_RUN.md" ]; then
     rm -rf "$tmp_dir"
     exit 1
 fi
+for unexpected_mcp_path in \
+    ".codex/config.toml" \
+    "docs/MCP_INTEGRATIONS.md" \
+    "docs/backlog/README.md" \
+    "scripts/run_playwright_mcp.sh"; do
+    if [ -e "$tmp_dir/$unexpected_mcp_path" ]; then
+        echo "Default scaffold unexpectedly generated optional MCP file: $unexpected_mcp_path" >&2
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+done
 for marker in \
     "H2 Local-first demo" \
     "weekly board" \
@@ -1021,6 +1108,62 @@ for marker in \
     "blindly accepting changes"; do
     if ! grep -R -- "$marker" "$tmp_dir/.agentic" "$tmp_dir/docs" "$tmp_dir/scripts/spawn_worker_agent.sh" >/tmp/Diffmogger-write-worker-grep.log 2>&1; then
         echo "Write-worker scaffold missing marker: $marker" >&2
+        rm -rf "$tmp_dir" "$tmp_intake"
+        exit 1
+    fi
+done
+rm -rf "$tmp_dir" "$tmp_intake"
+
+tmp_dir="$(mktemp -d)"
+tmp_intake="$(mktemp /tmp/Diffmogger-optional-mcp.XXXXXX)"
+cat >"$tmp_intake" <<'JSON'
+{
+  "project_name": "Optional MCP Smoke",
+  "product_goal": "Build an optional MCP scaffold smoke target.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "Generated docs only.",
+  "human_bridge_enabled": false,
+  "human_bridge_mode": "disabled",
+  "multi_role_automations_allowed": true,
+  "automation_role_profile": "planner_builder_hardener_integrator",
+  "optional_mcp_servers": ["context7", "playwright"],
+  "verification_commands": ["npm test"]
+}
+JSON
+python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-optional-mcp.log
+python3 scripts/check_required_files.py --human-bridge-mode disabled --multi-role-enabled --optional-mcp-enabled "$tmp_dir" >/tmp/Diffmogger-check-optional-mcp.log
+for marker in \
+    "[mcp_servers.context7]" \
+    "@upstash/context7-mcp" \
+    'env_vars = ["CONTEXT7_API_KEY"]' \
+    "[mcp_servers.playwright]" \
+    'disabled_tools = ["browser_run_code_unsafe", "browser_file_upload"]' \
+    "[profiles.diffmogger-planner.mcp_servers.context7]" \
+    "[profiles.diffmogger-hardener.mcp_servers.playwright]"; do
+    if ! grep -F -- "$marker" "$tmp_dir/.codex/config.toml" >/tmp/Diffmogger-optional-mcp-config-grep.log 2>&1; then
+        echo "Optional MCP config missing marker: $marker" >&2
+        rm -rf "$tmp_dir" "$tmp_intake"
+        exit 1
+    fi
+done
+for marker in \
+    'mcp_servers.context7.command="npx"' \
+    'mcp_servers.context7.env_vars=["CONTEXT7_API_KEY"]' \
+    'mcp_servers.playwright.command="bash"' \
+    'mcp_servers.playwright.disabled_tools=["browser_run_code_unsafe","browser_file_upload"]' \
+    "PLAYWRIGHT_MCP_OUTPUT_DIR"; do
+    if ! grep -F -- "$marker" "$tmp_dir/scripts/run_role_automation.sh" "$tmp_dir/scripts/run_codex_automation.sh" >/tmp/Diffmogger-optional-mcp-runner-grep.log 2>&1; then
+        echo "Optional MCP runner missing marker: $marker" >&2
+        rm -rf "$tmp_dir" "$tmp_intake"
+        exit 1
+    fi
+done
+for marker in \
+    "auth errors" \
+    "browser_take_screenshot" \
+    "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png"; do
+    if ! grep -R -- "$marker" "$tmp_dir/.agentic" "$tmp_dir/docs" >/tmp/Diffmogger-optional-mcp-prompt-grep.log 2>&1; then
+        echo "Optional MCP prompt/docs missing marker: $marker" >&2
         rm -rf "$tmp_dir" "$tmp_intake"
         exit 1
     fi

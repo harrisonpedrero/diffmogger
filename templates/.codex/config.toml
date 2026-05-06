@@ -1,0 +1,6 @@
+# Diffmogger optional MCP configuration.
+# Servers are disabled by default. Diffmogger wrappers turn enabled project entries
+# into temporary per-role `codex exec -c` overrides; profiles are present for manual use.
+# Diffmogger does not run `codex mcp add`, `codex mcp login`, or mutate user/global Codex config.
+
+{{MCP_CODEX_CONFIG}}

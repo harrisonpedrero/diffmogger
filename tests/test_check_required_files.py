@@ -53,6 +53,95 @@ class RequiredFilesCheckTests(unittest.TestCase):
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
 
+    def test_scaffold_without_optional_mcp_omits_mcp_state_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+
+            for rel in [
+                ".codex/config.toml",
+                "docs/MCP_INTEGRATIONS.md",
+                "docs/backlog/README.md",
+                "scripts/run_playwright_mcp.sh",
+            ]:
+                self.assertFalse((target / rel).exists(), rel)
+
+            result = self.run_check(target)
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+
+    def test_optional_mcp_scaffold_generates_role_scoped_config_and_guardrails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.NamedTemporaryFile("w", suffix=".json") as intake:
+            target = Path(tmp)
+            intake.write(
+                """
+{
+  "project_name": "MCP Smoke",
+  "product_goal": "Validate optional MCP scaffolding.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "Generated docs only.",
+  "human_bridge_enabled": false,
+  "human_bridge_mode": "disabled",
+  "multi_role_automations_allowed": true,
+  "automation_role_profile": "planner_builder_hardener_integrator",
+  "optional_mcp_servers": ["context7", "playwright"],
+  "verification_commands": ["npm test"]
+}
+""".strip()
+            )
+            intake.flush()
+
+            self.scaffold_target(target, Path(intake.name))
+            config = (target / ".codex" / "config.toml").read_text(encoding="utf-8")
+            role_runner = (target / "scripts" / "run_role_automation.sh").read_text(encoding="utf-8")
+            single_lane_runner = (target / "scripts" / "run_codex_automation.sh").read_text(encoding="utf-8")
+            helper = (target / "scripts" / "run_playwright_mcp.sh").read_text(encoding="utf-8")
+
+            self.assertIn("[mcp_servers.context7]", config)
+            self.assertIn('args = ["-y", "@upstash/context7-mcp"]', config)
+            self.assertIn('env_vars = ["CONTEXT7_API_KEY"]', config)
+            self.assertIn("[mcp_servers.playwright]", config)
+            self.assertIn('disabled_tools = ["browser_run_code_unsafe", "browser_file_upload"]', config)
+            self.assertIn("[profiles.diffmogger-planner.mcp_servers.context7]", config)
+            self.assertIn("[profiles.diffmogger-builder.mcp_servers.context7]", config)
+            self.assertIn("[profiles.diffmogger-hardener.mcp_servers.playwright]", config)
+            self.assertIn("[profiles.diffmogger-integrator.mcp_servers.playwright]", config)
+            self.assertIn('mcp_servers.context7.command="npx"', role_runner)
+            self.assertIn('mcp_servers.context7.env_vars=["CONTEXT7_API_KEY"]', role_runner)
+            self.assertIn('mcp_servers.playwright.command="bash"', role_runner)
+            self.assertIn('mcp_servers.playwright.disabled_tools=["browser_run_code_unsafe","browser_file_upload"]', role_runner)
+            self.assertIn('mcp_servers.context7.enabled=false', role_runner)
+            self.assertIn('mcp_servers.playwright.enabled=false', role_runner)
+            self.assertIn("PLAYWRIGHT_MCP_OUTPUT_DIR", single_lane_runner)
+            self.assertIn("--codegen", helper)
+
+            planner = (target / ".agentic" / "roles" / "planner.md").read_text(encoding="utf-8")
+            builder = (target / ".agentic" / "roles" / "builder.md").read_text(encoding="utf-8")
+            hardener = (target / ".agentic" / "roles" / "hardener.md").read_text(encoding="utf-8")
+            integrator = (target / ".agentic" / "roles" / "integrator.md").read_text(encoding="utf-8")
+            self.assertIn("auth errors", planner)
+            self.assertIn("do not halt", builder)
+            self.assertIn("browser_take_screenshot", hardener)
+            self.assertIn("docs/backlog/ui_artifacts", integrator)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECK_SCRIPT),
+                    "--human-bridge-mode",
+                    "disabled",
+                    "--multi-role-enabled",
+                    "--optional-mcp-enabled",
+                    str(target),
+                ],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+
     def test_continuous_scaffold_uses_intake_specific_horizons(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)

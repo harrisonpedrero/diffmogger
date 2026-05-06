@@ -142,6 +142,7 @@ These are observations from private repositories that ran on Diffmogger. They ar
 - optional multi-role prompts: `.agentic/roles/planner.md`, `builder.md`, `hardener.md`, `integrator.md`
 - optional multi-role scripts: `scripts/run_role_automation.sh`, `scripts/integrate_role_outputs.py`, `scripts/list_deferred_patches.py`
 - optional progress ledger: `docs/MULTI_ROLE_PROGRESS.md`
+- optional MCP setup docs/config for Context7 and Playwright MCP, including `docs/MCP_INTEGRATIONS.md`, `.codex/config.toml`, and Playwright UI artifacts under `docs/backlog/ui_artifacts/`
 - state compaction script: `scripts/compact_agent_state.py`
 - bundled local notifier service in `services/agentic-notifier/`
 - standalone dashboard in `services/agentic-dashboard/`
@@ -212,6 +213,7 @@ It supports:
 - optional bounded write-worker settings with a capped count and guidance text
 - optional automation signals for recurring local review nudges
 - optional multi-role automation mode with fixed role-specific launchd jobs, continuous conveyor scheduling, and local-only git guards
+- optional Context7 and Playwright MCP checkboxes with advisory prerequisites and role-scoped generated config
 - optional local observatory launch and Markdown self-review export for active signal nudges, conveyor state, active role runs, queued patches, validation state, the latest recorded integration-safety result, and recent automation timeline
 - a Monitor tab **Run Safety Check** action that runs `scripts/check_integration_safety.py` and shows the local result in the dashboard log
 - **Worker Strategy Controls** that mirror the observatory's next-run recommendation, can launch a bounded read-only report, explicitly owned write worker, or local integrator lane when appropriate, and load the latest consolidated worker summary

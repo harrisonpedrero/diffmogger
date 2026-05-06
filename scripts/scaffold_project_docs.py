@@ -33,6 +33,7 @@ DEFAULT_MAX_WRITE_WORKER_COUNT = 3
 VALID_ROLE_PROFILES = {"single_lane", "planner_builder_hardener_integrator"}
 VALID_SCHEDULE_STRATEGIES = {"single_lane_interval", "fixed_multi_role", "continuous_conveyor"}
 VALID_AUTOMATION_RUN_MODES = {"continuous_improvement", "ticket_campaign"}
+VALID_OPTIONAL_MCP_SERVERS = {"context7", "playwright"}
 DEFAULT_MULTI_ROLE_CADENCE_MINUTES = 30
 TICKET_RUN_FILES = {
     "docs/TICKET_RUN.md",
@@ -46,6 +47,14 @@ MULTI_ROLE_FILES = {
     "scripts/run_role_automation.sh",
     "scripts/integrate_role_outputs.py",
     "scripts/list_deferred_patches.py",
+}
+MCP_FILES = {
+    ".codex/config.toml",
+    "docs/MCP_INTEGRATIONS.md",
+}
+PLAYWRIGHT_MCP_FILES = {
+    "scripts/run_playwright_mcp.sh",
+    "docs/backlog/README.md",
 }
 MANAGED_EXISTING_PROJECT_FILES = {
     "AGENTS.md": "AGENTS",
@@ -129,6 +138,12 @@ HEADING_TO_KEY = {
     "automation pulse": "automation_signals_enabled",
     "automation pulses": "automation_signals_enabled",
     "automation signal system": "automation_signals_enabled",
+    "optional mcp servers": "optional_mcp_servers",
+    "optional mcp": "optional_mcp_servers",
+    "mcp servers": "optional_mcp_servers",
+    "mcp integrations": "optional_mcp_servers",
+    "context7": "optional_mcp_servers",
+    "playwright mcp": "optional_mcp_servers",
     "automation run mode": "automation_run_mode",
     "run mode": "automation_run_mode",
     "ticket run file": "ticket_run_file",
@@ -253,6 +268,98 @@ def normalize_automation_run_mode(value: Any) -> str:
     text = str(value or "continuous_improvement").strip().lower()
     text = text.replace("-", "_").replace(" ", "_")
     return text if text in VALID_AUTOMATION_RUN_MODES else "continuous_improvement"
+
+
+def normalize_optional_mcp_servers(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, list) else re.split(r"[\n,]+", str(value))
+    enabled: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = re.sub(r"^[-*]\s+", "", str(item).strip().lower())
+        if not text:
+            continue
+        normalized = text.replace("-", "_").replace(" ", "_")
+        names: list[str] = []
+        if "context7" in normalized or normalized in {"context_7", "context"}:
+            names.append("context7")
+        if "playwright" in normalized:
+            names.append("playwright")
+        if normalized in VALID_OPTIONAL_MCP_SERVERS:
+            names.append(normalized)
+        for name in names:
+            if name not in seen:
+                seen.add(name)
+                enabled.append(name)
+    return enabled
+
+
+def mcp_values(data: dict[str, Any]) -> dict[str, str]:
+    enabled = normalize_optional_mcp_servers(data.get("optional_mcp_servers"))
+    context7_enabled = "context7" in enabled
+    playwright_enabled = "playwright" in enabled
+    config_blocks: list[str] = []
+    profile_blocks: list[str] = []
+
+    if context7_enabled:
+        config_blocks.append(
+            """[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+enabled = false
+required = false
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+env_vars = ["CONTEXT7_API_KEY"]"""
+        )
+        for profile in ("diffmogger-single-lane", "diffmogger-planner", "diffmogger-builder"):
+            profile_blocks.append(
+                f"""[profiles.{profile}.mcp_servers.context7]
+enabled = true"""
+            )
+
+    if playwright_enabled:
+        config_blocks.append(
+            """[mcp_servers.playwright]
+command = "bash"
+args = ["scripts/run_playwright_mcp.sh"]
+enabled = false
+required = false
+disabled_tools = ["browser_run_code_unsafe", "browser_file_upload"]
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+env_vars = ["PLAYWRIGHT_MCP_EXECUTABLE_PATH", "PLAYWRIGHT_MCP_OUTPUT_DIR"]"""
+        )
+        for profile in ("diffmogger-single-lane", "diffmogger-hardener", "diffmogger-integrator"):
+            profile_blocks.append(
+                f"""[profiles.{profile}.mcp_servers.playwright]
+enabled = true"""
+            )
+
+    if enabled:
+        setup = """Optional MCP servers enabled: {servers}
+
+- Context7 is mounted only by single-lane runs and by planner/builder role wrappers. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, continue the sprint with normal web search, repo docs, package metadata, or existing knowledge.
+- Context7 uses stdio `npx -y @upstash/context7-mcp` by default. `CONTEXT7_API_KEY` is inherited when present for higher rate limits, but the key is never stored in generated files. Remote OAuth setup is manual/optional and must not be required for unattended overnight runs.
+- Playwright MCP is mounted only by single-lane runs and by hardener/integrator role wrappers. Hardener and Integrator should use it for local browser validation and screenshot artifacts, not for implementation-time browsing.
+- MCP servers are optional and non-required. Missing MCP support must never change `AUTOMATION_STATUS` to `BLOCKED_ON_ENVIRONMENT` by itself.
+- Project-scoped config lives in `.codex/config.toml`; wrappers convert the enabled project entries into temporary `codex exec -c` overrides for each role. Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config.
+""".format(servers=", ".join(enabled))
+    else:
+        setup = """Optional MCP servers enabled: none.
+
+No project-scoped MCP config is generated unless `optional_mcp_servers` is set in the project intake."""
+
+    return {
+        "OPTIONAL_MCP_SERVERS": "\n".join(f"- {name}" for name in enabled) if enabled else "None.",
+        "OPTIONAL_MCP_SERVER_LIST": ",".join(enabled),
+        "MCP_ENABLED": "true" if enabled else "false",
+        "CONTEXT7_MCP_ENABLED": "true" if context7_enabled else "false",
+        "PLAYWRIGHT_MCP_ENABLED": "true" if playwright_enabled else "false",
+        "MCP_CODEX_CONFIG": "\n\n".join([*config_blocks, *profile_blocks]).strip(),
+        "MCP_SETUP_SECTION": setup.strip(),
+    }
 
 
 def ticket_run_values(data: dict[str, Any]) -> dict[str, str]:
@@ -1397,6 +1504,7 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
     values.update(progression_values(data, project_name))
     values.update(worker_values(data))
     values.update(env_values)
+    values.update(mcp_values(data))
     values.update(multi_role_values(data))
     values.update(automation_signal_values(data))
     values.update(ticket_run_values(data))
@@ -1432,6 +1540,10 @@ def diffmogger_local_exclude_patterns(values: dict[str, str]) -> list[str]:
         if values.get("AUTOMATION_RUN_MODE") != "ticket_campaign" and rel in TICKET_RUN_FILES:
             continue
         if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and rel in MULTI_ROLE_FILES:
+            continue
+        if values.get("MCP_ENABLED") != "true" and rel in MCP_FILES:
+            continue
+        if values.get("PLAYWRIGHT_MCP_ENABLED") != "true" and rel in PLAYWRIGHT_MCP_FILES:
             continue
         if rel.startswith(".agentic/"):
             patterns.add("/.agentic/")
@@ -1502,6 +1614,10 @@ def managed_section_bounds(kind: str) -> tuple[str, str]:
     return (f"<!-- DIFFMOGGER:START {kind} -->", f"<!-- DIFFMOGGER:END {kind} -->")
 
 
+def managed_toml_section_bounds(kind: str) -> tuple[str, str]:
+    return (f"# DIFFMOGGER:START {kind}", f"# DIFFMOGGER:END {kind}")
+
+
 def demote_markdown_headings(text: str) -> str:
     lines = text.splitlines()
     if lines and lines[0].startswith("# "):
@@ -1542,6 +1658,23 @@ def upsert_managed_section(existing: str, section: str, kind: str) -> str:
     return existing.rstrip() + separator + section
 
 
+def render_managed_toml_section(kind: str, rendered: str) -> str:
+    start, end = managed_toml_section_bounds(kind)
+    return f"{start}\n{rendered.strip()}\n{end}\n"
+
+
+def upsert_managed_toml_section(existing: str, section: str, kind: str) -> str:
+    start, end = managed_toml_section_bounds(kind)
+    pattern = re.compile(
+        rf"{re.escape(start)}.*?{re.escape(end)}\s*",
+        re.DOTALL,
+    )
+    if pattern.search(existing):
+        return pattern.sub(section, existing).rstrip() + "\n"
+    separator = "\n\n" if existing.rstrip() else ""
+    return existing.rstrip() + separator + section
+
+
 def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
     written: list[Path] = []
     mode = values.get("PROJECT_MODE", "fresh_project")
@@ -1559,9 +1692,19 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
             continue
         if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and rel.as_posix() in MULTI_ROLE_FILES:
             continue
+        if values.get("MCP_ENABLED") != "true" and rel.as_posix() in MCP_FILES:
+            continue
+        if values.get("PLAYWRIGHT_MCP_ENABLED") != "true" and rel.as_posix() in PLAYWRIGHT_MCP_FILES:
+            continue
         dest = target / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         rendered = render_template(template_path.read_text(encoding="utf-8"), values)
+        if rel.as_posix() == ".codex/config.toml" and dest.exists():
+            existing = dest.read_text(encoding="utf-8", errors="replace")
+            section = render_managed_toml_section("MCP", rendered)
+            dest.write_text(upsert_managed_toml_section(existing, section, "MCP"), encoding="utf-8")
+            written.append(dest)
+            continue
         managed_kind = MANAGED_EXISTING_PROJECT_FILES.get(rel.as_posix())
         if mode == "existing_project" and managed_kind and dest.exists():
             existing = dest.read_text(encoding="utf-8", errors="replace")

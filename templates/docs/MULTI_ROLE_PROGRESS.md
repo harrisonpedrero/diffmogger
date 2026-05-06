@@ -46,6 +46,12 @@ Fixed cadence runs planner hourly at minute `0`, with builder, hardener, and int
 
 - None.
 
+## UI Artifact Backlog
+
+- Playwright UI artifacts path: `docs/backlog/ui_artifacts/<run_id>/`
+- Current screenshot-backed UI bugs: none yet.
+- Hardener and Integrator validation runs should link any `browser_take_screenshot` artifact here when a UI bug is deferred for Builder follow-up.
+
 ## Architectural Decisions
 
 - None yet.

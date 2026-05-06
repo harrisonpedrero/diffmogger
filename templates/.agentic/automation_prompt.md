@@ -179,6 +179,20 @@ target/agent_runs/<run_id>/worker_<role>.md
 
 {{MULTI_ROLE_AUTOMATION_SECTION}}
 
+## Optional MCP Integrations
+
+{{MCP_SETUP_SECTION}}
+
+Context7 and Playwright MCP are optional accelerators. Missing MCP support, expired auth, startup failures, timeouts, empty results, or MCP tool errors must not halt the run or become `BLOCKED_ON_ENVIRONMENT` by themselves. Continue with normal web search, repo docs, package metadata, existing knowledge, shell checks, or `scripts/diffmogger_browser.py`.
+
+When using Playwright MCP for UI validation, save failure screenshots under:
+
+```text
+docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png
+```
+
+Link screenshot-backed bugs in `docs/CODEX_AUTOMATION_TASKS.md` and, when multi-role mode is enabled, `docs/MULTI_ROLE_PROGRESS.md`.
+
 ## Automation Signals
 
 {{AUTOMATION_SIGNALS_SECTION}}

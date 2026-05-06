@@ -61,6 +61,7 @@ SCHEDULE_STRATEGY_LABELS = {
     SCHEDULE_STRATEGY_CONVEYOR: "Continuous conveyor",
 }
 SCHEDULE_STRATEGY_BY_LABEL = {label: key for key, label in SCHEDULE_STRATEGY_LABELS.items()}
+OPTIONAL_MCP_SERVERS = ("context7", "playwright")
 ENV_ACCESS_PROJECT_COMMANDS_ONLY = "project_commands_only"
 ENV_ACCESS_DIRECT = "direct_env_files_allowed"
 ENV_ACCESS_LABELS = {
@@ -297,6 +298,31 @@ def bool_from_value(value: Any, default: bool = False) -> bool:
     return default
 
 
+def optional_mcp_servers_from_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, list) else re.split(r"[\n,]+", str(value))
+    enabled: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = re.sub(r"^[-*]\s+", "", str(item).strip().lower())
+        if not text:
+            continue
+        normalized = text.replace("-", "_").replace(" ", "_")
+        names: list[str] = []
+        if "context7" in normalized or normalized in {"context_7", "context"}:
+            names.append("context7")
+        if "playwright" in normalized:
+            names.append("playwright")
+        if normalized in OPTIONAL_MCP_SERVERS:
+            names.append(normalized)
+        for name in names:
+            if name not in seen:
+                seen.add(name)
+                enabled.append(name)
+    return enabled
+
+
 def format_interval(seconds: int) -> str:
     minutes = max(1, seconds // 60)
     return f"every {minutes} minutes"
@@ -370,6 +396,7 @@ def automation_environment(target: Path, *, allow_remotes: bool = False) -> dict
     if browser_path:
         environment["DIFFMOGGER_BROWSER_PATH"] = browser_path
         environment["CHROME_PATH"] = browser_path
+        environment["PLAYWRIGHT_MCP_EXECUTABLE_PATH"] = browser_path
     if allow_remotes:
         environment["MULTI_ROLE_ALLOW_REMOTES"] = "1"
     return environment
@@ -527,8 +554,43 @@ def fetch_notifier_health(timeout: float = 0.6) -> tuple[bool, str]:
         return False, f"agentic-notifier is not reachable on 127.0.0.1:8765 ({exc})."
 
 
-def check_prerequisites(target: Path, human_bridge_mode: str) -> list[PrerequisiteItem]:
+def codex_mcp_detail(expected_servers: list[str], target: Path) -> tuple[bool, str]:
+    codex_path = shutil.which("codex")
+    if not codex_path:
+        return False, "`codex` not found; MCP readiness cannot be checked."
+    cwd = target if target.is_dir() else nearest_existing_parent(target)
+    try:
+        result = subprocess.run(
+            [codex_path, "mcp", "list", "--json"],
+            capture_output=True,
+            text=True,
+            cwd=cwd if cwd.exists() else None,
+            timeout=6,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"`codex mcp list --json` failed: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        return False, detail or "`codex mcp list --json` returned a non-zero exit code."
+    try:
+        data = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return False, "`codex mcp list --json` returned invalid JSON."
+    names = {
+        str(item.get("name") or "")
+        for item in data
+        if isinstance(item, dict)
+    }
+    missing = [name for name in expected_servers if name not in names]
+    if missing:
+        return False, "Not registered in current Codex MCP list yet: " + ", ".join(missing) + ". Project-scoped config will be generated; missing MCP remains advisory."
+    return True, "Configured MCP servers visible to Codex: " + ", ".join(expected_servers)
+
+
+def check_prerequisites(target: Path, human_bridge_mode: str, optional_mcp_servers: list[str] | None = None) -> list[PrerequisiteItem]:
     items: list[PrerequisiteItem] = []
+    optional_mcp_servers = optional_mcp_servers or []
 
     py_ok = sys.version_info >= (3, 10)
     items.append(
@@ -584,6 +646,38 @@ def check_prerequisites(target: Path, human_bridge_mode: str) -> list[Prerequisi
             f"{codex_home} exists." if codex_home.exists() else f"{codex_home} does not exist yet; run `codex` interactively once if workers fail.",
         )
     )
+
+    if optional_mcp_servers:
+        node_ok, node_detail = command_detail("node", ["--version"])
+        items.append(PrerequisiteItem("Optional MCP Node runtime", node_ok, False, node_detail))
+        npx_ok, npx_detail = command_detail("npx", ["--version"])
+        items.append(PrerequisiteItem("Optional MCP npx runtime", npx_ok, False, npx_detail))
+        mcp_ok, mcp_detail = codex_mcp_detail(optional_mcp_servers, target)
+        items.append(PrerequisiteItem("Optional Codex MCP config", mcp_ok, False, mcp_detail))
+        if "context7" in optional_mcp_servers:
+            context7_key_set = bool(os.environ.get("CONTEXT7_API_KEY"))
+            items.append(
+                PrerequisiteItem(
+                    "Optional Context7 API key",
+                    context7_key_set,
+                    False,
+                    (
+                        "CONTEXT7_API_KEY is visible to the dashboard process."
+                        if context7_key_set
+                        else "CONTEXT7_API_KEY is not visible; Context7 remains optional but may be unauthenticated or rate-limited. Set it with `launchctl setenv CONTEXT7_API_KEY ...` before launching scheduled runs."
+                    ),
+                )
+            )
+        if "playwright" in optional_mcp_servers:
+            browser_path = managed_browser_path()
+            items.append(
+                PrerequisiteItem(
+                    "Optional Playwright MCP browser",
+                    bool(browser_path),
+                    False,
+                    browser_path or "No managed browser found yet; run `python3 scripts/diffmogger_browser.py install` in the generated target or use system browser fallback manually.",
+                )
+            )
 
     if sys.platform == "darwin" and path_is_under(target, Path.home() / "Documents"):
         items.append(
@@ -1106,6 +1200,8 @@ if TK_AVAILABLE:
             self.ticket_campaign_enabled_var = tk.BooleanVar(value=False)
             self.ticket_run_file_var = tk.StringVar(value="docs/TICKET_RUN.md")
             self.ticket_completion_notify_var = tk.BooleanVar(value=True)
+            self.context7_mcp_var = tk.BooleanVar(value=False)
+            self.playwright_mcp_var = tk.BooleanVar(value=False)
             self.status_var = tk.StringVar(value="No target loaded.")
             self.schedule_status_var = tk.StringVar(value="Schedule: target not loaded.")
             self.worker_strategy_var = tk.StringVar(value="Next worker strategy: not loaded.")
@@ -1419,6 +1515,29 @@ if TK_AVAILABLE:
                 variable=self.automation_signals_enabled_var,
             ).grid(row=row, column=1, sticky="w", pady=6)
             ttk.Label(automation, text="Automation Signals", style="Section.TLabel").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=6)
+            row += 1
+            mcp_frame = ttk.LabelFrame(automation, text="Optional MCP Integrations")
+            mcp_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
+            mcp_frame.columnconfigure(1, weight=1)
+            ttk.Checkbutton(
+                mcp_frame,
+                text="Enable Context7 docs MCP for Planner and Builder",
+                variable=self.context7_mcp_var,
+                command=self.refresh_prerequisites,
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+            ttk.Checkbutton(
+                mcp_frame,
+                text="Enable Playwright MCP for Hardener validation",
+                variable=self.playwright_mcp_var,
+                command=self.refresh_prerequisites,
+            ).grid(row=0, column=1, sticky="w", padx=8, pady=(8, 4))
+            ttk.Label(
+                mcp_frame,
+                text="Optional and advisory. Diffmogger generates project-scoped config only; it never runs MCP install/login commands or mutates user/global Codex config.",
+                style="Help.TLabel",
+                wraplength=680,
+                justify="left",
+            ).grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 8))
             row += 1
             row = self._add_text(
                 automation,
@@ -2141,6 +2260,9 @@ if TK_AVAILABLE:
             self.worker_agents_var.set(bool(intake.get("worker_agents_allowed", True)))
             self.codex_workers_var.set(bool(intake.get("codex_cli_workers_expected_on_broad_runs", True)))
             self.automation_signals_enabled_var.set(bool(intake.get("automation_signals_enabled", False)))
+            optional_mcp = optional_mcp_servers_from_value(intake.get("optional_mcp_servers"))
+            self.context7_mcp_var.set("context7" in optional_mcp)
+            self.playwright_mcp_var.set("playwright" in optional_mcp)
             write_workers_enabled = bool(intake.get("write_worker_agents_allowed", False))
             self.write_worker_agents_var.set(write_workers_enabled)
             self.max_write_worker_count_var.set(
@@ -2181,6 +2303,10 @@ if TK_AVAILABLE:
                 )
             if "automation_signals_enabled" in state:
                 self.automation_signals_enabled_var.set(bool(state.get("automation_signals_enabled")))
+            if "optional_mcp_servers" in state:
+                optional_mcp = optional_mcp_servers_from_value(state.get("optional_mcp_servers"))
+                self.context7_mcp_var.set("context7" in optional_mcp)
+                self.playwright_mcp_var.set("playwright" in optional_mcp)
             if "local_notifications_enabled" in state:
                 self.local_notifications_enabled_var.set(bool_from_value(state.get("local_notifications_enabled"), True))
             if "env_access_policy" in state:
@@ -2257,6 +2383,7 @@ if TK_AVAILABLE:
                 "worker_agents_allowed": bool(self.worker_agents_var.get()),
                 "codex_cli_workers_expected_on_broad_runs": bool(self.codex_workers_var.get()),
                 "automation_signals_enabled": bool(self.automation_signals_enabled_var.get()),
+                "optional_mcp_servers": self.optional_mcp_servers(),
                 "write_worker_agents_allowed": bool(self.write_worker_agents_var.get()) and bool(self.worker_agents_var.get()),
                 "max_write_worker_count": write_worker_count_from_text(
                     self.max_write_worker_count_var.get(),
@@ -2348,6 +2475,14 @@ if TK_AVAILABLE:
                 multi_role_enabled=bool(self.multi_role_automations_var.get()),
             )
 
+        def optional_mcp_servers(self) -> list[str]:
+            servers: list[str] = []
+            if bool(self.context7_mcp_var.get()):
+                servers.append("context7")
+            if bool(self.playwright_mcp_var.get()):
+                servers.append("playwright")
+            return servers
+
         def collect_intake(self) -> dict[str, Any]:
             mode = self.bridge_mode_var.get()
             bridge_enabled = bool(self.human_bridge_enabled_var.get()) and mode != "disabled"
@@ -2383,6 +2518,7 @@ if TK_AVAILABLE:
                 "worker_agents_allowed": bool(self.worker_agents_var.get()),
                 "codex_cli_workers_expected_on_broad_runs": bool(self.codex_workers_var.get()),
                 "automation_signals_enabled": bool(self.automation_signals_enabled_var.get()),
+                "optional_mcp_servers": self.optional_mcp_servers(),
                 "write_worker_agents_allowed": write_workers_enabled,
                 "max_write_worker_count": max_write_workers,
                 "write_worker_guidance": self._text_value("Write Worker Guidance"),
@@ -2405,7 +2541,7 @@ if TK_AVAILABLE:
             target_text = self.target_var.get().strip() or str(Path.cwd() / "my-project")
             target = Path(target_text).expanduser()
             mode = self.bridge_mode_var.get() if self.human_bridge_enabled_var.get() else "disabled"
-            items = check_prerequisites(target, mode)
+            items = check_prerequisites(target, mode, self.optional_mcp_servers())
             if (
                 bool(self.local_notifications_enabled_var.get())
                 and mode in {"local_notifier", "discord_notifier"}
@@ -2476,7 +2612,7 @@ if TK_AVAILABLE:
             except ValueError as exc:
                 messagebox.showerror("Invalid automation cadence", str(exc))
                 return
-            items = check_prerequisites(target, intake["human_bridge_mode"])
+            items = check_prerequisites(target, intake["human_bridge_mode"], optional_mcp_servers_from_value(intake.get("optional_mcp_servers")))
             self._show_prerequisites(items)
             failures = required_failures(items)
             if failures:
@@ -2569,6 +2705,8 @@ if TK_AVAILABLE:
                     check_cmd.insert(-1, "--multi-role-enabled")
                 if intake.get("automation_run_mode") == "ticket_campaign":
                     check_cmd.insert(-1, "--ticket-campaign-enabled")
+                if intake.get("optional_mcp_servers"):
+                    check_cmd.insert(-1, "--optional-mcp-enabled")
                 check_code = self._run_command(check_cmd, cwd=KIT_ROOT)
                 if check_code != 0:
                     raise RuntimeError("Required-file check failed; bootstrap was not started.")
@@ -3302,6 +3440,25 @@ if TK_AVAILABLE:
                     pass
             return bool(self.local_notifications_enabled_var.get())
 
+        def _target_optional_mcp_servers(self, target: Path) -> list[str]:
+            state_path = dashboard_state_path(target)
+            if state_path.exists():
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    if "optional_mcp_servers" in state:
+                        return optional_mcp_servers_from_value(state.get("optional_mcp_servers"))
+                except (OSError, json.JSONDecodeError):
+                    pass
+            intake_path = target / ".agentic" / "project_intake.json"
+            if intake_path.exists():
+                try:
+                    intake = json.loads(intake_path.read_text(encoding="utf-8"))
+                    if "optional_mcp_servers" in intake:
+                        return optional_mcp_servers_from_value(intake.get("optional_mcp_servers"))
+                except (OSError, json.JSONDecodeError):
+                    pass
+            return self.optional_mcp_servers()
+
         def _target_schedule_strategy(self, target: Path) -> str:
             state_path = dashboard_state_path(target)
             if state_path.exists():
@@ -3388,7 +3545,7 @@ if TK_AVAILABLE:
             return [launchd_plist_path(label) for label in self._schedule_labels(target)]
 
         def _schedule_prerequisites(self, target: Path) -> list[PrerequisiteItem]:
-            items = check_prerequisites(target, self._target_human_bridge_mode(target))
+            items = check_prerequisites(target, self._target_human_bridge_mode(target), self._target_optional_mcp_servers(target))
             launchctl_path = shutil.which("launchctl") if sys.platform == "darwin" else None
             items.append(
                 PrerequisiteItem(

@@ -26,6 +26,7 @@ Own the main checkout. Apply clean queued role patches FIFO, verify them, create
 ## Required Behavior
 
 - Acquire the main `target/codex_automation.lock` before mutating the main checkout.
+- If Playwright MCP is mounted in a manual integrator validation session, use it only for local browser validation. On any UI or browser-backed failure that you defer for Builder follow-up, call `browser_take_screenshot` before deferring, save the PNG under `docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png`, and link it from the integrator notes, `docs/CODEX_AUTOMATION_TASKS.md`, and `docs/MULTI_ROLE_PROGRESS.md` with concise repro notes.
 - If the main checkout is dirty, inspect and checkpoint the dirty files as-is before applying queued role patches.
 - Batch apply all patches that pass `git apply --check`, run full verification once, then commit accepted patches as separate local commits.
 - If batch verification fails, reset to the pre-batch head and verify patches individually.

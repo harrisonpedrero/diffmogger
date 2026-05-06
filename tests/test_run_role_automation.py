@@ -15,6 +15,10 @@ ROLE_RUNNER_PATHS = [
     ROOT / "scripts" / "run_role_automation.sh",
     ROOT / "templates" / "scripts" / "run_role_automation.sh",
 ]
+PLAYWRIGHT_MCP_HELPER_PATHS = [
+    ROOT / "scripts" / "run_playwright_mcp.sh",
+    ROOT / "templates" / "scripts" / "run_playwright_mcp.sh",
+]
 
 
 class RunRoleAutomationTests(unittest.TestCase):
@@ -41,7 +45,14 @@ class RunRoleAutomationTests(unittest.TestCase):
         bin_dir = root / "bin"
         codex = bin_dir / "codex"
         bin_dir.mkdir(parents=True, exist_ok=True)
-        codex.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ -n \"${FAKE_CODEX_ARG_LOG:-}\" ]]; then\n"
+            "  printf '%s\\n' \"$@\" >\"$FAKE_CODEX_ARG_LOG\"\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
         codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
         return bin_dir
 
@@ -79,6 +90,80 @@ class RunRoleAutomationTests(unittest.TestCase):
         source = ROLE_RUNNER_PATHS[0].read_text(encoding="utf-8")
         template = ROLE_RUNNER_PATHS[1].read_text(encoding="utf-8")
         self.assertEqual(source, template)
+
+    def test_source_and_template_playwright_mcp_helpers_stay_byte_identical(self) -> None:
+        source = PLAYWRIGHT_MCP_HELPER_PATHS[0].read_text(encoding="utf-8")
+        template = PLAYWRIGHT_MCP_HELPER_PATHS[1].read_text(encoding="utf-8")
+        self.assertEqual(source, template)
+
+    def test_optional_mcp_role_args_are_scoped_by_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            target = tmp_path / "target"
+            target.mkdir()
+            self.seed_git_target(target)
+            self.write_text(
+                target,
+                ".codex/config.toml",
+                """
+                [mcp_servers.context7]
+                command = "npx"
+                args = ["-y", "@upstash/context7-mcp"]
+                enabled = false
+                env_vars = ["CONTEXT7_API_KEY"]
+
+                [mcp_servers.playwright]
+                command = "bash"
+                args = ["scripts/run_playwright_mcp.sh"]
+                enabled = false
+                disabled_tools = ["browser_run_code_unsafe", "browser_file_upload"]
+                """,
+            )
+            self.write_text(target, "scripts/run_playwright_mcp.sh", "#!/usr/bin/env bash\nexit 0\n")
+            fake_bin = self.write_fake_codex(tmp_path)
+
+            env = os.environ.copy()
+            env["CODEX_AUTOMATION_PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            env["DIFFMOGGER_BROWSER_PATH"] = "/tmp/diffmogger-browser"
+
+            builder_log = tmp_path / "builder-args.txt"
+            builder_env = env.copy()
+            builder_env["CODEX_RUN_ID"] = "mcp-builder"
+            builder_env["FAKE_CODEX_ARG_LOG"] = str(builder_log)
+            builder_result = subprocess.run(
+                ["bash", str(ROLE_RUNNER_PATHS[0]), "--target", str(target), "--role", "builder"],
+                cwd=ROOT,
+                env=builder_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(builder_result.returncode, 0, builder_result.stdout + builder_result.stderr)
+            builder_args = builder_log.read_text(encoding="utf-8")
+            self.assertIn('mcp_servers.context7.command="npx"', builder_args)
+            self.assertIn('mcp_servers.context7.env_vars=["CONTEXT7_API_KEY"]', builder_args)
+            self.assertIn("mcp_servers.playwright.enabled=false", builder_args)
+            self.assertNotIn('mcp_servers.playwright.command="bash"', builder_args)
+
+            hardener_log = tmp_path / "hardener-args.txt"
+            hardener_env = env.copy()
+            hardener_env["CODEX_RUN_ID"] = "mcp-hardener"
+            hardener_env["FAKE_CODEX_ARG_LOG"] = str(hardener_log)
+            hardener_result = subprocess.run(
+                ["bash", str(ROLE_RUNNER_PATHS[0]), "--target", str(target), "--role", "hardener"],
+                cwd=ROOT,
+                env=hardener_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(hardener_result.returncode, 0, hardener_result.stdout + hardener_result.stderr)
+            hardener_args = hardener_log.read_text(encoding="utf-8")
+            self.assertIn('mcp_servers.playwright.command="bash"', hardener_args)
+            self.assertIn('mcp_servers.playwright.disabled_tools=["browser_run_code_unsafe","browser_file_upload"]', hardener_args)
+            self.assertIn("PLAYWRIGHT_MCP_OUTPUT_DIR", hardener_args)
+            self.assertNotIn('mcp_servers.context7.command="npx"', hardener_args)
+            self.assertNotIn('mcp_servers.context7.env_vars=["CONTEXT7_API_KEY"]', hardener_args)
 
     def test_hardener_runtime_prompt_includes_recent_guardrail_deferral(self) -> None:
         for path in ROLE_RUNNER_PATHS:

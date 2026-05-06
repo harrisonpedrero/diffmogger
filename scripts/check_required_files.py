@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -64,6 +65,16 @@ MULTI_ROLE_REQUIRED = [
     "scripts/list_deferred_patches.py",
 ]
 
+MCP_REQUIRED = [
+    ".codex/config.toml",
+    "docs/MCP_INTEGRATIONS.md",
+]
+
+PLAYWRIGHT_MCP_REQUIRED = [
+    "scripts/run_playwright_mcp.sh",
+    "docs/backlog/README.md",
+]
+
 TASK_REQUIRED_STRINGS = [
     "AUTOMATION_STATUS:",
     "## Current Project State",
@@ -121,6 +132,12 @@ RUNNER_REQUIRED_STRINGS = [
     "CODEX_NESTED_CLI_HOME",
     "diffmogger_browser.py",
     "DIFFMOGGER_BROWSER_PATH",
+    "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
+    "PLAYWRIGHT_MCP_OUTPUT_DIR",
+    "mcp_servers.context7.command",
+    "mcp_servers.context7.env_vars",
+    "mcp_servers.playwright.command",
+    "mcp_servers.playwright.disabled_tools",
     "--add-dir",
     "$HOME/.codex",
     "codex exec --full-auto",
@@ -313,6 +330,12 @@ RUN_ROLE_REQUIRED_STRINGS = [
     "MULTI_ROLE_ALLOW_REMOTES",
     "diffmogger_browser.py",
     "DIFFMOGGER_BROWSER_PATH",
+    "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
+    "PLAYWRIGHT_MCP_OUTPUT_DIR",
+    "mcp_servers.context7.command",
+    "mcp_servers.context7.env_vars",
+    "mcp_servers.playwright.command",
+    "mcp_servers.playwright.disabled_tools",
     "git remote -v",
     "git worktree add",
     "git ls-files --others --exclude-standard -z",
@@ -355,6 +378,38 @@ DEFERRED_HELPER_REQUIRED_STRINGS = [
     "--decision-template",
 ]
 
+MCP_CONFIG_REQUIRED_STRINGS = [
+    "Diffmogger optional MCP configuration",
+    "mcp_servers.context7",
+    "mcp_servers.playwright",
+    "env_vars = [\"CONTEXT7_API_KEY\"]",
+    "enabled = false",
+    "required = false",
+    "profiles.diffmogger-planner",
+    "profiles.diffmogger-builder",
+    "profiles.diffmogger-hardener",
+    "disabled_tools = [\"browser_run_code_unsafe\", \"browser_file_upload\"]",
+]
+
+MCP_DOC_REQUIRED_STRINGS = [
+    "Optional MCP servers enabled",
+    "Context7",
+    "Playwright MCP",
+    "CONTEXT7_API_KEY",
+    "auth errors",
+    "Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config",
+]
+
+PLAYWRIGHT_MCP_HELPER_REQUIRED_STRINGS = [
+    "@playwright/mcp@latest",
+    "--headless",
+    "--isolated",
+    "--codegen",
+    "--output-dir",
+    "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
+    "docs/backlog/ui_artifacts",
+]
+
 
 def check_file(path: Path) -> str | None:
     if not path.exists():
@@ -373,6 +428,27 @@ def project_intake(root: Path) -> dict[str, object]:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def optional_mcp_servers(root: Path) -> list[str]:
+    raw = project_intake(root).get("optional_mcp_servers")
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, list) else re.split(r"[\n,]+", str(raw))
+    enabled: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = re.sub(r"^[-*]\s+", "", str(item).strip().lower()).replace("-", "_").replace(" ", "_")
+        names: list[str] = []
+        if "context7" in normalized:
+            names.append("context7")
+        if "playwright" in normalized:
+            names.append("playwright")
+        for name in names:
+            if name not in seen:
+                seen.add(name)
+                enabled.append(name)
+    return enabled
 
 
 def inferred_human_bridge_mode(root: Path) -> str:
@@ -424,10 +500,16 @@ def main() -> int:
         action="store_true",
         help="Validate optional ticket-campaign source file and markers.",
     )
+    parser.add_argument(
+        "--optional-mcp-enabled",
+        action="store_true",
+        help="Validate optional MCP config, docs, role scoping, and Playwright artifact markers.",
+    )
     args = parser.parse_args()
 
     root = Path(args.target).resolve()
     mode = args.human_bridge_mode or ("disabled" if args.no_human_bridge else inferred_human_bridge_mode(root))
+    mcp_servers = optional_mcp_servers(root) if args.optional_mcp_enabled else []
     required = list(BASE_REQUIRED)
     if mode != "disabled":
         required.extend(HUMAN_REQUIRED)
@@ -437,6 +519,10 @@ def main() -> int:
         required.extend(AUTOMATION_SIGNALS_REQUIRED)
     if args.ticket_campaign_enabled:
         required.extend(TICKET_CAMPAIGN_REQUIRED)
+    if args.optional_mcp_enabled:
+        required.extend(MCP_REQUIRED)
+    if "playwright" in mcp_servers:
+        required.extend(PLAYWRIGHT_MCP_REQUIRED)
 
     problems: list[str] = []
     for rel in required:
@@ -450,6 +536,10 @@ def main() -> int:
         for marker in TASK_REQUIRED_STRINGS:
             if marker not in task_text:
                 problems.append(f"docs/CODEX_AUTOMATION_TASKS.md: missing marker {marker!r}")
+        if args.optional_mcp_enabled:
+            for marker in ["## Optional MCP Integrations", "## UI Artifact Backlog", "docs/backlog/ui_artifacts/<run_id>/"]:
+                if marker not in task_text:
+                    problems.append(f"docs/CODEX_AUTOMATION_TASKS.md: missing marker {marker!r}")
         if not any(marker in task_text for marker in TASK_BACKLOG_HEADINGS):
             problems.append(
                 "docs/CODEX_AUTOMATION_TASKS.md: missing a recognized backlog heading"
@@ -461,6 +551,10 @@ def main() -> int:
         for marker in DEVELOPMENT_REQUIRED_STRINGS:
             if marker not in development_text:
                 problems.append(f"docs/DEVELOPMENT.md: missing marker {marker!r}")
+        if args.optional_mcp_enabled:
+            for marker in ["## Optional MCP Integrations", ".codex/config.toml", "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png"]:
+                if marker not in development_text:
+                    problems.append(f"docs/DEVELOPMENT.md: missing marker {marker!r}")
 
     automation_path = root / ".agentic/automation_prompt.md"
     if automation_path.exists() and automation_path.is_file():
@@ -479,6 +573,10 @@ def main() -> int:
         for marker in AUTOMATION_REQUIRED_STRINGS + mode_markers + write_worker_markers + multi_role_markers + signal_markers + ticket_markers:
             if marker not in automation_text:
                 problems.append(f".agentic/automation_prompt.md: missing marker {marker!r}")
+        if args.optional_mcp_enabled:
+            for marker in ["## Optional MCP Integrations", "expired auth", "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png"]:
+                if marker not in automation_text:
+                    problems.append(f".agentic/automation_prompt.md: missing marker {marker!r}")
 
     if args.ticket_campaign_enabled:
         ticket_run_path = root / "docs/TICKET_RUN.md"
@@ -510,9 +608,59 @@ def main() -> int:
                 role_markers = ROLE_PROMPT_REQUIRED_STRINGS
                 if role != "integrator":
                     role_markers = role_markers + QUEUE_ROLE_PROMPT_REQUIRED_STRINGS
+                if args.optional_mcp_enabled and "context7" in mcp_servers and role in {"planner", "builder"}:
+                    role_markers = role_markers + ["Context7", "auth errors", "do not halt"]
+                if args.optional_mcp_enabled and "playwright" in mcp_servers and role in {"hardener", "integrator"}:
+                    role_markers = role_markers + ["browser_take_screenshot", "docs/backlog/ui_artifacts"]
                 for marker in role_markers:
                     if marker not in role_text:
                         problems.append(f".agentic/roles/{role}.md: missing marker {marker!r}")
+
+    if args.optional_mcp_enabled:
+        config_path = root / ".codex" / "config.toml"
+        if config_path.exists() and config_path.is_file():
+            config_text = config_path.read_text(encoding="utf-8")
+            config_markers = [
+                "Diffmogger optional MCP configuration",
+                "enabled = false",
+                "required = false",
+            ]
+            if "context7" in mcp_servers:
+                config_markers.extend(
+                    [
+                        "mcp_servers.context7",
+                        "env_vars = [\"CONTEXT7_API_KEY\"]",
+                        "profiles.diffmogger-planner",
+                        "profiles.diffmogger-builder",
+                    ]
+                )
+            if "playwright" in mcp_servers:
+                config_markers.extend(
+                    [
+                        "mcp_servers.playwright",
+                        "profiles.diffmogger-hardener",
+                        "profiles.diffmogger-integrator",
+                        "disabled_tools = [\"browser_run_code_unsafe\", \"browser_file_upload\"]",
+                    ]
+                )
+            for marker in config_markers:
+                if marker not in config_text:
+                    problems.append(f".codex/config.toml: missing marker {marker!r}")
+
+        mcp_doc_path = root / "docs" / "MCP_INTEGRATIONS.md"
+        if mcp_doc_path.exists() and mcp_doc_path.is_file():
+            mcp_doc_text = mcp_doc_path.read_text(encoding="utf-8")
+            for marker in MCP_DOC_REQUIRED_STRINGS:
+                if marker not in mcp_doc_text:
+                    problems.append(f"docs/MCP_INTEGRATIONS.md: missing marker {marker!r}")
+
+        if "playwright" in mcp_servers:
+            playwright_helper_path = root / "scripts" / "run_playwright_mcp.sh"
+            if playwright_helper_path.exists() and playwright_helper_path.is_file():
+                playwright_helper_text = playwright_helper_path.read_text(encoding="utf-8")
+                for marker in PLAYWRIGHT_MCP_HELPER_REQUIRED_STRINGS:
+                    if marker not in playwright_helper_text:
+                        problems.append(f"scripts/run_playwright_mcp.sh: missing marker {marker!r}")
 
     runner_path = root / "scripts/run_codex_automation.sh"
     if runner_path.exists() and runner_path.is_file():
