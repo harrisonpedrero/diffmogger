@@ -2,8 +2,6 @@
   <img src="docs/assets/diffmogger-logo-cropped.png" alt="Diffmogger" width="720">
 </p>
 
-# Diffmogger
-
 A Markdown-first operating system for recurring AI coding agents.
 
 It can run as a single scheduled lane or as a continuous conveyor that dispatches local planner, builder, hardener, and integrator role agents.
