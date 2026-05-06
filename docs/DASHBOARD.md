@@ -10,6 +10,8 @@ python3 scripts/run_dashboard.py
 
 The dashboard opens a native desktop window with Python's standard-library Tkinter runtime. It does not require opening a browser.
 
+On launch, `scripts/run_dashboard.py` loads optional runtime variables from the Diffmogger starter repo's root `.env` file when it exists. Existing shell environment variables take precedence, values are never printed by the loader, and the file stays local to the starter repo instead of being copied into generated targets or role worktrees. This is useful for optional dashboard and runtime environment variables such as `CONTEXT7_API_KEY`, which dashboard prerequisite checks and dashboard-launched automation processes inherit from the dashboard process.
+
 ## Before Starting Automation
 
 The dashboard checks and lists prerequisites before the combined scaffold/bootstrap run starts:
@@ -24,6 +26,7 @@ The dashboard checks and lists prerequisites before the combined scaffold/bootst
 - macOS Full Disk Access advisory when a target lives under `~/Documents`
 - optional local notifier health when `local_notifier` mode is selected
 - optional macOS desktop notification command when ticket completion notifications are enabled
+- optional Context7 API key visibility when Context7 MCP is selected
 
 If a required check fails, the dashboard will not start the bootstrap run.
 
@@ -128,7 +131,7 @@ Use **Environment Access** to choose whether automation may open local `.env*` f
 
 When **Ticket Campaign** mode is enabled in Run Config, the dashboard scaffolds the ticket source file, usually `docs/TICKET_RUN.md`. The initial scaffold/bootstrap run is readiness-only for ticket campaigns: it confirms setup, ticket parsing, and verification state but should not implement ticket acceptance criteria. Edit the ticket file's fenced JSON block with ticket IDs, optional `depends_on` arrays, acceptance criteria, verification commands, evidence, and blockers before starting unattended work. Normal campaign runs use `python3 scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run.
 
-When optional MCP integrations are enabled, the dashboard writes only project-scoped setup. It does not run `codex mcp add`, `codex mcp login`, or mutate user/global Codex config. Context7 is scoped to Planner/Builder and inherits `CONTEXT7_API_KEY` when present; Playwright MCP is scoped to Hardener/Integrator validation, and missing or unauthenticated MCP remains an optional warning.
+When optional MCP integrations are enabled, the dashboard writes only project-scoped setup. It does not run `codex mcp add`, `codex mcp login`, or mutate user/global Codex config. Context7 is scoped to Planner/Builder and inherits `CONTEXT7_API_KEY` when present in the shell or loaded from the starter repo's root `.env`; Playwright MCP is scoped to Hardener/Integrator validation, and missing or unauthenticated MCP remains an optional warning.
 
 The dashboard keeps its visible run log bounded and starts dashboard-launched subprocesses in their own process group. When a bootstrap/check command exits or is cancelled, the dashboard terminates lingering child processes from that group so a temporary dev server started for smoke testing does not keep running after the dashboard run finishes.
 

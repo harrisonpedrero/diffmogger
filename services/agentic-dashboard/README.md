@@ -10,6 +10,8 @@ python3 scripts/run_dashboard.py
 
 It opens a native desktop window using Python's standard-library Tkinter runtime. It does not require opening a browser.
 
+The launcher loads optional dashboard/runtime environment variables from the Diffmogger starter repo's root `.env` file before importing the dashboard app. Missing `.env` is fine, existing shell variables win, and loaded values are not printed or copied into target projects or role worktrees. This lets advisory checks and dashboard-launched automation inherit optional values such as `CONTEXT7_API_KEY`.
+
 ## What It Does
 
 - collects a project intake
@@ -67,8 +69,9 @@ Before starting automation, the dashboard checks for:
 - optional macOS desktop notification command when local notifications are enabled
 - initialized git repo with an initial commit before starting multi-role or conveyor scheduling
 - explicit local-only remote opt-in before multi-role or conveyor scheduling in repos with configured git remotes
+- optional Context7 API key visibility when Context7 MCP is selected
 - optional Node/npx, Codex MCP visibility, and managed browser advisories when Context7 or Playwright MCP is selected
 
 The dashboard keeps notifier credentials out of target projects. In notifier modes, use `services/agentic-notifier/` for Discord and local desktop notification configuration.
 Ticket campaign setup lives in Run Config, but tickets themselves are populated in the generated Markdown file, usually `docs/TICKET_RUN.md`. Ticket-campaign bootstrap is readiness-only; scheduled runs use dependency-aware `next --json` selection and act on one ticket per run.
-Optional MCP setup is project-scoped and advisory. The dashboard never runs MCP install/login commands or edits user/global Codex config. When Context7 is selected, the generated config inherits `CONTEXT7_API_KEY` if it is present, but never stores the key.
+Optional MCP setup is project-scoped and advisory. The dashboard never runs MCP install/login commands or edits user/global Codex config. When Context7 is selected, the generated config inherits `CONTEXT7_API_KEY` if it is present in the shell or loaded from the starter repo's root `.env`, but never stores the key.
