@@ -70,6 +70,7 @@ required_files=(
   "templates/scripts/compact_agent_state.py"
   "tests/test_run_observatory.py"
   "tests/test_run_conveyor_automation.py"
+  "tests/test_run_role_automation.py"
   "tests/test_repair_environment.py"
   "tests/test_integrate_role_outputs.py"
   "tests/test_list_deferred_patches.py"
@@ -527,6 +528,7 @@ for marker in [
     "manifest.json",
     "runtime_state_actions.json",
     "runtime_state_changed_files",
+    "hardener_deferred_context.md",
     "runtime_state_status",
     "runtime_state_paths.txt",
     "allowed_runtime_path",
@@ -809,7 +811,7 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_list_deferred_patches.py tests/test_ticket_run.py tests/test_check_integration_safety.py tests/test_check_required_files.py tests/test_summarize_worker_outputs.py
+python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_run_role_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_list_deferred_patches.py tests/test_ticket_run.py tests/test_check_integration_safety.py tests/test_check_required_files.py tests/test_summarize_worker_outputs.py
 
 python3 scripts/check_integration_safety.py >/tmp/Diffmogger-integration-safety.log
 

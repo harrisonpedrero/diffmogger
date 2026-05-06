@@ -42,7 +42,7 @@ docs/CODEX_AUTOMATION_GUARDRAILS.md
 Full-suite commands are configured in `.agentic/verification_commands.txt`.
 Use them for hardener/finalization or when explicitly required; builder/planner patches may use narrower checks from `.agentic/smoke_commands.txt` or the role manifest.
 The integrator records clean-HEAD baseline verification in `target/baseline_verification.json`; unrelated focused patches should not be rejected solely because that baseline is already failing.
-Hardener may add, rewrite, or remove obsolete tests when it improves verification quality, but must include `Test change rationale:` for removed or substantially rewritten tests and must not delete tests merely to pass checks.
+Hardener may add, rewrite, broaden, or remove obsolete tests when it improves verification quality, but must include `Test change rationale:` when touching tests and must not delete tests merely to pass checks.
 
 Preferred commands:
 

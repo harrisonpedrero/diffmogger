@@ -186,6 +186,7 @@ stderr_log="$log_dir/$role.stderr.log"
 run_stdout="$queue_dir/codex.stdout.log"
 run_stderr="$queue_dir/codex.stderr.log"
 runtime_prompt_path="$queue_dir/runtime_prompt.md"
+hardener_deferred_context_path="$queue_dir/hardener_deferred_context.md"
 env_repair_path="$queue_dir/environment_repair.json"
 rerun_stdout="$queue_dir/codex.rerun.stdout.log"
 rerun_stderr="$queue_dir/codex.rerun.stderr.log"
@@ -426,8 +427,182 @@ for rel in paths:
 output.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
+if [[ "$role" == "hardener" ]]; then
+  python3 - "$target_abs" "$hardener_deferred_context_path" "${CONVEYOR_DECISION_REASON:-}" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+target = Path(sys.argv[1])
+output = Path(sys.argv[2])
+decision_reason = sys.argv[3] if len(sys.argv) > 3 else ""
+queue = target / "target" / "automation_queue" / "hardener"
+
+TICKET_RE = re.compile(r"(?<![\w-])#\d+\b|\b[A-Z][A-Z0-9]{0,12}-\d+\b")
+TEST_RATIONALE_RE = re.compile(r"test\s+change\s+rationale", re.IGNORECASE)
+
+
+def load_json(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def clean(value: Any, *, limit: int = 480) -> str:
+    text = " ".join(str(value or "").split())
+    if str(target):
+        text = text.replace(str(target), "<target>")
+    if len(text) > limit:
+        return text[: max(0, limit - 3)].rstrip() + "..."
+    return text
+
+
+def changed_files(manifest: dict[str, Any]) -> list[str]:
+    seen: set[str] = set()
+    files: list[str] = []
+    for key in ("changed_files", "runtime_state_changed_files"):
+        raw = manifest.get(key)
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            text = str(item).strip()
+            if text and text not in seen:
+                seen.add(text)
+                files.append(text)
+    return files
+
+
+def ticket_tokens(*values: Any) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for token in TICKET_RE.findall(str(value or "")):
+            normalized = token.upper()
+            if normalized not in seen:
+                seen.add(normalized)
+                tokens.append(token)
+    return tokens
+
+
+def field(manifest: dict[str, Any], name: str) -> str:
+    return clean(manifest.get(name), limit=700)
+
+
+records: list[dict[str, Any]] = []
+for path in sorted(queue.glob("*/manifest.json")):
+    manifest = load_json(path)
+    if not manifest or manifest.get("status") != "deferred":
+        continue
+    if str(manifest.get("role") or "hardener") != "hardener":
+        continue
+    files = changed_files(manifest)
+    haystack = "\n".join(
+        [
+            str(manifest.get("summary") or ""),
+            str(manifest.get("deferral_detail") or ""),
+            str(manifest.get("deferral_root_cause") or ""),
+            "\n".join(files),
+        ]
+    )
+    tokens = ticket_tokens(haystack)
+    lowered_reason = decision_reason.lower()
+    matches_decision = any(token.lower() in lowered_reason for token in tokens)
+    matches_decision = matches_decision or any(file_name.lower() in lowered_reason for file_name in files)
+    matches_decision = matches_decision or any(Path(file_name).name.lower() in lowered_reason for file_name in files)
+    records.append(
+        {
+            "path": path,
+            "manifest": manifest,
+            "files": files,
+            "tokens": tokens,
+            "matches_decision": matches_decision,
+            "created_at": str(manifest.get("created_at") or ""),
+            "run_id": str(manifest.get("run_id") or path.parent.name),
+        }
+    )
+
+records.sort(key=lambda item: (item["matches_decision"], item["created_at"], item["run_id"]), reverse=True)
+records = records[:8]
+matching = [item for item in records if item["matches_decision"]]
+missing_rationale = any(
+    TEST_RATIONALE_RE.search(
+        "\n".join(
+            [
+                str(item["manifest"].get("deferral_detail") or ""),
+                str(item["manifest"].get("deferral_root_cause") or ""),
+                str(item["manifest"].get("summary") or ""),
+            ]
+        )
+    )
+    for item in records
+)
+
+lines = [
+    "## Recent Deferred Hardener Patch Context",
+    "",
+    f"- current_conveyor_reason: {clean(decision_reason, limit=700) or 'not provided'}",
+    f"- deferred_hardener_patches_considered: {len(records)}",
+    f"- matching_current_ticket_or_files: {'yes' if matching else 'no'}",
+]
+
+if not records:
+    lines.extend(
+        [
+            "- retry_context: No recent deferred hardener patches found.",
+            "",
+        ]
+    )
+else:
+    lines.extend(
+        [
+            "- retry_context: Review these deferrals before choosing hardener work. If the current ticket, cluster, or files overlap a deferral, repair the deferral reason first or explicitly skip/defer that ticket with a concise blocker.",
+        ]
+    )
+    if missing_rationale:
+        lines.extend(
+            [
+                "- required_summary_line_when_touching_tests: `Test change rationale: <one concise reason this preserves or improves meaningful coverage>`",
+                "- missing_test_change_rationale_deferral_detected: yes; include that exact summary line in `summary.md` whenever this hardener run touches tests.",
+            ]
+        )
+    lines.append("")
+    for index, item in enumerate(records, start=1):
+        manifest = item["manifest"]
+        reason = field(manifest, "deferral_reason") or "other"
+        root_cause = field(manifest, "deferral_root_cause") or "not recorded"
+        detail = field(manifest, "deferral_detail") or "not recorded"
+        files = item["files"]
+        tokens = item["tokens"]
+        lines.extend(
+            [
+                f"### Deferred hardener patch {index}: {clean(item['run_id'], limit=120)}",
+                "",
+                f"- matches_current_ticket_or_files: {'yes' if item['matches_decision'] else 'no'}",
+                f"- manifest_path: {clean(item['path'].relative_to(target).as_posix(), limit=240)}",
+                f"- deferral_reason: {reason}",
+                f"- deferral_root_cause: {root_cause}",
+                f"- deferral_detail: {detail}",
+                f"- changed_files: {clean(', '.join(files) if files else 'none recorded', limit=500)}",
+                f"- ticket_or_cluster_tokens: {clean(', '.join(tokens) if tokens else 'none recorded', limit=240)}",
+                "- hardener_retry_instruction: Correct the deferral reason before making another normal attempt on overlapping work; otherwise skip/defer the ticket with a concise blocker.",
+                "",
+            ]
+        )
+
+output.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+PY
+fi
+
 {
   cat "$prompt_path"
+  if [[ "$role" == "hardener" && -s "$hardener_deferred_context_path" ]]; then
+    printf '\n'
+    cat "$hardener_deferred_context_path"
+  fi
   cat <<EOF
 
 ## Runtime Summary Contract
@@ -454,7 +629,7 @@ When this work intentionally repairs a failing clean-HEAD full-suite baseline, a
 Verification scope: baseline_repair
 \`\`\`
 
-If you are the hardener and you remove obsolete tests or substantially rewrite brittle/stale tests, add:
+If you are the hardener and you add, remove, substantially rewrite, broaden, or otherwise touch tests, add:
 
 \`\`\`text
 Test change rationale: <one concise reason this preserves or improves meaningful coverage>

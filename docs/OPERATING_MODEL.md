@@ -38,7 +38,7 @@ Full-suite verification is explicit config in `.agentic/verification_commands.tx
 
 Before applying full-suite-required patches, the integrator records clean-HEAD baseline verification in `target/baseline_verification.json`. A failing baseline becomes a `baseline_verification_blocker` for normal hardener/finalization patches, but does not reject unrelated builder patches whose focused checks pass. Missing project-local services, such as an unavailable local PostgreSQL test database in a repo with Prisma/Postgres test configuration, are classified as `repairable_local_service` and routed to baseline repair before `BLOCKED_ON_ENVIRONMENT`. Patches that intentionally repair the baseline should declare `Verification scope: baseline_repair`.
 
-Hardener may add tests, rewrite brittle or stale tests, update fixtures/mocks, and remove obsolete tests when that improves verification quality. It must not remove or weaken tests merely to make checks pass, and summaries must include `Test change rationale:` when tests are removed or substantially rewritten.
+Hardener may add tests, rewrite brittle or stale tests, broaden meaningful coverage, update fixtures/mocks, and remove obsolete tests when that improves verification quality. It must not remove or weaken tests merely to make checks pass, and summaries should include `Test change rationale:` whenever hardener touches tests.
 
 Deferred duplicate builder patches are triaged before launching more equivalent builder work. The integrator can mark older equivalent patches `superseded` and keep the freshest deferred patch as `retryable`, `retryable-after-environment-repair`, or `replace-from-current-HEAD` so planner/integrator triage happens before another builder retry.
 

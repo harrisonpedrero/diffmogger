@@ -67,27 +67,32 @@ class ConveyorDecisionTests(unittest.TestCase):
         summary: str = "",
         changed_files: list[str] | None = None,
         runtime_state_changed_files: list[str] | None = None,
+        deferral_reason: str | None = None,
+        deferral_category: str | None = None,
+        deferral_root_cause: str = "",
+        deferral_detail: str = "",
     ) -> Path:
         path = root / "target" / "automation_queue" / role / run_id / "manifest.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "role": role,
-                    "run_id": run_id,
-                    "status": status,
-                    "summary": summary,
-                    "changed_files": changed_files or [],
-                    "runtime_state_changed_files": runtime_state_changed_files or [],
-                    "created_at": "2026-05-04T00:00:00+00:00",
-                    "integrated_at": "2026-05-04T00:00:00+00:00",
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+        payload: dict[str, object] = {
+            "role": role,
+            "run_id": run_id,
+            "status": status,
+            "summary": summary,
+            "changed_files": changed_files or [],
+            "runtime_state_changed_files": runtime_state_changed_files or [],
+            "created_at": "2026-05-04T00:00:00+00:00",
+            "integrated_at": "2026-05-04T00:00:00+00:00",
+        }
+        if deferral_reason is not None:
+            payload["deferral_reason"] = deferral_reason
+        if deferral_category is not None:
+            payload["deferral_category"] = deferral_category
+        if deferral_root_cause:
+            payload["deferral_root_cause"] = deferral_root_cause
+        if deferral_detail:
+            payload["deferral_detail"] = deferral_detail
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return path
 
     def conveyor_state(
@@ -457,6 +462,50 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertEqual("integrator", role)
                     self.assertIn("duplicate builder deferred patches need triage", reason)
                     self.assertFalse(stop)
+
+    def test_repeated_hardener_guardrail_deferrals_route_to_planner_repair(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-active",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "#76", "status": "candidate_done", "summary": "Harden auth rate limit", "evidence": ["builder touched auth rate limit tests"]}
+                          ]
+                        }
+                        """,
+                    )
+                    for run_id in ("run-hardener-a", "run-hardener-b"):
+                        self.write_manifest(
+                            target,
+                            role="hardener",
+                            run_id=run_id,
+                            status="deferred",
+                            summary="Ticket #76 hardener patch rewrote auth rate-limit tests.",
+                            changed_files=["apps/web/tests/api.auth.rate-limit.test.ts"],
+                            deferral_reason="guardrail_violation",
+                            deferral_category="guardrail_violation",
+                            deferral_root_cause="Hardener removed or substantially rewrote tests without a Test change rationale summary line.",
+                            deferral_detail="Hardener removed or substantially rewrote tests without a `Test change rationale:` summary line.",
+                        )
+
+                    state = self.conveyor_state(module)
+                    role, reason, stop = module.choose_next(target, state, 3600, 2)
+                    queue = module.conveyor_decision_queue(target, state, role, reason, 3600, 2)
+
+                    self.assertEqual("planner", role)
+                    self.assertIn("repeated hardener guardrail deferrals", reason)
+                    self.assertIn("guardrail_violation", reason)
+                    self.assertIn("Test change rationale", reason)
+                    self.assertFalse(stop)
+                    self.assertEqual("planner", queue[0]["role"])
+                    self.assertIn("repair", queue[0]["reason"])
 
     def test_missing_baseline_ledger_routes_to_integrator_preflight(self) -> None:
         for path, module in self.modules:

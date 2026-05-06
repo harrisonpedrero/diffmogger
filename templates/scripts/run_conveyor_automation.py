@@ -672,6 +672,92 @@ def deferred_equivalence_key(manifest: dict[str, Any]) -> str:
     return json.dumps([role, changed_files, signature], sort_keys=True)
 
 
+TICKET_TOKEN_RE = re.compile(r"(?<![\w-])#\d+\b|\b[A-Z][A-Z0-9]{0,12}-\d+\b")
+
+
+def manifest_ticket_tokens(manifest: dict[str, Any]) -> list[str]:
+    values: list[str] = [
+        str(manifest.get("summary") or ""),
+        str(manifest.get("deferral_detail") or ""),
+        str(manifest.get("deferral_root_cause") or ""),
+        "\n".join(manifest_file_list(manifest)),
+    ]
+    for key in ("ticket_ids", "tickets", "ticket_cluster"):
+        value = manifest.get(key)
+        if isinstance(value, list):
+            values.extend(str(item) for item in value)
+        elif isinstance(value, str):
+            values.append(value)
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for token in TICKET_TOKEN_RE.findall(value):
+            normalized = token.upper()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            tokens.append(token)
+    return tokens
+
+
+def hardener_guardrail_group_keys(manifest: dict[str, Any]) -> list[tuple[str, str, str]]:
+    signature = normalized_deferral_signature(manifest)
+    tokens = sorted(token.upper() for token in manifest_ticket_tokens(manifest))
+    files = sorted(manifest_file_list(manifest))
+    keys: list[tuple[str, str, str]] = []
+    if tokens:
+        keys.append(("ticket", ", ".join(tokens), json.dumps(["ticket", tokens, signature], sort_keys=True)))
+    if files:
+        keys.append(("files", format_file_list(files), json.dumps(["files", files, signature], sort_keys=True)))
+    if not keys:
+        keys.append(("signature", signature, json.dumps(["signature", signature], sort_keys=True)))
+    return keys
+
+
+def repeated_hardener_guardrail_deferral_info(target: Path) -> dict[str, Any] | None:
+    queue_root = target / "target" / "automation_queue" / "hardener"
+    groups: dict[str, dict[str, Any]] = {}
+    if not queue_root.exists():
+        return None
+    for path in sorted(queue_root.glob("*/manifest.json")):
+        manifest = read_json(path)
+        if manifest.get("status") != "deferred":
+            continue
+        if str(manifest.get("deferral_reason") or "") != "guardrail_violation":
+            continue
+        for match_type, match_value, key in hardener_guardrail_group_keys(manifest):
+            group = groups.setdefault(
+                key,
+                {
+                    "match_type": match_type,
+                    "match_value": match_value,
+                    "items": [],
+                },
+            )
+            manifest = dict(manifest)
+            manifest["_manifest_path"] = str(path)
+            group["items"].append(manifest)
+    repeated = [group for group in groups.values() if len({item.get("run_id") for item in group["items"]}) > 1]
+    if not repeated:
+        return None
+    repeated.sort(key=lambda group: len(group["items"]), reverse=True)
+    group = repeated[0]
+    newest = sorted(group["items"], key=lambda item: str(item.get("created_at") or ""))[-1]
+    files = manifest_file_list(newest)
+    root_cause = re.sub(r"\s+", " ", str(newest.get("deferral_root_cause") or "")).strip()
+    detail = re.sub(r"\s+", " ", str(newest.get("deferral_detail") or "")).strip()
+    return {
+        "count": len(group["items"]),
+        "run_id": str(newest.get("run_id") or "unknown"),
+        "signature": normalized_deferral_signature(newest),
+        "match_type": str(group["match_type"]),
+        "match_value": str(group["match_value"]),
+        "files": format_file_list(files),
+        "root_cause": root_cause[:240] if root_cause else "No root cause recorded.",
+        "detail": detail[:240] if detail else "No deferral detail recorded.",
+    }
+
+
 def duplicate_builder_deferral_info(target: Path) -> dict[str, Any] | None:
     queue_root = target / "target" / "automation_queue" / "builder"
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -1039,6 +1125,22 @@ def choose_next(
             False,
         )
 
+    repeated_hardener_guardrail = repeated_hardener_guardrail_deferral_info(target)
+    if repeated_hardener_guardrail:
+        return (
+            "planner",
+            (
+                "repeated hardener guardrail deferrals need repair planning before another normal hardener retry: "
+                f"{repeated_hardener_guardrail['count']} patch(es) for "
+                f"{repeated_hardener_guardrail['match_type']}={repeated_hardener_guardrail['match_value']}; "
+                f"{repeated_hardener_guardrail['signature']}; root_cause={repeated_hardener_guardrail['root_cause']}; "
+                "hardener must correct the deferral reason first, including "
+                "`Test change rationale: <one concise reason this preserves or improves meaningful coverage>` "
+                "when touching tests"
+            ),
+            False,
+        )
+
     if str(state.get("last_completed_role") or "") == "integrator":
         builder_followup = builder_triage_followup_info(target)
         if builder_followup:
@@ -1161,6 +1263,19 @@ def conveyor_decision_queue(
             ),
         )
 
+    repeated_hardener_guardrail = repeated_hardener_guardrail_deferral_info(target)
+    if repeated_hardener_guardrail:
+        add(
+            "planner",
+            "ready",
+            (
+                "repeated hardener guardrail deferrals need repair planning: "
+                f"{repeated_hardener_guardrail['count']} patch(es) for "
+                f"{repeated_hardener_guardrail['match_type']}={repeated_hardener_guardrail['match_value']}; "
+                f"{repeated_hardener_guardrail['signature']}; root_cause={repeated_hardener_guardrail['root_cause']}"
+            ),
+        )
+
     if str(state.get("last_completed_role") or "") == "integrator":
         builder_followup = builder_triage_followup_info(target)
         if builder_followup:
@@ -1268,6 +1383,8 @@ def run_role(
     run_id_value = run_id(role)
     env["CODEX_RUN_ID"] = run_id_value
     env["PATH"] = env.get("CODEX_AUTOMATION_PATH", DEFAULT_AUTOMATION_PATH)
+    if reason:
+        env["CONVEYOR_DECISION_REASON"] = reason
     if allow_remotes:
         env["MULTI_ROLE_ALLOW_REMOTES"] = "1"
     command = command_for_role(role)

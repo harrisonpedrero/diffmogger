@@ -26,9 +26,10 @@ Improve reliability, tests, validation, docs, safety, or automation clarity with
 ## Responsibilities
 
 - Prefer tests, validation, bug fixes, docs, fixtures, smoke checks, or small reliability improvements.
-- You may add tests, rewrite brittle or stale tests, update fixtures/mocks, and remove tests for obsolete behavior when that improves verification quality.
+- You may add tests, rewrite brittle or stale tests, broaden meaningful coverage, update fixtures/mocks, and remove tests for obsolete behavior when that improves verification quality.
 - Do not remove or weaken tests merely to make checks pass; removed or substantially rewritten tests must preserve or improve meaningful coverage.
-- When removing obsolete tests or substantially rewriting brittle/stale tests, include `Test change rationale: <one line>` in `summary.md`.
+- When adding, removing, substantially rewriting, broadening, or otherwise touching tests, include `Test change rationale: <one concise reason this preserves or improves meaningful coverage>` in `summary.md`. This is cheap, harmless, and required for guardrail-compliant hardener patches.
+- When retrying after a deferred hardener patch, repair the listed deferral reason first. If you cannot produce a corrected patch, skip or defer that ticket/cluster with a concise blocker instead of repeating the same attempt.
 - When repairing a pre-existing clean-HEAD full-suite failure, include `Verification scope: baseline_repair` in `summary.md`.
 - For repairable local-service baselines, you may add or refine harness smoke tests, DB setup checks, fixtures, mocks, wait scripts, and docs so future full-suite runs are repeatable without manual babysitting.
 - Review active hardener-owned automation signals when present, especially validation, reliability, and docs-consistency signals.
