@@ -462,6 +462,18 @@ for marker in [
         print(f"Browser helper template missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
+env_loader = Path("templates/scripts/load_automation_env.py").read_text(encoding="utf-8")
+for marker in [
+    "CODEX_AUTOMATION_ENV_LOADED",
+    "CODEX_AUTOMATION_ENV_FILES",
+    "CODEX_AUTOMATION_ENV_DENYLIST",
+    "apps/*/.env.local",
+    "os.execvpe",
+]:
+    if marker not in env_loader:
+        print(f"Automation env loader template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
 ticket_helper = Path("templates/scripts/ticket_run.py").read_text(encoding="utf-8")
 for marker in [
     "json ticket-run",
@@ -580,6 +592,8 @@ for marker in [
     "MULTI_ROLE_ALLOW_REMOTES",
     "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
     "PLAYWRIGHT_MCP_OUTPUT_DIR",
+    "load_automation_env.py",
+    "CODEX_AUTOMATION_ENV_LOADED",
     "mcp_servers.context7.command",
     "mcp_servers.context7.env_vars",
     "mcp_servers.playwright.command",
@@ -887,7 +901,7 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_run_role_automation.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_list_deferred_patches.py tests/test_ticket_run.py tests/test_check_integration_safety.py tests/test_check_required_files.py tests/test_summarize_worker_outputs.py
+python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_run_role_automation.py tests/test_load_automation_env.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_list_deferred_patches.py tests/test_ticket_run.py tests/test_check_integration_safety.py tests/test_check_required_files.py tests/test_summarize_worker_outputs.py
 
 python3 scripts/check_integration_safety.py >/tmp/Diffmogger-integration-safety.log
 

@@ -71,6 +71,8 @@ class ConveyorDecisionTests(unittest.TestCase):
         deferral_category: str | None = None,
         deferral_root_cause: str = "",
         deferral_detail: str = "",
+        deferral_triage_status: str | None = None,
+        deferral_next_action: str = "",
     ) -> Path:
         path = root / "target" / "automation_queue" / role / run_id / "manifest.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,6 +94,10 @@ class ConveyorDecisionTests(unittest.TestCase):
             payload["deferral_root_cause"] = deferral_root_cause
         if deferral_detail:
             payload["deferral_detail"] = deferral_detail
+        if deferral_triage_status is not None:
+            payload["deferral_triage_status"] = deferral_triage_status
+        if deferral_next_action:
+            payload["deferral_next_action"] = deferral_next_action
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return path
 
@@ -798,6 +804,97 @@ class ConveyorDecisionTests(unittest.TestCase):
 
                     self.assertEqual("planner", role)
                     self.assertIn("replace-from-current-HEAD", reason)
+                    self.assertFalse(stop)
+
+    def test_planner_only_acceptance_with_unchanged_builder_deferral_is_no_progress(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_manifest(
+                        target,
+                        role="builder",
+                        run_id="run-builder-deferred",
+                        status="deferred",
+                        changed_files=["src/query.ts"],
+                        deferral_reason="verification_failure",
+                        deferral_category="typescript_compiler_error",
+                        deferral_root_cause="src/query.ts(12,9): error TS2345: type mismatch",
+                    )
+                    before = module.queue_snapshot(target)
+                    planner_requested_at = "2026-05-04T00:10:00+00:00"
+                    state = {
+                        module.NO_PROGRESS_STATE_KEY: {
+                            "active": False,
+                            "streak": 1,
+                            "threshold": 2,
+                            "signature": before["deferred_signature"],
+                            "planner_requested_at": planner_requested_at,
+                        }
+                    }
+                    self.write_manifest(
+                        target,
+                        role="planner",
+                        run_id="run-planner-docs",
+                        status="applied",
+                        changed_files=["docs/CODEX_AUTOMATION_TASKS.md"],
+                    )
+                    after = module.queue_snapshot(target)
+
+                    metadata = module.update_integrator_no_progress(
+                        state,
+                        before=before,
+                        after=after,
+                        exit_code=0,
+                        threshold=2,
+                        finished_at="2026-05-04T00:20:00+00:00",
+                    )
+
+                    info = state[module.NO_PROGRESS_STATE_KEY]
+                    self.assertFalse(metadata["progress_success"])
+                    self.assertTrue(metadata["planner_only_acceptance"])
+                    self.assertTrue(metadata["builder_deferred_unchanged"])
+                    self.assertTrue(metadata["planner_acceptance_did_not_unstick_builder_deferral"])
+                    self.assertEqual(2, info["streak"])
+                    self.assertTrue(info["active"])
+                    self.assertEqual(planner_requested_at, info["planner_requested_at"])
+                    self.assertIn("planner-only", info["reason"])
+
+    def test_active_no_progress_blocks_before_second_builder_deferral_planner_followup(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_manifest(
+                        target,
+                        role="builder",
+                        run_id="run-builder-deferred",
+                        status="deferred",
+                        changed_files=["src/query.ts"],
+                        deferral_reason="verification_failure",
+                        deferral_category="typescript_compiler_error",
+                        deferral_triage_status="replace-from-current-HEAD",
+                        deferral_next_action="Planner already prepared a retry handoff.",
+                    )
+                    snapshot = module.queue_snapshot(target)
+                    state = self.conveyor_state(module)
+                    state[module.NO_PROGRESS_STATE_KEY] = {
+                        "active": True,
+                        "streak": 2,
+                        "threshold": 2,
+                        "signature": snapshot["deferred_signature"],
+                        "builder_deferred_signature": snapshot["deferred_signature_by_role"]["builder"],
+                        "planner_requested_at": "2026-05-04T00:10:00+00:00",
+                        "reason": "integrator accepted planner-only patch, but builder deferred queue stayed blocked",
+                    }
+
+                    role, reason, stop = module.choose_next(target, state, 3600, 2)
+
+                    self.assertIsNone(role)
+                    self.assertIn("no-progress circuit breaker active after planner handoff", reason)
+                    self.assertNotIn("builder deferred patch triaged", reason)
                     self.assertFalse(stop)
 
 

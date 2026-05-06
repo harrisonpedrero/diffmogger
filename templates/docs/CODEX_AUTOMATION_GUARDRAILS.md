@@ -23,6 +23,7 @@ Do not build unrelated apps or large unrelated systems.
 {{ENV_ACCESS_GUARDRAILS_POLICY}}
 - Use placeholders in docs and examples.
 - If credentials are needed but direct env access is not enabled or the value is unavailable, create a human request and continue with mock/local work.
+- Generated wrappers may load target `.env*` values into the process environment for local commands and isolated role worktrees, but agents must not print, summarize, commit, or copy secret values or `.env*` files.
 
 ## External Side Effects Policy
 

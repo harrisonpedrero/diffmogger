@@ -112,6 +112,7 @@ REPAIRABLE_LOCAL_SERVICE_CATEGORIES = {
     "missing_local_database",
     "missing_env_var",
 }
+TYPESCRIPT_COMPILER_ERROR_RE = re.compile(r"\berror\s+TS\d{3,5}\b", re.IGNORECASE)
 DEFAULT_GIT_INDEX_LOCK_STALE_SECONDS = 120
 DEFAULT_GIT_INDEX_LOCK_WAIT_SECONDS = 30
 DEFAULT_GIT_INDEX_LOCK_RETRY_SECONDS = 5
@@ -742,6 +743,7 @@ def update_info_exclude(target: Path, *, dry_run: bool) -> None:
         "/scripts/compact_agent_state.py",
         "/scripts/diffmogger_browser.py",
         "/scripts/integrate_role_outputs.py",
+        "/scripts/load_automation_env.py",
         "/scripts/list_deferred_patches.py",
         "/scripts/release_codex_lock.sh",
         "/scripts/repair_environment.py",
@@ -1557,12 +1559,38 @@ def root_cause_line(output: str, keywords: tuple[str, ...] = ()) -> str:
     return (lines[0] if lines else "No failure detail recorded.")[:400]
 
 
+def missing_verification_config_text(output: str) -> bool:
+    lowered = output.lower()
+    # Patch-scoped verification can legitimately note that the full-suite file
+    # exists but is not required. That note must not masquerade as missing config.
+    lowered = re.sub(
+        r"full-suite verification configured in\s+\.agentic/verification_commands\.txt\s+but\s+not\s+required[^\n]*",
+        "",
+        lowered,
+    )
+    config_marker = (
+        ".agentic/verification_commands.txt" in lowered
+        or "verification_commands.txt" in lowered
+        or "verification config" in lowered
+        or "verification configuration" in lowered
+    )
+    if not config_marker:
+        return False
+    config_subject = r"(?:\.agentic/verification_commands\.txt|verification_commands\.txt|verification config(?:uration)?)"
+    missing_state = r"(?:empty|missing|required[- ]but[- ](?:empty|missing))"
+    return bool(
+        re.search(fr"{config_subject}[^\n]{{0,240}}{missing_state}", lowered)
+        or re.search(fr"{missing_state}[^\n]{{0,240}}{config_subject}", lowered)
+        or re.search(r"\bmissing verification config(?:uration)?\b", lowered)
+    )
+
+
 def classify_failure_text(command: str, output: str) -> tuple[str, str]:
     lowered = output.lower()
-    if ".agentic/verification_commands.txt" in lowered and any(
-        marker in lowered for marker in ("missing", "empty", "required")
-    ):
+    if missing_verification_config_text(output):
         return "missing_verification_config", ".agentic/verification_commands.txt is required but empty or missing."
+    if TYPESCRIPT_COMPILER_ERROR_RE.search(output):
+        return "typescript_compiler_error", root_cause_line(output, ("error ts", "ts"))
     if local_database_unavailable_text(command, output):
         return "missing_local_database", root_cause_line(
             output,

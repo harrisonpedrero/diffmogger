@@ -10,6 +10,18 @@ child_pid=""
 
 cd "$TARGET" || exit 1
 
+load_codex_automation_env() {
+  if [ "${CODEX_AUTOMATION_ENV_LOADED:-}" = "1" ]; then
+    return 0
+  fi
+  if [ -f "$TARGET/scripts/load_automation_env.py" ]; then
+    exec python3 "$TARGET/scripts/load_automation_env.py" --target "$TARGET" -- "${BASH:-bash}" "$0" "$@"
+  fi
+  export CODEX_AUTOMATION_ENV_LOADED="1"
+}
+
+load_codex_automation_env "$@"
+
 configure_diffmogger_browser() {
   if [ -n "${DIFFMOGGER_BROWSER_PATH:-}" ] && [ -z "${CHROME_PATH:-}" ]; then
     export CHROME_PATH="$DIFFMOGGER_BROWSER_PATH"

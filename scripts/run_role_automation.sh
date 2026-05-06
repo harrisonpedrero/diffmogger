@@ -18,6 +18,7 @@ Environment:
 EOF
 }
 
+original_args=("$@")
 target_dir="${TARGET:-$(cd "$(dirname "$0")/.." && pwd)}"
 role=""
 run_id="${CODEX_RUN_ID:-${RUN_ID:-}}"
@@ -65,6 +66,18 @@ fi
 
 target_abs="$(cd "$target_dir" && pwd)"
 cd "$target_abs"
+
+load_codex_automation_env() {
+  if [[ "${CODEX_AUTOMATION_ENV_LOADED:-}" == "1" ]]; then
+    return 0
+  fi
+  if [[ -f "$target_abs/scripts/load_automation_env.py" ]]; then
+    exec python3 "$target_abs/scripts/load_automation_env.py" --target "$target_abs" -- "${BASH:-bash}" "$0" "${original_args[@]}"
+  fi
+  export CODEX_AUTOMATION_ENV_LOADED="1"
+}
+
+load_codex_automation_env
 
 if [[ -n "${DIFFMOGGER_BROWSER_PATH:-}" && -z "${CHROME_PATH:-}" ]]; then
   export CHROME_PATH="$DIFFMOGGER_BROWSER_PATH"
@@ -126,6 +139,7 @@ for pattern in \
   "/scripts/compact_agent_state.py" \
   "/scripts/diffmogger_browser.py" \
   "/scripts/integrate_role_outputs.py" \
+  "/scripts/load_automation_env.py" \
   "/scripts/list_deferred_patches.py" \
   "/scripts/release_codex_lock.sh" \
   "/scripts/repair_environment.py" \
@@ -222,7 +236,25 @@ context_paths=(
   "docs/HUMAN_REQUESTS.md"
   "docs/HUMAN_RESPONSES_ARCHIVE.md"
   "docs/backlog/README.md"
+  "scripts/acquire_codex_lock.sh"
+  "scripts/build_replay.py"
+  "scripts/compact_agent_state.py"
+  "scripts/diffmogger_browser.py"
+  "scripts/integrate_role_outputs.py"
+  "scripts/load_automation_env.py"
+  "scripts/list_deferred_patches.py"
+  "scripts/release_codex_lock.sh"
+  "scripts/repair_environment.py"
+  "scripts/run_codex_automation.sh"
+  "scripts/run_conveyor_automation.py"
+  "scripts/run_conveyor_automation.sh"
+  "scripts/run_observatory.py"
   "scripts/run_playwright_mcp.sh"
+  "scripts/run_role_automation.sh"
+  "scripts/spawn_worker_agent.sh"
+  "scripts/summarize_worker_outputs.py"
+  "scripts/ticket_run.py"
+  "scripts/update_automation_signals.py"
   "target/automation_signals.json"
   "target/baseline_verification.json"
 )

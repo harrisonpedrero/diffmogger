@@ -15,6 +15,10 @@ ROLE_RUNNER_PATHS = [
     ROOT / "scripts" / "run_role_automation.sh",
     ROOT / "templates" / "scripts" / "run_role_automation.sh",
 ]
+LOAD_ENV_HELPER_PATHS = [
+    ROOT / "scripts" / "load_automation_env.py",
+    ROOT / "templates" / "scripts" / "load_automation_env.py",
+]
 PLAYWRIGHT_MCP_HELPER_PATHS = [
     ROOT / "scripts" / "run_playwright_mcp.sh",
     ROOT / "templates" / "scripts" / "run_playwright_mcp.sh",
@@ -94,6 +98,11 @@ class RunRoleAutomationTests(unittest.TestCase):
     def test_source_and_template_playwright_mcp_helpers_stay_byte_identical(self) -> None:
         source = PLAYWRIGHT_MCP_HELPER_PATHS[0].read_text(encoding="utf-8")
         template = PLAYWRIGHT_MCP_HELPER_PATHS[1].read_text(encoding="utf-8")
+        self.assertEqual(source, template)
+
+    def test_source_and_template_env_loaders_stay_byte_identical(self) -> None:
+        source = LOAD_ENV_HELPER_PATHS[0].read_text(encoding="utf-8")
+        template = LOAD_ENV_HELPER_PATHS[1].read_text(encoding="utf-8")
         self.assertEqual(source, template)
 
     def test_optional_mcp_role_args_are_scoped_by_role(self) -> None:
@@ -218,6 +227,124 @@ class RunRoleAutomationTests(unittest.TestCase):
                         prompt,
                     )
                     self.assertIn("whenever this hardener run touches tests", prompt)
+
+    def test_role_worktree_seeds_ticket_run_helper_without_patch_leakage(self) -> None:
+        for path in ROLE_RUNNER_PATHS:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    target = tmp_path / "target"
+                    target.mkdir()
+                    self.seed_git_target(target)
+                    self.write_text(target, "scripts/ticket_run.py", "#!/usr/bin/env python3\nprint('ticket helper')\n")
+                    fake_bin = self.write_fake_codex(tmp_path)
+
+                    env = os.environ.copy()
+                    env["CODEX_AUTOMATION_PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+                    env["CODEX_RUN_ID"] = "helper-context"
+
+                    result = subprocess.run(
+                        ["bash", str(path), "--target", str(target), "--role", "builder"],
+                        cwd=ROOT,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    worktree_helper = (
+                        target
+                        / "target"
+                        / "automation_worktrees"
+                        / "builder"
+                        / "helper-context"
+                        / "scripts"
+                        / "ticket_run.py"
+                    )
+                    self.assertTrue(worktree_helper.exists(), "ticket_run.py was not seeded into the role worktree")
+                    self.assertIn("ticket helper", worktree_helper.read_text(encoding="utf-8"))
+                    queue_dir = target / "target" / "automation_queue" / "builder" / "helper-context"
+                    patch_text = (queue_dir / "changes.patch").read_text(encoding="utf-8")
+                    changed_files = (queue_dir / "changed_files.txt").read_text(encoding="utf-8")
+                    self.assertNotIn("scripts/ticket_run.py", patch_text)
+                    self.assertNotIn("scripts/ticket_run.py", changed_files)
+
+    def test_role_worktree_inherits_loaded_target_env_without_copying_env_files(self) -> None:
+        for index, path in enumerate(ROLE_RUNNER_PATHS):
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    target = tmp_path / "target"
+                    target.mkdir()
+                    self.seed_git_target(target)
+                    self.write_text(target, ".gitignore", ".env*\napps/*/.env*\n")
+                    self.write_text(
+                        target,
+                        "apps/web/.env.local",
+                        "AUTH_SECRET=file-secret-value\nAPP_LOCAL_ONLY=file-only-value\n",
+                    )
+                    helper = target / "scripts" / "load_automation_env.py"
+                    helper.parent.mkdir(parents=True, exist_ok=True)
+                    helper.write_text(LOAD_ENV_HELPER_PATHS[index].read_text(encoding="utf-8"), encoding="utf-8")
+                    fake_bin = tmp_path / "bin"
+                    fake_bin.mkdir()
+                    fake_codex = fake_bin / "codex"
+                    fake_codex.write_text(
+                        "#!/usr/bin/env bash\n"
+                        "worktree=\"\"\n"
+                        "while [[ $# -gt 0 ]]; do\n"
+                        "  if [[ \"$1\" == \"-C\" ]]; then\n"
+                        "    worktree=\"$2\"\n"
+                        "    shift 2\n"
+                        "    continue\n"
+                        "  fi\n"
+                        "  shift\n"
+                        "done\n"
+                        "if [[ \"${CODEX_AUTOMATION_ENV_LOADED:-}\" != \"1\" ]]; then echo \"env sentinel missing\" >&2; exit 40; fi\n"
+                        "if [[ \"${AUTH_SECRET:-}\" != \"shell-secret-value\" ]]; then echo \"auth secret mismatch\" >&2; exit 41; fi\n"
+                        "if [[ \"${APP_LOCAL_ONLY:-}\" != \"file-only-value\" ]]; then echo \"app local env missing\" >&2; exit 42; fi\n"
+                        "printf 'env inherited\\n' > \"$worktree/env-check.txt\"\n"
+                        "exit 0\n",
+                        encoding="utf-8",
+                    )
+                    fake_codex.chmod(fake_codex.stat().st_mode | stat.S_IXUSR)
+
+                    env = os.environ.copy()
+                    env["CODEX_AUTOMATION_PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+                    env["CODEX_RUN_ID"] = "env-context"
+                    env["AUTH_SECRET"] = "shell-secret-value"
+
+                    result = subprocess.run(
+                        ["bash", str(path), "--target", str(target), "--role", "builder"],
+                        cwd=ROOT,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    worktree = target / "target" / "automation_worktrees" / "builder" / "env-context"
+                    self.assertTrue((worktree / "env-check.txt").exists())
+                    self.assertFalse((worktree / "apps" / "web" / ".env.local").exists())
+                    queue_dir = target / "target" / "automation_queue" / "builder" / "env-context"
+                    text_outputs = [result.stdout, result.stderr]
+                    text_outputs.extend(
+                        item.read_text(encoding="utf-8", errors="replace")
+                        for item in queue_dir.rglob("*")
+                        if item.is_file() and item.suffix not in {".z"}
+                    )
+                    log_dir = target / "target" / "automation_logs"
+                    if log_dir.exists():
+                        text_outputs.extend(
+                            item.read_text(encoding="utf-8", errors="replace")
+                            for item in log_dir.rglob("*")
+                            if item.is_file()
+                        )
+                    combined = "\n".join(text_outputs)
+                    self.assertNotIn("file-secret-value", combined)
+                    self.assertNotIn("shell-secret-value", combined)
 
 
 if __name__ == "__main__":

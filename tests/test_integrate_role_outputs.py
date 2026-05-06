@@ -625,6 +625,47 @@ Review `/tmp/example-project/target/automation_queue/builder/run/codex.raw.log` 
                     self.assertIn("Full-suite verification configured", joined)
                     self.assertNotIn("sys.exit(7)", joined)
 
+    def test_not_required_full_suite_note_does_not_hide_typescript_failure(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    (target / ".agentic").mkdir(parents=True)
+                    (target / ".agentic" / "verification_commands.txt").write_text(
+                        "python3 -c 'import sys; sys.exit(7)'\n",
+                        encoding="utf-8",
+                    )
+                    (target / ".agentic" / "smoke_commands.txt").write_text(
+                        "builder | python3 -c 'import sys; "
+                        'print("src/app.ts(12,9): error TS2345: Argument of type undefined is not assignable", file=sys.stderr); '
+                        "sys.exit(2)'\n",
+                        encoding="utf-8",
+                    )
+
+                    result = module.run_verification(target, {"role": "builder", "changed_files": ["src/app.ts"]})
+
+                    self.assertFalse(result.ok)
+                    self.assertEqual("verification_failure", result.reason)
+                    self.assertEqual("typescript_compiler_error", result.category)
+                    self.assertIn("TS2345", result.root_cause)
+                    joined = "\n".join(result.checks_run)
+                    self.assertIn("Full-suite verification configured", joined)
+                    self.assertNotIn("sys.exit(7)", joined)
+
+    def test_required_missing_full_suite_config_still_classifies_missing_config(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    (target / ".agentic").mkdir(parents=True)
+
+                    result = module.run_verification(target, {"role": "hardener", "changed_files": ["src/app.ts"]})
+
+                    self.assertFalse(result.ok)
+                    self.assertEqual("verification_environment_failure", result.reason)
+                    self.assertEqual("missing_verification_config", result.category)
+                    self.assertIn(".agentic/verification_commands.txt", result.root_cause)
+
     def test_smoke_commands_match_changed_files_for_patch_scope(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):

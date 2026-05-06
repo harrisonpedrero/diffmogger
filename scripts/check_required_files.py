@@ -23,6 +23,7 @@ BASE_REQUIRED = [
     "scripts/run_observatory.py",
     "scripts/build_replay.py",
     "scripts/diffmogger_browser.py",
+    "scripts/load_automation_env.py",
     "scripts/ticket_run.py",
     "scripts/repair_environment.py",
     "scripts/update_automation_signals.py",
@@ -108,6 +109,9 @@ DEVELOPMENT_REQUIRED_STRINGS = [
     "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
     "Diffmogger-observatory.html",
     "Diffmogger-self-review.md",
+    "Automation Environment Loading",
+    "CODEX_AUTOMATION_ENV_FILES",
+    "CODEX_AUTOMATION_ENV_DENYLIST",
 ]
 
 AUTOMATION_REQUIRED_STRINGS = [
@@ -130,6 +134,8 @@ RUNNER_REQUIRED_STRINGS = [
     "CODEX_LOCK_ALREADY_ACQUIRED",
     "CODEX_LOCK_CONTEXT",
     "CODEX_NESTED_CLI_HOME",
+    "load_automation_env.py",
+    "CODEX_AUTOMATION_ENV_LOADED",
     "diffmogger_browser.py",
     "DIFFMOGGER_BROWSER_PATH",
     "PLAYWRIGHT_MCP_EXECUTABLE_PATH",

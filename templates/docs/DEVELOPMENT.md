@@ -70,6 +70,14 @@ bash scripts/run_codex_automation.sh
 
 The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto --skip-git-repo-check`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock when the run exits.
 
+## Automation Environment Loading
+
+The local wrappers load target env files into the automation process before launching Codex, conveyor, role worktrees, or child workers. Values are inherited through the process environment; `.env*` files are not copied into isolated worktrees or queued patches.
+
+Default env files include root `.env`, `.env.local`, `.env.development`, `.env.development.local`, and matching `apps/*/.env*` development files. Already-exported shell variables win over file values.
+
+Use `CODEX_AUTOMATION_ENV_FILES` for an explicit comma- or colon-separated file list. Use `CODEX_AUTOMATION_ENV_DENYLIST` for comma- or colon-separated variable names that should not be inherited. Never print, summarize, commit, or copy secret values.
+
 Optional continuous conveyor scheduling uses:
 
 ```bash

@@ -24,6 +24,7 @@ from typing import Any
 
 
 ROLES = ("planner", "builder", "hardener", "integrator")
+QUEUE_ROLES = ("planner", "builder", "hardener")
 ACTIVE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
 DEFAULT_AUTOMATION_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 DEFAULT_IDLE_SLEEP_SECONDS = 60
@@ -40,6 +41,7 @@ FINAL_VERIFICATION_RE = re.compile(
     r"\b(hardener|final(?:ization)?|final\s+verification|verified\s+by\s+hardener|acceptance\s+verification)\b",
     re.IGNORECASE,
 )
+TYPESCRIPT_COMPILER_ERROR_RE = re.compile(r"\berror\s+TS\d{3,5}\b", re.IGNORECASE)
 
 CHILD: subprocess.Popen[str] | None = None
 TERMINATE_REQUESTED = False
@@ -644,7 +646,9 @@ def normalized_deferral_signature(manifest: dict[str, Any]) -> str:
         return f"{reason}:{category}"
     detail = re.sub(r"\s+", " ", str(manifest.get("deferral_detail") or "")).strip()
     lowered = detail.lower()
-    if "database_url" in lowered or re.search(r"\b[A-Z][A-Z0-9_]{2,}\b.*(?:not set|missing|required)", detail):
+    if TYPESCRIPT_COMPILER_ERROR_RE.search(detail):
+        detail_class = "typescript_compiler_error"
+    elif "database_url" in lowered or re.search(r"\b[A-Z][A-Z0-9_]{2,}\b.*(?:not set|missing|required)", detail):
         detail_class = "missing_env_var"
     elif "no module named pytest" in lowered or "pytest: command not found" in lowered:
         detail_class = "missing_pytest"
@@ -822,16 +826,17 @@ def builder_triage_followup_info(target: Path) -> dict[str, Any] | None:
 def queue_snapshot(target: Path) -> dict[str, Any]:
     queue_root = target / "target" / "automation_queue"
     counts = {"queued": 0, "deferred": 0, "applied": 0, "failed": 0, "skipped": 0, "superseded": 0}
-    applied_by_role = {"planner": 0, "builder": 0, "hardener": 0}
-    deferred_by_role = {"planner": 0, "builder": 0, "hardener": 0}
-    queued_by_role = {"planner": 0, "builder": 0, "hardener": 0}
+    applied_by_role = {role: 0 for role in QUEUE_ROLES}
+    deferred_by_role = {role: 0 for role in QUEUE_ROLES}
+    queued_by_role = {role: 0 for role in QUEUE_ROLES}
     deferred_signatures: dict[str, int] = {}
+    deferred_signatures_by_role: dict[str, dict[str, int]] = {role: {} for role in QUEUE_ROLES}
     for path in sorted(queue_root.glob("*/*/manifest.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if str(data.get("role") or "") not in {"planner", "builder", "hardener"}:
+        if str(data.get("role") or "") not in QUEUE_ROLES:
             continue
         status = str(data.get("status") or "unknown")
         if status in counts:
@@ -847,7 +852,14 @@ def queue_snapshot(target: Path) -> dict[str, Any]:
                 deferred_by_role[role] += 1
             signature = normalized_deferral_signature(data)
             deferred_signatures[signature] = deferred_signatures.get(signature, 0) + 1
+            if role in deferred_signatures_by_role:
+                role_signatures = deferred_signatures_by_role[role]
+                role_signatures[signature] = role_signatures.get(signature, 0) + 1
     signature_parts = sorted(deferred_signatures)
+    signature_by_role = {
+        role: "|".join(sorted(signatures)) if signatures else "none"
+        for role, signatures in deferred_signatures_by_role.items()
+    }
     return {
         **counts,
         "applied_by_role": applied_by_role,
@@ -855,6 +867,8 @@ def queue_snapshot(target: Path) -> dict[str, Any]:
         "queued_by_role": queued_by_role,
         "deferred_signature": "|".join(signature_parts) if signature_parts else "none",
         "deferred_signature_counts": deferred_signatures,
+        "deferred_signature_by_role": signature_by_role,
+        "deferred_signature_counts_by_role": deferred_signatures_by_role,
     }
 
 
@@ -866,6 +880,13 @@ def no_progress_info(state: dict[str, Any]) -> dict[str, Any]:
 def no_progress_active(state: dict[str, Any], threshold: int) -> bool:
     info = no_progress_info(state)
     return bool(info.get("active")) and int(info.get("streak", 0)) >= threshold
+
+
+def snapshot_deferred_role_signature(snapshot: dict[str, Any], role: str) -> str:
+    raw = snapshot.get("deferred_signature_by_role")
+    if isinstance(raw, dict):
+        return str(raw.get(role) or "none")
+    return "none"
 
 
 def update_integrator_no_progress(
@@ -883,7 +904,7 @@ def update_integrator_no_progress(
     after_by_role = after.get("applied_by_role") if isinstance(after.get("applied_by_role"), dict) else {}
     accepted_by_role = {
         role: max(0, int(after_by_role.get(role, 0)) - int(before_by_role.get(role, 0)))
-        for role in ("planner", "builder", "hardener")
+        for role in QUEUE_ROLES
     }
     before_deferred_by_role = (
         before.get("deferred_by_role") if isinstance(before.get("deferred_by_role"), dict) else {}
@@ -893,13 +914,43 @@ def update_integrator_no_progress(
     )
     deferred_delta_by_role = {
         role: int(after_deferred_by_role.get(role, 0)) - int(before_deferred_by_role.get(role, 0))
-        for role in ("planner", "builder", "hardener")
+        for role in QUEUE_ROLES
     }
     previous = no_progress_info(state)
     signature = str(after.get("deferred_signature") or "none")
     same_signature = bool(signature and signature != "none" and signature == previous.get("signature"))
     stuck_same_reason = same_signature and int(after.get("deferred", 0)) >= int(before.get("deferred", 0))
-    no_progress = exit_code == 0 and accepted_delta == 0 and (deferred_delta > 0 or stuck_same_reason)
+    builder_deferred_before = int(before_deferred_by_role.get("builder", 0))
+    builder_deferred_after = int(after_deferred_by_role.get("builder", 0))
+    builder_deferred_signature_before = snapshot_deferred_role_signature(before, "builder")
+    builder_deferred_signature_after = snapshot_deferred_role_signature(after, "builder")
+    same_builder_deferred_signature = bool(
+        builder_deferred_signature_after
+        and builder_deferred_signature_after != "none"
+        and builder_deferred_signature_after == previous.get("builder_deferred_signature")
+    )
+    builder_deferred_unchanged = (
+        builder_deferred_before > 0
+        and builder_deferred_after > 0
+        and deferred_delta_by_role.get("builder", 0) == 0
+        and builder_deferred_signature_before != "none"
+        and builder_deferred_signature_before == builder_deferred_signature_after
+    )
+    planner_only_acceptance = (
+        accepted_delta > 0
+        and accepted_by_role.get("planner", 0) == accepted_delta
+        and all(int(accepted_by_role.get(role, 0)) == 0 for role in ("builder", "hardener"))
+    )
+    planner_acceptance_did_not_unstick_builder_deferral = (
+        exit_code == 0 and planner_only_acceptance and builder_deferred_unchanged
+    )
+    same_no_progress_signature = same_signature or (
+        planner_acceptance_did_not_unstick_builder_deferral and same_builder_deferred_signature
+    )
+    no_progress = exit_code == 0 and (
+        (accepted_delta == 0 and (deferred_delta > 0 or stuck_same_reason))
+        or planner_acceptance_did_not_unstick_builder_deferral
+    )
 
     metadata = {
         "accepted_delta": accepted_delta,
@@ -910,11 +961,47 @@ def update_integrator_no_progress(
         "deferred_signature": signature,
         "accepted_by_role": accepted_by_role,
         "deferred_by_role": {
-            role: int(after_deferred_by_role.get(role, 0)) for role in ("planner", "builder", "hardener")
+            role: int(after_deferred_by_role.get(role, 0)) for role in QUEUE_ROLES
         },
         "deferred_delta_by_role": deferred_delta_by_role,
+        "builder_deferred_before": builder_deferred_before,
+        "builder_deferred_after": builder_deferred_after,
+        "builder_deferred_signature_before": builder_deferred_signature_before,
+        "builder_deferred_signature_after": builder_deferred_signature_after,
+        "same_builder_deferred_signature": same_builder_deferred_signature,
+        "builder_deferred_unchanged": builder_deferred_unchanged,
+        "planner_only_acceptance": planner_only_acceptance,
+        "planner_acceptance_did_not_unstick_builder_deferral": planner_acceptance_did_not_unstick_builder_deferral,
         "no_progress": no_progress,
     }
+
+    if no_progress:
+        streak = int(previous.get("streak", 0)) + 1 if same_no_progress_signature else 1
+        active = streak >= threshold
+        if planner_acceptance_did_not_unstick_builder_deferral:
+            reason = (
+                "integrator accepted planner-only patch, but builder deferred queue "
+                f"stayed blocked for {builder_deferred_signature_after}"
+            )
+        else:
+            reason = (
+                f"integrator accepted 0 patches; deferred queue "
+                f"{'grew' if deferred_delta > 0 else 'stayed blocked'} for {signature}"
+            )
+        state[NO_PROGRESS_STATE_KEY] = {
+            "active": active,
+            "streak": streak,
+            "threshold": threshold,
+            "signature": signature,
+            "builder_deferred_signature": builder_deferred_signature_after,
+            "reason": reason,
+            "last_seen_at": finished_at,
+            "last_snapshot": after,
+            "planner_requested_at": previous.get("planner_requested_at") if same_no_progress_signature else None,
+        }
+        metadata["progress_success"] = False
+        metadata["just_tripped"] = active and not bool(previous.get("active"))
+        return metadata
 
     if exit_code == 0 and accepted_delta > 0:
         state[NO_PROGRESS_STATE_KEY] = {
@@ -936,26 +1023,6 @@ def update_integrator_no_progress(
         }
         metadata["progress_success"] = True
         metadata["just_tripped"] = False
-        return metadata
-
-    if no_progress:
-        streak = int(previous.get("streak", 0)) + 1 if same_signature else 1
-        active = streak >= threshold
-        state[NO_PROGRESS_STATE_KEY] = {
-            "active": active,
-            "streak": streak,
-            "threshold": threshold,
-            "signature": signature,
-            "reason": (
-                f"integrator accepted 0 patches; deferred queue "
-                f"{'grew' if deferred_delta > 0 else 'stayed blocked'} for {signature}"
-            ),
-            "last_seen_at": finished_at,
-            "last_snapshot": after,
-            "planner_requested_at": previous.get("planner_requested_at") if same_signature else None,
-        }
-        metadata["progress_success"] = False
-        metadata["just_tripped"] = active and not bool(previous.get("active"))
         return metadata
 
     metadata["progress_success"] = exit_code == 0
@@ -1141,6 +1208,13 @@ def choose_next(
             False,
         )
 
+    if no_progress_active(state, no_progress_threshold):
+        info = no_progress_info(state)
+        reason = str(info.get("reason") or "integrator made no patch progress")
+        if not info.get("planner_requested_at"):
+            return "planner", f"no-progress circuit breaker tripped: {reason}", False
+        return None, f"no-progress circuit breaker active after planner handoff: {reason}", False
+
     if str(state.get("last_completed_role") or "") == "integrator":
         builder_followup = builder_triage_followup_info(target)
         if builder_followup:
@@ -1152,13 +1226,6 @@ def choose_next(
                 ),
                 False,
             )
-
-    if no_progress_active(state, no_progress_threshold):
-        info = no_progress_info(state)
-        reason = str(info.get("reason") or "integrator made no patch progress")
-        if not info.get("planner_requested_at"):
-            return "planner", f"no-progress circuit breaker tripped: {reason}", False
-        return None, f"no-progress circuit breaker active after planner handoff: {reason}", False
 
     if unhandled_human_inbox_count(target) and planner_due(state, min(planner_interval_seconds, 900)):
         return "planner", "unhandled human inbox message(s) need triage", False
@@ -1276,16 +1343,8 @@ def conveyor_decision_queue(
             ),
         )
 
-    if str(state.get("last_completed_role") or "") == "integrator":
-        builder_followup = builder_triage_followup_info(target)
-        if builder_followup:
-            add(
-                "planner",
-                "ready",
-                f"builder deferred patch triaged as {builder_followup['triage_status']}; choose retry, supersede, or replace-from-current-HEAD",
-            )
-
-    if no_progress_active(state, no_progress_threshold):
+    no_progress_blocked = no_progress_active(state, no_progress_threshold)
+    if no_progress_blocked:
         info = no_progress_info(state)
         reason = str(info.get("reason") or "integrator made no patch progress")
         if not info.get("planner_requested_at"):
@@ -1300,6 +1359,15 @@ def conveyor_decision_queue(
             add("planner", "ready", fast_follow_reason)
         elif planner_due(state, planner_interval_seconds):
             add("planner", "ready", "planner interval elapsed")
+
+    if not no_progress_blocked and str(state.get("last_completed_role") or "") == "integrator":
+        builder_followup = builder_triage_followup_info(target)
+        if builder_followup:
+            add(
+                "planner",
+                "ready",
+                f"builder deferred patch triaged as {builder_followup['triage_status']}; choose retry, supersede, or replace-from-current-HEAD",
+            )
 
     if post_builder_hardener_pending(state):
         add("hardener", "planned", post_builder_hardener_reason(target))

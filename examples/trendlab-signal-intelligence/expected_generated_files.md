@@ -25,6 +25,7 @@ scripts/run_conveyor_automation.py
 scripts/run_conveyor_automation.sh
 scripts/run_observatory.py
 scripts/diffmogger_browser.py
+scripts/load_automation_env.py
 scripts/ticket_run.py
 scripts/repair_environment.py
 scripts/update_automation_signals.py
