@@ -3,9 +3,13 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import contextlib
+import io
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -919,6 +923,249 @@ Review `/tmp/example-project/target/automation_queue/builder/run/codex.raw.log` 
                     self.assertEqual("superseded", older_saved["deferral_triage_status"])
                     self.assertEqual("deferred", newer_saved["status"])
                     self.assertEqual("replace-from-current-HEAD", newer_saved["deferral_triage_status"])
+
+
+class GitIndexLockTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = [(path, load_integrator(path)) for path in INTEGRATOR_PATHS]
+
+    def init_repo(self, target: Path) -> None:
+        (target / ".agentic").mkdir(parents=True, exist_ok=True)
+        (target / ".agentic" / "project_intake.json").write_text(
+            json.dumps({"human_bridge_mode": "disabled"}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (target / "docs").mkdir(parents=True, exist_ok=True)
+        (target / "docs" / "CODEX_AUTOMATION_TASKS.md").write_text("tasks v1\n", encoding="utf-8")
+        (target / "docs" / "MULTI_ROLE_PROGRESS.md").write_text("progress v1\n", encoding="utf-8")
+        (target / "README.md").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "init"], cwd=target, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(["git", "add", "."], cwd=target, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "chore: base",
+            ],
+            cwd=target,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+
+    def make_lock(self, target: Path, *, age_seconds: int = 0) -> Path:
+        lock = target / ".git" / "index.lock"
+        lock.write_text("", encoding="utf-8")
+        if age_seconds:
+            stamp = time.time() - age_seconds
+            os.utime(lock, (stamp, stamp))
+        return lock
+
+    def add_committed_file(self, target: Path, relative: str, content: str) -> None:
+        path = target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "add", relative], cwd=target, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                f"test: add {Path(relative).name}",
+            ],
+            cwd=target,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+
+    def write_patch_for_file(self, target: Path, relative: str, new_content: str, patch_path: Path) -> None:
+        (target / relative).write_text(new_content, encoding="utf-8")
+        result = subprocess.run(
+            ["git", "diff", "--binary", "HEAD", "--", relative],
+            cwd=target,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        patch_path.write_text(result.stdout, encoding="utf-8")
+        subprocess.run(["git", "checkout", "--", relative], cwd=target, check=True, stdout=subprocess.DEVNULL)
+
+    def test_no_lock_allows_mutating_git_command(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target)
+                    (target / "README.md").write_text("changed\n", encoding="utf-8")
+
+                    result = module.git(target, "add", "-A", check=True, lock_wait_seconds=0)
+
+                    self.assertEqual(0, result.returncode)
+                    staged = subprocess.run(
+                        ["git", "diff", "--cached", "--name-only"],
+                        cwd=target,
+                        text=True,
+                        capture_output=True,
+                        check=True,
+                    ).stdout
+                    self.assertIn("README.md", staged)
+
+    def test_fresh_lock_fails_without_deleting_lock(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target)
+                    lock = self.make_lock(target)
+                    (target / "README.md").write_text("changed\n", encoding="utf-8")
+
+                    with self.assertRaises(module.GitIndexLockBlocked) as raised:
+                        module.git(target, "add", "-A", check=True, lock_wait_seconds=0)
+
+                    self.assertTrue(lock.exists())
+                    message = str(raised.exception)
+                    self.assertIn(str(lock), message)
+                    self.assertIn("age_seconds=", message)
+                    self.assertIn("Manual action:", message)
+                    self.assertIn("recent", message)
+
+    def test_stale_unowned_lock_is_removed_and_command_proceeds(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target)
+                    lock = self.make_lock(target, age_seconds=300)
+                    (target / "README.md").write_text("changed\n", encoding="utf-8")
+
+                    result = module.git(target, "add", "-A", check=True, lock_wait_seconds=0)
+
+                    self.assertEqual(0, result.returncode)
+                    self.assertFalse(lock.exists())
+                    staged = subprocess.run(
+                        ["git", "diff", "--cached", "--name-only"],
+                        cwd=target,
+                        text=True,
+                        capture_output=True,
+                        check=True,
+                    ).stdout
+                    self.assertIn("README.md", staged)
+
+    def test_stale_open_lock_is_not_removed(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target)
+                    lock = self.make_lock(target, age_seconds=300)
+                    (target / "README.md").write_text("changed\n", encoding="utf-8")
+                    original = module.lock_open_process_details
+                    try:
+                        module.lock_open_process_details = lambda _lock: (
+                            ["pid=12345 command=python holding index.lock"],
+                            ["test probe"],
+                            "",
+                        )
+                        with self.assertRaises(module.GitIndexLockBlocked) as raised:
+                            module.git(target, "add", "-A", check=True, lock_wait_seconds=0)
+                    finally:
+                        module.lock_open_process_details = original
+
+                    self.assertTrue(lock.exists())
+                    self.assertIn("open_processes=", str(raised.exception))
+
+    def test_integrator_reports_actionable_message_when_lock_remains(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target)
+                    lock = self.make_lock(target)
+                    (target / "README.md").write_text("dirty main\n", encoding="utf-8")
+                    old_wait = os.environ.get("DIFFMOGGER_GIT_INDEX_LOCK_WAIT_SECONDS")
+                    old_retry = os.environ.get("DIFFMOGGER_GIT_INDEX_LOCK_RETRY_SECONDS")
+                    os.environ["DIFFMOGGER_GIT_INDEX_LOCK_WAIT_SECONDS"] = "0"
+                    os.environ["DIFFMOGGER_GIT_INDEX_LOCK_RETRY_SECONDS"] = "0"
+                    stderr = io.StringIO()
+                    try:
+                        with contextlib.redirect_stderr(stderr):
+                            exit_code = module.integrate(target, "run-lock", dry_run=False)
+                    finally:
+                        if old_wait is None:
+                            os.environ.pop("DIFFMOGGER_GIT_INDEX_LOCK_WAIT_SECONDS", None)
+                        else:
+                            os.environ["DIFFMOGGER_GIT_INDEX_LOCK_WAIT_SECONDS"] = old_wait
+                        if old_retry is None:
+                            os.environ.pop("DIFFMOGGER_GIT_INDEX_LOCK_RETRY_SECONDS", None)
+                        else:
+                            os.environ["DIFFMOGGER_GIT_INDEX_LOCK_RETRY_SECONDS"] = old_retry
+
+                    self.assertEqual(1, exit_code)
+                    self.assertTrue(lock.exists())
+                    output = stderr.getvalue()
+                    self.assertIn("INTEGRATOR_GIT_INDEX_LOCK_BLOCKED", output)
+                    self.assertIn(str(lock), output)
+                    self.assertIn("Manual action:", output)
+                    manifest_path = target / "target" / "automation_queue" / "integrator" / "run-lock" / "manifest.json"
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    self.assertEqual("failed", manifest["status"])
+                    self.assertIn(str(lock), manifest["deferral_detail"])
+                    self.assertIn("Manual action:", manifest["deferral_detail"])
+
+    def test_integrator_recovers_stale_lock_while_applying_patch(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target)
+                    self.add_committed_file(target, "src/app.txt", "old\n")
+                    base_commit = module.head(target)
+                    patch = target / "target" / "automation_queue" / "builder" / "run-stale" / "changes.patch"
+                    manifest_path = patch.parent / "manifest.json"
+                    patch.parent.mkdir(parents=True, exist_ok=True)
+                    self.write_patch_for_file(target, "src/app.txt", "new\n", patch)
+                    manifest_path.write_text(
+                        json.dumps(
+                            {
+                                "role": "builder",
+                                "run_id": "run-stale",
+                                "base_commit": base_commit,
+                                "head_before_integration": None,
+                                "status": "queued",
+                                "patch_path": str(patch),
+                                "changed_files": ["src/app.txt"],
+                                "checks_run": [],
+                                "summary": (
+                                    "Commit type: fix\n"
+                                    "Commit scope: app\n"
+                                    "Commit subject: update app fixture\n"
+                                ),
+                                "created_at": "2026-05-04T00:00:00+00:00",
+                                "integrated_at": None,
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    lock = self.make_lock(target, age_seconds=300)
+
+                    exit_code = module.integrate(target, "integrator-stale", dry_run=False)
+
+                    self.assertEqual(0, exit_code)
+                    self.assertFalse(lock.exists())
+                    self.assertEqual("new\n", (target / "src/app.txt").read_text(encoding="utf-8"))
+                    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    self.assertEqual("applied", saved["status"])
+                    self.assertTrue(saved["accepted_commit"])
 
 
 if __name__ == "__main__":
