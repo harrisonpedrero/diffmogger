@@ -838,7 +838,6 @@ for marker in [
 
 readme = Path("README.md").read_text(encoding="utf-8")
 for marker in [
-    "# Diffmogger",
     "A Markdown-first operating system for recurring AI coding agents.",
     "## Who This Is For",
     "## Core Idea",
