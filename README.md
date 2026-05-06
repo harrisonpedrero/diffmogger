@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/diffmogger-logo-cropped.png" alt="Diffmogger" width="720">
+</p>
+
 # Diffmogger
 
 A Markdown-first operating system for recurring AI coding agents.
@@ -6,7 +10,7 @@ It can run as a single scheduled lane or as a continuous conveyor that dispatche
 
 Diffmogger is for solo and small-team projects that want recurring Codex automation to compound instead of restarting from scratch. It externalizes agent state into repo-local Markdown so single-lane scheduled runs or conveyor-dispatched role lanes can preserve context, verify their own work, ask for human unlocks asynchronously, and keep moving around blockers.
 
-It is different from a pile of prompt files or a basic scheduled agent run because it includes the operating plumbing around the agent: task state, guardrails, inbox/outbox files, archives, lock files, conveyor state, role queues, worker reports, validation markers, observatory/dashboard review surfaces, ticket-run helpers, and an optional local human bridge. The goal is not enterprise autonomy infrastructure. Diffmogger is alpha, local-first, git-diffable workflow scaffolding for ambitious personal and small-team engineering work.
+It is different from a pile of prompt files or a basic scheduled agent run because it includes the operating plumbing around the agent: task state, guardrails, inbox/outbox files, archives, lock files, conveyor state, role queues, worker reports, validation markers, native review surfaces, ticket-run helpers, and an optional local human bridge. The goal is not enterprise autonomy infrastructure. Diffmogger is alpha, local-first, git-diffable workflow scaffolding for ambitious personal and small-team engineering work.
 
 Model/runtime note: Diffmogger was designed and tested with Codex running GPT-5.5. Other Codex models or non-Codex agent runtimes may work, but they have not been validated and may require prompt or workflow tuning. The templates are intentionally local-first and text-based so they can be adapted over time.
 
@@ -86,7 +90,7 @@ The design choices that matter are:
 - The run lifecycle is explicit: acquire a lock, read state, choose a sprint-sized milestone or conveyor lane, decide whether workers are useful, implement, verify, update artifacts, rewrite state, and leave a clear continuation point.
 - Worker parallelism is bounded: read-only worker reports are the default, while write-capable workers require explicit intake opt-in, reviewable ownership, lightweight coordination, and main-agent integration.
 - Multi-role automation is opt-in and local-only: the conveyor or fixed schedules dispatch planner, builder, hardener, and integrator lanes; role work happens in isolated git worktrees, the integrator owns the main checkout, and no generated role may push, fetch, pull, or configure remotes.
-- Conveyor state is inspectable: `target/automation_conveyor_state.json`, the dashboard, and the observatory show the active role, queued or deferred patches, recent outcomes, signal nudges, baseline verification state, and the likely next lane.
+- Conveyor state is inspectable: `target/automation_conveyor_state.json`, the native dashboard, and review exports show the active role, queued or deferred patches, recent outcomes, signal nudges, baseline verification state, and the likely next lane.
 - Ticket campaigns give bounded runs a finish line: `docs/TICKET_RUN.md` is the local source of truth, completion requires evidence, and terminal completion or blockage produces a local report instead of inventing new roadmap work.
 - Decoupled human bridge behavior is asynchronous and operationalized. File-only queues work without credentials, while the optional notifier keeps Discord credentials and local desktop delivery in a separate service and forces delivery failures to be recorded instead of hand-waved.
 - Explicit failure modes are part of the contract. `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP` let the automation keep working around partial blockers while still making hard stops visible.
@@ -133,7 +137,8 @@ These are observations from private repositories that ran on Diffmogger. They ar
 - lock scripts: `scripts/acquire_codex_lock.sh`, `scripts/release_codex_lock.sh`
 - scheduled-run wrapper template: `scripts/run_codex_automation.sh`
 - continuous conveyor wrapper: `scripts/run_conveyor_automation.sh`, `scripts/run_conveyor_automation.py`
-- local observatory page: `scripts/run_observatory.py`
+- automation review export: `scripts/export_automation_review.py`
+- export-only observatory compatibility shim: `scripts/run_observatory.py`
 - managed browser runtime helper: `scripts/diffmogger_browser.py`
 - bounded ticket-campaign helper: `scripts/ticket_run.py`
 - local environment repair helper: `scripts/repair_environment.py`
@@ -157,12 +162,12 @@ examples/                     Example intake briefs.
 schemas/                      Reference JSON Schemas.
 scripts/                      Validation, scaffolding, lock, worker, and compaction helpers.
 services/agentic-notifier/    Reusable Discord and local desktop notification bridge.
-services/agentic-dashboard/   Standalone local configuration wizard and dashboard.
+services/agentic-dashboard/   Unified native Tauri dashboard.
 ```
 
 ## Quickstart
 
-The dashboard is the easiest path for a fresh project or an existing-project integration. It launches as a native local window, checks prerequisites, walks through project configuration, scaffolds target files, and starts the first Codex bootstrap run.
+The dashboard is the easiest path for a fresh project or an existing-project integration. It launches as a native Tauri window, checks prerequisites, walks through project configuration, scaffolds target files, and starts the first Codex bootstrap run.
 
 ```bash
 git clone https://github.com/harrisonpedrero/diffmogger.git Diffmogger
@@ -184,16 +189,16 @@ In the dashboard:
 After bootstrap or before a demo, use one local review path instead of hunting through separate files:
 
 1. From the Diffmogger starter-kit source, run `bash scripts/validate_starter_kit.sh`.
-2. Launch `python3 scripts/run_dashboard.py`, open the target, and use Monitor tab **Run Safety Check**.
-3. Click **Export Review Bundle** or, from the repo being reviewed, run `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
-4. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
-5. Review the first-review readiness, safety status, validation state, active role or queue, known issues, next sprint recommendation, and next-run worker strategy in the observatory, Markdown export, or dashboard **Worker Strategy Controls** panel.
+2. Launch `python3 scripts/run_dashboard.py`, open the target, and run **Safety Check**.
+3. Click **Export Review** or, from the repo being reviewed, run `python3 scripts/export_automation_review.py --target . --review-dir /tmp/Diffmogger-review`.
+4. Inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md` and `/tmp/Diffmogger-review/Diffmogger-review-state.json`.
+5. Review first-review readiness, safety status, validation state, active role or queue, known issues, next sprint recommendation, and next-run worker strategy in the native Observatory view.
 
 The generated target includes local runtime scripts under `scripts/`. After the first bootstrap produces a runnable baseline, use the target repo's own `scripts/run_codex_automation.sh` for single-lane recurring Codex automation. If the intake enables continuous conveyor or multi-role mode, use dashboard scheduling or `scripts/run_conveyor_automation.sh` so the next lane is chosen from local state.
 
 The dashboard records **Run Safety Check** results in the selected target's gitignored
 `target/integration_safety_check.json`; the exported review bundle reads that marker so the
-Markdown and HTML review reflect the safety check you just ran.
+Markdown and JSON review reflect the safety check you just ran.
 
 For the manual CLI path, see `docs/FRESH_PROJECT_SETUP.md`.
 
@@ -203,7 +208,7 @@ For dashboard details, see `docs/DASHBOARD.md`.
 
 ## Dashboard
 
-The standalone dashboard is the primary setup flow for fresh projects and existing-project integrations, and a convenience layer over the same Markdown-first scaffold contract.
+The native Tauri dashboard is the primary setup flow for fresh projects and existing-project integrations, and a convenience layer over the same Markdown-first scaffold contract.
 
 It supports:
 
@@ -214,15 +219,15 @@ It supports:
 - optional automation signals for recurring local review nudges
 - optional multi-role automation mode with fixed role-specific launchd jobs, continuous conveyor scheduling, and local-only git guards
 - optional Context7 and Playwright MCP checkboxes with advisory prerequisites and role-scoped generated config
-- optional local observatory launch and Markdown self-review export for active signal nudges, conveyor state, active role runs, queued patches, validation state, the latest recorded integration-safety result, and recent automation timeline
-- a Monitor tab **Run Safety Check** action that runs `scripts/check_integration_safety.py` and shows the local result in the dashboard log
-- **Worker Strategy Controls** that mirror the observatory's next-run recommendation, can launch a bounded read-only report, explicitly owned write worker, or local integrator lane when appropriate, and load the latest consolidated worker summary
+- native Observatory panels and Markdown/JSON self-review export for active signal nudges, conveyor state, active role runs, queued patches, validation state, the latest recorded integration-safety result, and recent automation timeline
+- a **Safety Check** action that runs `scripts/check_integration_safety.py` and shows the local result in the dashboard log
+- worker strategy controls that mirror the snapshot's next-run recommendation, can launch a bounded read-only report, explicitly owned write worker, or local integrator lane when appropriate, and load the latest consolidated worker summary
 - optional context-file import into target `docs/context/`
 - generated `docs/PROJECT_CONTEXT.md`
 - a single `Scaffold & Bootstrap` pipeline
 - gated `Start Scheduled Automation` and `Pause Scheduled Automation` launchd controls after bootstrap completes
 - `Open Diffmogger Project` for reopening a target with existing dashboard state or launchd automation
-- prerequisite checks for Python, Tkinter, Codex CLI, shell tools, permissions, optional notifier health, and optional ticket-completion desktop notifications
+- prerequisite checks for Python, Node/npm, Rust/Cargo, Codex CLI, shell tools, permissions, optional notifier health, and optional ticket-completion desktop notifications
 - a compact automation monitor for selected Markdown files
 - file-only messages to the next automation run when notifier delivery is disabled or unavailable
 
@@ -254,7 +259,7 @@ python3 scripts/check_required_files.py /tmp/Diffmogger-smoke
 python3 scripts/check_integration_safety.py
 ```
 
-The same integration-safety verifier is also available in the dashboard Monitor tab through **Run Safety Check**. The observatory and Markdown self-review export surface the latest recorded integration-safety result from task-state checks.
+The same integration-safety verifier is also available in the dashboard through **Safety Check**. The native Observatory and Markdown/JSON self-review export surface the latest recorded integration-safety result from task-state checks.
 
 Run notifier tests:
 
@@ -356,7 +361,7 @@ Generated targets then receive role prompts under `.agentic/roles/`, helper scri
 
 Planner, builder, and hardener start from the latest main `HEAD` in isolated worktrees and queue patches. The integrator owns the main checkout, checkpoints dirty local changes as automation-authored local commits, runs `git apply --check`, batches verification, falls back to individual verification on failure, commits accepted patches locally, and updates task/progress docs.
 
-Alternatively, continuous conveyor scheduling writes one LaunchAgent that runs `scripts/run_conveyor_automation.sh`, records state under `target/automation_conveyor_state.json`, and chooses the next runnable lane as soon as the previous lane exits. It requires an initialized git repo with an initial commit, then prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state includes the active role run and a small future decision queue; `scripts/run_observatory.py` also reads `target/automation_signals.json` so the dashboard-launched observatory can show what is running now, what signal nudges are due, and what is likely next. Use `python3 scripts/list_deferred_patches.py . --markdown` for a grouped local triage view of deferred queue manifests, or add `--decision-template` for a per-manifest worksheet during integrator cleanup.
+Alternatively, continuous conveyor scheduling writes one LaunchAgent that runs `scripts/run_conveyor_automation.sh`, records state under `target/automation_conveyor_state.json`, and chooses the next runnable lane as soon as the previous lane exits. It requires an initialized git repo with an initial commit, then prioritizes queued integration first, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state includes the active role run and a small future decision queue; the native Observatory reads the same local state plus `target/automation_signals.json` so the dashboard can show what is running now, what signal nudges are due, and what is likely next. Use `python3 scripts/list_deferred_patches.py . --markdown` for a grouped local triage view of deferred queue manifests, or add `--decision-template` for a per-manifest worksheet during integrator cleanup.
 
 For bounded startup-ticket runs, set `automation_run_mode` to `ticket_campaign` in the target intake or enable Ticket Campaign mode in the dashboard. The generated `docs/TICKET_RUN.md` becomes the local source of truth, and `scripts/ticket_run.py` writes a completion report plus a native desktop notification or durable fallback state when every ticket is done or terminally blocked. Diffmogger still creates local commits only; pushing or opening a PR remains a manual review step.
 
@@ -503,7 +508,7 @@ The script preserves unresolved human requests and deferred multi-role manifests
 - better state compaction
 - example target projects
 - richer case studies
-- richer dashboard and observatory controls for live automation state
+- richer native dashboard controls for live automation state
 - more notifier channels beyond the current Discord and local desktop paths
 
 ## Example Validation
