@@ -7,13 +7,13 @@ Signals do not override guardrails, task state, human requests, or role judgment
 Runtime state is written to:
 
 ```text
-target/automation_signals.json
+.diffmogger/runtime/automation_signals.json
 ```
 
 Roles can mark a signal handled with:
 
 ```bash
-python3 scripts/update_automation_signals.py . --complete <signal-id> --role <role> --note "What was done or why it was enough."
+python3 .diffmogger/scripts/update_automation_signals.py . --complete <signal-id> --role <role> --note "What was done or why it was enough."
 ```
 
 ## Signal Definitions

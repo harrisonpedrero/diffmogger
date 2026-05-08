@@ -40,6 +40,7 @@ docs/CODEX_AUTOMATION_GUARDRAILS.md
 ## Verification
 
 Full-suite commands are configured in `.agentic/verification_commands.txt`.
+Every command in that file must pass on the current checkout. Do not add desired future commands there until the backing scripts, packages, services, or Make targets exist.
 Use them for hardener/finalization or when explicitly required; builder/planner patches may use narrower checks from `.agentic/smoke_commands.txt` or the role manifest.
 The integrator records clean-HEAD baseline verification in `target/baseline_verification.json`; unrelated focused patches should not be rejected solely because that baseline is already failing.
 Hardener may add, rewrite, broaden, or remove obsolete tests when it improves verification quality, but must include `Test change rationale:` when touching tests and must not delete tests merely to pass checks.

@@ -26,7 +26,7 @@ Continuous conveyor:
 One local dispatcher chooses the next runnable lane as soon as the previous lane exits.
 ```
 
-Good when you want work-conserving local automation instead of exact role times after the target has an initial git commit. The conveyor prioritizes queued integration first, clean-HEAD baseline verification preflight or repair routing when needed, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It records state in `target/automation_conveyor_state.json`, including the active role run and next decision queue, and uses `target/automation_conveyor.lock` so only one dispatcher runs.
+Good when you want work-conserving local automation instead of exact role times after the target has an initial git commit. The conveyor prioritizes queued integration first, clean-HEAD baseline verification preflight or repair routing when needed, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. It records state in `.diffmogger/runtime/automation_conveyor_state.json`, including the active role run and next decision queue, and uses `.diffmogger/runtime/automation_conveyor.lock` so only one dispatcher runs.
 
 45 minutes:
 
@@ -49,28 +49,28 @@ Use only with a lock file and short, reliable run boundaries. The dashboard acce
 Recommended path:
 
 ```text
-target/codex_automation.lock
+.diffmogger/runtime/codex_automation.lock
 ```
 
 Generated target projects include a local wrapper:
 
 ```bash
-bash scripts/run_codex_automation.sh
+bash .diffmogger/scripts/run_codex_automation.sh
 ```
 
-The wrapper sets `CODEX_RUN_ID`, sets `CODEX_LOCK_PATH`, acquires the lock with local `scripts/acquire_codex_lock.sh`, exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, runs `codex exec --full-auto --skip-git-repo-check`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock with local `scripts/release_codex_lock.sh` when the run exits.
+The wrapper sets `CODEX_RUN_ID`, sets `CODEX_LOCK_PATH`, acquires the lock with local `.diffmogger/scripts/acquire_codex_lock.sh`, exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, runs `codex exec --full-auto --skip-git-repo-check` through `.diffmogger/scripts/run_process_watchdog.py`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock with local `.diffmogger/scripts/release_codex_lock.sh` when the run exits. The watchdog defaults to a 90-minute hard timeout; override with `CODEX_ROLE_TIMEOUT_SECONDS` and tune shutdown grace with `CODEX_ROLE_TERMINATION_GRACE_SECONDS`.
 
-If a scheduler runs from another directory, call the absolute path to the target project's `scripts/run_codex_automation.sh` or set `TARGET=/absolute/path/to/target-project`.
+If a scheduler runs from another directory, call the absolute path to the target project's `.diffmogger/scripts/run_codex_automation.sh` or set `TARGET=/absolute/path/to/target-project`.
 
 Generated targets also include an optional conveyor wrapper:
 
 ```bash
-bash scripts/run_conveyor_automation.sh --dry-run
-bash scripts/run_conveyor_automation.sh --once
-python3 scripts/run_observatory.py --open
+bash .diffmogger/scripts/run_conveyor_automation.sh --dry-run
+bash .diffmogger/scripts/run_conveyor_automation.sh --once
+python3 .diffmogger/scripts/run_observatory.py --open
 ```
 
-When multi-role files are present, the conveyor invokes `scripts/run_role_automation.sh --role <role>`. Without multi-role files, it falls back to `scripts/run_codex_automation.sh`.
+When multi-role files are present, the conveyor invokes `.diffmogger/scripts/run_role_automation.sh --role <role>`. Without multi-role files, it falls back to `.diffmogger/scripts/run_codex_automation.sh`. On restart, the conveyor clears orphaned active role state and terminates over-time active role process groups before choosing the next lane.
 
 ## Dashboard LaunchAgent Controls
 
@@ -96,7 +96,7 @@ com.diffmogger.automation.<target-name>.<hash>.hardener
 com.diffmogger.automation.<target-name>.<hash>.integrator
 ```
 
-Those jobs use `StartCalendarInterval`, not `StartInterval`, and point at `scripts/run_role_automation.sh --role <role>`.
+Those jobs use `StartCalendarInterval`, not `StartInterval`, and point at `.diffmogger/scripts/run_role_automation.sh --role <role>`.
 
 Continuous conveyor jobs use one LaunchAgent:
 
@@ -104,17 +104,17 @@ Continuous conveyor jobs use one LaunchAgent:
 com.diffmogger.automation.<target-name>.<hash>.conveyor
 ```
 
-The job points at `scripts/run_conveyor_automation.sh`, sets `RunAtLoad`, and does not use `StartInterval` or `StartCalendarInterval` because the dispatcher stays running until paused, removed, blocked, or stopped by a critical status.
+The job points at `.diffmogger/scripts/run_conveyor_automation.sh`, sets `RunAtLoad`, and does not use `StartInterval` or `StartCalendarInterval` because the dispatcher stays running until paused, removed, blocked, or stopped by a critical status.
 
-In `ticket_campaign` mode, normal runs use `scripts/ticket_run.py . next --json` to select one dependency-ready ticket per run. The conveyor also exits when `scripts/ticket_run.py` determines that every ticket in `docs/TICKET_RUN.md` is done with evidence or that all remaining tickets are blocked. It finalizes the local report and sends a native desktop notification, or records a durable fallback in `docs/HUMAN_OUTBOX.md`, before stopping.
+In `ticket_campaign` mode, normal runs use `.diffmogger/scripts/ticket_run.py . next --json` to select one dependency-ready ticket per run. The conveyor also exits when `.diffmogger/scripts/ticket_run.py` determines that every ticket in `.diffmogger/state/TICKET_RUN.md` is done with evidence or that all remaining tickets are blocked. It finalizes the local report and sends a native desktop notification, or records a durable fallback in `.diffmogger/state/HUMAN_OUTBOX.md`, before stopping.
 
 Logs are written under the target repo:
 
 ```text
-target/automation_logs/stdout.log
-target/automation_logs/stderr.log
-target/automation_logs/<role>.stdout.log
-target/automation_logs/<role>.stderr.log
+.diffmogger/runtime/automation_logs/stdout.log
+.diffmogger/runtime/automation_logs/stderr.log
+.diffmogger/runtime/automation_logs/<role>.stdout.log
+.diffmogger/runtime/automation_logs/<role>.stderr.log
 ```
 
 The lock includes:
@@ -126,7 +126,7 @@ The lock includes:
 - host
 - command/context
 
-Target-local `scripts/acquire_codex_lock.sh` fails cleanly when an active lock exists. It removes stale locks after `CODEX_LOCK_STALE_SECONDS` seconds, defaulting to 4 hours. `scripts/release_codex_lock.sh` prefers a matching `CODEX_RUN_ID` before releasing.
+Target-local `.diffmogger/scripts/acquire_codex_lock.sh` fails cleanly when an active lock exists. It removes stale locks after `CODEX_LOCK_STALE_SECONDS` seconds, defaulting to 4 hours. `.diffmogger/scripts/release_codex_lock.sh` prefers a matching `CODEX_RUN_ID` before releasing.
 
 The automation prompt should not acquire or release a second lock when `CODEX_LOCK_ALREADY_ACQUIRED=true`; the wrapper owns the lock for scheduled runs.
 

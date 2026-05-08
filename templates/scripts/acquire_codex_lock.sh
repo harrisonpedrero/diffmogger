@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/acquire_codex_lock.sh [context...]
+Usage: .diffmogger/scripts/acquire_codex_lock.sh [context...]
 
 Acquire a local Codex automation lock.
 

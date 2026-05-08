@@ -10,9 +10,16 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from diffmogger_paths import target_path
 
 
 WORKER_GLOB = "worker_*.md"
@@ -35,7 +42,7 @@ class WorkerReport:
 
 
 def latest_run_id(target: Path) -> str:
-    runs_dir = target / "target" / "agent_runs"
+    runs_dir = target_path(target, "target/agent_runs")
     candidates = [path for path in runs_dir.iterdir() if path.is_dir()] if runs_dir.exists() else []
     if not candidates:
         raise SystemExit(f"No worker run directories found under {runs_dir}")
@@ -96,7 +103,7 @@ def summarize_report(path: Path) -> WorkerReport:
 
 
 def build_summary(target: Path, run_id: str) -> tuple[Path, str]:
-    run_dir = target / "target" / "agent_runs" / run_id
+    run_dir = target_path(target, "target/agent_runs") / run_id
     reports = sorted(
         path for path in run_dir.glob(WORKER_GLOB) if path.name != "worker_summary.md"
     )

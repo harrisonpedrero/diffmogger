@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/spawn_worker_agent.sh [options]
+Usage: .diffmogger/scripts/spawn_worker_agent.sh [options]
 
 Spawn one bounded Codex CLI worker report. The default mode is read-only review:
 the worker may only write its assigned report under target/agent_runs/<run_id>/.
@@ -174,7 +174,7 @@ Rules:
 - Do not touch unrelated files.
 - Do not revert unrelated edits or changes made by other agents or humans.
 - Adjust your implementation to documented contracts and outputs from other workers when visible.
-- Follow the target project's environment-access policy. Never print, copy, store, or commit secret values.
+- {{WORKER_ENV_ACCESS_RULE}}
 - Do not use network.
 - Do not send Discord, notifier, email, or other external messages.
 - Do not spawn subagents, do not call codex exec, and do not call spawn_worker_agent.sh.
@@ -209,7 +209,7 @@ Output report: $output_path
 Rules:
 - Read the target project and produce the assigned report.
 - Do not modify source files or docs except for the output report path above.
-- Follow the target project's environment-access policy. Never print, copy, store, or commit secret values.
+- {{WORKER_ENV_ACCESS_RULE}}
 - Do not use network.
 - Do not send Discord, notifier, email, or other external messages.
 - Do not spawn subagents, do not call codex exec, and do not call spawn_worker_agent.sh.

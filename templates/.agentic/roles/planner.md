@@ -64,5 +64,5 @@ Do not mutate the main checkout directly.
 If you handle an automation signal, run:
 
 ```bash
-python3 scripts/update_automation_signals.py . --complete <signal-id> --role planner --note "Brief outcome."
+python3 .diffmogger/scripts/update_automation_signals.py . --complete <signal-id> --role planner --note "Brief outcome."
 ```

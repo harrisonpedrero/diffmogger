@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from diffmogger_paths import existing_or_target_path, target_path, target_rel
+
 
 ROLES = ("planner", "builder", "hardener", "integrator")
 QUEUE_STATUSES = ("queued", "deferred", "applied", "failed", "skipped", "superseded")
@@ -96,6 +102,14 @@ def read_json(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def dpath(target: Path, legacy_rel: str | Path) -> Path:
+    return existing_or_target_path(target, legacy_rel)
+
+
+def runtime_path(target: Path, legacy_rel: str | Path) -> Path:
+    return target_path(target, legacy_rel)
 
 
 def read_tail_text(path: Path, max_bytes: int = 40_000) -> str:
@@ -239,7 +253,7 @@ def validation_snapshot(text: str) -> dict[str, Any]:
 
 
 def integration_safety_record_snapshot(target: Path) -> dict[str, Any]:
-    record = read_json(target / INTEGRATION_SAFETY_RECORD_RELATIVE)
+    record = read_json(dpath(target, INTEGRATION_SAFETY_RECORD_RELATIVE))
     if not record:
         return {}
 
@@ -354,7 +368,7 @@ def count_concrete_records_with_status(
 
 
 def parse_task_state(target: Path) -> dict[str, Any]:
-    text = read_text(target / "docs" / "CODEX_AUTOMATION_TASKS.md")
+    text = read_text(dpath(target, "docs/CODEX_AUTOMATION_TASKS.md"))
     status = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", text, re.MULTILINE)
     updated = re.search(r"^Last updated:\s*(.+)", text, re.MULTILINE)
     horizon = re.search(r"^-\s*Current horizon:\s*(.+)", text, re.MULTILINE)
@@ -508,7 +522,7 @@ def first_review_snapshot(target: Path, task: dict[str, Any]) -> dict[str, Any]:
 
 
 def queue_snapshot(target: Path) -> dict[str, Any]:
-    queue_root = target / "target" / "automation_queue"
+    queue_root = runtime_path(target, "target/automation_queue")
     counts: dict[str, dict[str, int]] = {
         role: {status: 0 for status in QUEUE_STATUSES} for role in ROLES
     }
@@ -564,7 +578,7 @@ def queue_snapshot(target: Path) -> dict[str, Any]:
 
 
 def baseline_verification_snapshot(target: Path) -> dict[str, Any]:
-    record = read_json(target / "target" / "baseline_verification.json")
+    record = read_json(runtime_path(target, "target/baseline_verification.json"))
     if not record:
         return {
             "status": "not_recorded",
@@ -606,6 +620,8 @@ def describe_path(path: str) -> str:
         return "observatory/review logic"
     if path.endswith("run_conveyor_automation.py"):
         return "conveyor scheduler"
+    if path.endswith("run_process_watchdog.py"):
+        return "process watchdog"
     if path.endswith("run_role_automation.sh"):
         return "role runner"
     if path.endswith("integrate_role_outputs.py"):
@@ -686,6 +702,8 @@ def commit_summary_from_files(subject: str, files: list[dict[str, Any]]) -> str:
         return "Dashboard controls or status surfaces changed."
     if "run_role_automation.sh" in joined and "integrate_role_outputs.py" in joined:
         return "Runtime-state handoff changed so ignored automation state reaches main."
+    if "run_process_watchdog.py" in joined:
+        return "Watchdog recovery changed for stuck automation subprocesses."
     if "run_observatory.py" in joined and "test_run_observatory.py" in joined:
         return "Observatory reporting changed, with matching regression tests."
     if "run_conveyor_automation.py" in joined and "test_run_conveyor_automation.py" in joined:
@@ -758,7 +776,7 @@ def git_snapshot(target: Path) -> dict[str, Any]:
 
 
 def log_snapshot(target: Path) -> list[dict[str, Any]]:
-    log_dir = target / "target" / "automation_logs"
+    log_dir = runtime_path(target, "target/automation_logs")
     if not log_dir.exists():
         return []
     files = sorted(
@@ -781,7 +799,7 @@ def log_snapshot(target: Path) -> list[dict[str, Any]]:
 
 
 def signals_snapshot(target: Path) -> dict[str, Any]:
-    data = read_json(target / "target" / "automation_signals.json")
+    data = read_json(runtime_path(target, "target/automation_signals.json"))
     raw_signals = data.get("signals") if isinstance(data.get("signals"), list) else []
     priority_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     active: list[dict[str, Any]] = []
@@ -1354,7 +1372,7 @@ def merge_recommendation_history(current: dict[str, Any], stored: list[dict[str,
 
 
 def load_recommendation_history(target: Path) -> list[dict[str, Any]]:
-    data = read_json(target / ACTION_PLAN_HISTORY_RELATIVE)
+    data = read_json(runtime_path(target, ACTION_PLAN_HISTORY_RELATIVE))
     raw_records = data.get("records") if isinstance(data.get("records"), list) else []
     records = [normalize_recommendation_history_record(item) for item in raw_records]
     return [item for item in records if item][:MAX_RECOMMENDATION_HISTORY]
@@ -1391,7 +1409,7 @@ def recommendation_history_snapshot(
     current = recommendation_history_record(generated_at, follow_through, conveyor)
     records = merge_recommendation_history(current, load_recommendation_history(target))
     return {
-        "storage_path": ACTION_PLAN_HISTORY_RELATIVE.as_posix(),
+        "storage_path": target_rel(target, ACTION_PLAN_HISTORY_RELATIVE.as_posix()),
         "summary": recommendation_history_summary(records),
         "records": records,
     }
@@ -1404,7 +1422,7 @@ def persist_recommendation_history(target: Path, snapshot: dict[str, Any]) -> di
         for item in list(history.get("records") or [])
     ]
     records = [item for item in records if item][:MAX_RECOMMENDATION_HISTORY]
-    path = target / ACTION_PLAN_HISTORY_RELATIVE
+    path = runtime_path(target, ACTION_PLAN_HISTORY_RELATIVE)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 1,
@@ -1413,7 +1431,7 @@ def persist_recommendation_history(target: Path, snapshot: dict[str, Any]) -> di
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     snapshot["recommendation_history"] = {
-        "storage_path": ACTION_PLAN_HISTORY_RELATIVE.as_posix(),
+        "storage_path": target_rel(target, ACTION_PLAN_HISTORY_RELATIVE.as_posix()),
         "summary": recommendation_history_summary(records),
         "records": records,
     }
@@ -1942,24 +1960,24 @@ def self_review_snapshot(
 def build_snapshot(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     generated_at = utc_now()
-    conveyor = read_json(target / "target" / "automation_conveyor_state.json")
+    conveyor = read_json(runtime_path(target, "target/automation_conveyor_state.json"))
     queue = queue_snapshot(target)
     baseline_verification = baseline_verification_snapshot(target)
     task = parse_task_state(target)
-    progress_text = read_text(target / "docs" / "MULTI_ROLE_PROGRESS.md", limit=40_000)
+    progress_text = read_text(dpath(target, "docs/MULTI_ROLE_PROGRESS.md"), limit=40_000)
     progress = progress_snapshot(progress_text)
     human = {
         "pending_requests": count_concrete_records_with_status(
-            target / "docs" / "HUMAN_REQUESTS.md",
+            dpath(target, "docs/HUMAN_REQUESTS.md"),
             "HR",
             {"active", "awaiting_user"},
         ),
         "unhandled_inbox": count_concrete_records_with_status(
-            target / "docs" / "HUMAN_INBOX.md",
+            dpath(target, "docs/HUMAN_INBOX.md"),
             "INBOX",
             {"unhandled"},
         ),
-        "outbound_records": count_concrete_records(target / "docs" / "HUMAN_OUTBOX.md", "OUTBOX"),
+        "outbound_records": count_concrete_records(dpath(target, "docs/HUMAN_OUTBOX.md"), "OUTBOX"),
     }
     signals = signals_snapshot(target)
     conveyor_state = {
@@ -3577,7 +3595,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
         lines.append(
             f"- summary: {clean_text(recommendation_history.get('summary') or recommendation_history_summary(history_records), limit=500)}"
         )
-        storage_path = clean_text(recommendation_history.get("storage_path") or ACTION_PLAN_HISTORY_RELATIVE.as_posix(), limit=160)
+        storage_path = clean_text(recommendation_history.get("storage_path") or target_rel(target, ACTION_PLAN_HISTORY_RELATIVE.as_posix()), limit=160)
         lines.append(f"- history_file: `{storage_path}`")
         for record in history_records[:MAX_RECOMMENDATION_HISTORY]:
             recorded_at = clean_text(record.get("recorded_at") or "unknown", limit=80)

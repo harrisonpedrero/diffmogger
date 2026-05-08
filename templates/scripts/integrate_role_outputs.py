@@ -23,6 +23,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from diffmogger_paths import existing_or_target_path, load_manifest, manifest_list as manifest_path_list, sidecar_rel, target_path
+
 
 QUEUE_ROLES = ("planner", "builder", "hardener")
 ALL_ROLES = (*QUEUE_ROLES, "integrator")
@@ -89,7 +95,7 @@ RUNTIME_STATE_DENY_SUFFIXES = (
 )
 RUNTIME_STATE_MAX_BYTES = 1024 * 1024
 RUNTIME_STATE_BLOCKING_STATUSES = {"blocked", "conflict", "error", "rejected"}
-RUNTIME_STATE_VOLATILE_PATHS = {"target/automation_signals.json"}
+RUNTIME_STATE_VOLATILE_PATHS = {"target/automation_signals.json", sidecar_rel("target/automation_signals.json")}
 PROGRESS_SECTIONS = [
     "Project State At Last Integration",
     "Cumulative Metrics",
@@ -260,7 +266,15 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def project_intake(target: Path) -> dict[str, Any]:
-    return read_json(target / ".agentic" / "project_intake.json")
+    return read_json(existing_or_target_path(target, ".agentic/project_intake.json"))
+
+
+def dpath(target: Path, legacy_rel: str | Path) -> Path:
+    return existing_or_target_path(target, legacy_rel)
+
+
+def runtime_path(target: Path, legacy_rel: str | Path) -> Path:
+    return target_path(target, legacy_rel)
 
 
 def human_bridge_mode(target: Path) -> str:
@@ -720,6 +734,7 @@ def update_info_exclude(target: Path, *, dry_run: bool) -> None:
     if not exclude.is_absolute():
         exclude = target / exclude
     patterns = [
+        "/.diffmogger/",
         "/.agentic/",
         "/AGENTS.md",
         "/docs/AUTOMATION_SIGNALS.md",
@@ -751,6 +766,7 @@ def update_info_exclude(target: Path, *, dry_run: bool) -> None:
         "/scripts/run_conveyor_automation.py",
         "/scripts/run_conveyor_automation.sh",
         "/scripts/run_observatory.py",
+        "/scripts/run_process_watchdog.py",
         "/scripts/run_role_automation.sh",
         "/scripts/spawn_worker_agent.sh",
         "/scripts/summarize_worker_outputs.py",
@@ -771,6 +787,10 @@ def update_info_exclude(target: Path, *, dry_run: bool) -> None:
         "/target/ticket_run_reports/",
         "/.pnpm-store/",
     ]
+    manifest = load_manifest(target)
+    if manifest.get("layout") == "sidecar_v1":
+        for rel in manifest_path_list(manifest, "patch_exclude_paths"):
+            patterns.append("/" + rel.rstrip("/") + ("/" if rel.endswith("/") else ""))
     if dry_run:
         return
     exclude.parent.mkdir(parents=True, exist_ok=True)
@@ -793,8 +813,8 @@ def update_info_exclude(target: Path, *, dry_run: bool) -> None:
 def acquire_lock(target: Path, run_id: str, *, dry_run: bool) -> LockHandle | None:
     if dry_run:
         return None
-    lock_path = target / "target" / "codex_automation.lock"
-    acquire = target / "scripts" / "acquire_codex_lock.sh"
+    lock_path = runtime_path(target, "target/codex_automation.lock")
+    acquire = existing_or_target_path(target, "scripts/acquire_codex_lock.sh")
     env = os.environ.copy()
     env.update(
         {
@@ -824,7 +844,7 @@ def acquire_lock(target: Path, run_id: str, *, dry_run: bool) -> LockHandle | No
 def release_lock(target: Path, run_id: str, lock: LockHandle | None) -> None:
     if lock is None:
         return
-    release = target / "scripts" / "release_codex_lock.sh"
+    release = existing_or_target_path(target, "scripts/release_codex_lock.sh")
     env = os.environ.copy()
     env.update(
         {
@@ -845,7 +865,7 @@ def release_lock(target: Path, run_id: str, lock: LockHandle | None) -> None:
 
 
 def manifest_path_for(target: Path, role: str, run_id: str) -> Path:
-    return target / "target" / "automation_queue" / role / run_id / "manifest.json"
+    return runtime_path(target, "target/automation_queue") / role / run_id / "manifest.json"
 
 
 def read_manifest(path: Path) -> dict[str, Any]:
@@ -913,6 +933,16 @@ def runtime_state_path_allowed(target: Path, rel_text: str) -> tuple[bool, str]:
     ok, detail = runtime_state_path_safe(rel_text)
     if not ok:
         return False, detail
+    manifest = load_manifest(target)
+    if manifest.get("layout") == "sidecar_v1":
+        if rel_text.startswith(".diffmogger/scripts/"):
+            return False, "runtime-state path may not update Diffmogger helper scripts"
+        owned = set(manifest_path_list(manifest, "owned_paths"))
+        seed = set(manifest_path_list(manifest, "worktree_seed_paths"))
+        human = set(manifest_path_list(manifest, "human_state_paths"))
+        if rel_text in owned | seed | human and rel_text.startswith(".diffmogger/"):
+            return True, ""
+        return False, "runtime-state path is outside the sidecar manifest ownership set"
     if rel_text in RUNTIME_STATE_WHITELIST:
         return True, ""
     if not rel_text.startswith(RUNTIME_STATE_ALLOWED_PREFIXES):
@@ -1184,7 +1214,7 @@ def parse_created_at(manifest: dict[str, Any], fallback: float) -> float:
 
 
 def load_queued_manifests(target: Path) -> list[tuple[Path, dict[str, Any]]]:
-    queue_root = target / "target" / "automation_queue"
+    queue_root = runtime_path(target, "target/automation_queue")
     items: list[tuple[Path, dict[str, Any]]] = []
     for role in QUEUE_ROLES:
         role_root = queue_root / role
@@ -1202,7 +1232,7 @@ def load_queued_manifests(target: Path) -> list[tuple[Path, dict[str, Any]]]:
 
 
 def all_role_manifests(target: Path) -> list[tuple[Path, dict[str, Any]]]:
-    queue_root = target / "target" / "automation_queue"
+    queue_root = runtime_path(target, "target/automation_queue")
     items: list[tuple[Path, dict[str, Any]]] = []
     for role in ALL_ROLES:
         role_root = queue_root / role
@@ -1419,7 +1449,7 @@ def dedupe_commands(commands: list[str]) -> list[str]:
 
 
 def load_full_verification_commands(target: Path) -> list[str]:
-    return load_command_file(target / ".agentic" / "verification_commands.txt")
+    return load_command_file(dpath(target, ".agentic/verification_commands.txt"))
 
 
 def manifest_list(manifests: list[dict[str, Any]] | dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1495,7 +1525,7 @@ def parse_smoke_command_line(line: str, role: str, changed_files: list[str]) -> 
 
 
 def load_smoke_verification_commands(target: Path, manifests: list[dict[str, Any]]) -> list[str]:
-    lines = load_command_file(target / ".agentic" / "smoke_commands.txt")
+    lines = load_command_file(dpath(target, ".agentic/smoke_commands.txt"))
     if not lines or not manifests:
         return []
     commands: list[str] = []
@@ -1767,7 +1797,7 @@ def requirements_for_pytest_repair(target: Path) -> list[tuple[Path, Path]]:
         candidates.append((notifier_requirements, notifier_requirements.parent / ".venv"))
     root_requirements = target / "requirements.txt"
     if root_requirements.exists():
-        candidates.append((root_requirements, target / "target" / "automation_venvs" / "root"))
+        candidates.append((root_requirements, runtime_path(target, "target/automation_venvs") / "root"))
     services_dir = target / "services"
     if services_dir.exists():
         for requirements in sorted(services_dir.glob("*/requirements.txt")):
@@ -1941,11 +1971,11 @@ def run_verification(
 
 
 def baseline_verification_path(target: Path) -> Path:
-    return target / BASELINE_VERIFICATION_RELATIVE
+    return dpath(target, BASELINE_VERIFICATION_RELATIVE)
 
 
 def verification_config_hash(target: Path) -> str:
-    config = target / ".agentic" / "verification_commands.txt"
+    config = dpath(target, ".agentic/verification_commands.txt")
     if not config.exists() or not config.is_file() or config.is_symlink():
         return "missing"
     digest = file_sha256(config)
@@ -2254,7 +2284,7 @@ def commit_automation_state(target: Path, run_id: str, *, dry_run: bool) -> str 
         "docs/CODEX_AUTOMATION_TASKS.md",
         "docs/MULTI_ROLE_PROGRESS.md",
     ]
-    existing = [path for path in paths if (target / path).exists()]
+    existing = [dpath(target, path).relative_to(target).as_posix() for path in paths if dpath(target, path).exists()]
     if not existing:
         return None
     result = git(target, "add", *existing)
@@ -2295,6 +2325,9 @@ AUTOMATION_BOOKKEEPING_FILES = {
     "docs/CODEX_AUTOMATION_TASKS.md",
     "docs/MULTI_ROLE_PROGRESS.md",
     "target/automation_signals.json",
+    sidecar_rel("docs/CODEX_AUTOMATION_TASKS.md"),
+    sidecar_rel("docs/MULTI_ROLE_PROGRESS.md"),
+    sidecar_rel("target/automation_signals.json"),
 }
 CONVENTIONAL_SUBJECT_RE = re.compile(r"^(?P<type>[a-z]+)(?:\((?P<scope>[^)]+)\))?:\s+(?P<action>.+)$")
 
@@ -2430,7 +2463,12 @@ def semantic_commit_message(manifest: dict[str, Any], target: Path, patch_run_id
 
 
 def semantic_changed_files(changed_files: list[str]) -> list[str]:
-    meaningful = [path for path in changed_files if path not in AUTOMATION_BOOKKEEPING_FILES and not path.startswith("target/")]
+    meaningful = [
+        path
+        for path in changed_files
+        if path not in AUTOMATION_BOOKKEEPING_FILES
+        and not path.startswith(("target/", ".diffmogger/runtime/", ".diffmogger/state/", ".diffmogger/agentic/", ".diffmogger/scripts/"))
+    ]
     return meaningful or changed_files
 
 
@@ -2475,6 +2513,7 @@ def semantic_commit_scope(changed_files: list[str], role: str) -> str:
         ("run_observatory.py", "observatory"),
         ("run_conveyor_automation.py", "conveyor"),
         ("integrate_role_outputs.py", "integrator"),
+        ("run_process_watchdog.py", "watchdog"),
         ("run_role_automation.sh", "role-runner"),
         ("check_integration_safety.py", "safety"),
         ("check_required_files.py", "scaffold"),
@@ -3075,7 +3114,7 @@ def update_progress(
     cleanup_summary: list[str],
     dry_run: bool,
 ) -> None:
-    progress = target / "docs" / "MULTI_ROLE_PROGRESS.md"
+    progress = dpath(target, "docs/MULTI_ROLE_PROGRESS.md")
     if progress.exists():
         header, sections = split_h2_sections(progress.read_text(encoding="utf-8"))
     else:
@@ -3173,7 +3212,7 @@ def update_task_file(
     deferred_count: int,
     dry_run: bool,
 ) -> None:
-    task = target / "docs" / "CODEX_AUTOMATION_TASKS.md"
+    task = dpath(target, "docs/CODEX_AUTOMATION_TASKS.md")
     if not task.exists() or dry_run:
         return
     text = task.read_text(encoding="utf-8").rstrip()
@@ -3227,8 +3266,8 @@ def cleanup_artifacts(target: Path, *, dry_run: bool) -> list[str]:
     now = time.time()
     seven_days = 7 * 24 * 60 * 60
     thirty_days = 30 * 24 * 60 * 60
-    queue_root = target / "target" / "automation_queue"
-    worktree_root = target / "target" / "automation_worktrees"
+    queue_root = runtime_path(target, "target/automation_queue")
+    worktree_root = runtime_path(target, "target/automation_worktrees")
     summaries: list[str] = []
     deleted_queue = 0
     deleted_worktrees = 0
@@ -3281,7 +3320,7 @@ def cleanup_artifacts(target: Path, *, dry_run: bool) -> list[str]:
                         shutil.rmtree(worktree)
                 deleted_worktrees += 1
 
-    log_root = target / "target" / "automation_logs"
+    log_root = runtime_path(target, "target/automation_logs")
     if log_root.exists():
         for log_path in log_root.glob("*.log"):
             if now - log_path.stat().st_mtime < thirty_days:

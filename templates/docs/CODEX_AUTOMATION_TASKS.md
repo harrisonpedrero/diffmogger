@@ -48,6 +48,7 @@ Last updated: {{CREATED_AT}}
 
 - Not run yet. Bootstrap run should discover or create verification commands.
 - Full-suite config: `.agentic/verification_commands.txt`
+- Bootstrap-safe baseline commands: `{{BOOTSTRAP_BASELINE_COMMANDS_INLINE}}`
 - Preferred commands: `{{VERIFICATION_COMMANDS}}`
 
 ## Worker-Agent Activity
@@ -58,7 +59,7 @@ Last updated: {{CREATED_AT}}
 - Reason: Initial scaffold only; no sprint has run yet.
 - Workers used: none yet.
 - Worker outputs consumed: none yet.
-- Local helpers: `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` can write and consolidate reports under `target/agent_runs/<run_id>/`.
+- Local helpers: `.diffmogger/scripts/spawn_worker_agent.sh` and `.diffmogger/scripts/summarize_worker_outputs.py` can write and consolidate reports under `target/agent_runs/<run_id>/`.
 
 {{WRITE_WORKER_TASK_NOTES}}
 

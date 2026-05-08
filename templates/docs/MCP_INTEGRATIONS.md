@@ -15,7 +15,7 @@
 
 ```bash
 codex mcp list --json
-python3 scripts/diffmogger_browser.py doctor --launch
+python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch
 ```
 
 If an MCP server is missing, unauthenticated, timed out, or returns an error, continue with existing Diffmogger behavior and record the fallback only when it affects the sprint evidence.

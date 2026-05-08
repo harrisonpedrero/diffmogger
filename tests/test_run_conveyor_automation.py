@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -896,6 +898,110 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertIn("no-progress circuit breaker active after planner handoff", reason)
                     self.assertNotIn("builder deferred patch triaged", reason)
                     self.assertFalse(stop)
+
+    def test_stale_active_role_run_with_missing_pid_is_cleared(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    state = {
+                        "schema_version": 1,
+                        "history": [],
+                        "active_role_run": {
+                            "role": "builder",
+                            "run_id": "run-orphaned",
+                            "pid": 99999999,
+                            "started_at": "2026-05-04T00:00:00+00:00",
+                            "status": "running",
+                        },
+                    }
+
+                    recovery = module.recover_stale_active_role_run(
+                        target,
+                        state,
+                        timeout_seconds=1,
+                        grace_seconds=0,
+                    )
+
+                    self.assertIsNotNone(recovery)
+                    self.assertEqual("orphaned", recovery["status"])
+                    self.assertIsNone(state["active_role_run"])
+                    self.assertEqual("orphaned", state["last_active_role_run"]["status"])
+                    self.assertEqual(1, state["last_exit_code"])
+                    self.assertEqual("orphaned", state["history"][-1]["metadata"]["active_role_recovery"])
+
+    def test_over_age_active_role_run_is_killed_and_records_timeout_streak(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    proc = subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-c",
+                            (
+                                "import signal, time\n"
+                                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                                "time.sleep(60)\n"
+                            ),
+                        ],
+                        start_new_session=True,
+                    )
+                    old_started = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(timespec="seconds")
+                    state = {
+                        "schema_version": 1,
+                        "history": [],
+                        "active_role_run": {
+                            "role": "hardener",
+                            "run_id": "run-timeout",
+                            "pid": proc.pid,
+                            "started_at": old_started,
+                            "status": "running",
+                        },
+                    }
+                    try:
+                        recovery = module.recover_stale_active_role_run(
+                            target,
+                            state,
+                            timeout_seconds=1,
+                            grace_seconds=0,
+                        )
+                        proc.wait(timeout=5)
+                    finally:
+                        if proc.poll() is None:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                            proc.wait(timeout=5)
+
+                    self.assertIsNotNone(recovery)
+                    self.assertEqual("timed_out", recovery["status"])
+                    self.assertIsNone(state["active_role_run"])
+                    self.assertEqual("timed_out", state["last_active_role_run"]["status"])
+                    self.assertEqual(module.ROLE_TIMEOUT_EXIT_CODE, state["last_exit_code"])
+                    self.assertEqual(1, module.timeout_streak_count(state, "hardener"))
+                    self.assertEqual("timed_out", state["history"][-1]["metadata"]["active_role_recovery"])
+
+    def test_timeout_circuit_breaker_routes_repeated_role_timeout_to_planner(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                state = {
+                    "role_timeout_streaks": {
+                        "hardener": {"count": 2, "last_timed_out_at": "2026-05-04T00:00:00+00:00"}
+                    }
+                }
+
+                role, reason, stop = module.apply_timeout_circuit_breaker(
+                    state,
+                    "hardener",
+                    "candidate_done ticket needs hardener verification",
+                    False,
+                    threshold=2,
+                )
+
+                self.assertEqual("planner", role)
+                self.assertIn("hardener lane timed out 2 consecutive time(s)", reason)
+                self.assertFalse(stop)
 
 
 class GitHeadPreflightTests(unittest.TestCase):

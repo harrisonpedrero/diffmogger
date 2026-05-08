@@ -46,7 +46,7 @@ Use optional `depends_on` arrays to require another ticket ID to be `done` with
 evidence before this ticket can be selected. Normal campaign runs use:
 
 ```bash
-python3 scripts/ticket_run.py . next --json
+python3 .diffmogger/scripts/ticket_run.py . next --json
 ```
 
 That command preserves file order as the human priority order, while skipping

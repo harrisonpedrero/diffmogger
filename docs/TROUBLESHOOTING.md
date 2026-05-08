@@ -6,7 +6,7 @@ Strengthen sprint sizing. Make sure the automation prompt contains the required 
 
 ## Automation Drifts
 
-Rewrite `docs/CODEX_AUTOMATION_TASKS.md` around one best next milestone. Tighten scope boundaries in guardrails. Add a decision record if direction changed.
+Rewrite `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` around one best next milestone. Tighten scope boundaries in guardrails. Add a decision record if direction changed.
 
 ## Automation Writes Docs Instead Of Product
 
@@ -29,7 +29,7 @@ Require consolidation before final summary. Move stale worker reports out of the
 Use:
 
 ```bash
-python3 scripts/summarize_worker_outputs.py /absolute/path/to/target-project --run-id "$CODEX_RUN_ID"
+python3 .diffmogger/scripts/summarize_worker_outputs.py /absolute/path/to/target-project --run-id "$CODEX_RUN_ID"
 ```
 
 ## Browser Smoke Fails Before DevTools
@@ -37,9 +37,9 @@ python3 scripts/summarize_worker_outputs.py /absolute/path/to/target-project --r
 Prefer Diffmogger's managed browser runtime instead of system Chrome:
 
 ```bash
-python3 scripts/diffmogger_browser.py doctor --launch
-python3 scripts/diffmogger_browser.py install
-python3 scripts/diffmogger_browser.py env
+python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch
+python3 .diffmogger/scripts/diffmogger_browser.py install
+python3 .diffmogger/scripts/diffmogger_browser.py env
 ```
 
 The helper resolves `DIFFMOGGER_BROWSER_PATH`, `CHROME_PATH`, then the managed
@@ -86,7 +86,7 @@ codex exec --disable plugins \
 
 The bypass is for the nested child only. The scheduled parent remains the outer sandbox boundary.
 
-For existing target repos, update `scripts/run_codex_automation.sh` to add `$HOME/.codex` and update `scripts/spawn_worker_agent.sh` to use the nested-child command shape above. Then rerun the scheduled job. If worker startup still fails, record `Codex CLI worker decision: UNAVAILABLE` and continue the sprint with in-session or main-agent review.
+For existing target repos, update `.diffmogger/scripts/run_codex_automation.sh` to add `$HOME/.codex` and update `.diffmogger/scripts/spawn_worker_agent.sh` to use the nested-child command shape above. Then rerun the scheduled job. If worker startup still fails, record `Codex CLI worker decision: UNAVAILABLE` and continue the sprint with in-session or main-agent review.
 
 ## Discord Notifier Outbound Works But Inbound Does Not
 
@@ -111,15 +111,15 @@ Check the Discord bot token, channel ids, server invite, and bot permissions. Us
 
 Check that `python -m agentic_notifier.run_service` is running, `GET http://127.0.0.1:8765/health` succeeds, and the API is bound to loopback. If `LOCAL_NOTIFY_API_TOKEN` is set, include the bearer token.
 
-The target automation should not claim a message was sent if the API is unreachable. It should write the intended message to `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`.
+The target automation should not claim a message was sent if the API is unreachable. It should write the intended message to `.diffmogger/state/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`.
 
 ## Inbound Replies Are Written But Codex Keeps Re-reading Them
 
-The target automation owns inbox cleanup. It must remove handled entries from `docs/HUMAN_INBOX.md` only after the requested action is complete or intentionally deferred, then append concise notes to `docs/HUMAN_RESPONSES_ARCHIVE.md`.
+The target automation owns inbox cleanup. It must remove handled entries from `.diffmogger/state/HUMAN_INBOX.md` only after the requested action is complete or intentionally deferred, then append concise notes to `.diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md`.
 
 ## Human Asked For A Message But Got Only A File
 
-In file-only mode, this is expected: the automation should answer locally. In notifier modes, treat it as an automation-process bug. Update `.agentic/automation_prompt.md` so freeform inbox requests such as `send me a summary`, `message me the blocker`, `status update`, or `what have you done so far?` are handled through the notifier. If still relevant, send the concise outbound response and archive the handled inbox entry.
+In file-only mode, this is expected: the automation should answer locally. In notifier modes, treat it as an automation-process bug. Update `.diffmogger/agentic/automation_prompt.md` so freeform inbox requests such as `send me a summary`, `message me the blocker`, `status update`, or `what have you done so far?` are handled through the notifier. If still relevant, send the concise outbound response and archive the handled inbox entry.
 
 ## Codex Cannot Read Or Write Expected Files
 
@@ -139,13 +139,13 @@ Keep active files short. Archive handled inbox items and stale tasks. Put long h
 Review compaction before writing:
 
 ```bash
-python3 scripts/compact_agent_state.py --dry-run /absolute/path/to/target-project
+python3 .diffmogger/scripts/compact_agent_state.py --dry-run /absolute/path/to/target-project
 ```
 
 Then run without `--dry-run` only after confirming unresolved human requests remain active.
 
 ## Lock Will Not Release
 
-`scripts/release_codex_lock.sh` prefers a matching `CODEX_RUN_ID`. If release fails, inspect `target/codex_automation.lock` and confirm you are not removing another active run. Use `CODEX_LOCK_FORCE_RELEASE=true` only after review.
+`.diffmogger/scripts/release_codex_lock.sh` prefers a matching `CODEX_RUN_ID`. If release fails, inspect `.diffmogger/runtime/codex_automation.lock` and confirm you are not removing another active run. Use `CODEX_LOCK_FORCE_RELEASE=true` only after review.
 
-If a scheduled run already exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, the Codex prompt should not acquire or release another lock. The target repo's `scripts/run_codex_automation.sh` owns lock release for scheduled runs.
+If a scheduled run already exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, the Codex prompt should not acquire or release another lock. The target repo's `.diffmogger/scripts/run_codex_automation.sh` owns lock release for scheduled runs.

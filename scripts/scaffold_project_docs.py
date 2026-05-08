@@ -7,12 +7,18 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from diffmogger_paths import MANIFEST_REL, PATH_ALIASES, sidecar_manifest, sidecar_rel, sidecarize_text
+
+
 KIT_ROOT = SCRIPT_DIR.parent
 TEMPLATE_ROOT = KIT_ROOT / "templates"
 HUMAN_BRIDGE_FILES = {
@@ -58,10 +64,10 @@ PLAYWRIGHT_MCP_FILES = {
 }
 MANAGED_EXISTING_PROJECT_FILES = {
     "AGENTS.md": "AGENTS",
-    "docs/DEVELOPMENT.md": "DEVELOPMENT",
 }
 
 DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS = [
+    "/.diffmogger/",
     "/scripts/__pycache__/",
     "/target/agent_runs/",
     "/target/automation_conveyor.lock",
@@ -76,6 +82,8 @@ DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS = [
     "/target/ticket_run_completion.json",
     "/target/ticket_run_reports/",
 ]
+
+DEFAULT_TICKET_RUN_FILE = sidecar_rel("docs/TICKET_RUN.md")
 
 
 HEADING_TO_KEY = {
@@ -209,6 +217,55 @@ def inline_text(value: Any, fallback: str) -> str:
 
 def inline_phrase(value: Any, fallback: str) -> str:
     return inline_text(value, fallback).rstrip(".")
+
+
+def normalize_command_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_lines = [str(item) for item in value]
+    elif isinstance(value, str):
+        raw_lines = value.splitlines()
+    else:
+        raw_lines = []
+    commands: list[str] = []
+    for raw in raw_lines:
+        line = re.sub(r"^[-*]\s+", "", raw.strip()).strip()
+        if line.startswith("`") and line.endswith("`") and len(line) >= 2:
+            line = line[1:-1].strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lower().startswith("add project-specific"):
+            continue
+        commands.append(line)
+    return commands
+
+
+def bootstrap_baseline_commands(data: dict[str, Any]) -> list[str]:
+    mode = project_mode(data)
+    run_mode = normalize_automation_run_mode(data.get("automation_run_mode"))
+    if mode != "fresh_project" and run_mode != "ticket_campaign":
+        return normalize_command_list(data.get("verification_commands"))
+
+    commands = [
+        "python3 -m py_compile scripts/run_process_watchdog.py scripts/ticket_run.py scripts/update_automation_signals.py scripts/compact_agent_state.py scripts/run_observatory.py scripts/repair_environment.py",
+    ]
+    if run_mode == "ticket_campaign":
+        return [
+            "python3 scripts/ticket_run.py . status --json",
+            "python3 scripts/ticket_run.py . next --json",
+            *commands,
+        ]
+    return [
+        f"test -f {sidecar_rel('docs/CODEX_AUTOMATION_TASKS.md')}",
+        f"test -f {sidecar_rel('.agentic/automation_prompt.md')}",
+        *commands,
+    ]
+
+
+def bootstrap_baseline_command_text(data: dict[str, Any]) -> str:
+    commands = bootstrap_baseline_commands(data)
+    if commands:
+        return "\n".join(commands)
+    return "python3 -m py_compile scripts/run_process_watchdog.py scripts/ticket_run.py scripts/update_automation_signals.py scripts/compact_agent_state.py scripts/run_observatory.py scripts/repair_environment.py"
 
 
 def table_cell(value: str) -> str:
@@ -364,7 +421,7 @@ No project-scoped MCP config is generated unless `optional_mcp_servers` is set i
 
 def ticket_run_values(data: dict[str, Any]) -> dict[str, str]:
     mode = normalize_automation_run_mode(data.get("automation_run_mode"))
-    ticket_file = str(data.get("ticket_run_file") or "docs/TICKET_RUN.md").strip() or "docs/TICKET_RUN.md"
+    ticket_file = str(data.get("ticket_run_file") or DEFAULT_TICKET_RUN_FILE).strip() or DEFAULT_TICKET_RUN_FILE
     notify = normalize_bool(data.get("ticket_completion_notify"), True)
     if mode == "ticket_campaign":
         section = f"""Automation run mode: `ticket_campaign`
@@ -463,7 +520,7 @@ def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str
         data.get("beyond_mvp"),
         "continue improving core value, demo quality, integrations, and automation reliability",
     )
-    ticket_file = str(data.get("ticket_run_file") or "docs/TICKET_RUN.md").strip() or "docs/TICKET_RUN.md"
+    ticket_file = str(data.get("ticket_run_file") or DEFAULT_TICKET_RUN_FILE).strip() or DEFAULT_TICKET_RUN_FILE
 
     if mode == "ticket_campaign":
         rows = [
@@ -1476,6 +1533,7 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
         data.get("verification_commands"),
         "Add project-specific test, lint, build, or demo commands during bootstrap.",
     )
+    bootstrap_verification = bootstrap_baseline_command_text(data)
     env_values = env_access_values(data)
     values = {
         "PROJECT_NAME": project_name,
@@ -1494,6 +1552,8 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
         "ADDITIONAL_CONTEXT_FILES": normalize_lines(data.get("additional_context_files"), "No additional context files provided."),
         "VERIFICATION_COMMANDS": verification,
         "VERIFICATION_COMMANDS_INLINE": re.sub(r"\s+", " ", verification.replace("`", "")).strip(),
+        "BOOTSTRAP_BASELINE_COMMANDS": bootstrap_verification,
+        "BOOTSTRAP_BASELINE_COMMANDS_INLINE": re.sub(r"\s+", " ", bootstrap_verification.replace("`", "")).strip(),
         "CADENCE": normalize_lines(data.get("desired_cadence"), "every 60 minutes"),
         "MEANINGFUL_DELIVERABLE": normalize_lines(data.get("meaningful_deliverable"), "A runnable, verified increment."),
         "BEYOND_MVP": normalize_lines(data.get("beyond_mvp"), "Continue improving core value, demo quality, integrations, and automation reliability."),
@@ -1525,28 +1585,131 @@ def render_template(text: str, values: dict[str, str]) -> str:
     return text
 
 
-def diffmogger_local_exclude_patterns(values: dict[str, str]) -> list[str]:
-    patterns: set[str] = set(DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS)
+def template_included(rel: str, values: dict[str, str]) -> bool:
+    if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel in HUMAN_BRIDGE_FILES:
+        return False
+    if values.get("AUTOMATION_SIGNALS_ENABLED") != "true" and rel in AUTOMATION_SIGNAL_FILES:
+        return False
+    if values.get("AUTOMATION_RUN_MODE") != "ticket_campaign" and rel in TICKET_RUN_FILES:
+        return False
+    if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and rel in MULTI_ROLE_FILES:
+        return False
+    if values.get("MCP_ENABLED") != "true" and rel in MCP_FILES:
+        return False
+    if values.get("PLAYWRIGHT_MCP_ENABLED") != "true" and rel in PLAYWRIGHT_MCP_FILES:
+        return False
+    return True
+
+
+def template_destination_rel(rel: str) -> str:
+    if rel == "AGENTS.md":
+        return rel
+    if rel.startswith("scripts/"):
+        return f".diffmogger/{rel}"
+    return sidecar_rel(rel)
+
+
+def generated_script_aliases(values: dict[str, str]) -> dict[str, str]:
+    aliases: dict[str, str] = {"scripts": ".diffmogger/scripts"}
+    for template_path in sorted((TEMPLATE_ROOT / "scripts").glob("*")):
+        if template_path.is_dir():
+            continue
+        rel = template_path.relative_to(TEMPLATE_ROOT).as_posix()
+        if template_included(rel, values):
+            aliases[rel] = template_destination_rel(rel)
+    return aliases
+
+
+def sidecarize_generated_text(text: str, values: dict[str, str]) -> str:
+    text = sidecarize_text(text)
+    for old, new in sorted(generated_script_aliases(values).items(), key=lambda item: len(item[0]), reverse=True):
+        if old == "scripts":
+            continue
+        text = re.sub(rf"(?<!\.diffmogger/){re.escape(old)}", new, text)
+    return text
+
+
+def generated_template_destinations(values: dict[str, str]) -> list[str]:
+    destinations: list[str] = []
     for template_path in sorted(TEMPLATE_ROOT.rglob("*")):
         if template_path.is_dir():
+            continue
+        if template_path.name == ".DS_Store":
             continue
         if "__pycache__" in template_path.parts or template_path.suffix == ".pyc":
             continue
         rel = template_path.relative_to(TEMPLATE_ROOT).as_posix()
-        if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel in HUMAN_BRIDGE_FILES:
-            continue
-        if values.get("AUTOMATION_SIGNALS_ENABLED") != "true" and rel in AUTOMATION_SIGNAL_FILES:
-            continue
-        if values.get("AUTOMATION_RUN_MODE") != "ticket_campaign" and rel in TICKET_RUN_FILES:
-            continue
-        if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and rel in MULTI_ROLE_FILES:
-            continue
-        if values.get("MCP_ENABLED") != "true" and rel in MCP_FILES:
-            continue
-        if values.get("PLAYWRIGHT_MCP_ENABLED") != "true" and rel in PLAYWRIGHT_MCP_FILES:
-            continue
-        if rel.startswith(".agentic/"):
-            patterns.add("/.agentic/")
+        if template_included(rel, values):
+            destinations.append(template_destination_rel(rel))
+    return sorted(set(destinations))
+
+
+def diffmogger_runtime_paths() -> list[str]:
+    return [
+        sidecar_rel("target/action_plan_history.json"),
+        sidecar_rel("target/agent_runs"),
+        sidecar_rel("target/automation_conveyor.lock"),
+        sidecar_rel("target/automation_conveyor_state.json"),
+        sidecar_rel("target/automation_logs"),
+        sidecar_rel("target/automation_queue"),
+        sidecar_rel("target/automation_signals.json"),
+        sidecar_rel("target/automation_venvs"),
+        sidecar_rel("target/automation_worktrees"),
+        sidecar_rel("target/baseline_verification.json"),
+        sidecar_rel("target/codex_automation.lock"),
+        sidecar_rel("target/first-review"),
+        sidecar_rel("target/integration_safety_check.json"),
+        sidecar_rel("target/prisma-cache"),
+        sidecar_rel("target/ticket_run_completion.json"),
+        sidecar_rel("target/ticket_run_reports"),
+    ]
+
+
+def diffmogger_human_state_paths(values: dict[str, str]) -> list[str]:
+    if values.get("HUMAN_BRIDGE_MODE") == "disabled":
+        return []
+    return [
+        sidecar_rel("docs/HUMAN_REQUESTS.md"),
+        sidecar_rel("docs/HUMAN_INBOX.md"),
+        sidecar_rel("docs/HUMAN_OUTBOX.md"),
+        sidecar_rel("docs/HUMAN_RESPONSES_ARCHIVE.md"),
+        sidecar_rel("docs/HUMAN_BRIDGE_SETUP.md"),
+    ]
+
+
+def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -> dict[str, Any]:
+    runtime_paths = diffmogger_runtime_paths()
+    context_paths = [sidecar_rel("docs/context")]
+    owned_paths = sorted(set([MANIFEST_REL, *generated_paths, *runtime_paths, *context_paths]))
+    worktree_seed_paths = [
+        path
+        for path in owned_paths
+        if path.startswith((".diffmogger/agentic/", ".diffmogger/context", ".diffmogger/state/", ".diffmogger/scripts/"))
+    ]
+    path_aliases = {**PATH_ALIASES, **generated_script_aliases(values)}
+    return sidecar_manifest(
+        owned_paths=owned_paths,
+        runtime_paths=runtime_paths,
+        worktree_seed_paths=worktree_seed_paths,
+        patch_exclude_paths=owned_paths,
+        human_state_paths=diffmogger_human_state_paths(values),
+        path_aliases=path_aliases,
+        features={
+            "human_bridge_mode": values.get("HUMAN_BRIDGE_MODE", "file_only"),
+            "automation_run_mode": values.get("AUTOMATION_RUN_MODE", "continuous_improvement"),
+            "multi_role": values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") == "true",
+            "automation_signals": values.get("AUTOMATION_SIGNALS_ENABLED") == "true",
+            "optional_mcp": values.get("MCP_ENABLED") == "true",
+            "playwright_mcp": values.get("PLAYWRIGHT_MCP_ENABLED") == "true",
+        },
+    )
+
+
+def diffmogger_local_exclude_patterns(values: dict[str, str]) -> list[str]:
+    patterns: set[str] = set(DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS)
+    for rel in generated_template_destinations(values):
+        if rel.startswith(".diffmogger/"):
+            patterns.add("/.diffmogger/")
         else:
             patterns.add(f"/{rel}")
     patterns.add("/.pnpm-store/")
@@ -1678,34 +1841,25 @@ def upsert_managed_toml_section(existing: str, section: str, kind: str) -> str:
 def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
     written: list[Path] = []
     mode = values.get("PROJECT_MODE", "fresh_project")
+    generated_paths = generated_template_destinations(values)
     for template_path in sorted(TEMPLATE_ROOT.rglob("*")):
         if template_path.is_dir():
+            continue
+        if template_path.name == ".DS_Store":
             continue
         if "__pycache__" in template_path.parts or template_path.suffix == ".pyc":
             continue
         rel = template_path.relative_to(TEMPLATE_ROOT)
-        if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel.as_posix() in HUMAN_BRIDGE_FILES:
+        rel_text = rel.as_posix()
+        if not template_included(rel_text, values):
             continue
-        if values.get("AUTOMATION_SIGNALS_ENABLED") != "true" and rel.as_posix() in AUTOMATION_SIGNAL_FILES:
-            continue
-        if values.get("AUTOMATION_RUN_MODE") != "ticket_campaign" and rel.as_posix() in TICKET_RUN_FILES:
-            continue
-        if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and rel.as_posix() in MULTI_ROLE_FILES:
-            continue
-        if values.get("MCP_ENABLED") != "true" and rel.as_posix() in MCP_FILES:
-            continue
-        if values.get("PLAYWRIGHT_MCP_ENABLED") != "true" and rel.as_posix() in PLAYWRIGHT_MCP_FILES:
-            continue
-        dest = target / rel
+        dest_rel = template_destination_rel(rel_text)
+        dest = target / dest_rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         rendered = render_template(template_path.read_text(encoding="utf-8"), values)
-        if rel.as_posix() == ".codex/config.toml" and dest.exists():
-            existing = dest.read_text(encoding="utf-8", errors="replace")
-            section = render_managed_toml_section("MCP", rendered)
-            dest.write_text(upsert_managed_toml_section(existing, section, "MCP"), encoding="utf-8")
-            written.append(dest)
-            continue
-        managed_kind = MANAGED_EXISTING_PROJECT_FILES.get(rel.as_posix())
+        if not rel_text.startswith("scripts/"):
+            rendered = sidecarize_generated_text(rendered, values)
+        managed_kind = MANAGED_EXISTING_PROJECT_FILES.get(rel_text)
         if mode == "existing_project" and managed_kind and dest.exists():
             existing = dest.read_text(encoding="utf-8", errors="replace")
             section = render_managed_section(managed_kind, rendered)
@@ -1718,6 +1872,11 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
         if rel.parts and rel.parts[0] == "scripts" and dest.suffix in {".sh", ".py"}:
             dest.chmod(0o755)
         written.append(dest)
+    manifest = build_sidecar_manifest(values, generated_paths)
+    manifest_dest = target / MANIFEST_REL
+    manifest_dest.parent.mkdir(parents=True, exist_ok=True)
+    manifest_dest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    written.append(manifest_dest)
     install_diffmogger_local_excludes(target, values)
     return written
 

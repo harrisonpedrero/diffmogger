@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/spawn_worker_agent.sh [options]
+Usage: .diffmogger/scripts/spawn_worker_agent.sh [options]
 
 Spawn one bounded Codex CLI worker report. The default mode is read-only review:
 the worker may only write its assigned report under target/agent_runs/<run_id>/.

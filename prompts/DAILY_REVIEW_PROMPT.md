@@ -4,15 +4,15 @@ Use this after several automation runs or at the end of a day.
 
 ---
 
-Create or update `docs/DAILY_AUTOMATION_REVIEW.md`.
+Create or update `.diffmogger/state/DAILY_AUTOMATION_REVIEW.md`.
 
 Read:
 
-- `docs/CODEX_AUTOMATION_TASKS.md`
-- `docs/AUTONOMY_EXPERIMENT_LOG.md`
+- `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`
+- `.diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md`
 - recent generated artifacts
 - human bridge files
-- worker reports under `target/agent_runs/` if present
+- worker reports under `.diffmogger/runtime/agent_runs/` if present
 - git diff or commit history if available
 
 Write a concise daily capsule:

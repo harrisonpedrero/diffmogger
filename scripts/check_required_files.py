@@ -9,6 +9,20 @@ import re
 import sys
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from diffmogger_paths import (
+    MANIFEST_REL,
+    existing_or_target_path,
+    load_manifest,
+    manifest_list,
+    sidecar_enabled,
+    sidecarize_text,
+    target_rel,
+)
+
 
 BASE_REQUIRED = [
     "AGENTS.md",
@@ -18,6 +32,7 @@ BASE_REQUIRED = [
     "scripts/acquire_codex_lock.sh",
     "scripts/release_codex_lock.sh",
     "scripts/run_codex_automation.sh",
+    "scripts/run_process_watchdog.py",
     "scripts/run_conveyor_automation.py",
     "scripts/run_conveyor_automation.sh",
     "scripts/run_observatory.py",
@@ -103,10 +118,10 @@ TASK_BACKLOG_HEADINGS = [
 DEVELOPMENT_REQUIRED_STRINGS = [
     "First Review Checklist",
     "bash scripts/validate_starter_kit.sh",
-    "python3 scripts/diffmogger_browser.py doctor --launch",
-    "python3 scripts/ticket_run.py . status --json",
+    "python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch",
+    "python3 .diffmogger/scripts/ticket_run.py . status --json",
     "Run Safety Check",
-    "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
+    "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
     "Diffmogger-observatory.html",
     "Diffmogger-self-review.md",
     "Automation Environment Loading",
@@ -116,18 +131,18 @@ DEVELOPMENT_REQUIRED_STRINGS = [
 
 AUTOMATION_REQUIRED_STRINGS = [
     "CODEX_LOCK_ALREADY_ACQUIRED=true",
-    "scripts/run_codex_automation.sh",
-    "scripts/acquire_codex_lock.sh",
-    "scripts/release_codex_lock.sh",
-    "scripts/spawn_worker_agent.sh",
-    "scripts/summarize_worker_outputs.py",
+    ".diffmogger/scripts/run_codex_automation.sh",
+    ".diffmogger/scripts/acquire_codex_lock.sh",
+    ".diffmogger/scripts/release_codex_lock.sh",
+    ".diffmogger/scripts/spawn_worker_agent.sh",
+    ".diffmogger/scripts/summarize_worker_outputs.py",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
     "command -v codex",
     "--dangerously-bypass-approvals-and-sandbox",
     "ACTIVE_WITH_PENDING_USER_INPUT",
     "BLOCKED_ON_USER",
     "ticket_campaign",
-    "scripts/ticket_run.py",
+    ".diffmogger/scripts/ticket_run.py",
 ]
 
 RUNNER_REQUIRED_STRINGS = [
@@ -153,6 +168,7 @@ RUNNER_REQUIRED_STRINGS = [
     "ticket_run.py",
     "child_pid",
     "forward_signal",
+    "run_process_watchdog.py",
 ]
 
 RUNNER_FORBIDDEN_STRINGS = [
@@ -167,6 +183,8 @@ CONVEYOR_REQUIRED_STRINGS = [
     "run_codex_automation.sh",
     "MULTI_ROLE_ALLOW_REMOTES",
     "active_role_run",
+    "CODEX_ROLE_TIMEOUT_SECONDS",
+    "role_timeout_streaks",
     "decision_queue",
     "planner deferred patch resolved",
     "ticket campaign complete",
@@ -354,6 +372,18 @@ RUN_ROLE_REQUIRED_STRINGS = [
     "automation_queue",
     "Runtime Summary Contract",
     "Commit subject:",
+    "run_process_watchdog.py",
+]
+
+WATCHDOG_REQUIRED_STRINGS = [
+    "CODEX_ROLE_TIMEOUT_SECONDS",
+    "CODEX_ROLE_TERMINATION_GRACE_SECONDS",
+    "DEFAULT_TIMEOUT_SECONDS = 5400",
+    "TIMEOUT_EXIT_CODE = 124",
+    "start_new_session=True",
+    "os.killpg",
+    "timed_out",
+    "idle_timed_out",
 ]
 
 INTEGRATOR_REQUIRED_STRINGS = [
@@ -427,8 +457,21 @@ def check_file(path: Path) -> str | None:
     return None
 
 
+
+
+def has_marker(text: str, marker: str) -> bool:
+    return marker in text or sidecarize_text(marker) in text or marker.replace("scripts/", ".diffmogger/scripts/") in text
+
+def rel_label(root: Path, legacy_rel: str) -> str:
+    return target_rel(root, legacy_rel) if sidecar_enabled(root) else legacy_rel
+
+
+def rel_path(root: Path, legacy_rel: str) -> Path:
+    return existing_or_target_path(root, legacy_rel)
+
+
 def project_intake(root: Path) -> dict[str, object]:
-    path = root / ".agentic" / "project_intake.json"
+    path = rel_path(root, ".agentic/project_intake.json")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -463,7 +506,7 @@ def inferred_human_bridge_mode(root: Path) -> str:
         return intake_mode
     for rel in [".agentic/automation_prompt.md", "docs/CODEX_AUTOMATION_TASKS.md"]:
         try:
-            text = (root / rel).read_text(encoding="utf-8")
+            text = rel_path(root, rel).read_text(encoding="utf-8")
         except OSError:
             continue
         for mode in ["disabled", "file_only", "local_notifier", "discord_notifier"]:
@@ -517,6 +560,8 @@ def main() -> int:
     mode = args.human_bridge_mode or ("disabled" if args.no_human_bridge else inferred_human_bridge_mode(root))
     mcp_servers = optional_mcp_servers(root) if args.optional_mcp_enabled else []
     required = list(BASE_REQUIRED)
+    if sidecar_enabled(root):
+        required.extend([MANIFEST_REL, "scripts/diffmogger_paths.py"])
     if mode != "disabled":
         required.extend(HUMAN_REQUIRED)
     if args.multi_role_enabled:
@@ -531,38 +576,78 @@ def main() -> int:
         required.extend(PLAYWRIGHT_MCP_REQUIRED)
 
     problems: list[str] = []
-    for rel in required:
-        problem = check_file(root / rel)
-        if problem:
-            problems.append(f"{rel}: {problem}")
+    if sidecar_enabled(root):
+        manifest = load_manifest(root)
+        if manifest.get("schema_version") != 1:
+            problems.append(f"{MANIFEST_REL}: schema_version must be 1")
+        if manifest.get("layout") != "sidecar_v1":
+            problems.append(f"{MANIFEST_REL}: layout must be sidecar_v1")
+        for key in [
+            "owned_paths",
+            "runtime_paths",
+            "worktree_seed_paths",
+            "patch_exclude_paths",
+            "human_state_paths",
+        ]:
+            if not isinstance(manifest.get(key), list):
+                problems.append(f"{MANIFEST_REL}: {key} must be a list")
+        aliases = manifest.get("path_aliases") if isinstance(manifest.get("path_aliases"), dict) else {}
+        script_aliases_sidecar = str(aliases.get("scripts") or "").strip().lstrip("./").rstrip("/") == ".diffmogger/scripts"
+        owned = set(manifest_list(manifest, "owned_paths"))
+        required_owned_paths = [
+            ".diffmogger/agentic/automation_prompt.md",
+            ".diffmogger/agentic/verification_commands.txt",
+            ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+            ".diffmogger/runtime/automation_queue",
+            ".diffmogger/runtime/automation_worktrees",
+        ]
+        if script_aliases_sidecar:
+            required_owned_paths.append(".diffmogger/scripts/diffmogger_paths.py")
+        for required_owned in required_owned_paths:
+            if required_owned not in owned:
+                problems.append(f"{MANIFEST_REL}: owned_paths missing {required_owned!r}")
+        for rel in manifest_list(manifest, "patch_exclude_paths"):
+            if not rel.startswith((".diffmogger/", "scripts/", "AGENTS.md")):
+                problems.append(f"{MANIFEST_REL}: patch_exclude_paths contains unexpected project-facing path {rel!r}")
 
-    task_path = root / "docs/CODEX_AUTOMATION_TASKS.md"
+    for rel in required:
+        problem = check_file(rel_path(root, rel))
+        if problem:
+            problems.append(f"{rel_label(root, rel)}: {problem}")
+
+    task_rel = "docs/CODEX_AUTOMATION_TASKS.md"
+    task_label = rel_label(root, task_rel)
+    task_path = rel_path(root, task_rel)
     if task_path.exists() and task_path.is_file():
         task_text = task_path.read_text(encoding="utf-8")
         for marker in TASK_REQUIRED_STRINGS:
-            if marker not in task_text:
-                problems.append(f"docs/CODEX_AUTOMATION_TASKS.md: missing marker {marker!r}")
+            if not has_marker(task_text, marker):
+                problems.append(f"{task_label}: missing marker {marker!r}")
         if args.optional_mcp_enabled:
             for marker in ["## Optional MCP Integrations", "## UI Artifact Backlog", "docs/backlog/ui_artifacts/<run_id>/"]:
-                if marker not in task_text:
-                    problems.append(f"docs/CODEX_AUTOMATION_TASKS.md: missing marker {marker!r}")
+                if not has_marker(task_text, marker):
+                    problems.append(f"{task_label}: missing marker {marker!r}")
         if not any(marker in task_text for marker in TASK_BACKLOG_HEADINGS):
             problems.append(
-                "docs/CODEX_AUTOMATION_TASKS.md: missing a recognized backlog heading"
+                f"{task_label}: missing a recognized backlog heading"
             )
 
-    development_path = root / "docs/DEVELOPMENT.md"
+    development_rel = "docs/DEVELOPMENT.md"
+    development_label = rel_label(root, development_rel)
+    development_path = rel_path(root, development_rel)
     if development_path.exists() and development_path.is_file():
         development_text = development_path.read_text(encoding="utf-8")
         for marker in DEVELOPMENT_REQUIRED_STRINGS:
-            if marker not in development_text:
-                problems.append(f"docs/DEVELOPMENT.md: missing marker {marker!r}")
+            if not has_marker(development_text, marker):
+                problems.append(f"{development_label}: missing marker {marker!r}")
         if args.optional_mcp_enabled:
             for marker in ["## Optional MCP Integrations", ".codex/config.toml", "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png"]:
-                if marker not in development_text:
-                    problems.append(f"docs/DEVELOPMENT.md: missing marker {marker!r}")
+                if not has_marker(development_text, marker):
+                    problems.append(f"{development_label}: missing marker {marker!r}")
 
-    automation_path = root / ".agentic/automation_prompt.md"
+    automation_rel = ".agentic/automation_prompt.md"
+    automation_label = rel_label(root, automation_rel)
+    automation_path = rel_path(root, automation_rel)
     if automation_path.exists() and automation_path.is_file():
         automation_text = automation_path.read_text(encoding="utf-8")
         mode_markers: list[str] = []
@@ -577,38 +662,46 @@ def main() -> int:
         signal_markers = ["Automation signals enabled: true", "target/automation_signals.json"] if args.automation_signals_enabled else []
         ticket_markers = ["Automation run mode: `ticket_campaign`", "docs/TICKET_RUN.md"] if args.ticket_campaign_enabled else []
         for marker in AUTOMATION_REQUIRED_STRINGS + mode_markers + write_worker_markers + multi_role_markers + signal_markers + ticket_markers:
-            if marker not in automation_text:
-                problems.append(f".agentic/automation_prompt.md: missing marker {marker!r}")
+            if not has_marker(automation_text, marker):
+                problems.append(f"{automation_label}: missing marker {marker!r}")
         if args.optional_mcp_enabled:
             for marker in ["## Optional MCP Integrations", "expired auth", "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png"]:
-                if marker not in automation_text:
-                    problems.append(f".agentic/automation_prompt.md: missing marker {marker!r}")
+                if not has_marker(automation_text, marker):
+                    problems.append(f"{automation_label}: missing marker {marker!r}")
 
     if args.ticket_campaign_enabled:
-        ticket_run_path = root / "docs/TICKET_RUN.md"
+        ticket_rel = "docs/TICKET_RUN.md"
+        ticket_label = rel_label(root, ticket_rel)
+        ticket_run_path = rel_path(root, ticket_rel)
         if ticket_run_path.exists() and ticket_run_path.is_file():
             ticket_text = ticket_run_path.read_text(encoding="utf-8")
             for marker in TICKET_RUN_REQUIRED_STRINGS:
-                if marker not in ticket_text:
-                    problems.append(f"docs/TICKET_RUN.md: missing marker {marker!r}")
+                if not has_marker(ticket_text, marker):
+                    problems.append(f"{ticket_label}: missing marker {marker!r}")
 
     if args.multi_role_enabled:
-        guardrails_path = root / "docs/CODEX_AUTOMATION_GUARDRAILS.md"
+        guardrails_rel = "docs/CODEX_AUTOMATION_GUARDRAILS.md"
+        guardrails_label = rel_label(root, guardrails_rel)
+        guardrails_path = rel_path(root, guardrails_rel)
         if guardrails_path.exists() and guardrails_path.is_file():
             guardrails_text = guardrails_path.read_text(encoding="utf-8")
             for marker in MULTI_ROLE_GUARDRAIL_REQUIRED_STRINGS:
-                if marker not in guardrails_text:
-                    problems.append(f"docs/CODEX_AUTOMATION_GUARDRAILS.md: missing marker {marker!r}")
+                if not has_marker(guardrails_text, marker):
+                    problems.append(f"{guardrails_label}: missing marker {marker!r}")
 
-        progress_path = root / "docs/MULTI_ROLE_PROGRESS.md"
+        progress_rel = "docs/MULTI_ROLE_PROGRESS.md"
+        progress_label = rel_label(root, progress_rel)
+        progress_path = rel_path(root, progress_rel)
         if progress_path.exists() and progress_path.is_file():
             progress_text = progress_path.read_text(encoding="utf-8")
             for marker in MULTI_ROLE_PROGRESS_REQUIRED_STRINGS:
-                if marker not in progress_text:
-                    problems.append(f"docs/MULTI_ROLE_PROGRESS.md: missing marker {marker!r}")
+                if not has_marker(progress_text, marker):
+                    problems.append(f"{progress_label}: missing marker {marker!r}")
 
         for role in ["planner", "builder", "hardener", "integrator"]:
-            role_path = root / ".agentic" / "roles" / f"{role}.md"
+            role_rel = f".agentic/roles/{role}.md"
+            role_label = rel_label(root, role_rel)
+            role_path = rel_path(root, role_rel)
             if role_path.exists() and role_path.is_file():
                 role_text = role_path.read_text(encoding="utf-8")
                 role_markers = ROLE_PROMPT_REQUIRED_STRINGS
@@ -619,11 +712,13 @@ def main() -> int:
                 if args.optional_mcp_enabled and "playwright" in mcp_servers and role in {"hardener", "integrator"}:
                     role_markers = role_markers + ["browser_take_screenshot", "docs/backlog/ui_artifacts"]
                 for marker in role_markers:
-                    if marker not in role_text:
-                        problems.append(f".agentic/roles/{role}.md: missing marker {marker!r}")
+                    if not has_marker(role_text, marker):
+                        problems.append(f"{role_label}: missing marker {marker!r}")
 
     if args.optional_mcp_enabled:
-        config_path = root / ".codex" / "config.toml"
+        config_rel = ".codex/config.toml"
+        config_label = rel_label(root, config_rel)
+        config_path = rel_path(root, config_rel)
         if config_path.exists() and config_path.is_file():
             config_text = config_path.read_text(encoding="utf-8")
             config_markers = [
@@ -650,98 +745,131 @@ def main() -> int:
                     ]
                 )
             for marker in config_markers:
-                if marker not in config_text:
-                    problems.append(f".codex/config.toml: missing marker {marker!r}")
+                if not has_marker(config_text, marker):
+                    problems.append(f"{config_label}: missing marker {marker!r}")
 
-        mcp_doc_path = root / "docs" / "MCP_INTEGRATIONS.md"
+        mcp_doc_rel = "docs/MCP_INTEGRATIONS.md"
+        mcp_doc_label = rel_label(root, mcp_doc_rel)
+        mcp_doc_path = rel_path(root, mcp_doc_rel)
         if mcp_doc_path.exists() and mcp_doc_path.is_file():
             mcp_doc_text = mcp_doc_path.read_text(encoding="utf-8")
             for marker in MCP_DOC_REQUIRED_STRINGS:
-                if marker not in mcp_doc_text:
-                    problems.append(f"docs/MCP_INTEGRATIONS.md: missing marker {marker!r}")
+                if not has_marker(mcp_doc_text, marker):
+                    problems.append(f"{mcp_doc_label}: missing marker {marker!r}")
 
         if "playwright" in mcp_servers:
-            playwright_helper_path = root / "scripts" / "run_playwright_mcp.sh"
+            playwright_helper_rel = "scripts/run_playwright_mcp.sh"
+            playwright_helper_label = rel_label(root, playwright_helper_rel)
+            playwright_helper_path = rel_path(root, playwright_helper_rel)
             if playwright_helper_path.exists() and playwright_helper_path.is_file():
                 playwright_helper_text = playwright_helper_path.read_text(encoding="utf-8")
                 for marker in PLAYWRIGHT_MCP_HELPER_REQUIRED_STRINGS:
-                    if marker not in playwright_helper_text:
-                        problems.append(f"scripts/run_playwright_mcp.sh: missing marker {marker!r}")
+                    if not has_marker(playwright_helper_text, marker):
+                        problems.append(f"{playwright_helper_label}: missing marker {marker!r}")
 
-    runner_path = root / "scripts/run_codex_automation.sh"
+    runner_rel = "scripts/run_codex_automation.sh"
+    runner_label = rel_label(root, runner_rel)
+    runner_path = rel_path(root, runner_rel)
     if runner_path.exists() and runner_path.is_file():
         runner_text = runner_path.read_text(encoding="utf-8")
         for marker in RUNNER_REQUIRED_STRINGS:
-            if marker not in runner_text:
-                problems.append(f"scripts/run_codex_automation.sh: missing marker {marker!r}")
+            if not has_marker(runner_text, marker):
+                problems.append(f"{runner_label}: missing marker {marker!r}")
         for marker in RUNNER_FORBIDDEN_STRINGS:
             if marker in runner_text:
-                problems.append(f"scripts/run_codex_automation.sh: forbidden self-run marker {marker!r}")
+                problems.append(f"{runner_label}: forbidden self-run marker {marker!r}")
 
-    conveyor_path = root / "scripts/run_conveyor_automation.py"
+    watchdog_rel = "scripts/run_process_watchdog.py"
+    watchdog_label = rel_label(root, watchdog_rel)
+    watchdog_path = rel_path(root, watchdog_rel)
+    if watchdog_path.exists() and watchdog_path.is_file():
+        watchdog_text = watchdog_path.read_text(encoding="utf-8")
+        for marker in WATCHDOG_REQUIRED_STRINGS:
+            if not has_marker(watchdog_text, marker):
+                problems.append(f"{watchdog_label}: missing marker {marker!r}")
+
+    conveyor_rel = "scripts/run_conveyor_automation.py"
+    conveyor_label = rel_label(root, conveyor_rel)
+    conveyor_path = rel_path(root, conveyor_rel)
     if conveyor_path.exists() and conveyor_path.is_file():
         conveyor_text = conveyor_path.read_text(encoding="utf-8")
         for marker in CONVEYOR_REQUIRED_STRINGS:
-            if marker not in conveyor_text:
-                problems.append(f"scripts/run_conveyor_automation.py: missing marker {marker!r}")
+            if not has_marker(conveyor_text, marker):
+                problems.append(f"{conveyor_label}: missing marker {marker!r}")
 
-    observatory_path = root / "scripts/run_observatory.py"
+    observatory_rel = "scripts/run_observatory.py"
+    observatory_label = rel_label(root, observatory_rel)
+    observatory_path = rel_path(root, observatory_rel)
     if observatory_path.exists() and observatory_path.is_file():
         observatory_text = observatory_path.read_text(encoding="utf-8")
         for marker in OBSERVATORY_REQUIRED_STRINGS:
-            if marker not in observatory_text:
-                problems.append(f"scripts/run_observatory.py: missing marker {marker!r}")
+            if not has_marker(observatory_text, marker):
+                problems.append(f"{observatory_label}: missing marker {marker!r}")
 
-    signal_helper_path = root / "scripts/update_automation_signals.py"
+    signal_helper_rel = "scripts/update_automation_signals.py"
+    signal_helper_label = rel_label(root, signal_helper_rel)
+    signal_helper_path = rel_path(root, signal_helper_rel)
     if signal_helper_path.exists() and signal_helper_path.is_file():
         signal_helper_text = signal_helper_path.read_text(encoding="utf-8")
         for marker in SIGNAL_HELPER_REQUIRED_STRINGS:
-            if marker not in signal_helper_text:
-                problems.append(f"scripts/update_automation_signals.py: missing marker {marker!r}")
+            if not has_marker(signal_helper_text, marker):
+                problems.append(f"{signal_helper_label}: missing marker {marker!r}")
 
-    worker_helper_path = root / "scripts/spawn_worker_agent.sh"
+    worker_helper_rel = "scripts/spawn_worker_agent.sh"
+    worker_helper_label = rel_label(root, worker_helper_rel)
+    worker_helper_path = rel_path(root, worker_helper_rel)
     if worker_helper_path.exists() and worker_helper_path.is_file():
         worker_helper_text = worker_helper_path.read_text(encoding="utf-8")
         write_worker_helper_markers = WRITE_WORKER_HELPER_REQUIRED_STRINGS if args.write_workers_enabled else []
         for marker in WORKER_HELPER_REQUIRED_STRINGS + write_worker_helper_markers:
-            if marker not in worker_helper_text:
-                problems.append(f"scripts/spawn_worker_agent.sh: missing marker {marker!r}")
+            if not has_marker(worker_helper_text, marker):
+                problems.append(f"{worker_helper_label}: missing marker {marker!r}")
 
-    browser_helper_path = root / "scripts/diffmogger_browser.py"
+    browser_helper_rel = "scripts/diffmogger_browser.py"
+    browser_helper_label = rel_label(root, browser_helper_rel)
+    browser_helper_path = rel_path(root, browser_helper_rel)
     if browser_helper_path.exists() and browser_helper_path.is_file():
         browser_helper_text = browser_helper_path.read_text(encoding="utf-8")
         for marker in BROWSER_HELPER_REQUIRED_STRINGS:
-            if marker not in browser_helper_text:
-                problems.append(f"scripts/diffmogger_browser.py: missing marker {marker!r}")
+            if not has_marker(browser_helper_text, marker):
+                problems.append(f"{browser_helper_label}: missing marker {marker!r}")
 
-    ticket_helper_path = root / "scripts/ticket_run.py"
+    ticket_helper_rel = "scripts/ticket_run.py"
+    ticket_helper_label = rel_label(root, ticket_helper_rel)
+    ticket_helper_path = rel_path(root, ticket_helper_rel)
     if ticket_helper_path.exists() and ticket_helper_path.is_file():
         ticket_helper_text = ticket_helper_path.read_text(encoding="utf-8")
         for marker in TICKET_HELPER_REQUIRED_STRINGS:
-            if marker not in ticket_helper_text:
-                problems.append(f"scripts/ticket_run.py: missing marker {marker!r}")
+            if not has_marker(ticket_helper_text, marker):
+                problems.append(f"{ticket_helper_label}: missing marker {marker!r}")
 
     if args.multi_role_enabled:
-        run_role_path = root / "scripts/run_role_automation.sh"
+        run_role_rel = "scripts/run_role_automation.sh"
+        run_role_label = rel_label(root, run_role_rel)
+        run_role_path = rel_path(root, run_role_rel)
         if run_role_path.exists() and run_role_path.is_file():
             run_role_text = run_role_path.read_text(encoding="utf-8")
             for marker in RUN_ROLE_REQUIRED_STRINGS:
-                if marker not in run_role_text:
-                    problems.append(f"scripts/run_role_automation.sh: missing marker {marker!r}")
+                if not has_marker(run_role_text, marker):
+                    problems.append(f"{run_role_label}: missing marker {marker!r}")
 
-        integrator_path = root / "scripts/integrate_role_outputs.py"
+        integrator_rel = "scripts/integrate_role_outputs.py"
+        integrator_label = rel_label(root, integrator_rel)
+        integrator_path = rel_path(root, integrator_rel)
         if integrator_path.exists() and integrator_path.is_file():
             integrator_text = integrator_path.read_text(encoding="utf-8")
             for marker in INTEGRATOR_REQUIRED_STRINGS:
-                if marker not in integrator_text:
-                    problems.append(f"scripts/integrate_role_outputs.py: missing marker {marker!r}")
+                if not has_marker(integrator_text, marker):
+                    problems.append(f"{integrator_label}: missing marker {marker!r}")
 
-        deferred_helper_path = root / "scripts/list_deferred_patches.py"
+        deferred_helper_rel = "scripts/list_deferred_patches.py"
+        deferred_helper_label = rel_label(root, deferred_helper_rel)
+        deferred_helper_path = rel_path(root, deferred_helper_rel)
         if deferred_helper_path.exists() and deferred_helper_path.is_file():
             deferred_helper_text = deferred_helper_path.read_text(encoding="utf-8")
             for marker in DEFERRED_HELPER_REQUIRED_STRINGS:
-                if marker not in deferred_helper_text:
-                    problems.append(f"scripts/list_deferred_patches.py: missing marker {marker!r}")
+                if not has_marker(deferred_helper_text, marker):
+                    problems.append(f"{deferred_helper_label}: missing marker {marker!r}")
 
     if problems:
         print("Required automation file check failed:", file=sys.stderr)

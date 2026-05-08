@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/release_codex_lock.sh
+Usage: .diffmogger/scripts/release_codex_lock.sh
 
 Release the local Codex automation lock when it appears to belong to this run.
 

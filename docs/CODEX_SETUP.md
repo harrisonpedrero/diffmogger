@@ -38,7 +38,7 @@ codex exec "summarize the repository structure"
 For recurring local automation, use explicit sandbox and approval settings. Current docs say `codex exec` defaults to read-only. Use `--full-auto` only when edits and workspace commands are expected:
 
 ```bash
-codex exec --full-auto --skip-git-repo-check "$(cat .agentic/automation_prompt.md)"
+codex exec --full-auto --skip-git-repo-check "$(cat .diffmogger/agentic/automation_prompt.md)"
 ```
 
 For read-only worker reports from an automation run, prefer an explicit bounded command:
@@ -47,13 +47,13 @@ For read-only worker reports from an automation run, prefer an explicit bounded 
 command -v codex
 
 export CODEX_RUN_ID="${CODEX_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
-mkdir -p "target/agent_runs/$CODEX_RUN_ID"
+mkdir -p ".diffmogger/runtime/agent_runs/$CODEX_RUN_ID"
 
 codex exec --disable plugins \
   --ephemeral \
   --dangerously-bypass-approvals-and-sandbox \
   -C . \
-  "You are a read-only worker for this project. Read the repo and write a concise report to target/agent_runs/$CODEX_RUN_ID/worker_review.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
+  "You are a read-only worker for this project. Read the repo and write a concise report to .diffmogger/runtime/agent_runs/$CODEX_RUN_ID/worker_review.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
 ```
 
 Use this bypass shape only for nested workers launched from inside a scheduled parent automation run. The parent remains the outer sandbox boundary; the child bypass avoids a second macOS `sandbox-exec` layer.
@@ -61,14 +61,14 @@ Use this bypass shape only for nested workers launched from inside a scheduled p
 The parent scheduled run still controls whether a nested `codex` process can touch its startup paths. Generated wrappers run the parent automation with Codex-home access:
 
 ```bash
-codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" "$(cat .agentic/automation_prompt.md)"
+codex exec --full-auto --skip-git-repo-check --add-dir "$HOME/.codex" "$(cat .diffmogger/agentic/automation_prompt.md)"
 ```
 
 Generated target repos include local helper scripts:
 
 ```bash
-bash scripts/spawn_worker_agent.sh --target . --run-id "$CODEX_RUN_ID" --role review --prompt "Write a concise read-only review report."
-python3 scripts/summarize_worker_outputs.py . --run-id "$CODEX_RUN_ID"
+bash .diffmogger/scripts/spawn_worker_agent.sh --target . --run-id "$CODEX_RUN_ID" --role review --prompt "Write a concise read-only review report."
+python3 .diffmogger/scripts/summarize_worker_outputs.py . --run-id "$CODEX_RUN_ID"
 ```
 
 If `command -v codex` fails, record `Codex CLI worker decision: UNAVAILABLE` in the task file and continue without blocking the sprint.
@@ -79,12 +79,12 @@ Read-only worker reports are the default. Generated projects may enable bounded 
 
 Codex Automations run recurring tasks on a schedule. Good automation instructions are specific, repeatable, and easy to review. Local automations work best when the machine is awake and Codex is running.
 
-This kit recommends keeping the automation task prompt stable and putting changing project state in `docs/CODEX_AUTOMATION_TASKS.md`.
+This kit recommends keeping the automation task prompt stable and putting changing project state in `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
 
 For scheduled runs, use the generated target-local wrapper:
 
 ```bash
-bash scripts/run_codex_automation.sh
+bash .diffmogger/scripts/run_codex_automation.sh
 ```
 
 If the scheduler does not run from the target repo, call the wrapper by absolute path or set `TARGET=/absolute/path/to/target-project`. The wrapper exports `CODEX_LOCK_ALREADY_ACQUIRED=true` so the prompt knows not to acquire a second lock.
@@ -96,7 +96,7 @@ Current Codex docs describe subagent workflows that spawn specialized agents in 
 Recommended project convention:
 
 ```text
-target/agent_runs/<run_id>/worker_<role>.md
+.diffmogger/runtime/agent_runs/<run_id>/worker_<role>.md
 ```
 
 ## Sandboxing And Approvals

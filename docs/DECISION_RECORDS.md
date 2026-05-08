@@ -2,7 +2,7 @@
 
 ## DR-001: Separate Stable Prompt From Dynamic Task State
 
-Decision: keep recurring behavior in `.agentic/automation_prompt.md` and changing state in `docs/CODEX_AUTOMATION_TASKS.md`.
+Decision: keep recurring behavior in `.diffmogger/agentic/automation_prompt.md` and changing state in `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
 
 Why: earlier automation trials showed that recurring agents need stable behavior plus fresh handoff state. Combining them makes prompts stale and bloated.
 
@@ -14,7 +14,7 @@ Why: file mode requires no credentials, no Discord bot, and no network setup. Th
 
 ## DR-003: Worker Agents Are Bounded And Main-Agent Integrated
 
-Decision: workers produce bounded reports or isolated prototypes under `target/agent_runs/<run_id>/`.
+Decision: workers produce bounded reports or isolated prototypes under `.diffmogger/runtime/agent_runs/<run_id>/`.
 
 Why: the playbook recommends manager-worker-integrator behavior. Official Codex docs describe subagents as parallel specialist workflows, but they cost extra tokens and inherit sandbox policy, so the main agent must use them intentionally.
 
@@ -44,7 +44,7 @@ Why: broad autonomous runs benefit from bounded independent review, but worker u
 
 ## DR-008: Make Lock Files Executable, Not Only Advisory
 
-Decision: include `scripts/acquire_codex_lock.sh` and `scripts/release_codex_lock.sh` with run metadata, stale-lock detection, and run-id-aware release behavior.
+Decision: include `.diffmogger/scripts/acquire_codex_lock.sh` and `.diffmogger/scripts/release_codex_lock.sh` with run metadata, stale-lock detection, and run-id-aware release behavior.
 
 Why: short-cadence automations need a real local overlap guard. The scripts are intentionally simple and auditable rather than distributed lock infrastructure.
 
@@ -62,13 +62,13 @@ Why: schema generation can become a project of its own. A small drift test gives
 
 ## DR-011: Generated Target Repos Own Runtime Scripts
 
-Decision: scaffold target-local copies of lock, schedule, worker, summary, and compaction scripts under `scripts/`.
+Decision: scaffold target-local copies of lock, schedule, worker, summary, and compaction scripts under `.diffmogger/scripts/`.
 
 Why: target automations should not depend on the Diffmogger checkout at runtime. The starter repo is a source for scaffolding and reference docs; generated projects should be movable and schedulable on their own.
 
 ## DR-012: Scheduler Wrapper Owns Scheduled-Run Locks
 
-Decision: generated scheduled runs use `scripts/run_codex_automation.sh` to acquire and release `target/codex_automation.lock`, and export `CODEX_LOCK_ALREADY_ACQUIRED=true` so the Codex prompt does not acquire a second lock.
+Decision: generated scheduled runs use `.diffmogger/scripts/run_codex_automation.sh` to acquire and release `.diffmogger/runtime/codex_automation.lock`, and export `CODEX_LOCK_ALREADY_ACQUIRED=true` so the Codex prompt does not acquire a second lock.
 
 Why: a first fresh-project run showed that both the wrapper and the prompt could attempt lock creation. One lock owner is easier to reason about and avoids malformed fallback lock files.
 
@@ -116,7 +116,7 @@ Why: prompts guide agent intent, while script guards catch mistakes and environm
 
 ## DR-020: Multi-Role Progress Is Durable Markdown State
 
-Decision: generated multi-role targets include `docs/MULTI_ROLE_PROGRESS.md` as the durable progress record for project state, cumulative metrics, recent activity, historical summaries, deferred backlog, architectural decisions, and role health.
+Decision: generated multi-role targets include `.diffmogger/state/MULTI_ROLE_PROGRESS.md` as the durable progress record for project state, cumulative metrics, recent activity, historical summaries, deferred backlog, architectural decisions, and role health.
 
 Why: role run directories and logs are transient. Humans and future automation need a compact weeks-long record that survives compaction.
 
@@ -128,7 +128,7 @@ Why: implementation roles should execute against a stable plan through two imple
 
 ## DR-022: Continuous Conveyor Is An Opt-In Scheduling Strategy
 
-Decision: generated targets include `scripts/run_conveyor_automation.sh` and `scripts/run_conveyor_automation.py`. Dashboard-managed schedules can use one conveyor LaunchAgent instead of exact periodic role jobs.
+Decision: generated targets include `.diffmogger/scripts/run_conveyor_automation.sh` and `.diffmogger/scripts/run_conveyor_automation.py`. Dashboard-managed schedules can use one conveyor LaunchAgent instead of exact periodic role jobs.
 
 Why: work-conserving automation should keep useful local work moving when prior lanes finish early or role timing would otherwise leave gaps. The conveyor records reviewable local state, uses its own dispatcher lock, delegates mutation to existing wrappers, and prioritizes queued integration, fast-follow replanning for planner deferral changes, due planning, builder momentum, and one hardener pass after integrated builder work.
 
@@ -138,13 +138,19 @@ Decision: when a planner patch is deferred for staleness and later accepted work
 
 Why: planner patches coordinate future work; they should not churn current docs or schedules from an obsolete base. Fast-follow replanning after planner deferrals gives the system a fresh planning pass without disrupting builder/hardener momentum.
 
+## DR-024: New Targets Use A Diffmogger Sidecar Namespace
+
+Decision: new generated targets keep Diffmogger-owned prompts, state, runtime files, imported context, queue data, worktrees, and logs under `.diffmogger/`, with `.diffmogger/manifest.json` as the path source of truth for scaffold, validation, runners, dashboard surfaces, patch exclusion, and runtime-state writes.
+
+Why: the older layout scattered generated files across `.agentic/`, `docs/`, and `target/`, which made git ignore rules, worktree seeding, patch filtering, and target-project path collisions harder to reason about. A single ignored sidecar namespace makes ownership explicit while preserving legacy target compatibility.
+
 ## Source Summary From References
 
 Local playbook PDF:
 Recurring automations should act as substantial engineering sprints, read stable guardrails and dynamic task state, verify work, use lock files for short cadence, ask humans asynchronously for unlocks, and use bounded worker agents without giving up main-agent ownership.
 
 Product automation trial:
-A real project benefits from `.agentic/automation_prompt.md`, `CODEX_AUTOMATION_TASKS.md`, lean guardrails, human bridge docs, daily review, autonomy log, and end-of-run updates. Product-specific content should stay outside the core kit or inside clearly fictional examples.
+A real project benefits from a stable automation prompt, dynamic task state, lean guardrails, human bridge state, daily review, autonomy log, and end-of-run updates. New Diffmogger targets place those generated files under `.diffmogger/`; product-specific content should stay outside the core kit or inside clearly fictional examples.
 
 Agentic Notifier reference:
 A separate local service can own Discord credentials, expose `POST /api/notify`, route outbound progress/messages, capture bot mentions/replies from a configured messaging channel, dedupe messages, and write human replies into project markdown files. Diffmogger adapts the generic pieces into `services/agentic-notifier/` and replaces product-specific path names with target-project configuration.

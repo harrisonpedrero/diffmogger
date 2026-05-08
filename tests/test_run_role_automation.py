@@ -6,6 +6,7 @@ import stat
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -22,6 +23,10 @@ LOAD_ENV_HELPER_PATHS = [
 PLAYWRIGHT_MCP_HELPER_PATHS = [
     ROOT / "scripts" / "run_playwright_mcp.sh",
     ROOT / "templates" / "scripts" / "run_playwright_mcp.sh",
+]
+WATCHDOG_HELPER_PATHS = [
+    ROOT / "scripts" / "run_process_watchdog.py",
+    ROOT / "templates" / "scripts" / "run_process_watchdog.py",
 ]
 
 
@@ -55,6 +60,22 @@ class RunRoleAutomationTests(unittest.TestCase):
             "  printf '%s\\n' \"$@\" >\"$FAKE_CODEX_ARG_LOG\"\n"
             "fi\n"
             "exit 0\n",
+            encoding="utf-8",
+        )
+        codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
+        return bin_dir
+
+    def write_hanging_codex(self, root: Path) -> Path:
+        bin_dir = root / "bin"
+        codex = bin_dir / "codex"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ -n \"${FAKE_CODEX_PID_FILE:-}\" ]]; then\n"
+            "  printf '%s\\n' \"$$\" >\"$FAKE_CODEX_PID_FILE\"\n"
+            "fi\n"
+            "trap '' TERM\n"
+            "while true; do sleep 1; done\n",
             encoding="utf-8",
         )
         codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
@@ -98,6 +119,11 @@ class RunRoleAutomationTests(unittest.TestCase):
     def test_source_and_template_playwright_mcp_helpers_stay_byte_identical(self) -> None:
         source = PLAYWRIGHT_MCP_HELPER_PATHS[0].read_text(encoding="utf-8")
         template = PLAYWRIGHT_MCP_HELPER_PATHS[1].read_text(encoding="utf-8")
+        self.assertEqual(source, template)
+
+    def test_source_and_template_watchdog_helpers_stay_byte_identical(self) -> None:
+        source = WATCHDOG_HELPER_PATHS[0].read_text(encoding="utf-8")
+        template = WATCHDOG_HELPER_PATHS[1].read_text(encoding="utf-8")
         self.assertEqual(source, template)
 
     def test_source_and_template_env_loaders_stay_byte_identical(self) -> None:
@@ -345,6 +371,63 @@ class RunRoleAutomationTests(unittest.TestCase):
                     combined = "\n".join(text_outputs)
                     self.assertNotIn("file-secret-value", combined)
                     self.assertNotIn("shell-secret-value", combined)
+
+    def test_hanging_codex_is_timed_out_and_failed_manifest_is_written(self) -> None:
+        for path in ROLE_RUNNER_PATHS:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    target = tmp_path / "target"
+                    target.mkdir()
+                    self.seed_git_target(target)
+                    fake_bin = self.write_hanging_codex(tmp_path)
+                    pid_file = tmp_path / "codex.pid"
+
+                    env = os.environ.copy()
+                    env["CODEX_AUTOMATION_PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+                    env["CODEX_RUN_ID"] = "watchdog-timeout"
+                    env["CODEX_ROLE_TIMEOUT_SECONDS"] = "1"
+                    env["CODEX_ROLE_TERMINATION_GRACE_SECONDS"] = "0"
+                    env["FAKE_CODEX_PID_FILE"] = str(pid_file)
+
+                    result = subprocess.run(
+                        ["bash", str(path), "--target", str(target), "--role", "builder"],
+                        cwd=ROOT,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        check=False,
+                    )
+
+                    self.assertEqual(124, result.returncode, result.stdout + result.stderr)
+                    queue_dir = target / "target" / "automation_queue" / "builder" / "watchdog-timeout"
+                    status = json.loads((queue_dir / "codex.watchdog.json").read_text(encoding="utf-8"))
+                    self.assertTrue(status["timed_out"])
+                    self.assertTrue(status["terminated"])
+                    self.assertTrue(status["killed"])
+                    self.assertEqual(124, status["exit_code"])
+
+                    manifest = json.loads((queue_dir / "manifest.json").read_text(encoding="utf-8"))
+                    self.assertEqual("failed", manifest["status"])
+                    self.assertTrue(manifest["watchdog_timed_out"])
+                    self.assertEqual(124, manifest["watchdog_exit_code"])
+
+                    summary = (queue_dir / "summary.md").read_text(encoding="utf-8")
+                    self.assertIn("Watchdog timed out: true", summary)
+                    self.assertIn("ROLE_RUN role=builder run_id=watchdog-timeout status=failed", result.stdout)
+
+                    if pid_file.exists():
+                        pid = int(pid_file.read_text(encoding="utf-8").strip())
+                        deadline = time.monotonic() + 3
+                        while time.monotonic() < deadline:
+                            try:
+                                os.kill(pid, 0)
+                            except ProcessLookupError:
+                                break
+                            time.sleep(0.05)
+                        with self.assertRaises(ProcessLookupError):
+                            os.kill(pid, 0)
 
 
 if __name__ == "__main__":

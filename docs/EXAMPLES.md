@@ -6,7 +6,7 @@ The `examples/` directory contains intake briefs and expected generated files.
 
 Use `examples/generic-web-app/project_intake.md` to test the kit against a normal fresh-project idea. It exercises project mode, project goals, target users, stack preferences, first demo, verification, human bridge, and worker-agent settings.
 
-The dashboard can add supplemental context files at setup time. Those files are copied into the generated target under `docs/context/` and indexed in `docs/PROJECT_CONTEXT.md`.
+The dashboard can add supplemental context files at setup time. In new sidecar targets those files are copied under `.diffmogger/context/` and indexed in `.diffmogger/state/PROJECT_CONTEXT.md`.
 
 ## TrendLab Signal Intelligence
 
@@ -14,7 +14,7 @@ Use `examples/trendlab-signal-intelligence/project_intake.md` to exercise a more
 
 ## Ticket Campaign
 
-Use `examples/ticket-campaign/project_intake.md` to exercise bounded ticket-campaign mode. It checks that generated automation uses ticket-run phases, treats `docs/TICKET_RUN.md` as scope, keeps bootstrap readiness-only, supports dependency-aware `depends_on` ordering, and avoids open-ended roadmap language.
+Use `examples/ticket-campaign/project_intake.md` to exercise bounded ticket-campaign mode. It checks that generated automation uses ticket-run phases, treats `.diffmogger/state/TICKET_RUN.md` as scope, keeps bootstrap readiness-only, supports dependency-aware `depends_on` ordering, and avoids open-ended roadmap language.
 
 ## Smoke Test
 

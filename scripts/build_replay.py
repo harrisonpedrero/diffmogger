@@ -376,6 +376,8 @@ def describe_path(path: str) -> str:
         return "observatory/review logic"
     if path.endswith("run_conveyor_automation.py"):
         return "conveyor scheduler"
+    if path.endswith("run_process_watchdog.py"):
+        return "process watchdog"
     if path.endswith("run_role_automation.sh"):
         return "role runner"
     if path.endswith("integrate_role_outputs.py"):
@@ -418,6 +420,8 @@ def infer_commit_summary(subject: str, files: list[dict[str, Any]], symbols: lis
         return "Expanded dashboard controls/status around integration safety."
     if "run_role_automation.sh" in joined and "integrate_role_outputs.py" in joined:
         return "Patched runtime-state handoff so ignored automation state reaches main."
+    if "run_process_watchdog.py" in joined:
+        return "Added watchdog-based recovery for stuck automation subprocesses."
     if "run_observatory.py" in joined and "test_run_observatory.py" in joined:
         return "Expanded observatory self-review/reporting with matching tests."
     if "run_conveyor_automation.py" in joined and "test_run_conveyor_automation.py" in joined:

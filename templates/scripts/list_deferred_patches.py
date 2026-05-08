@@ -5,8 +5,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from diffmogger_paths import target_path
 
 
 ROLES = ("planner", "builder", "hardener")
@@ -51,7 +58,7 @@ def load_json(path: Path) -> dict[str, Any] | None:
 
 
 def deferred_manifests(target: Path) -> list[dict[str, Any]]:
-    queue = target / "target" / "automation_queue"
+    queue = target_path(target, "target/automation_queue")
     records: list[dict[str, Any]] = []
     for role in ROLES:
         role_dir = queue / role

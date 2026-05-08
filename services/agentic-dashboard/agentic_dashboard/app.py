@@ -29,6 +29,9 @@ from typing import Any, Callable
 
 KIT_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_DIR = KIT_ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS_DIR))
+from diffmogger_paths import existing_or_target_path, preferred_target_path, sidecar_rel, target_path
+
 SCAFFOLD_SCRIPT = SCRIPTS_DIR / "scaffold_project_docs.py"
 CHECK_REQUIRED_SCRIPT = SCRIPTS_DIR / "check_required_files.py"
 OBSERVATORY_SCRIPT = SCRIPTS_DIR / "run_observatory.py"
@@ -71,30 +74,30 @@ ENV_ACCESS_LABELS = {
 ENV_ACCESS_BY_LABEL = {label: key for key, label in ENV_ACCESS_LABELS.items()}
 MAX_DASHBOARD_LOG_LINES = 1200
 MAX_DASHBOARD_LOG_LINE_CHARS = 4000
-DASHBOARD_STATE_FILE = ".agentic/dashboard_state.json"
+DASHBOARD_STATE_FILE = sidecar_rel(".agentic/dashboard_state.json")
 CONTEXT_IMPORTS_START = "<!-- DIFFMOGGER:CONTEXT-IMPORTS:START -->"
 CONTEXT_IMPORTS_END = "<!-- DIFFMOGGER:CONTEXT-IMPORTS:END -->"
 WORKER_STRATEGY_NAMES = {"NO_WORKERS", "READ_ONLY_REPORTS", "WRITE_WORKERS", "INTEGRATION_ONLY"}
 WORKER_REPORT_STRATEGIES = {"READ_ONLY_REPORTS", "WRITE_WORKERS"}
 
 DOC_CHOICES = {
-    "Automation Tasks": "docs/CODEX_AUTOMATION_TASKS.md",
-    "Multi-Role Progress": "docs/MULTI_ROLE_PROGRESS.md",
-    "Project Context": "docs/PROJECT_CONTEXT.md",
-    "Human Requests": "docs/HUMAN_REQUESTS.md",
-    "Human Inbox": "docs/HUMAN_INBOX.md",
-    "Human Outbox": "docs/HUMAN_OUTBOX.md",
-    "Daily Review": "docs/DAILY_AUTOMATION_REVIEW.md",
-    "Experiment Log": "docs/AUTONOMY_EXPERIMENT_LOG.md",
-    "Initial Bootstrap Prompt": "docs/INITIAL_BOOTSTRAP_PROMPT.md",
-    "Automation Prompt": ".agentic/automation_prompt.md",
+    "Automation Tasks": sidecar_rel("docs/CODEX_AUTOMATION_TASKS.md"),
+    "Multi-Role Progress": sidecar_rel("docs/MULTI_ROLE_PROGRESS.md"),
+    "Project Context": sidecar_rel("docs/PROJECT_CONTEXT.md"),
+    "Human Requests": sidecar_rel("docs/HUMAN_REQUESTS.md"),
+    "Human Inbox": sidecar_rel("docs/HUMAN_INBOX.md"),
+    "Human Outbox": sidecar_rel("docs/HUMAN_OUTBOX.md"),
+    "Daily Review": sidecar_rel("docs/DAILY_AUTOMATION_REVIEW.md"),
+    "Experiment Log": sidecar_rel("docs/AUTONOMY_EXPERIMENT_LOG.md"),
+    "Initial Bootstrap Prompt": sidecar_rel("docs/INITIAL_BOOTSTRAP_PROMPT.md"),
+    "Automation Prompt": sidecar_rel(".agentic/automation_prompt.md"),
 }
 
 HUMAN_DOC_CHOICES = {
-    "Requests From Automation": "docs/HUMAN_REQUESTS.md",
-    "Messages Waiting For Next Run": "docs/HUMAN_INBOX.md",
-    "Sent Updates & Delivery Log": "docs/HUMAN_OUTBOX.md",
-    "Resolved Conversation History": "docs/HUMAN_RESPONSES_ARCHIVE.md",
+    "Requests From Automation": sidecar_rel("docs/HUMAN_REQUESTS.md"),
+    "Messages Waiting For Next Run": sidecar_rel("docs/HUMAN_INBOX.md"),
+    "Sent Updates & Delivery Log": sidecar_rel("docs/HUMAN_OUTBOX.md"),
+    "Resolved Conversation History": sidecar_rel("docs/HUMAN_RESPONSES_ARCHIVE.md"),
 }
 
 INTENT_CHOICES = {
@@ -356,11 +359,73 @@ def launchd_domain_target() -> str:
 
 
 def launchd_log_dir(target: Path) -> Path:
-    return target.expanduser().resolve() / "target" / "automation_logs"
+    return target_path(target.expanduser().resolve(), "target/automation_logs")
+
+
+def target_script_path(target: Path, legacy_rel: str) -> Path:
+    return existing_or_target_path(target.expanduser().resolve(), legacy_rel)
+
+
+def launchd_disabled_in_output(output: str, label: str) -> bool:
+    return re.search(rf'"{re.escape(label)}"\s*=>\s*(?:true|disabled)\b', output) is not None
+
+
+def _path_equals_or_lives_under_target(raw: Any, target: Path) -> bool:
+    if not raw:
+        return False
+    try:
+        candidate = Path(str(raw)).expanduser().resolve()
+    except OSError:
+        candidate = Path(str(raw)).expanduser()
+    return candidate == target or target in candidate.parents
+
+
+def launchd_plist_targets_project(payload: dict[str, Any], target: Path) -> bool:
+    if _path_equals_or_lives_under_target(payload.get("WorkingDirectory"), target):
+        return True
+    environment = payload.get("EnvironmentVariables")
+    if isinstance(environment, dict) and _path_equals_or_lives_under_target(environment.get("TARGET"), target):
+        return True
+    arguments = payload.get("ProgramArguments")
+    if isinstance(arguments, list):
+        return any(_path_equals_or_lives_under_target(argument, target) for argument in arguments)
+    return False
+
+
+def managed_launchd_entries(
+    target: Path,
+    expected_labels: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    target = target.expanduser().resolve()
+    labels = expected_labels or [
+        launchd_label(target),
+        launchd_conveyor_label(target),
+        *[launchd_role_label(target, role) for role in MULTI_ROLE_ROLES],
+    ]
+    records: dict[str, Path] = {
+        label: launchd_plist_path(label)
+        for label in labels
+    }
+    launch_dir = Path.home() / "Library" / "LaunchAgents"
+    if launch_dir.exists():
+        for plist_path in sorted(launch_dir.glob(f"{LAUNCHD_LABEL_PREFIX}*.plist")):
+            try:
+                payload = plistlib.loads(plist_path.read_bytes())
+            except (OSError, plistlib.InvalidFileException):
+                continue
+            if not isinstance(payload, dict) or not launchd_plist_targets_project(payload, target):
+                continue
+            label = str(payload.get("Label") or plist_path.stem).strip()
+            if label:
+                records.setdefault(label, plist_path)
+    return [
+        {"label": label, "plist_path": plist_path}
+        for label, plist_path in records.items()
+    ]
 
 
 def dashboard_state_path(target: Path) -> Path:
-    return target.expanduser().resolve() / DASHBOARD_STATE_FILE
+    return preferred_target_path(target.expanduser().resolve(), ".agentic/dashboard_state.json")
 
 
 def default_browser_cache_dir() -> Path:
@@ -411,7 +476,7 @@ def write_launchd_plist(target: Path, cadence_seconds: int) -> tuple[str, Path]:
     log_dir.mkdir(parents=True, exist_ok=True)
     plist = {
         "Label": label,
-        "ProgramArguments": ["/bin/bash", str(target / "scripts" / "run_codex_automation.sh")],
+        "ProgramArguments": ["/bin/bash", str(target_script_path(target, "scripts/run_codex_automation.sh"))],
         "WorkingDirectory": str(target),
         "RunAtLoad": True,
         "StartInterval": cadence_seconds,
@@ -443,7 +508,7 @@ def write_role_launchd_plist(target: Path, role: str, *, allow_remotes: bool = F
         "Label": label,
         "ProgramArguments": [
             "/bin/bash",
-            str(target / "scripts" / "run_role_automation.sh"),
+            str(target_script_path(target, "scripts/run_role_automation.sh")),
             "--role",
             role,
         ],
@@ -470,7 +535,7 @@ def write_conveyor_launchd_plist(target: Path, *, allow_remotes: bool = False) -
         "Label": label,
         "ProgramArguments": [
             "/bin/bash",
-            str(target / "scripts" / "run_conveyor_automation.sh"),
+            str(target_script_path(target, "scripts/run_conveyor_automation.sh")),
         ],
         "WorkingDirectory": str(target),
         "RunAtLoad": True,
@@ -675,7 +740,7 @@ def check_prerequisites(target: Path, human_bridge_mode: str, optional_mcp_serve
                     "Optional Playwright MCP browser",
                     bool(browser_path),
                     False,
-                    browser_path or "No managed browser found yet; run `python3 scripts/diffmogger_browser.py install` in the generated target or use system browser fallback manually.",
+                    browser_path or "No managed browser found yet; run `.diffmogger/scripts/diffmogger_browser.py install` in the generated target or use system browser fallback manually.",
                 )
             )
 
@@ -755,7 +820,7 @@ def integration_safety_command(target: Path) -> list[str]:
 
 
 def integration_safety_record_path(target: Path) -> Path:
-    return target.expanduser().resolve() / INTEGRATION_SAFETY_RECORD_RELATIVE
+    return target_path(target.expanduser().resolve(), INTEGRATION_SAFETY_RECORD_RELATIVE)
 
 
 def write_integration_safety_record(
@@ -850,7 +915,7 @@ def worker_summary_command(target: Path, run_id: str) -> list[str]:
     target = target.expanduser().resolve()
     return [
         sys.executable,
-        str(target / "scripts" / "summarize_worker_outputs.py"),
+        str(target_script_path(target, "scripts/summarize_worker_outputs.py")),
         str(target),
         "--run-id",
         run_id,
@@ -859,7 +924,7 @@ def worker_summary_command(target: Path, run_id: str) -> list[str]:
 
 def latest_worker_result(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    runs_dir = target / "target" / "agent_runs"
+    runs_dir = target_path(target, "target/agent_runs")
     result: dict[str, Any] = {
         "label": "Latest worker result: none yet.",
         "run_id": None,
@@ -976,7 +1041,7 @@ def read_only_worker_command(target: Path, strategy: dict[str, Any], *, run_id: 
     target = target.expanduser().resolve()
     return [
         "bash",
-        str(target / "scripts" / "spawn_worker_agent.sh"),
+        str(target_script_path(target, "scripts/spawn_worker_agent.sh")),
         "--target",
         str(target),
         "--run-id",
@@ -1000,7 +1065,7 @@ def write_worker_command(
     ownership_scope = normalize_worker_ownership_scope(ownership_scope)
     return [
         "bash",
-        str(target / "scripts" / "spawn_worker_agent.sh"),
+        str(target_script_path(target, "scripts/spawn_worker_agent.sh")),
         "--target",
         str(target),
         "--run-id",
@@ -1021,7 +1086,7 @@ def integration_only_command(target: Path, *, run_id: str | None = None) -> list
         "env",
         f"CODEX_RUN_ID={run_id or dashboard_run_id('dashboard-integrator')}",
         "bash",
-        str(target / "scripts" / "run_role_automation.sh"),
+        str(target_script_path(target, "scripts/run_role_automation.sh")),
         "--target",
         str(target),
         "--role",
@@ -1044,7 +1109,7 @@ def copy_context_files(
     if not context_paths:
         return []
 
-    context_dir = target / "docs" / "context"
+    context_dir = target / ".diffmogger" / "context"
     context_dir.mkdir(parents=True, exist_ok=True)
     records: list[ContextRecord] = []
     used_names: set[str] = set()
@@ -1068,10 +1133,10 @@ def copy_context_files(
             log(f"Context file already in target: {dest}")
         else:
             shutil.copy2(source, dest)
-            log(f"Copied context file: {source.name} -> docs/context/{candidate}")
+            log(f"Copied context file: {source.name} -> .diffmogger/context/{candidate}")
         records.append(
             ContextRecord(
-                rel_path=f"docs/context/{candidate}",
+                rel_path=f".diffmogger/context/{candidate}",
                 original_name=source.name,
                 size_bytes=dest.stat().st_size,
             )
@@ -1125,9 +1190,8 @@ def append_manual_inbox_entry(
     request_id: str,
     parsed_intent: str,
 ) -> str:
-    docs_dir = target / "docs"
-    docs_dir.mkdir(parents=True, exist_ok=True)
-    inbox_path = docs_dir / "HUMAN_INBOX.md"
+    inbox_path = target_path(target, "docs/HUMAN_INBOX.md")
+    inbox_path.parent.mkdir(parents=True, exist_ok=True)
     if not inbox_path.exists():
         inbox_path.write_text(
             "# Human Inbox\n\nActive inbox for replies from the human owner.\n\n",
@@ -1153,7 +1217,7 @@ def append_manual_inbox_entry(
 
 ### Expected automation behavior
 
-The next target project automation run should handle this message, update any related request state, then remove this entry from `docs/HUMAN_INBOX.md` and archive a concise resolution note in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
+The next target project automation run should handle this message, update any related request state, then remove this entry from `{sidecar_rel("docs/HUMAN_INBOX.md")}` and archive a concise resolution note in `{sidecar_rel("docs/HUMAN_RESPONSES_ARCHIVE.md")}`.
 """
     text = inbox_path.read_text(encoding="utf-8").rstrip()
     inbox_path.write_text(text + "\n\n" + entry + "\n", encoding="utf-8")
@@ -1198,7 +1262,7 @@ if TK_AVAILABLE:
             self.multi_role_base_cadence_var = tk.StringVar(value=str(DEFAULT_MULTI_ROLE_BASE_CADENCE_MINUTES))
             self.multi_role_allow_remotes_var = tk.BooleanVar(value=False)
             self.ticket_campaign_enabled_var = tk.BooleanVar(value=False)
-            self.ticket_run_file_var = tk.StringVar(value="docs/TICKET_RUN.md")
+            self.ticket_run_file_var = tk.StringVar(value=sidecar_rel("docs/TICKET_RUN.md"))
             self.ticket_completion_notify_var = tk.BooleanVar(value=True)
             self.context7_mcp_var = tk.BooleanVar(value=False)
             self.playwright_mcp_var = tk.BooleanVar(value=False)
@@ -1661,7 +1725,7 @@ if TK_AVAILABLE:
             ttk.Button(context_frame, text="Remove Selected", command=self.remove_context_file).grid(row=1, column=1, sticky="ew", padx=8, pady=4)
             ttk.Label(
                 context_frame,
-                text="Files are copied into docs/context/ and indexed in docs/PROJECT_CONTEXT.md. Do not add secrets.",
+                text=f"Files are copied into {sidecar_rel('docs/context')}/ and indexed in {sidecar_rel('docs/PROJECT_CONTEXT.md')}. Do not add secrets.",
                 wraplength=360,
             ).grid(row=2, column=1, sticky="ew", padx=8, pady=(4, 8))
             row += 1
@@ -2190,14 +2254,14 @@ if TK_AVAILABLE:
             target = target.expanduser()
             return (
                 dashboard_state_path(target).exists()
-                or (target / ".agentic" / "project_intake.json").exists()
-                or (target / "docs" / "CODEX_AUTOMATION_TASKS.md").exists()
+                or existing_or_target_path(target, ".agentic/project_intake.json").exists()
+                or existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md").exists()
             )
 
         def load_project_state(self, target: Path, *, announce: bool) -> None:
             target = target.expanduser().resolve()
             self.target_var.set(str(target))
-            intake_path = target / ".agentic" / "project_intake.json"
+            intake_path = existing_or_target_path(target, ".agentic/project_intake.json")
             state_path = dashboard_state_path(target)
             loaded = False
 
@@ -2281,7 +2345,7 @@ if TK_AVAILABLE:
             self.multi_role_allow_remotes_var.set(bool(intake.get("multi_role_allow_remotes", False)))
             automation_run_mode = str(intake.get("automation_run_mode") or "continuous_improvement").strip()
             self.ticket_campaign_enabled_var.set(automation_run_mode == "ticket_campaign")
-            self.ticket_run_file_var.set(str(intake.get("ticket_run_file") or "docs/TICKET_RUN.md"))
+            self.ticket_run_file_var.set(str(intake.get("ticket_run_file") or sidecar_rel("docs/TICKET_RUN.md")))
             self.ticket_completion_notify_var.set(bool_from_value(intake.get("ticket_completion_notify"), True))
             strategy = schedule_strategy_from_value(intake.get("automation_schedule_strategy"), multi_role_enabled=multi_role_enabled)
             self.schedule_strategy_var.set(SCHEDULE_STRATEGY_LABELS[strategy])
@@ -2323,7 +2387,7 @@ if TK_AVAILABLE:
             if "automation_run_mode" in state:
                 self.ticket_campaign_enabled_var.set(str(state.get("automation_run_mode")) == "ticket_campaign")
             if "ticket_run_file" in state:
-                self.ticket_run_file_var.set(str(state.get("ticket_run_file") or "docs/TICKET_RUN.md"))
+                self.ticket_run_file_var.set(str(state.get("ticket_run_file") or sidecar_rel("docs/TICKET_RUN.md")))
             if "ticket_completion_notify" in state:
                 self.ticket_completion_notify_var.set(bool_from_value(state.get("ticket_completion_notify"), True))
             if "automation_schedule_strategy" in state:
@@ -2395,7 +2459,7 @@ if TK_AVAILABLE:
                 "multi_role_base_cadence_minutes": multi_role_cadence_minutes_from_text(self.multi_role_base_cadence_var.get()),
                 "multi_role_allow_remotes": bool(self.multi_role_allow_remotes_var.get()),
                 "automation_run_mode": "ticket_campaign" if bool(self.ticket_campaign_enabled_var.get()) else "continuous_improvement",
-                "ticket_run_file": self.ticket_run_file_var.get().strip() or "docs/TICKET_RUN.md",
+                "ticket_run_file": self.ticket_run_file_var.get().strip() or sidecar_rel("docs/TICKET_RUN.md"),
                 "ticket_completion_notify": bool(self.ticket_completion_notify_var.get()),
                 "overwrite_existing_scaffold_files": bool(self.force_var.get()),
                 "last_action": last_action,
@@ -2486,7 +2550,7 @@ if TK_AVAILABLE:
         def collect_intake(self) -> dict[str, Any]:
             mode = self.bridge_mode_var.get()
             bridge_enabled = bool(self.human_bridge_enabled_var.get()) and mode != "disabled"
-            context_names = [f"docs/context/{safe_context_filename(path.name)}" for path in self.context_files]
+            context_names = [sidecar_rel(f"docs/context/{safe_context_filename(path.name)}") for path in self.context_files]
             cadence_minutes = self.cadence_minutes()
             write_workers_enabled = bool(self.write_worker_agents_var.get()) and bool(self.worker_agents_var.get())
             max_write_workers = write_worker_count_from_text(
@@ -2496,7 +2560,7 @@ if TK_AVAILABLE:
             multi_role_enabled = bool(self.multi_role_automations_var.get())
             multi_role_cadence = multi_role_cadence_minutes_from_text(self.multi_role_base_cadence_var.get())
             schedule_strategy = self.schedule_strategy()
-            ticket_file = self.ticket_run_file_var.get().strip() or "docs/TICKET_RUN.md"
+            ticket_file = self.ticket_run_file_var.get().strip() or sidecar_rel("docs/TICKET_RUN.md")
             return {
                 "project_name": self.project_name_var.get().strip() or "New Project",
                 "project_mode": "existing_project" if bool(self.existing_project_var.get()) else "fresh_project",
@@ -2552,7 +2616,7 @@ if TK_AVAILABLE:
                         "macOS desktop notifications",
                         bool(osascript_path),
                         False,
-                        osascript_path or "osascript unavailable; notifier delivery will record LOCAL_NOTIFICATION_FAILED in docs/HUMAN_OUTBOX.md.",
+                        osascript_path or f"osascript unavailable; notifier delivery will record LOCAL_NOTIFICATION_FAILED in {sidecar_rel('docs/HUMAN_OUTBOX.md')}.",
                     )
                 )
             self._show_prerequisites(items)
@@ -2660,15 +2724,15 @@ if TK_AVAILABLE:
             try:
                 self._thread_log(f"Target: {target}")
                 target.mkdir(parents=True, exist_ok=True)
-                context_index_existed = (target / "docs" / "PROJECT_CONTEXT.md").exists()
+                context_path = preferred_target_path(target, "docs/PROJECT_CONTEXT.md")
+                context_index_existed = context_path.exists()
                 records = copy_context_files(target, context_paths, self._thread_log)
                 intake["additional_context_files"] = [record.rel_path for record in records]
 
-                agentic_dir = target / ".agentic"
-                agentic_dir.mkdir(parents=True, exist_ok=True)
-                intake_path = agentic_dir / "project_intake.json"
+                intake_path = preferred_target_path(target, ".agentic/project_intake.json")
+                intake_path.parent.mkdir(parents=True, exist_ok=True)
                 intake_path.write_text(json.dumps(intake, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-                self._thread_log("Wrote .agentic/project_intake.json")
+                self._thread_log(f"Wrote {intake_path.relative_to(target)}")
 
                 scaffold_module = load_scaffold_module()
                 values = scaffold_module.placeholders(intake)
@@ -2679,18 +2743,17 @@ if TK_AVAILABLE:
                 if len(written) > 20:
                     self._thread_log(f"  ... {len(written) - 20} more files")
 
-                context_path = target / "docs" / "PROJECT_CONTEXT.md"
                 if records and (force or not context_index_existed):
                     context_text = render_project_context(intake["project_name"], records)
                     context_path.write_text(context_text, encoding="utf-8")
-                    self._thread_log("Updated docs/PROJECT_CONTEXT.md with imported context files.")
+                    self._thread_log(f"Updated {context_path.relative_to(target)} with imported context files.")
                 elif records:
                     existing_context = context_path.read_text(encoding="utf-8", errors="replace") if context_path.exists() else ""
                     context_path.write_text(
                         upsert_context_imports(existing_context, intake["project_name"], records),
                         encoding="utf-8",
                     )
-                    self._thread_log("Updated managed context-file index in docs/PROJECT_CONTEXT.md.")
+                    self._thread_log(f"Updated managed context-file index in {context_path.relative_to(target)}.")
 
                 check_cmd = [
                     sys.executable,
@@ -2711,7 +2774,7 @@ if TK_AVAILABLE:
                 if check_code != 0:
                     raise RuntimeError("Required-file check failed; bootstrap was not started.")
 
-                prompt_path = target / "docs" / "INITIAL_BOOTSTRAP_PROMPT.md"
+                prompt_path = preferred_target_path(target, "docs/INITIAL_BOOTSTRAP_PROMPT.md")
                 prompt = prompt_path.read_text(encoding="utf-8")
                 self._thread_log("Starting Codex bootstrap run.")
                 code = self._run_command(["codex", "exec", "--full-auto", "--skip-git-repo-check", prompt], cwd=target)
@@ -2857,7 +2920,7 @@ if TK_AVAILABLE:
 
         def refresh_monitor(self) -> None:
             target = Path(self.target_var.get().strip() or ".").expanduser()
-            task_path = target / "docs" / "CODEX_AUTOMATION_TASKS.md"
+            task_path = existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md")
             if not task_path.exists():
                 self.status_var.set("No generated automation task file found for the selected target.")
                 self.current_worker_strategy = {}
@@ -2872,13 +2935,13 @@ if TK_AVAILABLE:
             updated = re.search(r"^Last updated:\s*(.+)", text, re.MULTILINE)
             horizon = re.search(r"^- Current horizon:\s*(.+)", text, re.MULTILINE)
             horizon_decision = re.search(r"^- Advancement decision:\s*(.+)", text, re.MULTILINE)
-            requests_path = target / "docs" / "HUMAN_REQUESTS.md"
-            inbox_path = target / "docs" / "HUMAN_INBOX.md"
-            outbox_path = target / "docs" / "HUMAN_OUTBOX.md"
+            requests_path = existing_or_target_path(target, "docs/HUMAN_REQUESTS.md")
+            inbox_path = existing_or_target_path(target, "docs/HUMAN_INBOX.md")
+            outbox_path = existing_or_target_path(target, "docs/HUMAN_OUTBOX.md")
             request_count = self._count_marker(requests_path, r"^##\s+HR-")
             inbox_count = self._count_marker(inbox_path, r"status:\s*unhandled")
             outbox_count = self._count_marker(outbox_path, r"^##\s+OUTBOX-")
-            worker_reports = sorted((target / "target" / "agent_runs").glob("*/worker_*.md")) if (target / "target" / "agent_runs").exists() else []
+            worker_reports = sorted((target_path(target, "target/agent_runs")).glob("*/worker_*.md")) if (target_path(target, "target/agent_runs")).exists() else []
             try:
                 self.current_worker_strategy = dashboard_worker_strategy(target)
                 worker_summary = worker_strategy_summary(self.current_worker_strategy)
@@ -2934,10 +2997,10 @@ if TK_AVAILABLE:
                 self.current_worker_strategy.get("strategy") or "NO_WORKERS",
                 limit=80,
             )
-            worker_helper_exists = (target / "scripts" / "spawn_worker_agent.sh").exists()
+            worker_helper_exists = target_script_path(target, "scripts/spawn_worker_agent.sh").exists()
             integrator_helper_exists = (
-                (target / "scripts" / "run_role_automation.sh").exists()
-                and (target / ".agentic" / "roles" / "integrator.md").exists()
+                target_script_path(target, "scripts/run_role_automation.sh").exists()
+                and (existing_or_target_path(target, ".agentic/roles/integrator.md")).exists()
             )
             self.read_only_worker_button.configure(
                 state="normal" if worker_helper_exists and strategy in WORKER_REPORT_STRATEGIES else "disabled"
@@ -3092,8 +3155,8 @@ if TK_AVAILABLE:
                 self.events.put(("done", None))
 
         def _summarize_worker_run(self, target: Path, run_id: str) -> Path | None:
-            script = target / "scripts" / "summarize_worker_outputs.py"
-            run_dir = target / "target" / "agent_runs" / run_id
+            script = target_script_path(target, "scripts/summarize_worker_outputs.py")
+            run_dir = target_path(target, "target/agent_runs") / run_id
             if not script.exists():
                 self._thread_log(f"Worker summary helper is missing: {script}")
                 return None
@@ -3112,7 +3175,7 @@ if TK_AVAILABLE:
 
         def load_selected_doc(self) -> None:
             target = Path(self.target_var.get().strip() or ".").expanduser()
-            rel = DOC_CHOICES.get(self.doc_choice_var.get(), "docs/CODEX_AUTOMATION_TASKS.md")
+            rel = DOC_CHOICES.get(self.doc_choice_var.get(), sidecar_rel("docs/CODEX_AUTOMATION_TASKS.md"))
             self._load_markdown_file(self.markdown_text, target / rel)
 
         def launch_observatory(self) -> None:
@@ -3274,34 +3337,34 @@ if TK_AVAILABLE:
             target = target.expanduser().resolve()
             schedule_strategy = self._target_schedule_strategy(target)
             required = [
-                target / ".agentic" / "project_intake.json",
-                target / ".agentic" / "automation_prompt.md",
-                target / "docs" / "INITIAL_BOOTSTRAP_PROMPT.md",
-                target / "docs" / "CODEX_AUTOMATION_TASKS.md",
-                target / "scripts" / "run_codex_automation.sh",
+                existing_or_target_path(target, ".agentic/project_intake.json"),
+                existing_or_target_path(target, ".agentic/automation_prompt.md"),
+                existing_or_target_path(target, "docs/INITIAL_BOOTSTRAP_PROMPT.md"),
+                existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md"),
+                target_script_path(target, "scripts/run_codex_automation.sh"),
             ]
             if schedule_strategy == SCHEDULE_STRATEGY_CONVEYOR:
                 required.extend(
                     [
-                        target / "scripts" / "run_conveyor_automation.sh",
-                        target / "scripts" / "run_conveyor_automation.py",
+                        target_script_path(target, "scripts/run_conveyor_automation.sh"),
+                        target_script_path(target, "scripts/run_conveyor_automation.py"),
                     ]
                 )
             if self._target_multi_role_enabled(target):
                 required.extend(
                     [
-                        target / ".agentic" / "roles" / "planner.md",
-                        target / ".agentic" / "roles" / "builder.md",
-                        target / ".agentic" / "roles" / "hardener.md",
-                        target / ".agentic" / "roles" / "integrator.md",
-                        target / "docs" / "MULTI_ROLE_PROGRESS.md",
-                        target / "scripts" / "run_role_automation.sh",
-                        target / "scripts" / "integrate_role_outputs.py",
-                        target / "scripts" / "list_deferred_patches.py",
+                        existing_or_target_path(target, ".agentic/roles/planner.md"),
+                        existing_or_target_path(target, ".agentic/roles/builder.md"),
+                        existing_or_target_path(target, ".agentic/roles/hardener.md"),
+                        existing_or_target_path(target, ".agentic/roles/integrator.md"),
+                        existing_or_target_path(target, "docs/MULTI_ROLE_PROGRESS.md"),
+                        target_script_path(target, "scripts/run_role_automation.sh"),
+                        target_script_path(target, "scripts/integrate_role_outputs.py"),
+                        target_script_path(target, "scripts/list_deferred_patches.py"),
                     ]
                 )
             if self._target_ticket_campaign_enabled(target):
-                required.append(target / "docs" / "TICKET_RUN.md")
+                required.append(existing_or_target_path(target, "docs/TICKET_RUN.md"))
             missing = [path.relative_to(target).as_posix() for path in required if not path.exists()]
             if missing:
                 return False, "Missing " + ", ".join(missing)
@@ -3311,7 +3374,8 @@ if TK_AVAILABLE:
             )
             if requires_initial_commit and not self._target_has_initial_commit(target):
                 return False, "Multi-role or conveyor scheduling requires an initialized git repo with an initial commit."
-            task_text = (target / "docs" / "CODEX_AUTOMATION_TASKS.md").read_text(
+            task_path = existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md")
+            task_text = task_path.read_text(
                 encoding="utf-8",
                 errors="replace",
             )
@@ -3319,7 +3383,7 @@ if TK_AVAILABLE:
                 return False, "Bootstrap has not completed yet."
             status_match = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", task_text, re.MULTILINE)
             if not status_match:
-                return False, "Missing AUTOMATION_STATUS in docs/CODEX_AUTOMATION_TASKS.md."
+                return False, f"Missing AUTOMATION_STATUS in {task_path.relative_to(target)}."
             status = status_match.group(1).strip().upper()
             if status not in SCHEDULABLE_STATUSES:
                 return False, f"Automation status is {status}; scheduling requires ACTIVE or ACTIVE_WITH_PENDING_USER_INPUT."
@@ -3348,10 +3412,10 @@ if TK_AVAILABLE:
             if result.returncode != 0:
                 return False
             output = result.stdout or result.stderr
-            return re.search(rf'"{re.escape(label)}"\s*=>\s*true', output) is not None
+            return launchd_disabled_in_output(output, label)
 
         def _target_human_bridge_mode(self, target: Path) -> str:
-            intake_path = target / ".agentic" / "project_intake.json"
+            intake_path = existing_or_target_path(target, ".agentic/project_intake.json")
             if intake_path.exists():
                 try:
                     intake = json.loads(intake_path.read_text(encoding="utf-8"))
@@ -3363,7 +3427,7 @@ if TK_AVAILABLE:
             return self.bridge_mode_var.get() if self.human_bridge_enabled_var.get() else "disabled"
 
         def _target_multi_role_enabled(self, target: Path) -> bool:
-            intake_path = target / ".agentic" / "project_intake.json"
+            intake_path = existing_or_target_path(target, ".agentic/project_intake.json")
             if intake_path.exists():
                 try:
                     intake = json.loads(intake_path.read_text(encoding="utf-8"))
@@ -3378,8 +3442,8 @@ if TK_AVAILABLE:
                 except (OSError, json.JSONDecodeError):
                     pass
             for marker_path in [
-                target / ".agentic" / "automation_prompt.md",
-                target / "docs" / "CODEX_AUTOMATION_TASKS.md",
+                existing_or_target_path(target, ".agentic/automation_prompt.md"),
+                existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md"),
             ]:
                 if marker_path.exists():
                     text = marker_path.read_text(encoding="utf-8", errors="replace")
@@ -3390,7 +3454,7 @@ if TK_AVAILABLE:
             return bool(self.multi_role_automations_var.get())
 
         def _target_ticket_campaign_enabled(self, target: Path) -> bool:
-            intake_path = target / ".agentic" / "project_intake.json"
+            intake_path = existing_or_target_path(target, ".agentic/project_intake.json")
             if intake_path.exists():
                 try:
                     intake = json.loads(intake_path.read_text(encoding="utf-8"))
@@ -3407,7 +3471,7 @@ if TK_AVAILABLE:
             return bool(self.ticket_campaign_enabled_var.get())
 
         def _target_ticket_completion_notify_enabled(self, target: Path) -> bool:
-            intake_path = target / ".agentic" / "project_intake.json"
+            intake_path = existing_or_target_path(target, ".agentic/project_intake.json")
             if intake_path.exists():
                 try:
                     intake = json.loads(intake_path.read_text(encoding="utf-8"))
@@ -3424,7 +3488,7 @@ if TK_AVAILABLE:
             return bool(self.ticket_completion_notify_var.get())
 
         def _target_local_notifications_enabled(self, target: Path) -> bool:
-            intake_path = target / ".agentic" / "project_intake.json"
+            intake_path = existing_or_target_path(target, ".agentic/project_intake.json")
             if intake_path.exists():
                 try:
                     intake = json.loads(intake_path.read_text(encoding="utf-8"))
@@ -3449,7 +3513,7 @@ if TK_AVAILABLE:
                         return optional_mcp_servers_from_value(state.get("optional_mcp_servers"))
                 except (OSError, json.JSONDecodeError):
                     pass
-            intake_path = target / ".agentic" / "project_intake.json"
+            intake_path = existing_or_target_path(target, ".agentic/project_intake.json")
             if intake_path.exists():
                 try:
                     intake = json.loads(intake_path.read_text(encoding="utf-8"))
@@ -3471,7 +3535,7 @@ if TK_AVAILABLE:
                         )
                 except (OSError, json.JSONDecodeError):
                     pass
-            intake_path = target / ".agentic" / "project_intake.json"
+            intake_path = existing_or_target_path(target, ".agentic/project_intake.json")
             if intake_path.exists():
                 try:
                     intake = json.loads(intake_path.read_text(encoding="utf-8"))
@@ -3493,7 +3557,7 @@ if TK_AVAILABLE:
                         return bool(state.get("multi_role_allow_remotes"))
                 except (OSError, json.JSONDecodeError):
                     pass
-            intake_path = target / ".agentic" / "project_intake.json"
+            intake_path = existing_or_target_path(target, ".agentic/project_intake.json")
             if intake_path.exists():
                 try:
                     intake = json.loads(intake_path.read_text(encoding="utf-8"))
@@ -3541,8 +3605,11 @@ if TK_AVAILABLE:
                 *[launchd_role_label(target, role) for role in MULTI_ROLE_ROLES],
             ]
 
+        def _schedule_entries(self, target: Path) -> list[dict[str, Any]]:
+            return managed_launchd_entries(target, self._all_schedule_labels(target))
+
         def _schedule_plists(self, target: Path) -> list[Path]:
-            return [launchd_plist_path(label) for label in self._schedule_labels(target)]
+            return [Path(entry["plist_path"]) for entry in self._schedule_entries(target)]
 
         def _schedule_prerequisites(self, target: Path) -> list[PrerequisiteItem]:
             items = check_prerequisites(target, self._target_human_bridge_mode(target), self._target_optional_mcp_servers(target))
@@ -3580,7 +3647,7 @@ if TK_AVAILABLE:
                         "macOS desktop notifications",
                         bool(osascript_path),
                         False,
-                        osascript_path or "osascript unavailable; notifier delivery will record LOCAL_NOTIFICATION_FAILED in docs/HUMAN_OUTBOX.md.",
+                        osascript_path or f"osascript unavailable; notifier delivery will record LOCAL_NOTIFICATION_FAILED in {sidecar_rel('docs/HUMAN_OUTBOX.md')}.",
                     )
                 )
             return items
@@ -3620,10 +3687,10 @@ if TK_AVAILABLE:
                 return
             target = Path(target_text).expanduser().resolve()
             ready, reason = self._automation_ready(target)
-            labels = self._all_schedule_labels(target)
-            plists = [launchd_plist_path(label) for label in labels]
+            entries = self._schedule_entries(target)
+            labels = [str(entry["label"]) for entry in entries]
             loaded_labels = [label for label in labels if self._launchd_loaded(label)]
-            existing_plists = [path for path in plists if path.exists()]
+            existing_plists = [Path(entry["plist_path"]) for entry in entries if Path(entry["plist_path"]).exists()]
             disabled_labels = [label for label in labels if self._launchd_disabled(label)]
             strategy = self._target_schedule_strategy(target)
             if sys.platform != "darwin":
@@ -3634,7 +3701,7 @@ if TK_AVAILABLE:
                 self._set_worker_action_state()
                 return
             self.run_automation_button.configure(state="normal" if ready else "disabled")
-            self.pause_automation_button.configure(state="normal" if loaded_labels or existing_plists else "disabled")
+            self.pause_automation_button.configure(state="normal" if loaded_labels else "disabled")
             self.remove_schedule_button.configure(state="normal" if loaded_labels or existing_plists else "disabled")
             if loaded_labels:
                 if any(label == launchd_conveyor_label(target) for label in loaded_labels):
@@ -3710,8 +3777,9 @@ if TK_AVAILABLE:
                         + "\n\nEnable the advanced option \"Allow local-only multi-role automation when this repo has git remotes\" to set MULTI_ROLE_ALLOW_REMOTES=1 in the launchd job. This still does not allow pushes, fetches, pulls, or remote configuration.",
                     )
                     return
-                for label in self._all_schedule_labels(target):
-                    plist_path = launchd_plist_path(label)
+                for entry in self._schedule_entries(target):
+                    label = str(entry["label"])
+                    plist_path = Path(entry["plist_path"])
                     if self._launchd_loaded(label):
                         result = self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
                         if result.returncode != 0:
@@ -3775,19 +3843,22 @@ if TK_AVAILABLE:
                 return
             target = Path(target_text).expanduser().resolve()
             try:
-                found = False
-                for label in self._all_schedule_labels(target):
-                    plist_path = launchd_plist_path(label)
-                    if self._launchd_loaded(label):
-                        result = self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
-                        if result.returncode != 0:
-                            self._launchctl(["bootout", launchd_domain_target(), str(plist_path)], allow_failure=True)
-                    if plist_path.exists():
-                        self._launchctl(["disable", launchd_service_target(label)], allow_failure=True)
-                        self._append_log(f"Paused and disabled scheduled automation: {label}.")
-                        found = True
+                loaded_entries = [
+                    entry
+                    for entry in self._schedule_entries(target)
+                    if self._launchd_loaded(str(entry["label"]))
+                ]
+                found = bool(loaded_entries)
+                for entry in loaded_entries:
+                    label = str(entry["label"])
+                    plist_path = Path(entry["plist_path"])
+                    result = self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
+                    if result.returncode != 0:
+                        self._launchctl(["bootout", launchd_domain_target(), str(plist_path)], allow_failure=True)
+                    self._launchctl(["disable", launchd_service_target(label)], allow_failure=True)
+                    self._append_log(f"Paused and disabled scheduled automation: {label}.")
                 if not found:
-                    self._append_log("Scheduled automation plist was not found.")
+                    self._append_log("Scheduled automation is not currently running.")
                 self.write_dashboard_state(target, last_action="schedule_paused")
                 self._set_run_automation_state()
             except Exception as exc:
@@ -3813,8 +3884,9 @@ if TK_AVAILABLE:
                 return
             try:
                 removed = False
-                for label in self._all_schedule_labels(target):
-                    plist_path = launchd_plist_path(label)
+                for entry in self._schedule_entries(target):
+                    label = str(entry["label"])
+                    plist_path = Path(entry["plist_path"])
                     if self._launchd_loaded(label):
                         result = self._launchctl(["bootout", launchd_service_target(label)], allow_failure=True)
                         if result.returncode != 0:

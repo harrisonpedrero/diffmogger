@@ -26,9 +26,16 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from diffmogger_paths import existing_or_target_path, target_path
 
 
 ACTIVE_STATUS_WORDS = {
@@ -400,8 +407,8 @@ def compact_multi_role_artifacts(target: Path, *, dry_run: bool) -> list[str]:
     now = datetime.now(timezone.utc).timestamp()
     seven_days = 7 * 24 * 60 * 60
     thirty_days = 30 * 24 * 60 * 60
-    queue_root = target / "target" / "automation_queue"
-    worktree_root = target / "target" / "automation_worktrees"
+    queue_root = target_path(target, "target/automation_queue")
+    worktree_root = target_path(target, "target/automation_worktrees")
     summaries: list[str] = []
 
     for role in MULTI_ROLE_ROLES:
@@ -462,7 +469,7 @@ def compact_multi_role_artifacts(target: Path, *, dry_run: bool) -> list[str]:
         if deleted_worktrees:
             summaries.append(f"- {role}: deleted {deleted_worktrees} transient worktrees.")
 
-    log_root = target / "target" / "automation_logs"
+    log_root = target_path(target, "target/automation_logs")
     if log_root.exists():
         deleted_logs = 0
         for log_path in log_root.glob("*.log"):
@@ -476,7 +483,7 @@ def compact_multi_role_artifacts(target: Path, *, dry_run: bool) -> list[str]:
             summaries.append(f"- deleted {deleted_logs} role logs older than 30 days.")
 
     if summaries:
-        append_multi_role_history(target / "docs" / "MULTI_ROLE_PROGRESS.md", summaries, dry_run=dry_run)
+        append_multi_role_history(existing_or_target_path(target, "docs/MULTI_ROLE_PROGRESS.md"), summaries, dry_run=dry_run)
     if not dry_run and (target / ".git").exists():
         subprocess.run(["git", "worktree", "prune"], cwd=target, capture_output=True, text=True, check=False)
     return summaries
@@ -526,14 +533,13 @@ def main() -> int:
         raise SystemExit("--keep-latest must be at least 1")
 
     target = Path(args.target).resolve()
-    docs = target / "docs"
-    archive = docs / "HUMAN_RESPONSES_ARCHIVE.md"
+    archive = existing_or_target_path(target, "docs/HUMAN_RESPONSES_ARCHIVE.md")
     changes: list[str] = []
 
     queue_specs = [
-        (docs / "HUMAN_INBOX.md", False),
-        (docs / "HUMAN_REQUESTS.md", False),
-        (docs / "HUMAN_OUTBOX.md", True),
+        (existing_or_target_path(target, "docs/HUMAN_INBOX.md"), False),
+        (existing_or_target_path(target, "docs/HUMAN_REQUESTS.md"), False),
+        (existing_or_target_path(target, "docs/HUMAN_OUTBOX.md"), True),
     ]
     for path, preserve_failures in queue_specs:
         new_text, summaries = compact_active_queue(
@@ -555,11 +561,11 @@ def main() -> int:
         changes.append(f"compacted {archive.relative_to(target)}")
 
     for rel in ["AUTONOMY_EXPERIMENT_LOG.md", "DAILY_AUTOMATION_REVIEW.md"]:
-        path = docs / rel
+        path = existing_or_target_path(target, f"docs/{rel}")
         if maybe_write(path, compact_log(path, keep_latest=args.keep_latest), dry_run=args.dry_run):
             changes.append(f"compacted {path.relative_to(target)}")
 
-    progress_path = docs / "MULTI_ROLE_PROGRESS.md"
+    progress_path = existing_or_target_path(target, "docs/MULTI_ROLE_PROGRESS.md")
     if maybe_write(
         progress_path,
         compact_multi_role_progress(
@@ -575,7 +581,7 @@ def main() -> int:
     if multi_role_summaries:
         changes.append(f"processed multi-role transient artifacts ({len(multi_role_summaries)} summaries)")
 
-    task_path = docs / "CODEX_AUTOMATION_TASKS.md"
+    task_path = existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md")
     if maybe_write(
         task_path,
         compact_task_file(task_path, max_section_lines=args.max_task_section_lines),

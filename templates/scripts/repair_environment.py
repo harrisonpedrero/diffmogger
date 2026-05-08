@@ -23,6 +23,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from diffmogger_paths import target_path
+
 
 ENV_FAILURE_KINDS = {
     "missing_command",
@@ -331,7 +337,7 @@ def python_requirement_candidates(target: Path, command: str, output: str) -> li
         candidates.append((notifier_requirements, notifier_requirements.parent / ".venv"))
     root_requirements = target / "requirements.txt"
     if root_requirements.exists():
-        candidates.append((root_requirements, target / "target" / "automation_venvs" / "root"))
+        candidates.append((root_requirements, target_path(target, "target/automation_venvs") / "root"))
     services = target / "services"
     if services.exists():
         for requirements in sorted(services.glob("*/requirements.txt")):

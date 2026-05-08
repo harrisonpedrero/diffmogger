@@ -15,6 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from diffmogger_paths import existing_or_target_path, target_path
+
 
 DEFAULT_TICKET_FILE = "docs/TICKET_RUN.md"
 COMPLETION_STATE = "target/ticket_run_completion.json"
@@ -39,13 +45,15 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def project_intake(target: Path) -> dict[str, Any]:
-    return read_json(target / ".agentic" / "project_intake.json")
+    return read_json(existing_or_target_path(target, ".agentic/project_intake.json"))
 
 
 def ticket_file_path(target: Path) -> Path:
     intake = project_intake(target)
-    configured = str(intake.get("ticket_run_file") or DEFAULT_TICKET_FILE).strip() or DEFAULT_TICKET_FILE
-    return target / configured
+    configured = str(intake.get("ticket_run_file") or "").strip()
+    if configured:
+        return target / configured
+    return target_path(target, DEFAULT_TICKET_FILE)
 
 
 def load_ticket_run(target: Path, ticket_file: Path | None = None) -> tuple[dict[str, Any], Path, str]:
@@ -109,7 +117,7 @@ def has_verification_evidence(ticket: dict[str, Any]) -> bool:
 
 
 def queued_patch_count(target: Path) -> int:
-    queue_root = target / "target" / "automation_queue"
+    queue_root = target_path(target, "target/automation_queue")
     count = 0
     for path in queue_root.glob("*/*/manifest.json"):
         data = read_json(path)
@@ -361,8 +369,10 @@ def next_ticket_selection(data: dict[str, Any]) -> dict[str, Any]:
 
 def default_report_path(target: Path, data: dict[str, Any]) -> Path:
     run_id = str(data.get("run_id") or "ticket-run").strip() or "ticket-run"
-    configured = str(data.get("report_path") or f"target/ticket_run_reports/{run_id}.md").strip()
-    return target / configured
+    configured = str(data.get("report_path") or "").strip()
+    if configured:
+        return target / configured
+    return target_path(target, f"target/ticket_run_reports/{run_id}.md")
 
 
 def report_markdown(target: Path, data: dict[str, Any], summary: dict[str, Any]) -> str:
@@ -493,7 +503,7 @@ def ticket_notification_message(target: Path, data: dict[str, Any], summary: dic
 
 
 def append_outbox(target: Path, message: str, status: str, detail: str) -> None:
-    path = target / "docs" / "HUMAN_OUTBOX.md"
+    path = target_path(target, "docs/HUMAN_OUTBOX.md")
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else "# Human Outbox\n"
     entry = (
@@ -572,7 +582,7 @@ def notify_completion(target: Path, data: dict[str, Any], summary: dict[str, Any
 
 
 def completion_state_path(target: Path) -> Path:
-    return target / COMPLETION_STATE
+    return target_path(target, COMPLETION_STATE)
 
 
 def finalize(target: Path, *, ticket_file: Path | None = None) -> dict[str, Any]:

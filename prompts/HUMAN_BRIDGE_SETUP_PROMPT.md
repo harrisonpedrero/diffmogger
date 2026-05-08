@@ -15,10 +15,10 @@ Implement or document these modes:
 The target project contains:
 
 ```text
-docs/HUMAN_REQUESTS.md
-docs/HUMAN_INBOX.md
-docs/HUMAN_OUTBOX.md
-docs/HUMAN_RESPONSES_ARCHIVE.md
+.diffmogger/state/HUMAN_REQUESTS.md
+.diffmogger/state/HUMAN_INBOX.md
+.diffmogger/state/HUMAN_OUTBOX.md
+.diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md
 ```
 
 Codex writes requests. The human replies manually in `HUMAN_INBOX.md`. Codex consumes and archives handled entries on the next run.
@@ -56,14 +56,14 @@ Diffmogger's notifier service also supports Discord:
 The notifier writes inbound replies to:
 
 ```text
-docs/HUMAN_INBOX.md
+.diffmogger/state/HUMAN_INBOX.md
 ```
 
 The target project must not read notifier `.env` files or handle Discord credentials.
 
-The target automation must fall back to writing `docs/HUMAN_REQUESTS.md` if the notifier is unavailable, use `ACTIVE_WITH_PENDING_USER_INPUT` when useful work remains, and use `BLOCKED_ON_USER` only when no useful work remains.
+The target automation must fall back to writing `.diffmogger/state/HUMAN_REQUESTS.md` if the notifier is unavailable, use `ACTIVE_WITH_PENDING_USER_INPUT` when useful work remains, and use `BLOCKED_ON_USER` only when no useful work remains.
 
-For human-unlock requests, document the structured request payload. For direct human-requested status/update responses, document the optional `message_body` and `expects_reply: false` payload. If the notifier is unavailable, require the automation to write the intended outbound message to `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and not claim delivery.
+For human-unlock requests, document the structured request payload. For direct human-requested status/update responses, document the optional `message_body` and `expects_reply: false` payload. If the notifier is unavailable, require the automation to write the intended outbound message to `.diffmogger/state/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and not claim delivery.
 
 In Discord notifier mode, document that the multi-role integrator sends a brief `event_kind: "progress"` notification after each local automation commit it creates, including the commit subject and short work summary.
 

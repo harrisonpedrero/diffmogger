@@ -20,6 +20,10 @@ Full-suite commands are stored in:
 .agentic/verification_commands.txt
 ```
 
+The commands in that file are the clean-HEAD baseline gate. They must pass on
+the current checkout; keep future desired commands out of this file until the
+corresponding scripts, packages, services, or Make targets exist.
+
 Patch-scoped multi-role smoke checks may be configured in:
 
 ```text
@@ -30,6 +34,12 @@ Preferred commands:
 
 ```text
 {{VERIFICATION_COMMANDS}}
+```
+
+Bootstrap-safe baseline commands:
+
+```text
+{{BOOTSTRAP_BASELINE_COMMANDS}}
 ```
 
 Update this section and `.agentic/verification_commands.txt` when full-suite commands change.
@@ -65,10 +75,10 @@ docs/PROJECT_CONTEXT.md
 Scheduled runs should use the local wrapper:
 
 ```bash
-bash scripts/run_codex_automation.sh
+bash .diffmogger/scripts/run_codex_automation.sh
 ```
 
-The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto --skip-git-repo-check`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock when the run exits.
+The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto --skip-git-repo-check` through `.diffmogger/scripts/run_process_watchdog.py`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock when the run exits. Set `CODEX_ROLE_TIMEOUT_SECONDS` to override the 90-minute hard timeout and `CODEX_ROLE_TERMINATION_GRACE_SECONDS` to tune graceful shutdown.
 
 ## Automation Environment Loading
 
@@ -81,9 +91,9 @@ Use `CODEX_AUTOMATION_ENV_FILES` for an explicit comma- or colon-separated file 
 Optional continuous conveyor scheduling uses:
 
 ```bash
-bash scripts/run_conveyor_automation.sh --dry-run
-bash scripts/run_conveyor_automation.sh --once
-python3 scripts/run_observatory.py --open
+bash .diffmogger/scripts/run_conveyor_automation.sh --dry-run
+bash .diffmogger/scripts/run_conveyor_automation.sh --once
+python3 .diffmogger/scripts/run_observatory.py --open
 ```
 
 Continuous conveyor scheduling requires this target to be an initialized git repo with an initial commit.
@@ -95,16 +105,16 @@ The conveyor records local state under `target/automation_conveyor_state.json`, 
 Browser-backed automation should prefer Diffmogger's managed local browser over ambient system Chrome:
 
 ```bash
-python3 scripts/diffmogger_browser.py doctor --launch
-python3 scripts/diffmogger_browser.py install
-python3 scripts/diffmogger_browser.py env
+python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch
+python3 .diffmogger/scripts/diffmogger_browser.py install
+python3 .diffmogger/scripts/diffmogger_browser.py env
 ```
 
 The helper checks `DIFFMOGGER_BROWSER_PATH`, `CHROME_PATH`, and the managed cache at
 `DIFFMOGGER_BROWSER_CACHE` or `~/.cache/diffmogger/browsers`. Scheduled wrappers export
 the managed path for child Codex runs when it exists, and dashboard-managed LaunchAgents
 inherit the same environment. Do not make browser smoke checks depend only on system
-Chrome; use `python3 scripts/diffmogger_browser.py resolve` or the exported `CHROME_PATH`.
+Chrome; use `python3 .diffmogger/scripts/diffmogger_browser.py resolve` or the exported `CHROME_PATH`.
 
 ## Optional MCP Integrations
 
@@ -131,7 +141,7 @@ docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png
 For a durable first-run review bundle, render the same local state to HTML and Markdown:
 
 ```bash
-python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review
+python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review
 ```
 
 This writes `/tmp/Diffmogger-review/Diffmogger-observatory.html` and
@@ -145,7 +155,7 @@ After the first bootstrap, use one local review path:
 
 1. In the Diffmogger starter-kit source, run `bash scripts/validate_starter_kit.sh` when reviewing kit or scaffold behavior.
 2. Open the dashboard with `python3 /path/to/Diffmogger/scripts/run_dashboard.py`, reopen this target, and click **Run Safety Check** in the Monitor tab.
-3. Click **Export Review Bundle** or, from this target repo, run `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
+3. Click **Export Review Bundle** or, from this target repo, run `python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
 4. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
 5. Confirm the review shows first-review readiness, safety status, validation state, active role or queue, known issues, the next sprint recommendation, and the next-run worker strategy.
 
@@ -167,8 +177,8 @@ Use read-only worker reports first and record outputs under `target/agent_runs/<
 Local helpers:
 
 ```bash
-bash scripts/spawn_worker_agent.sh --target . --run-id "$CODEX_RUN_ID" --role review --prompt "Write a concise read-only review report."
-python3 scripts/summarize_worker_outputs.py . --run-id "$CODEX_RUN_ID"
+bash .diffmogger/scripts/spawn_worker_agent.sh --target . --run-id "$CODEX_RUN_ID" --role review --prompt "Write a concise read-only review report."
+python3 .diffmogger/scripts/summarize_worker_outputs.py . --run-id "$CODEX_RUN_ID"
 ```
 
 Every automation run should record:
@@ -191,7 +201,7 @@ Reason: <one sentence>
 Use the local state compaction helper when Markdown handoff files become long:
 
 ```bash
-python3 scripts/compact_agent_state.py --dry-run .
+python3 .diffmogger/scripts/compact_agent_state.py --dry-run .
 ```
 
 Review the diff before running without `--dry-run`; unresolved human requests must stay active.

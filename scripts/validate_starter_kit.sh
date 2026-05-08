@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+kit_root="$(pwd)"
 
 required_files=(
   "README.md"
@@ -15,6 +16,8 @@ required_files=(
   "docs/OPERATING_MODEL.md"
   "docs/CODEX_SETUP.md"
   "docs/DASHBOARD.md"
+  "docs/NATIVE_APP_REBUILD.md"
+  "docs/NATIVE_APP_REBUILD_INVENTORY.md"
   "docs/FRESH_PROJECT_SETUP.md"
   "docs/HUMAN_BRIDGE.md"
   "docs/WORKER_AGENTS.md"
@@ -57,11 +60,13 @@ required_files=(
   "templates/scripts/acquire_codex_lock.sh"
   "templates/scripts/release_codex_lock.sh"
   "templates/scripts/run_codex_automation.sh"
+  "templates/scripts/run_process_watchdog.py"
   "templates/scripts/run_conveyor_automation.py"
   "templates/scripts/run_conveyor_automation.sh"
   "templates/scripts/run_observatory.py"
   "templates/scripts/build_replay.py"
   "templates/scripts/diffmogger_browser.py"
+  "templates/scripts/diffmogger_paths.py"
   "templates/scripts/ticket_run.py"
   "templates/scripts/repair_environment.py"
   "templates/scripts/update_automation_signals.py"
@@ -73,6 +78,8 @@ required_files=(
   "templates/scripts/summarize_worker_outputs.py"
   "templates/scripts/compact_agent_state.py"
   "tests/test_run_observatory.py"
+  "tests/test_dashboard_backend_cli.py"
+  "tests/test_native_rebuild_guardrails.py"
   "tests/test_run_conveyor_automation.py"
   "tests/test_run_role_automation.py"
   "tests/test_repair_environment.py"
@@ -96,14 +103,19 @@ required_files=(
   "scripts/check_required_files.py"
   "scripts/check_integration_safety.py"
   "scripts/scaffold_project_docs.py"
+  "scripts/dashboard_backend_cli.py"
+  "scripts/check_native_rebuild_guardrails.py"
+  "scripts/validate_native_app.sh"
   "scripts/run_dashboard.py"
   "scripts/acquire_codex_lock.sh"
   "scripts/release_codex_lock.sh"
   "scripts/run_conveyor_automation.py"
   "scripts/run_conveyor_automation.sh"
+  "scripts/run_process_watchdog.py"
   "scripts/run_observatory.py"
   "scripts/build_replay.py"
   "scripts/diffmogger_browser.py"
+  "scripts/diffmogger_paths.py"
   "scripts/ticket_run.py"
   "scripts/repair_environment.py"
   "scripts/update_automation_signals.py"
@@ -141,6 +153,45 @@ required_files=(
   "services/agentic-dashboard/README.md"
   "services/agentic-dashboard/agentic_dashboard/__init__.py"
   "services/agentic-dashboard/agentic_dashboard/app.py"
+  "services/agentic-dashboard/native/README.md"
+  "services/agentic-dashboard/native/package.json"
+  "services/agentic-dashboard/native/package-lock.json"
+  "services/agentic-dashboard/native/index.html"
+  "services/agentic-dashboard/native/tsconfig.json"
+  "services/agentic-dashboard/native/vite.config.ts"
+  "services/agentic-dashboard/native/src/App.tsx"
+  "services/agentic-dashboard/native/src/App.css"
+  "services/agentic-dashboard/native/src/AdvancedPage.tsx"
+  "services/agentic-dashboard/native/src/AppShell.test.tsx"
+  "services/agentic-dashboard/native/src/BriefWizard.tsx"
+  "services/agentic-dashboard/native/src/CommandPalette.tsx"
+  "services/agentic-dashboard/native/src/InboxPage.tsx"
+  "services/agentic-dashboard/native/src/InboxPage.test.tsx"
+  "services/agentic-dashboard/native/src/ObservatoryPage.tsx"
+  "services/agentic-dashboard/native/src/ObservatoryPage.test.tsx"
+  "services/agentic-dashboard/native/src/ReviewPage.tsx"
+  "services/agentic-dashboard/native/src/RunPage.tsx"
+  "services/agentic-dashboard/native/src/advancedModel.ts"
+  "services/agentic-dashboard/native/src/advancedModel.test.ts"
+  "services/agentic-dashboard/native/src/api/backend.ts"
+  "services/agentic-dashboard/native/src/assets/diffmogger-icon.png"
+  "services/agentic-dashboard/native/src/assets/diffmogger-logo-cropped.png"
+  "services/agentic-dashboard/native/src/commandPaletteModel.ts"
+  "services/agentic-dashboard/native/src/commandPaletteModel.test.ts"
+  "services/agentic-dashboard/native/src/homeModel.ts"
+  "services/agentic-dashboard/native/src/homeModel.test.ts"
+  "services/agentic-dashboard/native/src/observatoryModel.ts"
+  "services/agentic-dashboard/native/src/observatoryModel.test.ts"
+  "services/agentic-dashboard/native/src/runModel.ts"
+  "services/agentic-dashboard/native/src/runModel.test.ts"
+  "services/agentic-dashboard/native/src/main.tsx"
+  "services/agentic-dashboard/native/src-tauri/Cargo.toml"
+  "services/agentic-dashboard/native/src-tauri/Cargo.lock"
+  "services/agentic-dashboard/native/src-tauri/build.rs"
+  "services/agentic-dashboard/native/src-tauri/tauri.conf.json"
+  "services/agentic-dashboard/native/src-tauri/capabilities/default.json"
+  "services/agentic-dashboard/native/src-tauri/src/lib.rs"
+  "services/agentic-dashboard/native/src-tauri/src/main.rs"
 )
 
 for file in "${required_files[@]}"; do
@@ -153,6 +204,7 @@ done
 python3 - <<'PY'
 from pathlib import Path
 import json
+import os
 import subprocess
 import sys
 
@@ -216,6 +268,10 @@ def skip_stale_reference_scan(path: Path) -> bool:
         ".pytest_cache",
         ".venv",
         "__pycache__",
+        "node_modules",
+        "dist",
+        "dist-ssr",
+        "gen",
         "target",
     }
     if any(part in runtime_parts for part in path.parts):
@@ -230,18 +286,26 @@ def skip_stale_reference_scan(path: Path) -> bool:
 
 
 stale_hits = []
-for path in sorted(Path(".").rglob("*")):
-    if not path.is_file():
-        continue
-    if skip_stale_reference_scan(path):
-        continue
-    try:
-        text = path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        continue
-    for term in stale_terms:
-        if term in text:
-            stale_hits.append((path, term))
+for root, dirnames, filenames in os.walk("."):
+    root_path = Path(root)
+    dirnames[:] = sorted(
+        dirname
+        for dirname in dirnames
+        if not skip_stale_reference_scan(root_path / dirname)
+    )
+    for filename in sorted(filenames):
+        path = root_path / filename
+        if not path.is_file():
+            continue
+        if skip_stale_reference_scan(path):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for term in stale_terms:
+            if term in text:
+                stale_hits.append((path, term))
 
 if stale_hits:
     for path, term in stale_hits:
@@ -357,11 +421,11 @@ for path in [
 
 for marker in [
     "CODEX_LOCK_ALREADY_ACQUIRED=true",
-    "scripts/run_codex_automation.sh",
-    "scripts/acquire_codex_lock.sh",
-    "scripts/release_codex_lock.sh",
-    "scripts/spawn_worker_agent.sh",
-    "scripts/summarize_worker_outputs.py",
+    ".diffmogger/scripts/run_codex_automation.sh",
+    ".diffmogger/scripts/acquire_codex_lock.sh",
+    ".diffmogger/scripts/release_codex_lock.sh",
+    ".diffmogger/scripts/spawn_worker_agent.sh",
+    ".diffmogger/scripts/summarize_worker_outputs.py",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
     "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS",
     "Parallelism budget:",
@@ -405,9 +469,25 @@ for marker in [
     "ticket_run.py",
     "child_pid",
     "forward_signal",
+    "run_process_watchdog.py",
 ]:
     if marker not in runner:
         print(f"Scheduled runner template missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+watchdog = Path("templates/scripts/run_process_watchdog.py").read_text(encoding="utf-8")
+for marker in [
+    "CODEX_ROLE_TIMEOUT_SECONDS",
+    "CODEX_ROLE_TERMINATION_GRACE_SECONDS",
+    "DEFAULT_TIMEOUT_SECONDS = 5400",
+    "TIMEOUT_EXIT_CODE = 124",
+    "start_new_session=True",
+    "os.killpg",
+    "timed_out",
+    "idle_timed_out",
+]:
+    if marker not in watchdog:
+        print(f"Watchdog helper template missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 if "Diffmogger Self Improvement scheduled sprint" in runner:
     print("Scheduled runner template contains self-run lock context", file=sys.stderr)
@@ -683,6 +763,7 @@ for path in [
     Path("templates/scripts/integrate_role_outputs.py"),
     Path("scripts/summarize_worker_outputs.py"),
     Path("templates/scripts/summarize_worker_outputs.py"),
+    Path("scripts/dashboard_backend_cli.py"),
     Path("scripts/run_dashboard.py"),
     Path("scripts/check_integration_safety.py"),
     Path("services/agentic-dashboard/agentic_dashboard/app.py"),
@@ -742,14 +823,516 @@ for marker in [
         print(f"Dashboard app missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
+backend_cli = Path("scripts/dashboard_backend_cli.py").read_text(encoding="utf-8")
+for marker in [
+    "project.load_snapshot",
+    "project.list_recent",
+    "brief.load",
+    "brief.save_draft",
+    "brief.scaffold_preview",
+    "brief.scaffold_bootstrap",
+    "context.import",
+    "inbox.load",
+    "inbox.send_note",
+    "inbox.reply_request",
+    "run.load",
+    "run.load_log",
+    "run.once",
+    "schedule.start",
+    "schedule.pause",
+    "schedule.remove",
+    "safety.run_check",
+    "worker.run_read_only",
+    "worker.run_write",
+    "worker.run_integrator",
+    "observatory.snapshot",
+    "observatory.generate_html",
+    "observatory.load_html",
+    "review.load",
+    "review.export_bundle",
+    "review.mark_reviewed",
+    "diagnostics.environment",
+    "diagnostics.run_checks",
+    "advanced.list_files",
+    "advanced.load_file",
+    "advanced.save_file",
+    "advanced.validate_file",
+    "advanced.export_debug_bundle",
+    "schema_version",
+    "BackendArgumentParser",
+    "resolve_target",
+]:
+    if marker not in backend_cli:
+        print(f"Dashboard backend CLI missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_package = Path("services/agentic-dashboard/native/package.json").read_text(encoding="utf-8")
+for marker in [
+    "diffmogger-native-dashboard",
+    "@tauri-apps/api",
+    "lucide-react",
+    "\"build\": \"tsc && vite build\"",
+    "\"test\": \"vitest run\"",
+    "\"tauri\": \"tauri\"",
+]:
+    if marker not in native_package:
+        print(f"Native dashboard package missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_tauri = Path("services/agentic-dashboard/native/src-tauri/tauri.conf.json").read_text(encoding="utf-8")
+for marker in [
+    "Diffmogger",
+    "com.diffmogger.dashboard",
+    "\"decorations\": false",
+    "\"targets\": [\"app\"]",
+]:
+    if marker not in native_tauri:
+        print(f"Native Tauri config missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_cargo = Path("services/agentic-dashboard/native/src-tauri/Cargo.toml").read_text(encoding="utf-8")
+for marker in [
+    "diffmogger-native-dashboard",
+    "tauri = { version = \"2\"",
+    "rfd =",
+    "serde_json",
+]:
+    if marker not in native_cargo:
+        print(f"Native Cargo manifest missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_lib = Path("services/agentic-dashboard/native/src-tauri/src/lib.rs").read_text(encoding="utf-8")
+for marker in [
+    "scripts/dashboard_backend_cli.py",
+    "RECENT_CONFIG_FILE",
+    "validate_target_path",
+    "READ_ONLY_BACKEND_COMMANDS",
+    "MUTATING_BACKEND_COMMANDS",
+    "DEFAULT_AUTOMATION_PATH",
+    "path_with_native_toolchain",
+    "backend_python_executable",
+    "prepare_backend_process",
+    "DIFFMOGGER_NATIVE_APP_PATH",
+    "DIFFMOGGER_BACKEND_PATH",
+    "rfd::FileDialog",
+    "select_context_files",
+    "select_settings_directory",
+    "get_advanced_settings",
+    "update_advanced_settings",
+    "run_backend_command_streamed",
+    "backend-log",
+    "brief.scaffold_bootstrap",
+    "brief.scaffold_preview",
+    "context.import",
+    "inbox.load",
+    "inbox.send_note",
+    "inbox.reply_request",
+    "run.once",
+    "schedule.start",
+    "schedule.pause",
+    "schedule.remove",
+    "safety.run_check",
+    "worker.run_read_only",
+    "worker.run_write",
+    "worker.run_integrator",
+    "project.load_snapshot",
+    "diagnostics.environment",
+    "observatory.snapshot",
+    "observatory.load_html",
+    "review.load",
+    "review.mark_reviewed",
+    "advanced.save_file",
+    "advanced.validate_file",
+    "advanced.export_debug_bundle",
+    "open_observatory_file",
+    "open_review_artifact",
+    "open_managed_file",
+    "reveal_managed_file",
+    "reveal_project",
+    "open_project_in_editor",
+    "ALLOWED_EDITOR_COMMANDS",
+    "validate_review_artifact_path",
+    "validate_observatory_html_path",
+    "app_config_dir",
+    "run_backend_command",
+]:
+    if marker not in native_lib:
+        print(f"Native Rust command layer missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_api = Path("services/agentic-dashboard/native/src/api/backend.ts").read_text(encoding="utf-8")
+for marker in [
+    "BackendEnvelope",
+    "InboxSnapshot",
+    "ReviewSnapshot",
+    "ProjectSnapshot",
+    "listRecentProjects",
+    "selectProjectFolder",
+    "selectContextFiles",
+    "loadProjectSnapshot",
+    "runBackendCommand",
+    "runBackendCommandStreamed",
+    "listenBackendLogs",
+    "openObservatoryFile",
+    "openReviewArtifact",
+    "openManagedFile",
+    "revealManagedFile",
+    "revealProject",
+    "openProjectInEditor",
+    "AdvancedSettings",
+    "AdvancedDebugBundleResult",
+    "ObservatorySnapshot",
+    "ownership",
+]:
+    if marker not in native_api:
+        print(f"Native frontend API missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_app = Path("services/agentic-dashboard/native/src/App.tsx").read_text(encoding="utf-8")
+for marker in [
+    "Home",
+    "Brief",
+    "Run",
+    "Observatory",
+    "Inbox",
+    "Review",
+    "Advanced",
+    "Backend Error",
+    "Choose Project Folder",
+    "Command",
+    "HomePage",
+    "BriefWizard",
+    "InboxPage",
+    "ObservatoryPage",
+    "ReviewPage",
+    "RunPage",
+    "AdvancedPage",
+    "CommandPalette",
+    "Cmd/Ctrl+K",
+    "executePaletteCommand",
+    "buildCommandPaletteModel",
+    "Recommended Next Action",
+]:
+    if marker not in native_app:
+        print(f"Native React shell missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_command_palette = Path("services/agentic-dashboard/native/src/CommandPalette.tsx").read_text(encoding="utf-8")
+for marker in [
+    "Command palette",
+    "Search commands",
+    "disabledReason",
+    "No matching commands",
+    "ArrowDown",
+    "ArrowUp",
+    "Enter",
+    "Escape",
+]:
+    if marker not in native_command_palette:
+        print(f"Native CommandPalette missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_command_palette_model = Path("services/agentic-dashboard/native/src/commandPaletteModel.ts").read_text(encoding="utf-8")
+for marker in [
+    "Open project",
+    "Create new project",
+    "Reveal project in Finder",
+    "Open project in editor",
+    "Continue Brief",
+    "Import context files",
+    "Scaffold & Bootstrap",
+    "Run once now",
+    "Start schedule",
+    "Pause schedule",
+    "Run safety check",
+    "Open Observatory",
+    "Open Observatory in browser",
+    "Export review bundle",
+    "Send note to next run",
+    "Open raw automation tasks",
+    "Open Diagnostics",
+    "Export debug bundle",
+    "filterPaletteCommands",
+]:
+    if marker not in native_command_palette_model:
+        print(f"Native command palette model missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_command_palette_tests = Path("services/agentic-dashboard/native/src/commandPaletteModel.test.ts").read_text(encoding="utf-8")
+for marker in [
+    "includes the required command surface",
+    "explains disabled target-scoped commands",
+    "uses run-control reasons",
+    "searches command title",
+]:
+    if marker not in native_command_palette_tests:
+        print(f"Native command palette tests missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_brief = Path("services/agentic-dashboard/native/src/BriefWizard.tsx").read_text(encoding="utf-8")
+for marker in [
+    "Guided Intake",
+    "Project",
+    "Goal",
+    "Stack",
+    "Automation Mode",
+    "Guardrails",
+    "Context Files",
+    "Review",
+    "brief.save_draft",
+    "brief.scaffold_preview",
+    "context.import",
+    "brief.scaffold_bootstrap",
+    "Scaffold & Bootstrap",
+    "Add Context Files",
+    "Context7 MCP",
+    "Playwright MCP",
+    "Bounded write-worker opt-in",
+    "FIRST_REVIEW_NEEDED",
+    "Progress Log",
+    "Diagnostics",
+]:
+    if marker not in native_brief:
+        print(f"Native Brief wizard missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_home_model = Path("services/agentic-dashboard/native/src/homeModel.ts").read_text(encoding="utf-8")
+for marker in [
+    "buildHomeModel",
+    "This project is not configured yet",
+    "Continue Brief",
+    "Run Once Now",
+    "Open Inbox",
+    "Open Review",
+    "Ready for the first automation run",
+    "Environment blockers",
+]:
+    if marker not in native_home_model:
+        print(f"Native Home model missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_home_tests = Path("services/agentic-dashboard/native/src/homeModel.test.ts").read_text(encoding="utf-8")
+for marker in [
+    "maps no target",
+    "maps unconfigured targets",
+    "maps scaffolded targets with no runs",
+    "maps running targets",
+    "maps blocked human input",
+    "maps environment blockers",
+]:
+    if marker not in native_home_tests:
+        print(f"Native Home tests missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_run_model = Path("services/agentic-dashboard/native/src/runModel.ts").read_text(encoding="utf-8")
+for marker in [
+    "buildRunModel",
+    "Finish the Brief before running automation.",
+    "Run Once Now",
+    "Start Schedule",
+    "Pause Schedule",
+    "Run Safety Check",
+    "run.once",
+    "schedule.start",
+    "schedule.pause",
+    "safety.run_check",
+    "worker.run_read_only",
+    "worker.run_write",
+    "worker.run_integrator",
+    "READ_ONLY_REPORTS",
+    "read-only review worker",
+    "Environment blocker",
+]:
+    if marker not in native_run_model:
+        print(f"Native Run model missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_run_page = Path("services/agentic-dashboard/native/src/RunPage.tsx").read_text(encoding="utf-8")
+for marker in [
+    "Run Readiness",
+    "Run Controls",
+    "Schedule Status",
+    "Current / Latest Run",
+    "Run Log",
+    "Worker Strategy",
+    "Environment Blockers",
+    "worker.run_write",
+    "Copy",
+    "Open Log File",
+]:
+    if marker not in native_run_page:
+        print(f"Native Run page missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_run_tests = Path("services/agentic-dashboard/native/src/runModel.test.ts").read_text(encoding="utf-8")
+for marker in [
+    "disables run controls when no target is selected",
+    "maps unscaffolded targets to the Brief gate",
+    "enables Run Once Now and Start Schedule",
+    "disables launch controls while a run is active",
+    "enables Pause Schedule",
+    "translates read-only worker strategy strings",
+]:
+    if marker not in native_run_tests:
+        print(f"Native Run tests missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_inbox = Path("services/agentic-dashboard/native/src/InboxPage.tsx").read_text(encoding="utf-8")
+for marker in [
+    "Requests",
+    "Notes to next run",
+    "Archive",
+    "File-only human bridge",
+    "inbox.load",
+    "inbox.send_note",
+    "inbox.reply_request",
+    "Send Reply",
+    "Send To Next Run",
+    "Queued and recent notes",
+    "Search archive",
+]:
+    if marker not in native_inbox:
+        print(f"Native Inbox page missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_review = Path("services/agentic-dashboard/native/src/ReviewPage.tsx").read_text(encoding="utf-8")
+for marker in [
+    "Should I trust this run?",
+    "Latest Run Summary",
+    "Changed Files",
+    "Latest Commits / Landed Work",
+    "Verification Results",
+    "Safety Check Result",
+    "Known Skipped Checks / Environment Limitations",
+    "Self-Review Markdown Preview",
+    "Review Bundle Export",
+    "Follow-Up Note To Next Run",
+    "review.load",
+    "review.export_bundle",
+    "review.mark_reviewed",
+    "inbox.send_note",
+    "openReviewArtifact",
+    "Open self-review",
+    "Open Observatory HTML",
+    "Mark reviewed",
+]:
+    if marker not in native_review:
+        print(f"Native Review page missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_advanced = Path("services/agentic-dashboard/native/src/AdvancedPage.tsx").read_text(encoding="utf-8")
+for marker in [
+    "Files",
+    "Diagnostics",
+    "Settings",
+    "Debug bundle",
+    "Core state",
+    "Human bridge",
+    "Review",
+    "Context",
+    "Multi-role / conveyor",
+    "advanced.list_files",
+    "advanced.load_file",
+    "advanced.save_file",
+    "advanced.validate_file",
+    "advanced.export_debug_bundle",
+    "Open in external editor",
+    "Reveal in Finder",
+    "Run Checks",
+    "Codex",
+    "Tool Status",
+    "Target Writability",
+    "Notifier Health",
+    "Backend Schema Versions",
+    "Review export directory",
+    "Preferred editor command",
+    "Schedule cadence defaults",
+    "Human bridge mode",
+    "Appearance",
+    "Density",
+    ".env and .env.* contents are omitted",
+]:
+    if marker not in native_advanced:
+        print(f"Native Advanced page missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_observatory_page = Path("services/agentic-dashboard/native/src/ObservatoryPage.tsx").read_text(encoding="utf-8")
+for marker in [
+    "Diffmogger Autonomous Build Log",
+    "observatory.snapshot",
+    "observatory.load_html",
+    "review.export_bundle",
+    "openObservatoryFile",
+    "Open in Browser",
+    "Export Bundle",
+    "Copy path",
+    "Summary",
+    "Timeline",
+    "Conveyor",
+    "Patches",
+    "Metrics",
+    "Mission State",
+    "Conveyor Belt",
+    "Progress Story",
+    "Landed Work",
+    "Recent Outcomes",
+    "Signal Nudges",
+    "RoleCard",
+    "CommitCard",
+]:
+    if marker not in native_observatory_page:
+        print(f"Native Observatory page missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_observatory_model = Path("services/agentic-dashboard/native/src/observatoryModel.ts").read_text(encoding="utf-8")
+for marker in [
+    "buildObservatoryViewModel",
+    "Critical stop is active",
+    "Human input is needed",
+    "Diffmogger Autonomous Build Log",
+    "Summary",
+    "Timeline",
+    "Conveyor",
+    "Patches",
+    "Metrics",
+]:
+    if marker not in native_observatory_model:
+        print(f"Native Observatory model missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_observatory_tests = Path("services/agentic-dashboard/native/src/observatoryModel.test.ts").read_text(encoding="utf-8")
+for marker in [
+    "covers the empty state",
+    "covers an active builder",
+    "covers a queued patch",
+    "covers blocked user input",
+    "covers critical stop",
+]:
+    if marker not in native_observatory_tests:
+        print(f"Native Observatory tests missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_observatory_page_tests = Path("services/agentic-dashboard/native/src/ObservatoryPage.test.tsx").read_text(encoding="utf-8")
+for marker in [
+    "renders the empty state",
+    "renders an active builder",
+    "renders a queued patch",
+    "renders blocked user input",
+    "renders a critical stop",
+    "renderToStaticMarkup",
+]:
+    if marker not in native_observatory_page_tests:
+        print(f"Native Observatory component tests missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
 dashboard_readme = Path("services/agentic-dashboard/README.md").read_text(encoding="utf-8")
 for marker in [
     "python3 scripts/run_dashboard.py",
     "Scaffold & Bootstrap",
-    ".agentic/dashboard_state.json",
+    ".diffmogger/agentic/dashboard_state.json",
     "Open Diffmogger Project",
-    "docs/context/",
-    "docs/PROJECT_CONTEXT.md",
+    ".diffmogger/context/",
+    ".diffmogger/state/PROJECT_CONTEXT.md",
     "Codex CLI installed and signed in",
     "Export Review Bundle",
     "Run Safety Check",
@@ -765,7 +1348,7 @@ first_review_markers = {
         "bash scripts/validate_starter_kit.sh",
         "Export Review Bundle",
         "Run Safety Check",
-        "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
+        "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
         "Diffmogger-self-review.md",
     ],
@@ -774,7 +1357,7 @@ first_review_markers = {
         "Open Diffmogger Project",
         "Export Review Bundle",
         "Run Safety Check",
-        "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
+        "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
         "Diffmogger-self-review.md",
     ],
@@ -783,17 +1366,17 @@ first_review_markers = {
         "bash scripts/validate_starter_kit.sh",
         "Export Review Bundle",
         "Run Safety Check",
-        "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
+        "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
         "Diffmogger-self-review.md",
     ],
     Path("templates/docs/DEVELOPMENT.md"): [
         "First Review Checklist",
         "bash scripts/validate_starter_kit.sh",
-        "python3 scripts/diffmogger_browser.py doctor --launch",
+        "python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch",
         "Export Review Bundle",
         "Run Safety Check",
-        "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
+        "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
         "Diffmogger-self-review.md",
     ],
@@ -802,7 +1385,7 @@ first_review_markers = {
         "bash scripts/validate_starter_kit.sh",
         "Export Review Bundle",
         "Run Safety Check",
-        "python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
+        "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
         "Diffmogger-self-review.md",
     ],
@@ -867,10 +1450,10 @@ for marker in [
     "https://github.com/harrisonpedrero/diffmogger.git",
     "DISCORD_BOT_TOKEN",
     "LOCAL_NOTIFICATIONS_ENABLED",
-    "scripts/acquire_codex_lock.sh",
-    "scripts/spawn_worker_agent.sh",
+    ".diffmogger/scripts/acquire_codex_lock.sh",
+    ".diffmogger/scripts/spawn_worker_agent.sh",
     "write_worker_agents_allowed",
-    "scripts/compact_agent_state.py",
+    ".diffmogger/scripts/compact_agent_state.py",
     "scripts/run_dashboard.py",
     "services/agentic-dashboard",
 ]:
@@ -900,7 +1483,7 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests/test_run_observatory.py tests/test_run_conveyor_automation.py tests/test_run_role_automation.py tests/test_load_automation_env.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_list_deferred_patches.py tests/test_ticket_run.py tests/test_check_integration_safety.py tests/test_check_required_files.py tests/test_summarize_worker_outputs.py
+python3 -m unittest tests/test_run_observatory.py tests/test_dashboard_backend_cli.py tests/test_native_rebuild_guardrails.py tests/test_run_conveyor_automation.py tests/test_run_role_automation.py tests/test_load_automation_env.py tests/test_repair_environment.py tests/test_integrate_role_outputs.py tests/test_list_deferred_patches.py tests/test_ticket_run.py tests/test_check_integration_safety.py tests/test_check_required_files.py tests/test_summarize_worker_outputs.py
 
 python3 scripts/check_integration_safety.py >/tmp/Diffmogger-integration-safety.log
 
@@ -927,7 +1510,7 @@ rm -rf "$lock_smoke_dir"
 tmp_dir="$(mktemp -d)"
 python3 scripts/scaffold_project_docs.py --intake examples/generic-web-app/project_intake.md --target "$tmp_dir" >/tmp/Diffmogger-scaffold.log
 python3 scripts/check_required_files.py --human-bridge-mode file_only "$tmp_dir" >/tmp/Diffmogger-check.log
-if grep -R "POST http://127.0.0.1:8765/api/notify\\|NOTIFIER_UNREACHABLE\\|message_body\\|discord_notifier\\|DISCORD_" "$tmp_dir/.agentic" "$tmp_dir/docs" >/tmp/Diffmogger-file-only-grep.log 2>&1; then
+if grep -R "POST http://127.0.0.1:8765/api/notify\\|NOTIFIER_UNREACHABLE\\|message_body\\|discord_notifier\\|DISCORD_" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" >/tmp/Diffmogger-file-only-grep.log 2>&1; then
     echo "File-only scaffold unexpectedly contains notifier-only markers" >&2
     cat /tmp/Diffmogger-file-only-grep.log >&2
     rm -rf "$tmp_dir"
@@ -939,22 +1522,25 @@ if grep -R "Diffmogger Self Improvement scheduled sprint" "$tmp_dir" >/tmp/Diffm
     rm -rf "$tmp_dir"
     exit 1
 fi
-if ! grep "CODEX_LOCK_CONTEXT" "$tmp_dir/scripts/run_codex_automation.sh" >/tmp/Diffmogger-lock-context-marker.log 2>&1; then
+if ! grep "CODEX_LOCK_CONTEXT" "$tmp_dir/.diffmogger/scripts/run_codex_automation.sh" >/tmp/Diffmogger-lock-context-marker.log 2>&1; then
     echo "Scaffolded runner missing target-local lock context override marker" >&2
-    cat "$tmp_dir/scripts/run_codex_automation.sh" >&2
+    cat "$tmp_dir/.diffmogger/scripts/run_codex_automation.sh" >&2
     rm -rf "$tmp_dir"
     exit 1
 fi
-if [ -f "$tmp_dir/docs/TICKET_RUN.md" ]; then
+if [ -f "$tmp_dir/.diffmogger/state/TICKET_RUN.md" ]; then
     echo "Default scaffold unexpectedly generated ticket campaign source" >&2
     rm -rf "$tmp_dir"
     exit 1
 fi
 for unexpected_mcp_path in \
     ".codex/config.toml" \
+    ".diffmogger/agentic/codex_config.toml" \
     "docs/MCP_INTEGRATIONS.md" \
+    ".diffmogger/state/MCP_INTEGRATIONS.md" \
     "docs/backlog/README.md" \
-    "scripts/run_playwright_mcp.sh"; do
+    ".diffmogger/state/backlog/README.md" \
+    ".diffmogger/scripts/run_playwright_mcp.sh"; do
     if [ -e "$tmp_dir/$unexpected_mcp_path" ]; then
         echo "Default scaffold unexpectedly generated optional MCP file: $unexpected_mcp_path" >&2
         rm -rf "$tmp_dir"
@@ -967,7 +1553,7 @@ for marker in \
     "Long-run direction" \
     "recurring review capsules" \
     "## Improvement Backlog"; do
-    if ! grep -R -- "$marker" "$tmp_dir/.agentic" "$tmp_dir/docs/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-mode-horizon-grep.log 2>&1; then
+    if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-mode-horizon-grep.log 2>&1; then
         echo "Continuous-improvement scaffold missing mode-aware horizon marker: $marker" >&2
         cat /tmp/Diffmogger-mode-horizon-grep.log >&2
         rm -rf "$tmp_dir"
@@ -1005,7 +1591,7 @@ JSON
   git commit -m "product base" >/tmp/Diffmogger-local-excludes-commit.log
 )
 python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-local-excludes-scaffold.log
-for ignored_path in ".agentic/automation_prompt.md" "docs/CODEX_AUTOMATION_TASKS.md" "docs/TICKET_RUN.md" "scripts/run_role_automation.sh" "target/agent_runs/run-1/summary.md" "target/prisma-cache/node/cache-file"; do
+for ignored_path in ".diffmogger/agentic/automation_prompt.md" ".diffmogger/state/CODEX_AUTOMATION_TASKS.md" ".diffmogger/state/TICKET_RUN.md" ".diffmogger/scripts/run_role_automation.sh" ".diffmogger/runtime/agent_runs/run-1/summary.md" ".diffmogger/runtime/prisma-cache/node/cache-file"; do
     if ! git -C "$tmp_dir" check-ignore -q -- "$ignored_path"; then
         echo "Existing-project scaffold failed to locally ignore Diffmogger path: $ignored_path" >&2
         cat "$tmp_dir/.git/info/exclude" >&2
@@ -1040,7 +1626,39 @@ cat >"$tmp_intake" <<'JSON'
 JSON
 python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-ticket-campaign.log
 python3 scripts/check_required_files.py --human-bridge-mode local_notifier --ticket-campaign-enabled "$tmp_dir" >/tmp/Diffmogger-check-ticket-campaign.log
-if ! grep -R "Automation run mode: \`ticket_campaign\`\\|docs/TICKET_RUN.md\\|scripts/ticket_run.py" "$tmp_dir/.agentic" "$tmp_dir/docs" "$tmp_dir/scripts" >/tmp/Diffmogger-ticket-campaign-grep.log 2>&1; then
+if grep -Fx "npm test" "$tmp_dir/.diffmogger/agentic/verification_commands.txt" >/tmp/Diffmogger-ticket-campaign-verification-future.log 2>&1; then
+    echo "Ticket-campaign scaffold put a future project command in the clean-HEAD baseline gate" >&2
+    cat "$tmp_dir/.diffmogger/agentic/verification_commands.txt" >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+for command in \
+    "python3 .diffmogger/scripts/ticket_run.py . status --json" \
+    "python3 .diffmogger/scripts/ticket_run.py . next --json" \
+    "python3 -m py_compile .diffmogger/scripts/run_process_watchdog.py .diffmogger/scripts/ticket_run.py .diffmogger/scripts/update_automation_signals.py .diffmogger/scripts/compact_agent_state.py .diffmogger/scripts/run_observatory.py .diffmogger/scripts/repair_environment.py"; do
+    if ! grep -Fx "$command" "$tmp_dir/.diffmogger/agentic/verification_commands.txt" >/tmp/Diffmogger-ticket-campaign-verification-grep.log 2>&1; then
+        echo "Ticket-campaign scaffold missing bootstrap-safe baseline command: $command" >&2
+        cat "$tmp_dir/.diffmogger/agentic/verification_commands.txt" >&2
+        rm -rf "$tmp_dir" "$tmp_intake"
+        exit 1
+    fi
+done
+(
+  cd "$tmp_dir"
+  while IFS= read -r command; do
+    command="${command#- }"
+    case "$command" in
+      ""|\#*) continue ;;
+    esac
+    /bin/bash -lc "$command"
+  done < .diffmogger/agentic/verification_commands.txt
+) >/tmp/Diffmogger-ticket-campaign-baseline.log 2>&1 || {
+    echo "Ticket-campaign bootstrap-safe baseline commands did not pass" >&2
+    cat /tmp/Diffmogger-ticket-campaign-baseline.log >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+}
+if ! grep -R "Automation run mode: \`ticket_campaign\`\\|.diffmogger/state/TICKET_RUN.md\\|.diffmogger/scripts/ticket_run.py" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" "$tmp_dir/.diffmogger/scripts" >/tmp/Diffmogger-ticket-campaign-grep.log 2>&1; then
     echo "Ticket-campaign scaffold missing mode markers" >&2
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
@@ -1049,18 +1667,18 @@ for marker in \
     "T1 Ticket-run readiness" \
     "T4 Completion report and stop" \
     "Ticket-campaign bootstrap is readiness-only" \
-    "python3 scripts/ticket_run.py . next --json" \
+    "python3 .diffmogger/scripts/ticket_run.py . next --json" \
     "at most one dependency-ready ticket per run" \
     "depends_on" \
     "## Deferred / Follow-Up Tickets"; do
-    if ! grep -R -- "$marker" "$tmp_dir/.agentic" "$tmp_dir/docs/CODEX_AUTOMATION_TASKS.md" "$tmp_dir/docs/INITIAL_BOOTSTRAP_PROMPT.md" "$tmp_dir/docs/TICKET_RUN.md" >/tmp/Diffmogger-ticket-horizon-grep.log 2>&1; then
+    if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" "$tmp_dir/.diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md" "$tmp_dir/.diffmogger/state/TICKET_RUN.md" >/tmp/Diffmogger-ticket-horizon-grep.log 2>&1; then
         echo "Ticket-campaign scaffold missing ticket progression marker: $marker" >&2
         cat /tmp/Diffmogger-ticket-horizon-grep.log >&2
         rm -rf "$tmp_dir" "$tmp_intake"
         exit 1
     fi
 done
-if grep -R -E "MVP|Beyond MVP|Ambitious extensions" "$tmp_dir/.agentic/automation_prompt.md" "$tmp_dir/docs/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-ticket-roadmap-language.log 2>&1; then
+if grep -R -E "MVP|Beyond MVP|Ambitious extensions" "$tmp_dir/.diffmogger/agentic/automation_prompt.md" "$tmp_dir/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-ticket-roadmap-language.log 2>&1; then
     echo "Ticket-campaign prompt/task unexpectedly contains product-roadmap language" >&2
     cat /tmp/Diffmogger-ticket-roadmap-language.log >&2
     rm -rf "$tmp_dir" "$tmp_intake"
@@ -1084,7 +1702,7 @@ cat >"$tmp_intake" <<'JSON'
 JSON
 python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-discord-notifier.log
 python3 scripts/check_required_files.py --human-bridge-mode discord_notifier "$tmp_dir" >/tmp/Diffmogger-check-discord-notifier.log
-if ! grep -R "discord_notifier\\|event_kind\\|progress\\|message\\|POST http://127.0.0.1:8765/api/notify" "$tmp_dir/.agentic" "$tmp_dir/docs" >/tmp/Diffmogger-discord-notifier-grep.log 2>&1; then
+if ! grep -R "discord_notifier\\|event_kind\\|progress\\|message\\|POST http://127.0.0.1:8765/api/notify" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" >/tmp/Diffmogger-discord-notifier-grep.log 2>&1; then
     echo "Discord-notifier scaffold missing notifier routing markers" >&2
     cat /tmp/Diffmogger-discord-notifier-grep.log >&2
     rm -rf "$tmp_dir" "$tmp_intake"
@@ -1119,7 +1737,7 @@ for marker in \
     "--mode write" \
     "not alone in the codebase" \
     "blindly accepting changes"; do
-    if ! grep -R -- "$marker" "$tmp_dir/.agentic" "$tmp_dir/docs" "$tmp_dir/scripts/spawn_worker_agent.sh" >/tmp/Diffmogger-write-worker-grep.log 2>&1; then
+    if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" "$tmp_dir/.diffmogger/scripts/spawn_worker_agent.sh" >/tmp/Diffmogger-write-worker-grep.log 2>&1; then
         echo "Write-worker scaffold missing marker: $marker" >&2
         rm -rf "$tmp_dir" "$tmp_intake"
         exit 1
@@ -1153,7 +1771,7 @@ for marker in \
     'disabled_tools = ["browser_run_code_unsafe", "browser_file_upload"]' \
     "[profiles.diffmogger-planner.mcp_servers.context7]" \
     "[profiles.diffmogger-hardener.mcp_servers.playwright]"; do
-    if ! grep -F -- "$marker" "$tmp_dir/.codex/config.toml" >/tmp/Diffmogger-optional-mcp-config-grep.log 2>&1; then
+    if ! grep -F -- "$marker" "$tmp_dir/.diffmogger/agentic/codex_config.toml" >/tmp/Diffmogger-optional-mcp-config-grep.log 2>&1; then
         echo "Optional MCP config missing marker: $marker" >&2
         rm -rf "$tmp_dir" "$tmp_intake"
         exit 1
@@ -1165,7 +1783,7 @@ for marker in \
     'mcp_servers.playwright.command="bash"' \
     'mcp_servers.playwright.disabled_tools=["browser_run_code_unsafe","browser_file_upload"]' \
     "PLAYWRIGHT_MCP_OUTPUT_DIR"; do
-    if ! grep -F -- "$marker" "$tmp_dir/scripts/run_role_automation.sh" "$tmp_dir/scripts/run_codex_automation.sh" >/tmp/Diffmogger-optional-mcp-runner-grep.log 2>&1; then
+    if ! grep -F -- "$marker" "$tmp_dir/.diffmogger/scripts/run_role_automation.sh" "$tmp_dir/.diffmogger/scripts/run_codex_automation.sh" >/tmp/Diffmogger-optional-mcp-runner-grep.log 2>&1; then
         echo "Optional MCP runner missing marker: $marker" >&2
         rm -rf "$tmp_dir" "$tmp_intake"
         exit 1
@@ -1175,7 +1793,7 @@ for marker in \
     "auth errors" \
     "browser_take_screenshot" \
     "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png"; do
-    if ! grep -R -- "$marker" "$tmp_dir/.agentic" "$tmp_dir/docs" >/tmp/Diffmogger-optional-mcp-prompt-grep.log 2>&1; then
+    if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" >/tmp/Diffmogger-optional-mcp-prompt-grep.log 2>&1; then
         echo "Optional MCP prompt/docs missing marker: $marker" >&2
         rm -rf "$tmp_dir" "$tmp_intake"
         exit 1
@@ -1203,21 +1821,21 @@ cat >"$tmp_intake" <<'JSON'
 JSON
 python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-multi-role.log
 python3 scripts/check_required_files.py --human-bridge-mode disabled --multi-role-enabled --automation-signals-enabled "$tmp_dir" >/tmp/Diffmogger-check-multi-role.log
-python3 "$tmp_dir/scripts/update_automation_signals.py" "$tmp_dir" --refresh --role planner --summary >/tmp/Diffmogger-signals-refresh.log
+python3 "$tmp_dir/.diffmogger/scripts/update_automation_signals.py" "$tmp_dir" --refresh --role planner --summary >/tmp/Diffmogger-signals-refresh.log
 if ! grep "AUTOMATION_SIGNALS active=" /tmp/Diffmogger-signals-refresh.log >/tmp/Diffmogger-signals-active.log; then
     echo "Automation signals refresh did not print active signal summary" >&2
     cat /tmp/Diffmogger-signals-refresh.log >&2
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
 fi
-python3 "$tmp_dir/scripts/update_automation_signals.py" "$tmp_dir" --complete prompt-self-audit --role planner --note "validation smoke" >/tmp/Diffmogger-signals-complete.log
-if ! grep '"last_completed_by": "planner"' "$tmp_dir/target/automation_signals.json" >/tmp/Diffmogger-signals-completed-by.log; then
+python3 "$tmp_dir/.diffmogger/scripts/update_automation_signals.py" "$tmp_dir" --complete prompt-self-audit --role planner --note "validation smoke" >/tmp/Diffmogger-signals-complete.log
+if ! grep '"last_completed_by": "planner"' "$tmp_dir/.diffmogger/runtime/automation_signals.json" >/tmp/Diffmogger-signals-completed-by.log; then
     echo "Automation signals completion smoke failed" >&2
-    cat "$tmp_dir/target/automation_signals.json" >&2
+    cat "$tmp_dir/.diffmogger/runtime/automation_signals.json" >&2
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
 fi
-if find "$tmp_dir/docs" -maxdepth 1 -name 'HUMAN*' | grep . >/tmp/Diffmogger-multi-role-human-files.log; then
+if find "$tmp_dir/.diffmogger/state" -maxdepth 1 -name 'HUMAN*' | grep . >/tmp/Diffmogger-multi-role-human-files.log; then
     echo "Disabled human bridge multi-role scaffold unexpectedly generated human bridge files" >&2
     cat /tmp/Diffmogger-multi-role-human-files.log >&2
     rm -rf "$tmp_dir" "$tmp_intake"
@@ -1281,10 +1899,12 @@ rm -f "$tmp_dir/role_export.patch" "$tmp_dir/role_export.changed"
   git reset -- accepted.txt >/dev/null
   rm accepted.txt
 )
-mkdir -p "$tmp_dir/target/automation_queue/builder/run-001"
-mv "$tmp_dir/target_patch.diff" "$tmp_dir/target/automation_queue/builder/run-001/changes.patch"
+queue_root="$tmp_dir/.diffmogger/runtime/automation_queue"
+lock_path="$tmp_dir/.diffmogger/runtime/codex_automation.lock"
+mkdir -p "$queue_root/builder/run-001"
+mv "$tmp_dir/target_patch.diff" "$queue_root/builder/run-001/changes.patch"
 base_commit="$(git -C "$tmp_dir" rev-parse HEAD)"
-cat >"$tmp_dir/target/automation_queue/builder/run-001/manifest.json" <<JSON
+cat >"$queue_root/builder/run-001/manifest.json" <<JSON
 {
   "role": "builder",
   "run_id": "run-001",
@@ -1293,7 +1913,7 @@ cat >"$tmp_dir/target/automation_queue/builder/run-001/manifest.json" <<JSON
   "status": "queued",
   "deferral_reason": null,
   "deferral_detail": "",
-  "patch_path": "target/automation_queue/builder/run-001/changes.patch",
+  "patch_path": ".diffmogger/runtime/automation_queue/builder/run-001/changes.patch",
   "changed_files": ["accepted.txt"],
   "checks_run": [],
   "summary": "Commit type: chore\\nCommit scope: smoke\\nCommit subject: create accepted smoke file\\n\\n## Summary\\n- Create accepted smoke file.",
@@ -1322,9 +1942,9 @@ stale_base="$(git -C "$tmp_dir" rev-parse HEAD)"
   git add stale.txt
   git commit -m "advance main for stale patch smoke" >/tmp/Diffmogger-stale-main-commit.log
 )
-mkdir -p "$tmp_dir/target/automation_queue/builder/run-stale"
-mv "$tmp_dir/stale_patch.diff" "$tmp_dir/target/automation_queue/builder/run-stale/changes.patch"
-cat >"$tmp_dir/target/automation_queue/builder/run-stale/manifest.json" <<JSON
+mkdir -p "$queue_root/builder/run-stale"
+mv "$tmp_dir/stale_patch.diff" "$queue_root/builder/run-stale/changes.patch"
+cat >"$queue_root/builder/run-stale/manifest.json" <<JSON
 {
   "role": "builder",
   "run_id": "run-stale",
@@ -1333,7 +1953,7 @@ cat >"$tmp_dir/target/automation_queue/builder/run-stale/manifest.json" <<JSON
   "status": "queued",
   "deferral_reason": null,
   "deferral_detail": "",
-  "patch_path": "target/automation_queue/builder/run-stale/changes.patch",
+  "patch_path": ".diffmogger/runtime/automation_queue/builder/run-stale/changes.patch",
   "changed_files": ["stale.txt"],
   "checks_run": [],
   "summary": "Stale patch smoke.",
@@ -1344,9 +1964,9 @@ cat >"$tmp_dir/target/automation_queue/builder/run-stale/manifest.json" <<JSON
 }
 JSON
 python3 scripts/integrate_role_outputs.py "$tmp_dir" --run-id validation-stale >/tmp/Diffmogger-stale-integrator.log
-if ! grep '"deferral_reason": "staleness"' "$tmp_dir/target/automation_queue/builder/run-stale/manifest.json" >/tmp/Diffmogger-stale-reason.log; then
+if ! grep '"deferral_reason": "staleness"' "$queue_root/builder/run-stale/manifest.json" >/tmp/Diffmogger-stale-reason.log; then
     echo "Integrator stale patch smoke did not classify staleness" >&2
-    cat "$tmp_dir/target/automation_queue/builder/run-stale/manifest.json" >&2
+    cat "$queue_root/builder/run-stale/manifest.json" >&2
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
 fi
@@ -1365,17 +1985,17 @@ if ! grep 'recommended_decision: replace_from_current_head' /tmp/Diffmogger-defe
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
 fi
-CODEX_LOCK_PATH="$tmp_dir/target/codex_automation.lock" \
+CODEX_LOCK_PATH="$lock_path" \
 CODEX_RUN_ID="held-lock" \
-bash "$tmp_dir/scripts/acquire_codex_lock.sh" "validation held lock" >/tmp/Diffmogger-integrator-held-lock-acquire.log
+bash "$tmp_dir/.diffmogger/scripts/acquire_codex_lock.sh" "validation held lock" >/tmp/Diffmogger-integrator-held-lock-acquire.log
 if python3 scripts/integrate_role_outputs.py "$tmp_dir" --run-id blocked-by-lock >/tmp/Diffmogger-integrator-lock-refusal.log 2>&1; then
     echo "Integrator lock guard failed: run unexpectedly succeeded while lock was held" >&2
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
 fi
-CODEX_LOCK_PATH="$tmp_dir/target/codex_automation.lock" \
+CODEX_LOCK_PATH="$lock_path" \
 CODEX_RUN_ID="held-lock" \
-bash "$tmp_dir/scripts/release_codex_lock.sh" >/tmp/Diffmogger-integrator-held-lock-release.log
+bash "$tmp_dir/.diffmogger/scripts/release_codex_lock.sh" >/tmp/Diffmogger-integrator-held-lock-release.log
 real_git="$(command -v git)"
 fake_git_dir="$(mktemp -d)"
 cat >"$fake_git_dir/git" <<SH
@@ -2012,7 +2632,7 @@ chmod +x "$fake_codex_dir/codex"
   } >> .git/info/exclude
 )
 CODEX_AUTOMATION_PATH="$fake_codex_dir:$PATH" CODEX_RUN_ID="validation-context" \
-  bash scripts/run_role_automation.sh --target "$tmp_dir" --role builder >/tmp/Diffmogger-role-context.log
+  bash "$kit_root/scripts/run_role_automation.sh" --target "$tmp_dir" --role builder >/tmp/Diffmogger-role-context.log
 patch_path="$tmp_dir/target/automation_queue/builder/validation-context/changes.patch"
 changed_path="$tmp_dir/target/automation_queue/builder/validation-context/changed_files.txt"
 if ! grep -q "feature.txt" "$patch_path"; then
@@ -2048,7 +2668,7 @@ chmod +x "$fake_codex_dir/codex"
   printf 'builder prompt\n' > .agentic/roles/builder.md
 )
 CODEX_AUTOMATION_PATH="$fake_codex_dir:$PATH" CODEX_RUN_ID="validation-skipped" \
-  bash scripts/run_role_automation.sh --target "$tmp_dir" --role builder >/tmp/Diffmogger-role-skipped.log
+  bash "$kit_root/scripts/run_role_automation.sh" --target "$tmp_dir" --role builder >/tmp/Diffmogger-role-skipped.log
 if ! grep '"status": "skipped"' "$tmp_dir/target/automation_queue/builder/validation-skipped/manifest.json" >/tmp/Diffmogger-role-skipped-status.log; then
     echo "Role no-op smoke did not mark empty patch as skipped" >&2
     cat /tmp/Diffmogger-role-skipped.log >&2
@@ -2089,7 +2709,7 @@ cat >"$tmp_intake" <<'JSON'
 JSON
 python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-disabled.log
 python3 scripts/check_required_files.py --human-bridge-mode disabled "$tmp_dir" >/tmp/Diffmogger-check-disabled.log
-if find "$tmp_dir/docs" -maxdepth 1 -name 'HUMAN*' | grep . >/tmp/Diffmogger-disabled-human-files.log; then
+if find "$tmp_dir/.diffmogger/state" -maxdepth 1 -name 'HUMAN*' | grep . >/tmp/Diffmogger-disabled-human-files.log; then
     echo "Disabled human bridge scaffold unexpectedly generated human bridge files" >&2
     cat /tmp/Diffmogger-disabled-human-files.log >&2
     rm -rf "$tmp_dir" "$tmp_intake"

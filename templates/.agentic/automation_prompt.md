@@ -42,11 +42,11 @@ A strong run usually combines implementation, tests or fixtures, integration int
 
 A weak run is one that only reads files and summarizes, makes a tiny doc-only change when implementation work is available, adds a placeholder without wiring it into the product, avoids Codex CLI worker usage on a broad task without explaining why, or updates the task file without improving the app, tests, reports, or automation process.
 
-Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. Use `python3 scripts/ticket_run.py . next --json` to select one dependency-ready ticket, treat that single selection as the run's implementation scope, and do not continue into another ticket after it is completed, blocked, or marked `candidate_done`. If the command reports placeholder tickets, missing dependencies, duplicate ticket IDs, cycles, blocked dependencies, or no actionable ticket, record that structured blocker instead of guessing. Do not invent new backlog after every ticket is `done` or `blocked`; finalize the ticket run and stop only after remaining blockers are not repairable baseline/service setup work.
+Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. Use `python3 .diffmogger/scripts/ticket_run.py . next --json` to select one dependency-ready ticket, treat that single selection as the run's implementation scope, and do not continue into another ticket after it is completed, blocked, or marked `candidate_done`. If the command reports placeholder tickets, missing dependencies, duplicate ticket IDs, cycles, blocked dependencies, or no actionable ticket, record that structured blocker instead of guessing. Do not invent new backlog after every ticket is `done` or `blocked`; finalize the ticket run and stop only after remaining blockers are not repairable baseline/service setup work.
 
 ## Run Structure
 
-1. Check lock context before mutating code. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, treat `scripts/run_codex_automation.sh` as the lock owner and do not acquire, overwrite, manually create, or release `target/codex_automation.lock` inside the Codex run. If no wrapper-owned lock is present, acquire the lock before mutating code using the target repo's local `scripts/acquire_codex_lock.sh`.
+1. Check lock context before mutating code. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, treat `.diffmogger/scripts/run_codex_automation.sh` as the lock owner and do not acquire, overwrite, manually create, or release `target/codex_automation.lock` inside the Codex run. If no wrapper-owned lock is present, acquire the lock before mutating code using the target repo's local `.diffmogger/scripts/acquire_codex_lock.sh`.
 1. Read required files.
 {{HUMAN_RUN_STEPS}}
 1. Inspect the repo enough to understand current state.
@@ -57,7 +57,7 @@ Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. 
 1. Implement it and adjacent safe work.
 1. Run relevant verification.
 1. Update artifacts, docs, task state, worker activity, human request state when enabled, generated artifacts, checks run, and next sprint.
-1. If this Codex run acquired the lock itself, release it with the target repo's local `scripts/release_codex_lock.sh` when possible. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, leave lock release to `scripts/run_codex_automation.sh`. Summarize results.
+1. If this Codex run acquired the lock itself, release it with the target repo's local `.diffmogger/scripts/release_codex_lock.sh` when possible. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, leave lock release to `.diffmogger/scripts/run_codex_automation.sh`. Summarize results.
 
 ## Sprint Sizing
 
@@ -101,13 +101,13 @@ Record this decision in `docs/CODEX_AUTOMATION_TASKS.md` at the end of the run.
 This target repo includes local helper scripts for bounded CLI workers:
 
 ```bash
-bash scripts/spawn_worker_agent.sh \
+bash .diffmogger/scripts/spawn_worker_agent.sh \
   --target . \
   --run-id "$CODEX_RUN_ID" \
   --role tests \
   --prompt "Inspect the current sprint for test gaps and write a concise report."
 
-python3 scripts/summarize_worker_outputs.py . --run-id "$CODEX_RUN_ID"
+python3 .diffmogger/scripts/summarize_worker_outputs.py . --run-id "$CODEX_RUN_ID"
 ```
 
 Use these helpers when they are available and useful; otherwise use equivalent bounded `codex exec` commands. They are not mandatory magic. They create `target/agent_runs/<run_id>/`, write read-only reports by default, avoid network, and fail gracefully when the Codex CLI is unavailable.
@@ -183,7 +183,7 @@ target/agent_runs/<run_id>/worker_<role>.md
 
 {{MCP_SETUP_SECTION}}
 
-Context7 and Playwright MCP are optional accelerators. Missing MCP support, expired auth, startup failures, timeouts, empty results, or MCP tool errors must not halt the run or become `BLOCKED_ON_ENVIRONMENT` by themselves. Continue with normal web search, repo docs, package metadata, existing knowledge, shell checks, or `scripts/diffmogger_browser.py`.
+Context7 and Playwright MCP are optional accelerators. Missing MCP support, expired auth, startup failures, timeouts, empty results, or MCP tool errors must not halt the run or become `BLOCKED_ON_ENVIRONMENT` by themselves. Continue with normal web search, repo docs, package metadata, existing knowledge, shell checks, or `.diffmogger/scripts/diffmogger_browser.py`.
 
 When using Playwright MCP for UI validation, save failure screenshots under:
 
@@ -203,11 +203,11 @@ Link screenshot-backed bugs in `docs/CODEX_AUTOMATION_TASKS.md` and, when multi-
 
 ## Lock-File Behavior
 
-Scheduled single-lane runs are expected to be launched by the target repo's local `scripts/run_codex_automation.sh`. Continuous conveyor scheduling uses `scripts/run_conveyor_automation.sh`, which chooses the next runnable lane and delegates to target-local wrappers. The wrapper for a mutating Codex run still owns lock acquisition and release.
+Scheduled single-lane runs are expected to be launched by the target repo's local `.diffmogger/scripts/run_codex_automation.sh`. Continuous conveyor scheduling uses `.diffmogger/scripts/run_conveyor_automation.sh`, which chooses the next runnable lane and delegates to target-local wrappers. The wrapper for a mutating Codex run still owns lock acquisition and release.
 
-This target project must keep relevant automation runtime scripts in its own `scripts/` directory. During normal scheduled runs, do not import, call, or depend on scripts from the Diffmogger starter repo.
+This target project must keep relevant automation runtime scripts in its own `.diffmogger/scripts/` directory. During normal scheduled runs, do not import, call, or depend on scripts from the Diffmogger starter repo.
 
-If `CODEX_LOCK_ALREADY_ACQUIRED=true`, the lock is already held by `scripts/run_codex_automation.sh`. In that case:
+If `CODEX_LOCK_ALREADY_ACQUIRED=true`, the lock is already held by `.diffmogger/scripts/run_codex_automation.sh`. In that case:
 
 - Do not run an additional acquire command.
 - Do not overwrite `target/codex_automation.lock`.
@@ -233,35 +233,37 @@ For manual runs where `CODEX_LOCK_ALREADY_ACQUIRED` is not true, acquire the loc
 
 ```bash
 export CODEX_RUN_ID="${CODEX_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
-bash scripts/acquire_codex_lock.sh "{{PROJECT_NAME}} manual sprint"
+bash .diffmogger/scripts/acquire_codex_lock.sh "{{PROJECT_NAME}} manual sprint"
 ```
 
 If this Codex run acquired the lock itself, release it at the end:
 
 ```bash
-bash scripts/release_codex_lock.sh
+bash .diffmogger/scripts/release_codex_lock.sh
 ```
 
 If cadence is shorter than maximum run duration, lock-file behavior is required. If acquiring the lock fails because a fresh active lock exists, do not mutate code. If the helper removes a stale lock, record that fact in `docs/CODEX_AUTOMATION_TASKS.md`. Lock scripts reduce overlap risk; they do not remove the need to review diffs.
 
 ## Verification
 
-Preferred commands:
+Clean-HEAD baseline commands live in `.agentic/verification_commands.txt`. Every command in that file must pass on the current checkout. Do not add future project commands there until the backing scripts, packages, services, or Make targets exist; keep those desired commands in the task file or ticket evidence until they are real.
+
+Preferred project commands once the matching project surfaces exist:
 
 ```text
 {{VERIFICATION_COMMANDS}}
 ```
 
-Run the checks that match the files changed. Do not claim checks passed unless they were run. If a check cannot run because of missing local tooling, dependencies, or a project-local service such as a test database, diagnose the environment and use `scripts/repair_environment.py` or an equivalent local-only repair before declaring an environment blocker. Never install globally.
+Run the checks that match the files changed. Do not claim checks passed unless they were run. If a check cannot run because of missing local tooling, dependencies, or a project-local service such as a test database, diagnose the environment and use `.diffmogger/scripts/repair_environment.py` or an equivalent local-only repair before declaring an environment blocker. Never install globally.
 
 If a repo has enough local configuration to repair the service setup safely, such as Prisma/PostgreSQL schema plus local test database examples, classify the baseline as `repairable_local_service` and route `Verification scope: baseline_repair` work instead of asking the human to start the service manually.
 
 For browser-backed smoke checks, visual QA, or documentation research, prefer the managed browser runtime:
 
 ```bash
-python3 scripts/diffmogger_browser.py doctor --launch
-python3 scripts/diffmogger_browser.py install
-python3 scripts/diffmogger_browser.py env
+python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch
+python3 .diffmogger/scripts/diffmogger_browser.py install
+python3 .diffmogger/scripts/diffmogger_browser.py env
 ```
 
 Use `DIFFMOGGER_BROWSER_PATH` or `CHROME_PATH` when launching headless browser checks. If the same browser launch fails repeatedly before DevTools is ready, record the diagnostics as `BLOCKED_ON_ENVIRONMENT` and switch to an equivalent managed-browser/manual QA path rather than retrying the identical command.

@@ -11,9 +11,16 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from diffmogger_paths import target_path
 
 
 DEFAULT_STATE = {"schema_version": 1, "signals": []}
@@ -70,11 +77,11 @@ def read_json(path: Path, fallback: Any) -> Any:
 
 
 def signal_docs_path(target: Path) -> Path:
-    return target / "docs" / "AUTOMATION_SIGNALS.md"
+    return target_path(target, "docs/AUTOMATION_SIGNALS.md")
 
 
 def state_path(target: Path) -> Path:
-    return target / "target" / "automation_signals.json"
+    return target_path(target, "target/automation_signals.json")
 
 
 def load_definitions(target: Path) -> list[dict[str, Any]]:

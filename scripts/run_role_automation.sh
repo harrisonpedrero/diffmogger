@@ -5,7 +5,7 @@ export PATH="${CODEX_AUTOMATION_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run_role_automation.sh --role planner|builder|hardener|integrator [--target PATH]
+Usage: .diffmogger/scripts/run_role_automation.sh --role planner|builder|hardener|integrator [--target PATH]
 
 Run one optional multi-role automation role. Planner, builder, and hardener run
 inside isolated git worktrees and queue patches. Integrator applies queued
@@ -19,7 +19,14 @@ EOF
 }
 
 original_args=("$@")
-target_dir="${TARGET:-$(cd "$(dirname "$0")/.." && pwd)}"
+runner_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+script_parent="$(cd "$runner_script_dir/.." && pwd)"
+if [[ "$(basename "$script_parent")" == ".diffmogger" ]]; then
+  default_target="$(cd "$script_parent/.." && pwd)"
+else
+  default_target="$script_parent"
+fi
+target_dir="${TARGET:-$default_target}"
 role=""
 run_id="${CODEX_RUN_ID:-${RUN_ID:-}}"
 
@@ -71,8 +78,8 @@ load_codex_automation_env() {
   if [[ "${CODEX_AUTOMATION_ENV_LOADED:-}" == "1" ]]; then
     return 0
   fi
-  if [[ -f "$target_abs/scripts/load_automation_env.py" ]]; then
-    exec python3 "$target_abs/scripts/load_automation_env.py" --target "$target_abs" -- "${BASH:-bash}" "$0" "${original_args[@]}"
+  if [[ -f "$runner_script_dir/load_automation_env.py" ]]; then
+    exec python3 "$runner_script_dir/load_automation_env.py" --target "$target_abs" -- "${BASH:-bash}" "$0" "${original_args[@]}"
   fi
   export CODEX_AUTOMATION_ENV_LOADED="1"
 }
@@ -81,8 +88,8 @@ load_codex_automation_env
 
 if [[ -n "${DIFFMOGGER_BROWSER_PATH:-}" && -z "${CHROME_PATH:-}" ]]; then
   export CHROME_PATH="$DIFFMOGGER_BROWSER_PATH"
-elif [[ -z "${DIFFMOGGER_BROWSER_PATH:-}" && -z "${CHROME_PATH:-}" && -f "scripts/diffmogger_browser.py" ]]; then
-  browser_env="$(python3 scripts/diffmogger_browser.py env 2>/dev/null || true)"
+elif [[ -z "${DIFFMOGGER_BROWSER_PATH:-}" && -z "${CHROME_PATH:-}" && -f "$runner_script_dir/diffmogger_browser.py" ]]; then
+  browser_env="$(python3 "$runner_script_dir/diffmogger_browser.py" env 2>/dev/null || true)"
   if [[ -n "$browser_env" ]]; then
     eval "$browser_env"
   fi
@@ -148,6 +155,7 @@ for pattern in \
   "/scripts/run_conveyor_automation.sh" \
   "/scripts/run_observatory.py" \
   "/scripts/run_role_automation.sh" \
+  "/scripts/run_process_watchdog.py" \
   "/scripts/spawn_worker_agent.sh" \
   "/scripts/summarize_worker_outputs.py" \
   "/scripts/ticket_run.py" \
@@ -171,32 +179,97 @@ for pattern in \
   fi
 done
 
-prompt_path="$target_abs/.agentic/roles/$role.md"
+if [[ -f "$target_abs/.diffmogger/manifest.json" ]]; then
+  while IFS= read -r pattern; do
+    if [[ -n "$pattern" ]] && ! grep -Fx "$pattern" "$exclude_path" >/dev/null 2>&1; then
+      printf '%s\n' "$pattern" >> "$exclude_path"
+    fi
+  done < <(python3 - "$target_abs" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+try:
+    manifest = json.loads((target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8"))
+except Exception:
+    manifest = {}
+for rel in manifest.get("patch_exclude_paths") or []:
+    rel = str(rel).strip().lstrip("./")
+    if rel:
+        print("/" + rel.rstrip("/") + ("/" if rel.endswith("/") else ""))
+PY
+  )
+fi
+
+eval "$(
+  python3 - "$target_abs" "$role" "$run_id" <<'PY'
+import json
+import shlex
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+role = sys.argv[2]
+run_id = sys.argv[3]
+try:
+    manifest = json.loads((target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8"))
+except Exception:
+    manifest = {}
+sidecar = manifest.get("layout") == "sidecar_v1"
+aliases = manifest.get("path_aliases") if isinstance(manifest.get("path_aliases"), dict) else {}
+
+def rel(path: str) -> str:
+    if not sidecar:
+        return path
+    if path in aliases:
+        return str(aliases[path]).strip().lstrip("./")
+    for old, new in sorted(aliases.items(), key=lambda item: len(str(item[0])), reverse=True):
+        old = str(old).strip().lstrip("./").rstrip("/")
+        new = str(new).strip().lstrip("./").rstrip("/")
+        if old and path.startswith(old + "/"):
+            return new + path[len(old):]
+    return path
+
+values = {
+    "prompt_path": target / rel(f".agentic/roles/{role}.md"),
+    "queue_dir": target / rel(f"target/automation_queue/{role}/{run_id}"),
+    "worktree_dir": target / rel(f"target/automation_worktrees/{role}/{run_id}"),
+    "log_dir": target / rel("target/automation_logs"),
+    "worktree_summary_rel": rel(f"target/automation_queue/{role}/{run_id}/summary.md"),
+    "signal_docs_path": target / rel("docs/AUTOMATION_SIGNALS.md"),
+    "signal_state_path": target / rel("target/automation_signals.json"),
+    "mcp_config_rel": rel(".codex/config.toml"),
+    "playwright_mcp_rel": rel("scripts/run_playwright_mcp.sh"),
+    "playwright_artifact_rel": rel(f"docs/backlog/ui_artifacts/{run_id}"),
+}
+for key, value in values.items():
+    print(f"{key}={shlex.quote(str(value))}")
+PY
+)"
+
 if [[ ! -f "$prompt_path" ]]; then
   echo "Missing role prompt: $prompt_path" >&2
   exit 2
 fi
 
 if [[ "$role" == "integrator" ]]; then
-  if [[ -f "$target_abs/scripts/update_automation_signals.py" && -f "$target_abs/docs/AUTOMATION_SIGNALS.md" ]]; then
-    python3 "$target_abs/scripts/update_automation_signals.py" "$target_abs" --refresh --role integrator --summary || true
+  if [[ -f "$runner_script_dir/update_automation_signals.py" && -f "$signal_docs_path" ]]; then
+    python3 "$runner_script_dir/update_automation_signals.py" "$target_abs" --refresh --role integrator --summary || true
   fi
-  python3 scripts/integrate_role_outputs.py "$target_abs" --run-id "$run_id"
+  python3 "$runner_script_dir/integrate_role_outputs.py" "$target_abs" --run-id "$run_id"
   integrator_status=$?
-  if [[ "$integrator_status" -eq 0 && -f "$target_abs/scripts/ticket_run.py" ]]; then
-    python3 "$target_abs/scripts/ticket_run.py" "$target_abs" should-halt --finalize || true
+  if [[ "$integrator_status" -eq 0 && -f "$runner_script_dir/ticket_run.py" ]]; then
+    python3 "$runner_script_dir/ticket_run.py" "$target_abs" should-halt --finalize || true
   fi
   exit "$integrator_status"
 fi
 
 base_commit="$(git rev-parse HEAD)"
-queue_dir="$target_abs/target/automation_queue/$role/$run_id"
-worktree_dir="$target_abs/target/automation_worktrees/$role/$run_id"
-log_dir="$target_abs/target/automation_logs"
 mkdir -p "$queue_dir" "$(dirname "$worktree_dir")" "$log_dir"
 
 summary_path="$queue_dir/summary.md"
-worktree_summary_path="$worktree_dir/target/automation_queue/$role/$run_id/summary.md"
+worktree_summary_path="$worktree_dir/$worktree_summary_rel"
 patch_path="$queue_dir/changes.patch"
 manifest_path="$queue_dir/manifest.json"
 raw_log="$queue_dir/codex.raw.log"
@@ -204,17 +277,21 @@ stdout_log="$log_dir/$role.stdout.log"
 stderr_log="$log_dir/$role.stderr.log"
 run_stdout="$queue_dir/codex.stdout.log"
 run_stderr="$queue_dir/codex.stderr.log"
+watchdog_status_path="$queue_dir/codex.watchdog.json"
 runtime_prompt_path="$queue_dir/runtime_prompt.md"
 hardener_deferred_context_path="$queue_dir/hardener_deferred_context.md"
 env_repair_path="$queue_dir/environment_repair.json"
 rerun_stdout="$queue_dir/codex.rerun.stdout.log"
 rerun_stderr="$queue_dir/codex.rerun.stderr.log"
+rerun_watchdog_status_path="$queue_dir/codex.rerun.watchdog.json"
+final_watchdog_status_path="$watchdog_status_path"
+hardener_queue_root="$(dirname "$(dirname "$queue_dir")")/hardener"
 
 git worktree add --detach "$worktree_dir" "$base_commit" >/dev/null
 mkdir -p "$(dirname "$worktree_summary_path")"
 
-if [[ -f "$target_abs/scripts/update_automation_signals.py" && -f "$target_abs/docs/AUTOMATION_SIGNALS.md" ]]; then
-  python3 "$target_abs/scripts/update_automation_signals.py" "$target_abs" --refresh --role "$role" --summary || true
+if [[ -f "$runner_script_dir/update_automation_signals.py" && -f "$signal_docs_path" ]]; then
+  python3 "$runner_script_dir/update_automation_signals.py" "$target_abs" --refresh --role "$role" --summary || true
 fi
 
 context_paths=(
@@ -250,6 +327,7 @@ context_paths=(
   "scripts/run_conveyor_automation.sh"
   "scripts/run_observatory.py"
   "scripts/run_playwright_mcp.sh"
+  "scripts/run_process_watchdog.py"
   "scripts/run_role_automation.sh"
   "scripts/spawn_worker_agent.sh"
   "scripts/summarize_worker_outputs.py"
@@ -259,6 +337,30 @@ context_paths=(
   "target/baseline_verification.json"
 )
 
+if [[ -f "$target_abs/.diffmogger/manifest.json" ]]; then
+  context_paths=()
+  while IFS= read -r rel; do
+    if [[ -n "$rel" ]]; then
+      context_paths+=("$rel")
+    fi
+  done < <(python3 - "$target_abs" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+try:
+    manifest = json.loads((target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8"))
+except Exception:
+    manifest = {}
+for rel in manifest.get("worktree_seed_paths") or []:
+    rel = str(rel).strip().lstrip("./")
+    if rel:
+        print(rel)
+PY
+  )
+fi
+
 runtime_state_paths_path="$queue_dir/runtime_state_paths.txt"
 runtime_state_start_path="$queue_dir/runtime_state_start.json"
 runtime_state_actions_path="$queue_dir/runtime_state_actions.json"
@@ -266,6 +368,7 @@ runtime_state_changed_files_path="$queue_dir/runtime_state_changed_files.txt"
 
 python3 - "$target_abs" "$runtime_state_paths_path" <<'PY'
 import os
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -273,25 +376,38 @@ from pathlib import Path
 target = Path(sys.argv[1])
 output = Path(sys.argv[2])
 max_bytes = int(os.environ.get("RUNTIME_STATE_MAX_BYTES", "1048576"))
-explicit_paths = [
-    ".agentic/automation_prompt.md",
-    ".agentic/smoke_commands.txt",
-    ".agentic/verification_commands.txt",
-  ".agentic/roles/planner.md",
-  ".agentic/roles/builder.md",
-  ".agentic/roles/hardener.md",
-  ".agentic/roles/integrator.md",
-  ".codex/config.toml",
-  "docs/HUMAN_INBOX.md",
-    "docs/HUMAN_RESPONSES_ARCHIVE.md",
-    "docs/HUMAN_REQUESTS.md",
-    "docs/HUMAN_OUTBOX.md",
-    "docs/CODEX_AUTOMATION_TASKS.md",
-    "docs/MULTI_ROLE_PROGRESS.md",
-    "target/automation_signals.json",
-]
-scan_roots = [".agentic", "docs"]
-allowed_prefixes = (".agentic/", "docs/")
+try:
+    manifest = json.loads((target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8"))
+except Exception:
+    manifest = {}
+if manifest.get("layout") == "sidecar_v1":
+    explicit_paths = [
+        str(item).strip().lstrip("./")
+        for item in (manifest.get("worktree_seed_paths") or [])
+        if str(item).strip().startswith((".diffmogger/agentic/", ".diffmogger/state/", ".diffmogger/runtime/automation_signals.json"))
+    ]
+    scan_roots = [".diffmogger"]
+    allowed_prefixes = (".diffmogger/",)
+else:
+    explicit_paths = [
+        ".agentic/automation_prompt.md",
+        ".agentic/smoke_commands.txt",
+        ".agentic/verification_commands.txt",
+      ".agentic/roles/planner.md",
+      ".agentic/roles/builder.md",
+      ".agentic/roles/hardener.md",
+      ".agentic/roles/integrator.md",
+      ".codex/config.toml",
+      "docs/HUMAN_INBOX.md",
+        "docs/HUMAN_RESPONSES_ARCHIVE.md",
+        "docs/HUMAN_REQUESTS.md",
+        "docs/HUMAN_OUTBOX.md",
+        "docs/CODEX_AUTOMATION_TASKS.md",
+        "docs/MULTI_ROLE_PROGRESS.md",
+        "target/automation_signals.json",
+    ]
+    scan_roots = [".agentic", "docs"]
+    allowed_prefixes = (".agentic/", "docs/")
 deny_parts = {
     ".git",
     ".hg",
@@ -444,7 +560,7 @@ for rel in "${runtime_state_paths[@]}"; do
   seed_context_path "$rel"
 done
 
-export PLAYWRIGHT_MCP_OUTPUT_DIR="${PLAYWRIGHT_MCP_OUTPUT_DIR:-$worktree_dir/docs/backlog/ui_artifacts/$run_id}"
+export PLAYWRIGHT_MCP_OUTPUT_DIR="${PLAYWRIGHT_MCP_OUTPUT_DIR:-$worktree_dir/$playwright_artifact_rel}"
 
 CODEX_ROLE_ARGS=(--add-dir "$HOME/.codex")
 toml_quote() {
@@ -469,7 +585,7 @@ append_context7_mcp_args() {
 append_playwright_mcp_args() {
   CODEX_ROLE_ARGS+=(
     -c 'mcp_servers.playwright.command="bash"'
-    -c 'mcp_servers.playwright.args=["scripts/run_playwright_mcp.sh"]'
+    -c "mcp_servers.playwright.args=[$(toml_quote "$playwright_mcp_rel")]"
     -c 'mcp_servers.playwright.enabled=true'
     -c 'mcp_servers.playwright.required=false'
     -c 'mcp_servers.playwright.disabled_tools=["browser_run_code_unsafe","browser_file_upload"]'
@@ -484,15 +600,15 @@ append_playwright_mcp_args() {
   fi
 }
 
-if [[ -f "$worktree_dir/.codex/config.toml" ]]; then
+if [[ -f "$worktree_dir/$mcp_config_rel" ]]; then
   CODEX_ROLE_ARGS+=(
     -c 'mcp_servers.context7.enabled=false'
     -c 'mcp_servers.playwright.enabled=false'
   )
-  if [[ "$role" == "planner" || "$role" == "builder" ]] && grep -q "mcp_servers.context7" "$worktree_dir/.codex/config.toml"; then
+  if [[ "$role" == "planner" || "$role" == "builder" ]] && grep -q "mcp_servers.context7" "$worktree_dir/$mcp_config_rel"; then
     append_context7_mcp_args
   fi
-  if [[ "$role" == "hardener" || "$role" == "integrator" ]] && grep -q "mcp_servers.playwright" "$worktree_dir/.codex/config.toml"; then
+  if [[ "$role" == "hardener" || "$role" == "integrator" ]] && grep -q "mcp_servers.playwright" "$worktree_dir/$mcp_config_rel"; then
     append_playwright_mcp_args
   fi
 fi
@@ -523,7 +639,7 @@ output.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encodin
 PY
 
 if [[ "$role" == "hardener" ]]; then
-  python3 - "$target_abs" "$hardener_deferred_context_path" "${CONVEYOR_DECISION_REASON:-}" <<'PY'
+  python3 - "$target_abs" "$hardener_deferred_context_path" "$hardener_queue_root" "${CONVEYOR_DECISION_REASON:-}" <<'PY'
 import json
 import re
 import sys
@@ -532,8 +648,8 @@ from typing import Any
 
 target = Path(sys.argv[1])
 output = Path(sys.argv[2])
-decision_reason = sys.argv[3] if len(sys.argv) > 3 else ""
-queue = target / "target" / "automation_queue" / "hardener"
+queue = Path(sys.argv[3])
+decision_reason = sys.argv[4] if len(sys.argv) > 4 else ""
 
 TICKET_RE = re.compile(r"(?<![\w-])#\d+\b|\b[A-Z][A-Z0-9]{0,12}-\d+\b")
 TEST_RATIONALE_RE = re.compile(r"test\s+change\s+rationale", re.IGNORECASE)
@@ -734,10 +850,37 @@ Do not remove or weaken tests merely to make verification pass.
 EOF
 } >"$runtime_prompt_path"
 
+watchdog_helper="$runner_script_dir/run_process_watchdog.py"
+
+run_with_watchdog() {
+  local stdout_file="$1"
+  local stderr_file="$2"
+  local status_file="$3"
+  shift 3
+  python3 "$watchdog_helper" \
+    --stdout-file "$stdout_file" \
+    --stderr-file "$stderr_file" \
+    --status-file "$status_file" \
+    -- "$@"
+}
+
+append_watchdog_status() {
+  local status_file="$1"
+  local log_file="$2"
+  if [[ -f "$status_file" ]]; then
+    {
+      printf '\n=== process watchdog status ===\n'
+      cat "$status_file"
+    } >>"$log_file"
+  fi
+}
+
 set +e
-codex exec --full-auto --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")" >"$run_stdout" 2>"$run_stderr"
+run_with_watchdog "$run_stdout" "$run_stderr" "$watchdog_status_path" \
+  codex exec --full-auto --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")"
 codex_status=$?
 set -e
+append_watchdog_status "$watchdog_status_path" "$run_stderr"
 critical_stop_detected=0
 detect_critical_stop() {
   python3 - "$1" <<'PY'
@@ -772,9 +915,9 @@ if detect_critical_stop "$run_stdout" || detect_critical_stop "$run_stderr"; the
   fi
 fi
 
-if [[ "$codex_status" != "0" && "$critical_stop_detected" != "1" && -f "$target_abs/scripts/repair_environment.py" ]]; then
+if [[ "$codex_status" != "0" && "$codex_status" != "124" && "$critical_stop_detected" != "1" && -f "$runner_script_dir/repair_environment.py" ]]; then
   repair_status=0
-  python3 "$target_abs/scripts/repair_environment.py" "$target_abs" \
+  python3 "$runner_script_dir/repair_environment.py" "$target_abs" \
     --command "codex exec role $role" \
     --exit-code "$codex_status" \
     --stdout-file "$run_stdout" \
@@ -810,9 +953,12 @@ for item in data.get("path_prepend") or []:
 PY
 )
     set +e
-    codex exec --full-auto --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")" >"$rerun_stdout" 2>"$rerun_stderr"
+    run_with_watchdog "$rerun_stdout" "$rerun_stderr" "$rerun_watchdog_status_path" \
+      codex exec --full-auto --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")"
     rerun_status=$?
     set -e
+    append_watchdog_status "$rerun_watchdog_status_path" "$rerun_stderr"
+    final_watchdog_status_path="$rerun_watchdog_status_path"
     {
       printf '\n=== environment repair attempted; repair_status=%s ===\n' "$repair_status"
       cat "$env_repair_path"
@@ -835,8 +981,8 @@ PY
   fi
 fi
 
-if [[ -f "$target_abs/scripts/update_automation_signals.py" && -f "$worktree_dir/target/automation_signals.json" ]]; then
-  python3 "$target_abs/scripts/update_automation_signals.py" "$target_abs" --merge-state "$worktree_dir/target/automation_signals.json" --refresh --role "$role" --summary || true
+if [[ -f "$runner_script_dir/update_automation_signals.py" && -f "$worktree_dir/${signal_state_path#$target_abs/}" ]]; then
+  python3 "$runner_script_dir/update_automation_signals.py" "$target_abs" --merge-state "$worktree_dir/${signal_state_path#$target_abs/}" --refresh --role "$role" --summary || true
 fi
 
 {
@@ -929,7 +1075,8 @@ PY
   git diff --name-only "$base_commit" -- . "${context_excludes[@]}" >"$queue_dir/changed_files.txt"
 )
 
-python3 - "$summary_path" "$role" "$run_id" "$base_commit" "$codex_status" "$target_abs" <<'PY'
+python3 - "$summary_path" "$role" "$run_id" "$base_commit" "$codex_status" "$target_abs" "$final_watchdog_status_path" <<'PY'
+import json
 import re
 import sys
 from pathlib import Path
@@ -940,6 +1087,7 @@ run_id = sys.argv[3]
 base_commit = sys.argv[4]
 codex_status = sys.argv[5]
 target = Path(sys.argv[6])
+watchdog_status_path = Path(sys.argv[7])
 
 def scrub(text: str) -> str:
     replacements = {
@@ -978,13 +1126,25 @@ fallback = [
     f"- Codex exit code: {codex_status}",
     f"- Base commit: {base_commit[:12]}",
 ]
+try:
+    watchdog = json.loads(watchdog_status_path.read_text(encoding="utf-8"))
+except Exception:
+    watchdog = {}
+if watchdog:
+    fallback.extend(
+        [
+            f"- Watchdog timed out: {str(bool(watchdog.get('timed_out'))).lower()}",
+            f"- Watchdog terminated process group: {str(bool(watchdog.get('terminated'))).lower()}",
+            f"- Watchdog status file: {scrub(str(watchdog_status_path))}",
+        ]
+    )
 if original.strip():
     fallback.extend(["", "## Role Notes", original.strip()[:1600]])
 summary_path.parent.mkdir(parents=True, exist_ok=True)
 summary_path.write_text("\n".join(fallback).rstrip() + "\n", encoding="utf-8")
 PY
 
-python3 - "$manifest_path" "$role" "$run_id" "$base_commit" "$patch_path" "$summary_path" "$codex_status" "$queue_dir/changed_files.txt" "$runtime_state_actions_path" "$runtime_state_changed_files_path" <<'PY'
+python3 - "$manifest_path" "$role" "$run_id" "$base_commit" "$patch_path" "$summary_path" "$codex_status" "$queue_dir/changed_files.txt" "$runtime_state_actions_path" "$runtime_state_changed_files_path" "$final_watchdog_status_path" <<'PY'
 import json
 import re
 import sys
@@ -1001,6 +1161,7 @@ exit_code = int(sys.argv[7])
 changed_files_path = Path(sys.argv[8])
 runtime_state_actions_path = Path(sys.argv[9])
 runtime_state_changed_files_path = Path(sys.argv[10])
+watchdog_status_path = Path(sys.argv[11])
 changed_files = [
     line.strip()
     for line in changed_files_path.read_text(encoding="utf-8").splitlines()
@@ -1012,6 +1173,10 @@ runtime_state_changed_files = [
     if line.strip()
 ] if runtime_state_changed_files_path.exists() else []
 summary = summary_path.read_text(encoding="utf-8", errors="replace")[:2000] if summary_path.exists() else ""
+try:
+    watchdog_status = json.loads(watchdog_status_path.read_text(encoding="utf-8"))
+except Exception:
+    watchdog_status = {}
 
 def summary_field(field_name: str) -> str:
     prefix = f"{field_name.lower()}:"
@@ -1040,6 +1205,13 @@ manifest = {
     "runtime_state_changed_files": runtime_state_changed_files,
     "runtime_state_status": "pending" if runtime_state_changed_files else "none",
     "runtime_state_results": [],
+    "watchdog_status_path": str(watchdog_status_path),
+    "watchdog_timed_out": bool(watchdog_status.get("timed_out")),
+    "watchdog_idle_timed_out": bool(watchdog_status.get("idle_timed_out")),
+    "watchdog_terminated": bool(watchdog_status.get("terminated")),
+    "watchdog_killed": bool(watchdog_status.get("killed")),
+    "watchdog_exit_code": watchdog_status.get("exit_code"),
+    "watchdog_duration_seconds": watchdog_status.get("duration_seconds"),
     "checks_run": [],
     "verification_scope": verification_scope,
     "test_change_rationale": test_change_rationale,

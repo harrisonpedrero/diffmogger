@@ -22,7 +22,7 @@ If unavailable, record `UNAVAILABLE` and continue without blocking the sprint.
 Output convention:
 
 ```text
-target/agent_runs/<run_id>/worker_<role>.md
+.diffmogger/runtime/agent_runs/<run_id>/worker_<role>.md
 ```
 
 The main agent must read and consolidate outputs before ending the run.
@@ -30,8 +30,8 @@ The main agent must read and consolidate outputs before ending the run.
 Optional Diffmogger helpers:
 
 ```bash
-bash scripts/spawn_worker_agent.sh --target /absolute/path/to/target-project --run-id "$CODEX_RUN_ID" --role tests --prompt "Inspect test gaps and write a concise report."
-python3 scripts/summarize_worker_outputs.py /absolute/path/to/target-project --run-id "$CODEX_RUN_ID"
+bash .diffmogger/scripts/spawn_worker_agent.sh --target /absolute/path/to/target-project --run-id "$CODEX_RUN_ID" --role tests --prompt "Inspect test gaps and write a concise report."
+python3 .diffmogger/scripts/summarize_worker_outputs.py /absolute/path/to/target-project --run-id "$CODEX_RUN_ID"
 ```
 
 These helpers default to read-only worker-report mode, avoid network, tell workers not to spawn more workers, and fail gracefully when `codex` is unavailable.
@@ -39,7 +39,7 @@ These helpers default to read-only worker-report mode, avoid network, tell worke
 When generated project intake explicitly enables write-capable workers, use explicit write mode and ownership:
 
 ```bash
-bash scripts/spawn_worker_agent.sh --mode write --target /absolute/path/to/target-project --run-id "$CODEX_RUN_ID" --role feature_a --ownership "src/feature-a/** and tests/feature-a/** only" --prompt "Implement the assigned slice and write changed files/checks to the report."
+bash .diffmogger/scripts/spawn_worker_agent.sh --mode write --target /absolute/path/to/target-project --run-id "$CODEX_RUN_ID" --role feature_a --ownership "src/feature-a/** and tests/feature-a/** only" --prompt "Implement the assigned slice and write changed files/checks to the report."
 ```
 
 Write workers are optional acceleration. Use the most parallelism the task can safely absorb, up to the configured maximum, when work can split into reviewable lanes. The main agent should define enough ownership, contracts, verification, and integration strategy to keep the work coherent without turning planning into ceremony.
@@ -48,7 +48,7 @@ Default Codex CLI shape:
 
 ```bash
 export CODEX_RUN_ID="${CODEX_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
-mkdir -p "target/agent_runs/$CODEX_RUN_ID"
+mkdir -p ".diffmogger/runtime/agent_runs/$CODEX_RUN_ID"
 
 codex exec --disable plugins \
   --ephemeral \
@@ -72,7 +72,7 @@ Inspect the repository for module boundaries, coupling, naming, dependency direc
 
 Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials.
 
-Write your report to target/agent_runs/<run_id>/worker_architecture.md with:
+Write your report to .diffmogger/runtime/agent_runs/<run_id>/worker_architecture.md with:
 - assignment
 - files inspected
 - current architecture summary
@@ -91,7 +91,7 @@ Inspect existing tests, scripts, and the current sprint target. Identify missing
 
 Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials.
 
-Write your report to target/agent_runs/<run_id>/worker_tests.md with:
+Write your report to .diffmogger/runtime/agent_runs/<run_id>/worker_tests.md with:
 - assignment
 - files inspected
 - existing checks
@@ -110,7 +110,7 @@ Inspect the current user-facing demo, docs, reports, screenshots, or UI. Identif
 
 Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials.
 
-Write your report to target/agent_runs/<run_id>/worker_product_polish.md with:
+Write your report to .diffmogger/runtime/agent_runs/<run_id>/worker_product_polish.md with:
 - assignment
 - surfaces inspected
 - top polish issues
@@ -128,7 +128,7 @@ Inspect the current sprint for safety, secrets, external side effects, destructi
 
 Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials.
 
-Write your report to target/agent_runs/<run_id>/worker_risk.md with:
+Write your report to .diffmogger/runtime/agent_runs/<run_id>/worker_risk.md with:
 - assignment
 - files inspected
 - risks found
@@ -146,7 +146,7 @@ You are a bounded implementation prototype worker.
 You may modify only the explicitly assigned files or scratch directory. Do not touch unrelated files. Do not revert other agents' work.
 Do not use network unless explicitly approved for this run. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials.
 
-Implement the assigned prototype, run the relevant checks you can, and write a report to target/agent_runs/<run_id>/worker_<role>.md with:
+Implement the assigned prototype, run the relevant checks you can, and write a report to .diffmogger/runtime/agent_runs/<run_id>/worker_<role>.md with:
 - assignment
 - files changed
 - approach
@@ -167,7 +167,7 @@ You are not alone in the codebase. Other agents or humans may be editing nearby 
 
 Do not touch unrelated files. Do not revert unrelated edits or changes made by others. Do not use network unless explicitly approved. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials. Do not run destructive cleanup.
 
-Implement the assigned slice, run the relevant checks you can, and write a report to target/agent_runs/<run_id>/worker_<role>.md with:
+Implement the assigned slice, run the relevant checks you can, and write a report to .diffmogger/runtime/agent_runs/<run_id>/worker_<role>.md with:
 - assignment
 - ownership scope
 - files changed

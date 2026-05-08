@@ -13,6 +13,9 @@ Lean constraints that prevent dangerous or off-mission behavior.
 Dynamic task file:
 Current state, last run, checks, blockers, human requests, and next sprint. Codex rewrites this at the end of every run.
 
+Sidecar ownership:
+New generated targets keep Diffmogger-owned prompts, state, queue data, worktrees, logs, and imported context under `.diffmogger/`. The generated `.diffmogger/manifest.json` is the path source of truth for runners, validation, dashboard views, and patch exclusion. Existing generated targets may still use the legacy `.agentic/`, `docs/`, and `target/` layout.
+
 ## Bootstrap Vs Recurring Automation
 
 The bootstrap prompt is project-specific and temporary. Use it once or a few times to create the product baseline, docs, tests, and automation state.
@@ -49,7 +52,7 @@ Diffmogger scaffolds mode-aware horizons from the project intake. Continuous-imp
 7. H7 Long-run direction aligned with the mission.
 8. H8 Automation process improvement.
 
-Ticket-campaign projects use bounded ticket-run phases instead: ticket-run readiness, ticket implementation, verification and hardening, completion report, and stop. In that mode bootstrap is readiness-only, `docs/TICKET_RUN.md` remains the source of truth, optional `depends_on` arrays define ticket prerequisites, and normal campaign runs use `python3 scripts/ticket_run.py . next --json` to act on one dependency-ready ticket at a time. The automation should not invent open-ended roadmap work after the listed tickets are complete or blocked.
+Ticket-campaign projects use bounded ticket-run phases instead: ticket-run readiness, ticket implementation, verification and hardening, completion report, and stop. In that mode bootstrap is readiness-only, `.diffmogger/state/TICKET_RUN.md` remains the source of truth, optional `depends_on` arrays define ticket prerequisites, and normal campaign runs use `python3 .diffmogger/scripts/ticket_run.py . next --json` to act on one dependency-ready ticket at a time. The automation should not invent open-ended roadmap work after the listed tickets are complete or blocked.
 
 When a horizon's advancement criteria are met, the automation should update the current horizon to the next horizon and append evidence to the transition log. If a later regression undermines an earlier horizon, the automation should keep the current horizon but make the regression the next sprint-sized task.
 
@@ -57,7 +60,7 @@ When a horizon's advancement criteria are met, the automation should update the 
 
 Human input is asynchronous. The automation should request only meaningful unlocks, keep working around pending input, and consume replies on later runs.
 
-In file-only mode, summary or status requests are answered locally in Markdown or app artifacts. In notifier modes, requests to be messaged should send a concise outbound response through the local notifier when available. Either way, the automation should archive handled entries and keep `docs/HUMAN_INBOX.md` as an active queue, not a permanent log.
+In file-only mode, summary or status requests are answered locally in Markdown or app artifacts. In notifier modes, requests to be messaged should send a concise outbound response through the local notifier when available. Either way, the automation should archive handled entries and keep `.diffmogger/state/HUMAN_INBOX.md` as an active queue, not a permanent log.
 
 ## Worker Agents
 
@@ -69,8 +72,8 @@ Generated target repos include helper scripts for read-only worker reports. Opti
 
 ## Lock Files
 
-Scheduled runs should acquire `target/codex_automation.lock` before mutating code. The bundled acquire/release scripts record run metadata, detect stale locks, and fail cleanly when another active run exists.
+Scheduled runs should acquire `.diffmogger/runtime/codex_automation.lock` before mutating code. The bundled acquire/release scripts record run metadata, detect stale locks, and fail cleanly when another active run exists.
 
 ## State Compaction
 
-Markdown handoff files are useful because they live in the repo, but they can grow into context bloat. `scripts/compact_agent_state.py` preserves unresolved human requests, keeps recent state, and archives concise rollups for older handled entries.
+Markdown handoff files are useful because they live in the repo, but they can grow into context bloat. `.diffmogger/scripts/compact_agent_state.py` preserves unresolved human requests, keeps recent state, and archives concise rollups for older handled entries.
