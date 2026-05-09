@@ -125,7 +125,6 @@ fi
 for pattern in \
   "/.agentic/" \
   "/AGENTS.md" \
-  "/docs/AUTOMATION_SIGNALS.md" \
   "/docs/AUTONOMY_EXPERIMENT_LOG.md" \
   "/docs/CODEX_AUTOMATION_GUARDRAILS.md" \
   "/docs/CODEX_AUTOMATION_TASKS.md" \
@@ -159,14 +158,13 @@ for pattern in \
   "/scripts/spawn_worker_agent.sh" \
   "/scripts/summarize_worker_outputs.py" \
   "/scripts/ticket_run.py" \
-  "/scripts/update_automation_signals.py" \
   "/target/agent_runs/" \
+  "/target/automation_runner.json" \
   "/target/automation_conveyor.lock" \
   "/target/automation_conveyor_state.json" \
   "/target/baseline_verification.json" \
   "/target/automation_logs/" \
   "/target/automation_queue/" \
-  "/target/automation_signals.json" \
   "/target/automation_venvs/" \
   "/target/automation_worktrees/" \
   "/target/codex_automation.lock" \
@@ -237,8 +235,6 @@ values = {
     "worktree_dir": target / rel(f"target/automation_worktrees/{role}/{run_id}"),
     "log_dir": target / rel("target/automation_logs"),
     "worktree_summary_rel": rel(f"target/automation_queue/{role}/{run_id}/summary.md"),
-    "signal_docs_path": target / rel("docs/AUTOMATION_SIGNALS.md"),
-    "signal_state_path": target / rel("target/automation_signals.json"),
     "mcp_config_rel": rel(".codex/config.toml"),
     "playwright_mcp_rel": rel("scripts/run_playwright_mcp.sh"),
     "playwright_artifact_rel": rel(f"docs/backlog/ui_artifacts/{run_id}"),
@@ -254,9 +250,6 @@ if [[ ! -f "$prompt_path" ]]; then
 fi
 
 if [[ "$role" == "integrator" ]]; then
-  if [[ -f "$runner_script_dir/update_automation_signals.py" && -f "$signal_docs_path" ]]; then
-    python3 "$runner_script_dir/update_automation_signals.py" "$target_abs" --refresh --role integrator --summary || true
-  fi
   python3 "$runner_script_dir/integrate_role_outputs.py" "$target_abs" --run-id "$run_id"
   integrator_status=$?
   if [[ "$integrator_status" -eq 0 && -f "$runner_script_dir/ticket_run.py" ]]; then
@@ -290,10 +283,6 @@ hardener_queue_root="$(dirname "$(dirname "$queue_dir")")/hardener"
 git worktree add --detach "$worktree_dir" "$base_commit" >/dev/null
 mkdir -p "$(dirname "$worktree_summary_path")"
 
-if [[ -f "$runner_script_dir/update_automation_signals.py" && -f "$signal_docs_path" ]]; then
-  python3 "$runner_script_dir/update_automation_signals.py" "$target_abs" --refresh --role "$role" --summary || true
-fi
-
 context_paths=(
   ".agentic/automation_prompt.md"
   ".agentic/smoke_commands.txt"
@@ -304,7 +293,6 @@ context_paths=(
   "docs/MULTI_ROLE_PROGRESS.md"
   "docs/CODEX_AUTOMATION_GUARDRAILS.md"
   "docs/PROJECT_CONTEXT.md"
-  "docs/AUTOMATION_SIGNALS.md"
   "docs/AUTONOMY_EXPERIMENT_LOG.md"
   "docs/DAILY_AUTOMATION_REVIEW.md"
   "docs/HUMAN_BRIDGE_SETUP.md"
@@ -332,8 +320,7 @@ context_paths=(
   "scripts/spawn_worker_agent.sh"
   "scripts/summarize_worker_outputs.py"
   "scripts/ticket_run.py"
-  "scripts/update_automation_signals.py"
-  "target/automation_signals.json"
+  "target/automation_runner.json"
   "target/baseline_verification.json"
 )
 
@@ -384,7 +371,7 @@ if manifest.get("layout") == "sidecar_v1":
     explicit_paths = [
         str(item).strip().lstrip("./")
         for item in (manifest.get("worktree_seed_paths") or [])
-        if str(item).strip().startswith((".diffmogger/agentic/", ".diffmogger/state/", ".diffmogger/runtime/automation_signals.json"))
+        if str(item).strip().startswith((".diffmogger/agentic/", ".diffmogger/state/"))
     ]
     scan_roots = [".diffmogger"]
     allowed_prefixes = (".diffmogger/",)
@@ -404,7 +391,7 @@ else:
         "docs/HUMAN_OUTBOX.md",
         "docs/CODEX_AUTOMATION_TASKS.md",
         "docs/MULTI_ROLE_PROGRESS.md",
-        "target/automation_signals.json",
+        "target/automation_runner.json",
     ]
     scan_roots = [".agentic", "docs"]
     allowed_prefixes = (".agentic/", "docs/")
@@ -979,10 +966,6 @@ PY
       fi
     fi
   fi
-fi
-
-if [[ -f "$runner_script_dir/update_automation_signals.py" && -f "$worktree_dir/${signal_state_path#$target_abs/}" ]]; then
-  python3 "$runner_script_dir/update_automation_signals.py" "$target_abs" --merge-state "$worktree_dir/${signal_state_path#$target_abs/}" --refresh --role "$role" --summary || true
 fi
 
 {

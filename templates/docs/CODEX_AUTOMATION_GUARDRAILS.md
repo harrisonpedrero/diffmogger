@@ -1,6 +1,6 @@
 # Codex Automation Guardrails
 
-These guardrails apply to every scheduled or manual high-agency Codex run in this repo.
+These guardrails apply to every continuous or manual high-agency Codex run in this repo.
 
 ## Scope Boundaries
 
@@ -55,7 +55,7 @@ Do not build unrelated apps or large unrelated systems.
 - Prefer read-only worker reports.
 - Main agent owns integration.
 - Record worker outputs under `target/agent_runs/<run_id>/`.
-- Use local `.diffmogger/scripts/spawn_worker_agent.sh` and `.diffmogger/scripts/summarize_worker_outputs.py` helpers when available; otherwise use equivalent bounded nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` commands from inside the scheduled parent run.
+- Use local `.diffmogger/scripts/spawn_worker_agent.sh` and `.diffmogger/scripts/summarize_worker_outputs.py` helpers when available; otherwise use equivalent bounded nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` commands from inside the parent automation run.
 - Do not create unbounded recursive agent loops.
 - Workers must not send Discord, notifier, email, or other external messages, spawn additional workers, or use network unless explicitly approved for that run.
 - {{WORKER_ENV_ACCESS_RULE}}
@@ -67,7 +67,7 @@ Do not build unrelated apps or large unrelated systems.
 
 ## Lock-File Policy
 
-- Acquire `target/codex_automation.lock` before mutating code in scheduled runs.
+- Acquire `target/codex_automation.lock` before mutating code in automation runs.
 - Scheduled runs should use local `.diffmogger/scripts/run_codex_automation.sh`, which owns lock acquire/release.
 - If `CODEX_LOCK_ALREADY_ACQUIRED=true`, do not acquire, overwrite, manually create, or release the lock inside the Codex run.
 - Manual runs should use local `.diffmogger/scripts/acquire_codex_lock.sh` and `.diffmogger/scripts/release_codex_lock.sh`.

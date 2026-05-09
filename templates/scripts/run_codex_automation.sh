@@ -48,7 +48,6 @@ def rel(path: str) -> str:
 
 values = {
     "automation_prompt_path": target / rel(".agentic/automation_prompt.md"),
-    "signal_docs_path": target / rel("docs/AUTOMATION_SIGNALS.md"),
     "logs_dir": target / rel("target/automation_logs"),
     "lock_path": target / rel("target/codex_automation.lock"),
     "mcp_config_path": target / rel(".codex/config.toml"),
@@ -184,16 +183,12 @@ trap 'forward_signal TERM 143' TERM
 trap 'forward_signal INT 130' INT
 
 target_name="$(basename "$TARGET")"
-lock_context="${CODEX_LOCK_CONTEXT:-${target_name} scheduled sprint}"
+lock_context="${CODEX_LOCK_CONTEXT:-${target_name} automation sprint}"
 bash "$runner_script_dir/acquire_codex_lock.sh" "$lock_context" || exit 0
 export CODEX_LOCK_ALREADY_ACQUIRED="true"
 
 if maybe_finalize_ticket_campaign; then
   exit 0
-fi
-
-if [ -f "$runner_script_dir/update_automation_signals.py" ] && [ -f "$signal_docs_path" ]; then
-  python3 "$runner_script_dir/update_automation_signals.py" . --refresh --summary || true
 fi
 
 mkdir -p "$logs_dir"

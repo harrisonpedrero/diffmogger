@@ -55,9 +55,9 @@ project_commands_only
 
 - `npm test`
 
-## Automation Cadence
+## Automation Mode
 
-Every 60 minutes until the ticket run is complete or blocked.
+Continuous planner/builder/hardener/integrator conveyor until the ticket run is complete or blocked.
 
 ## Human Bridge
 
@@ -70,6 +70,36 @@ ticket_campaign
 ## Ticket Completion Notify
 
 false
+
+## Ticket Run Seed Tickets
+
+[
+  {
+    "id": "TICKET-001",
+    "summary": "Add a local queue health check",
+    "status": "pending",
+    "acceptance_criteria": [
+      "The fictional queue health check reports pass/fail status without network access."
+    ],
+    "verification_commands": [
+      "npm test"
+    ]
+  },
+  {
+    "id": "TICKET-002",
+    "summary": "Document the maintainer review path",
+    "depends_on": [
+      "TICKET-001"
+    ],
+    "status": "pending",
+    "acceptance_criteria": [
+      "The local review notes explain how maintainers inspect the queue result."
+    ],
+    "verification_commands": [
+      "npm test"
+    ]
+  }
+]
 
 ## Worker Agents
 

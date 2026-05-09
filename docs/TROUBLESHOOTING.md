@@ -43,8 +43,8 @@ python3 .diffmogger/scripts/diffmogger_browser.py env
 ```
 
 The helper resolves `DIFFMOGGER_BROWSER_PATH`, `CHROME_PATH`, then the managed
-cache at `DIFFMOGGER_BROWSER_CACHE` or `~/.cache/diffmogger/browsers`. Scheduled
-wrappers and dashboard-managed LaunchAgents export the managed browser path when
+cache at `DIFFMOGGER_BROWSER_CACHE` or `~/.cache/diffmogger/browsers`. Automation
+wrappers export the managed browser path when
 it exists. If repeated browser launches exit before DevTools is ready, record the
 diagnostics as `BLOCKED_ON_ENVIRONMENT`, avoid retrying the same command, and use
 a managed-browser or manual visual-QA path.
@@ -62,7 +62,7 @@ Check availability with `command -v codex`. If Codex CLI is unavailable, continu
 
 ## Nested Codex Worker Cannot Start Or Write Reports
 
-If a worker report says `~/.codex/sessions`, `~/.codex/state_5.sqlite`, or `~/.codex/shell_snapshots` is not writable, the parent automation sandbox likely blocked the child CLI before the child worker could start. Generated scheduled wrappers should grant the parent run access to Codex's home directory:
+If a worker report says `~/.codex/sessions`, `~/.codex/state_5.sqlite`, or `~/.codex/shell_snapshots` is not writable, the parent automation sandbox likely blocked the child CLI before the child worker could start. Generated automation wrappers should grant the parent run access to Codex's home directory:
 
 ```bash
 --add-dir "$HOME/.codex"
@@ -84,9 +84,9 @@ codex exec --disable plugins \
   "<worker prompt>"
 ```
 
-The bypass is for the nested child only. The scheduled parent remains the outer sandbox boundary.
+The bypass is for the nested child only. The parent automation run remains the outer sandbox boundary.
 
-For existing target repos, update `.diffmogger/scripts/run_codex_automation.sh` to add `$HOME/.codex` and update `.diffmogger/scripts/spawn_worker_agent.sh` to use the nested-child command shape above. Then rerun the scheduled job. If worker startup still fails, record `Codex CLI worker decision: UNAVAILABLE` and continue the sprint with in-session or main-agent review.
+For existing target repos, update `.diffmogger/scripts/run_codex_automation.sh` to add `$HOME/.codex` and update `.diffmogger/scripts/spawn_worker_agent.sh` to use the nested-child command shape above. Then rerun the automation job. If worker startup still fails, record `Codex CLI worker decision: UNAVAILABLE` and continue the sprint with in-session or main-agent review.
 
 ## Discord Notifier Outbound Works But Inbound Does Not
 
@@ -148,4 +148,4 @@ Then run without `--dry-run` only after confirming unresolved human requests rem
 
 `.diffmogger/scripts/release_codex_lock.sh` prefers a matching `CODEX_RUN_ID`. If release fails, inspect `.diffmogger/runtime/codex_automation.lock` and confirm you are not removing another active run. Use `CODEX_LOCK_FORCE_RELEASE=true` only after review.
 
-If a scheduled run already exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, the Codex prompt should not acquire or release another lock. The target repo's `.diffmogger/scripts/run_codex_automation.sh` owns lock release for scheduled runs.
+If an automation run already exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, the Codex prompt should not acquire or release another lock. The target repo's `.diffmogger/scripts/run_codex_automation.sh` owns lock release for wrapped runs.

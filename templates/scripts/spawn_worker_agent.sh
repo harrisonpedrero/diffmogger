@@ -23,7 +23,7 @@ Options:
 
 The script uses `codex exec --disable plugins --ephemeral
 --dangerously-bypass-approvals-and-sandbox` for the nested child worker. The
-scheduled parent run remains the outer sandbox boundary. The parent should grant
+parent automation run remains the outer sandbox boundary. The parent should grant
 write access to ~/.codex with --add-dir so the nested CLI can authenticate and
 start. If codex is unavailable or the worker fails, it still writes a report
 explaining what happened.

@@ -1,29 +1,17 @@
 # Native Dashboard Architecture
 
 Diffmogger's primary dashboard is the native Tauri v2 app. The Python backend command layer remains
-the source of truth for scaffold, schedule, human bridge, Observatory, review, and validation
+the source of truth for scaffold, automation runner lifecycle, human bridge, Observatory, review, and validation
 behavior.
 
-Legacy path note: older migration notes and inventory rows may mention generated `.agentic/`,
-`docs/`, or `target/` paths. New generated targets resolve those surfaces through
-`.diffmogger/manifest.json` and store Diffmogger-owned files under `.diffmogger/`.
+Generated sidecar targets resolve managed paths through `.diffmogger/manifest.json` and store
+Diffmogger-owned files under `.diffmogger/`. Runtime helpers still tolerate earlier generated
+target layouts where required for compatibility.
 
 The goal is better UX without losing the dashboard's automation controls, Observatory export,
 file-only human bridge, scaffold flow, and Markdown-first operating model.
 
 ## Entry Points
-
-Legacy Tkinter dashboard, still supported for compatibility checks:
-
-```bash
-python3 scripts/run_dashboard.py
-```
-
-Observatory export/server, still supported:
-
-```bash
-python3 scripts/run_observatory.py --target /path/to/target --review-dir /path/to/target/.diffmogger/runtime/first-review
-```
 
 Native app:
 
@@ -31,6 +19,18 @@ Native app:
 cd services/agentic-dashboard/native
 npm install
 npm run tauri dev
+```
+
+Backend command smoke:
+
+```bash
+python3 scripts/dashboard_backend_cli.py diagnostics.environment
+```
+
+Observatory export/server:
+
+```bash
+python3 scripts/runtime/run_observatory.py --target /path/to/target --review-dir /path/to/target/.diffmogger/runtime/first-review
 ```
 
 Source-checkout packaged app:
@@ -67,7 +67,7 @@ The native app is intentionally thin:
 - Tauri/Rust owns native folder selection, recent-project config, path validation, safe open/reveal
   actions, and the allowlisted subprocess boundary.
 - Python remains the backend source of truth through `scripts/dashboard_backend_cli.py`.
-- Existing scaffold, dashboard helper, schedule, human bridge, Observatory, review export, and
+- Existing scaffold, dashboard helper, automation runner, human bridge, Observatory, review export, and
   validation functions are reused rather than duplicated in TypeScript.
 
 The frontend must not scrape Markdown files for core state. It calls backend commands and receives
@@ -106,8 +106,8 @@ Current command groups:
 - Project and Brief: `project.load_snapshot`, `project.list_recent`, `brief.load`,
   `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`.
 - Context: `context.import`.
-- Run and schedule: `run.load`, `run.load_log`, `run.once`, `schedule.start`, `schedule.pause`,
-  `schedule.remove`, `safety.run_check`.
+- Run and automation: `run.load`, `run.load_log`, `run.once`, `automation.start`,
+  `automation.stop`, `safety.run_check`.
 - Workers: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`.
 - Observatory and Review: `observatory.snapshot`, `observatory.generate_html`,
   `observatory.load_html`, `review.load`, `review.export_bundle`, `review.mark_reviewed`.
@@ -141,22 +141,22 @@ The native app uses backend snapshots to derive page state:
 State derivation lives in small testable frontend model files:
 
 - `homeModel.ts`: Home headline, primary CTA, safety/readiness, progress, and human bridge.
-- `runModel.ts`: Run page readiness, control enablement, schedule status, log state, worker strategy.
+- `runModel.ts`: Run page readiness, control enablement, automation runner status, log state, worker strategy.
 - `observatoryModel.ts`: Observatory headline/tone from snapshot mission, active role, queue, human
   input, and critical stop state.
 - `commandPaletteModel.ts`: state-gated command palette commands and disabled reasons.
 - `advancedModel.ts`: Advanced file editor dirty/save/open/reveal state.
 
-## Legacy Tkinter Parity
+## Native Backend Parity
 
-Keep native behavior and test coverage aligned with the legacy dashboard contracts for:
+Keep native behavior and test coverage aligned with the backend contracts for:
 
 - prerequisite checks
 - fresh and existing project setup
 - project intake fields
 - context-file import and `.diffmogger/state/PROJECT_CONTEXT.md` updates
 - scaffold/bootstrap preview and execution
-- scheduled automation start/pause/remove
+- continuous automation start/stop
 - run safety checks
 - review bundle export
 - Observatory launch/export and native snapshot rendering
@@ -167,16 +167,16 @@ Keep native behavior and test coverage aligned with the legacy dashboard contrac
 - Context7 and Playwright MCP intake options
 - dashboard state persistence in `.diffmogger/agentic/dashboard_state.json`
 
-`docs/NATIVE_APP_REBUILD_INVENTORY.md` is the preservation checklist and historical migration inventory. The guardrail script
-`scripts/check_native_rebuild_guardrails.py` verifies the inventory's preserved feature groups still
-have backend commands and that those commands remain available through the native Rust allowlist.
+`docs/archive/native-dashboard-command-inventory.md` is the compact command inventory used by the guardrail script.
+`scripts/validation/check_native_rebuild_guardrails.py` verifies preserved feature groups still have backend
+commands and that those commands remain available through the native Rust allowlist.
 
 ## Regression Guardrails
 
 Backend tests:
 
 ```bash
-python3 -m unittest tests/test_dashboard_backend_cli.py tests/test_native_rebuild_guardrails.py
+python3 -m unittest tests.dashboard.test_dashboard_backend_cli tests.kit.test_native_rebuild_guardrails
 ```
 
 Frontend/native tests:
@@ -198,7 +198,7 @@ npm run tauri build
 ## Clone / Build / Run Troubleshooting
 
 The native app launches backend commands with the same practical automation PATH used by generated
-scheduled runs: `CODEX_AUTOMATION_PATH` when set, otherwise
+automation runs: `CODEX_AUTOMATION_PATH` when set, otherwise
 `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`, followed by the app's original GUI
 PATH. This avoids the common macOS GUI issue where a packaged app only sees `/usr/bin/python3`.
 
@@ -221,7 +221,7 @@ Common fixes:
 - Install Node with `brew install node` only when optional Context7/Playwright MCP integration needs
   `node`, `npm`, or `npx`.
 - macOS targets under `~/Documents` may need Full Disk Access for `/bin/bash` and the Node
-  executable used by scheduled Codex runs. This is advisory unless scheduled jobs fail to access the
+  executable used by continuous Codex runs. This is advisory unless automation jobs fail to access the
   target.
 
 The setup doctor shows copyable commands and rerun checks. It does not auto-install tools or print
@@ -235,8 +235,10 @@ bash scripts/validate_starter_kit.sh
 
 When adding, renaming, or removing a backend command, update all of:
 
+- `src/diffmogger/dashboard/cli.py` and the relevant module under `src/diffmogger/dashboard/commands/`
+- `src/diffmogger/dashboard/backend_cli.py` only when the compatibility facade needs a new public re-export
 - `scripts/dashboard_backend_cli.py`
 - the Rust allowlist in `services/agentic-dashboard/native/src-tauri/src/lib.rs`
-- `docs/NATIVE_APP_REBUILD_INVENTORY.md`
-- `scripts/check_native_rebuild_guardrails.py`
+- `docs/archive/native-dashboard-command-inventory.md`
+- `scripts/validation/check_native_rebuild_guardrails.py`
 - backend and frontend regression tests

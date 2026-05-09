@@ -65,8 +65,6 @@ Last updated: {{CREATED_AT}}
 
 {{MULTI_ROLE_TASK_NOTES}}
 
-{{AUTOMATION_SIGNALS_TASK_NOTES}}
-
 {{TICKET_CAMPAIGN_TASK_NOTES}}
 
 ## Optional MCP Integrations

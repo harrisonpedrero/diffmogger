@@ -88,7 +88,7 @@ Default env files include root `.env`, `.env.local`, `.env.development`, `.env.d
 
 Use `CODEX_AUTOMATION_ENV_FILES` for an explicit comma- or colon-separated file list. Use `CODEX_AUTOMATION_ENV_DENYLIST` for comma- or colon-separated variable names that should not be inherited. Never print, summarize, commit, or copy secret values.
 
-Optional continuous conveyor scheduling uses:
+Continuous conveyor automation uses:
 
 ```bash
 bash .diffmogger/scripts/run_conveyor_automation.sh --dry-run
@@ -96,9 +96,9 @@ bash .diffmogger/scripts/run_conveyor_automation.sh --once
 python3 .diffmogger/scripts/run_observatory.py --open
 ```
 
-Continuous conveyor scheduling requires this target to be an initialized git repo with an initial commit.
+Continuous conveyor automation requires this target to be an initialized git repo with an initial commit.
 
-The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_signals.json` and `target/baseline_verification.json` to show active signal nudges, baseline verification state, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
+The conveyor records local state under `target/automation_conveyor_state.json`, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads the same local state plus `target/automation_runner.json` and `target/baseline_verification.json` to show runner state, baseline verification state, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
 
 ## Managed Browser Runtime
 
@@ -111,9 +111,8 @@ python3 .diffmogger/scripts/diffmogger_browser.py env
 ```
 
 The helper checks `DIFFMOGGER_BROWSER_PATH`, `CHROME_PATH`, and the managed cache at
-`DIFFMOGGER_BROWSER_CACHE` or `~/.cache/diffmogger/browsers`. Scheduled wrappers export
-the managed path for child Codex runs when it exists, and dashboard-managed LaunchAgents
-inherit the same environment. Do not make browser smoke checks depend only on system
+`DIFFMOGGER_BROWSER_CACHE` or `~/.cache/diffmogger/browsers`. Automation wrappers export
+the managed path for child Codex runs when it exists. Do not make browser smoke checks depend only on system
 Chrome; use `python3 .diffmogger/scripts/diffmogger_browser.py resolve` or the exported `CHROME_PATH`.
 
 ## Optional MCP Integrations
@@ -154,13 +153,13 @@ remain visible across local conveyor cycles.
 After the first bootstrap, use one local review path:
 
 1. In the Diffmogger starter-kit source, run `bash scripts/validate_starter_kit.sh` when reviewing kit or scaffold behavior.
-2. Open the dashboard with `python3 /path/to/Diffmogger/scripts/run_dashboard.py`, reopen this target, and click **Run Safety Check** in the Monitor tab.
+2. Open the native dashboard from the Diffmogger checkout, reopen this target, and click **Run Safety Check** on the Run page.
 3. Click **Export Review Bundle** or, from this target repo, run `python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
 4. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
 5. Confirm the review shows first-review readiness, safety status, validation state, active role or queue, known issues, the next sprint recommendation, and the next-run worker strategy.
 
-The dashboard writes the safety-check result to `target/integration_safety_check.json` in this
-target before the export reads it. That file is runtime state, not source.
+The dashboard writes the safety-check result to `.diffmogger/runtime/integration_safety_check.json`
+before the export reads it. That file is runtime state, not source.
 
 ## Human Bridge
 
@@ -191,10 +190,6 @@ Reason: <one sentence>
 ## Multi-Role Automation
 
 {{MULTI_ROLE_DEVELOPMENT_SECTION}}
-
-## Automation Signals
-
-{{AUTOMATION_SIGNALS_DEVELOPMENT_SECTION}}
 
 ## State Compaction
 

@@ -60,10 +60,6 @@ Desired first demo: {{DESIRED_FIRST_DEMO}}
 
 {{MULTI_ROLE_BOOTSTRAP_SECTION}}
 
-## Automation Signals
-
-{{AUTOMATION_SIGNALS_BOOTSTRAP_SECTION}}
-
 ## Ticket Campaign Mode
 
 {{TICKET_CAMPAIGN_TASK_NOTES}}

@@ -63,9 +63,9 @@ project_commands_only
 - `npm run build`
 - `./scripts/demo_all.sh`
 
-## Automation Cadence
+## Automation Mode
 
-Every 60 minutes at first. Every 45 minutes only with lock-file behavior.
+Continuous planner/builder/hardener/integrator conveyor.
 
 ## Human Bridge
 

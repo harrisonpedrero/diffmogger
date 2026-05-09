@@ -2,8 +2,8 @@
 
 ## Loop
 
-1. Scheduler wakes Codex.
-2. The target repo's scheduler wrapper, usually `.diffmogger/scripts/run_codex_automation.sh`, reads `.diffmogger/manifest.json`, acquires the manifest-declared lock path, and grants `$HOME/.codex` access for nested Codex CLI startup.
+1. The continuous conveyor chooses the next runnable lane.
+2. The target repo's automation wrapper reads `.diffmogger/manifest.json`, acquires the manifest-declared lock path, and grants `$HOME/.codex` access for nested Codex CLI startup.
 3. Codex reads `AGENTS.md`, `.diffmogger/agentic/automation_prompt.md`, `.diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md`, `.diffmogger/state/PROJECT_CONTEXT.md`, and `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
 4. Codex reads human bridge files when enabled. In file-only mode it handles manual replies locally; in notifier modes it sends direct notifier responses when the human asked to be messaged.
 5. Codex removes handled inbox entries only after the requested action is complete or intentionally deferred.
@@ -13,20 +13,11 @@
 9. If the generated target intake explicitly enabled write-capable workers, Codex may spawn up to the capped write-worker count as bounded acceleration for work that can split into reviewable lanes. The main agent must choose a parallelism budget, define enough ownership/contracts to keep work coherent, review diffs, integrate, verify, and update task state.
 10. Codex implements, verifies, and updates artifacts.
 11. Codex rewrites the task file and logs product horizon state, horizon transitions, worker decisions, human messages, checks, artifacts, and status state.
-12. The scheduler wrapper releases the lock through local `.diffmogger/scripts/release_codex_lock.sh` when possible and Codex returns a concise summary.
+12. The automation wrapper releases the lock through local `.diffmogger/scripts/release_codex_lock.sh` when possible and Codex returns a concise summary.
 
 ## Optional Multi-Role Loop
 
-The default loop is single-lane. When a generated target explicitly enables `multi_role_automations_allowed`, the dashboard may install four local launchd jobs instead:
-
-- planner: hourly at minute `0`
-- builder: minutes `10` and `40`
-- hardener: minutes `20` and `50`
-- integrator: minutes `25` and `55`
-
-As an alternative, the dashboard can install one continuous conveyor LaunchAgent. The conveyor runs `.diffmogger/scripts/run_conveyor_automation.sh`, records state in `.diffmogger/runtime/automation_conveyor_state.json`, and chooses the next runnable lane from queue depth, planner deferral changes, planning freshness, builder momentum, and bounded hardening after integrated builder work. Conveyor state includes the active role run and a bounded future decision queue for local observability.
-
-Generated targets also include an optional automation signal helper. When `automation_signals_enabled` is true, `.diffmogger/state/AUTOMATION_SIGNALS.md` defines recurring local nudges and `.diffmogger/runtime/automation_signals.json` records due/completed state. Signals never override guardrails or task state.
+Generated targets use the role conveyor by default. The dashboard **Start** button launches one detached local runner for `.diffmogger/scripts/run_conveyor_automation.sh`; **Stop** terminates the recorded runner process group. The conveyor records state in `.diffmogger/runtime/automation_conveyor_state.json` and chooses the next runnable lane from queue depth, terminal ticket state, active locks, ticket completion/blocking, queued patches, baseline repair, duplicate/deferred triage, no-progress recovery, human inbox items, post-builder hardening, candidate verification, and planner/builder/hardener transitions. Conveyor state includes the active role run and a bounded future decision queue for local observability.
 
 When `automation_run_mode` is `ticket_campaign`, generated targets also use `.diffmogger/state/TICKET_RUN.md` and `.diffmogger/scripts/ticket_run.py`. Bootstrap is readiness-only in this mode. Normal campaign runs use `python3 .diffmogger/scripts/ticket_run.py . next --json` to select one dependency-ready ticket, preserve file order as the human priority order, and avoid continuing into the next ticket in the same run. The conveyor and single-lane wrapper stop launching new work after all tickets are done with evidence, or after all remaining tickets are blocked, then write `.diffmogger/runtime/ticket_run_completion.json`, a Markdown completion report, and a native desktop notification or durable fallback record. Remote push/PR creation remains manual.
 
@@ -44,19 +35,25 @@ Deferred duplicate builder patches are triaged before launching more equivalent 
 
 Multi-role mode is local-only. Role prompts prohibit pushes, fetches, pulls, remote configuration, upstream tracking, and remote-affecting git commands. Runtime scripts refuse configured remotes unless `MULTI_ROLE_ALLOW_REMOTES=1` is set, and the integrator refuses executable hooks containing `git push`.
 
+## Continuous Runner
+
+The dashboard no longer creates or manages fixed-time schedules. Start launches a detached local runner that survives closing the dashboard but does not auto-start after reboot. Stop sends `SIGTERM` to the runner process group and only escalates when the process does not exit after a short grace period.
+
+Logs are written under `.diffmogger/runtime/automation_logs/`. Runner state is recorded in `.diffmogger/runtime/automation_runner.json`; conveyor state is recorded in `.diffmogger/runtime/automation_conveyor_state.json`.
+
 ## Main State Files
 
 New generated targets keep Diffmogger-owned state under `.diffmogger/` and ignore that namespace locally. Existing generated targets may still use the legacy `.agentic/`, `docs/`, and `target/` paths; generated helper scripts resolve both layouts through `.diffmogger/manifest.json` when present.
 
 - `AGENTS.md`: repository-wide instructions Codex loads automatically.
 - `.diffmogger/manifest.json`: generated ownership manifest and path source of truth.
+- `.diffmogger/lib/diffmogger/`: bundled runtime package copied from `src/diffmogger/` so generated targets do not depend on the source checkout.
 - `.diffmogger/agentic/automation_prompt.md`: recurring automation behavior.
 - `.diffmogger/agentic/roles/*.md`: optional static role prompts for multi-role mode.
-- `.diffmogger/scripts/run_conveyor_automation.py`: optional work-conserving local scheduler.
-- `.diffmogger/scripts/run_observatory.py`: optional local browser observatory for signal, conveyor, queue, log, and progress state.
+- `.diffmogger/scripts/run_conveyor_automation.py`: continuous local conveyor.
+- `.diffmogger/scripts/run_observatory.py`: optional local browser observatory for runner, conveyor, queue, log, and progress state.
 - `.diffmogger/scripts/ticket_run.py`: bounded ticket-campaign status, dependency-aware next-ticket selection, halt, report, and local desktop notification helper.
 - `.diffmogger/scripts/repair_environment.py`: local environment diagnosis and safe repair helper.
-- `.diffmogger/scripts/update_automation_signals.py`: optional recurring signal refresher and completion helper.
 - `.diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md`: static boundaries.
 - `.diffmogger/state/PROJECT_CONTEXT.md`: optional supplemental context index for PDFs, research notes, design docs, and other reusable references.
 - `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`: dynamic handoff.

@@ -1,4 +1,6 @@
-# Decision Records
+# Archived Decision Records
+
+These records preserve historical source-kit decisions. Active setup and operating guidance lives in `docs/README.md`, `DEVELOPMENT.md`, and `docs/OPERATING_MODEL.md`.
 
 ## DR-001: Separate Stable Prompt From Dynamic Task State
 
@@ -62,9 +64,11 @@ Why: schema generation can become a project of its own. A small drift test gives
 
 ## DR-011: Generated Target Repos Own Runtime Scripts
 
-Decision: scaffold target-local copies of lock, schedule, worker, summary, and compaction scripts under `.diffmogger/scripts/`.
+Decision: scaffold target-local copies of lock, schedule, worker, summary, and compaction entrypoints under `.diffmogger/scripts/`.
 
 Why: target automations should not depend on the Diffmogger checkout at runtime. The starter repo is a source for scaffolding and reference docs; generated projects should be movable and schedulable on their own.
+
+Current note: Python entrypoints are now thin wrappers over the bundled `.diffmogger/lib/diffmogger/` runtime copied from `src/diffmogger/`; shell entrypoints remain physical target-local scripts.
 
 ## DR-012: Scheduler Wrapper Owns Scheduled-Run Locks
 
@@ -143,6 +147,12 @@ Why: planner patches coordinate future work; they should not churn current docs 
 Decision: new generated targets keep Diffmogger-owned prompts, state, runtime files, imported context, queue data, worktrees, and logs under `.diffmogger/`, with `.diffmogger/manifest.json` as the path source of truth for scaffold, validation, runners, dashboard surfaces, patch exclusion, and runtime-state writes.
 
 Why: the older layout scattered generated files across `.agentic/`, `docs/`, and `target/`, which made git ignore rules, worktree seeding, patch filtering, and target-project path collisions harder to reason about. A single ignored sidecar namespace makes ownership explicit while preserving legacy target compatibility.
+
+## DR-025: Canonical Runtime Package With Target-Local Wrappers
+
+Decision: canonical Python runtime source lives under `src/diffmogger/`. Root `scripts/*.py` are compatibility wrappers that import package modules, and generated target `.diffmogger/scripts/*.py` wrappers are rendered from the runtime entrypoint manifest and canonical wrapper template. Scaffolding copies `src/diffmogger/` into target repos under `.diffmogger/lib/diffmogger/` and records the bundle in `.diffmogger/manifest.json`.
+
+Why: the earlier layout kept Python implementation in multiple tracked locations, which made ownership unclear and made drift prevention depend on exact file comparisons. Manifest-generated wrappers preserve command names while making source ownership explicit.
 
 ## Source Summary From References
 

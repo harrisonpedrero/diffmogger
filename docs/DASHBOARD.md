@@ -1,8 +1,10 @@
 # Dashboard
 
-Diffmogger includes a native local configuration wizard and automation dashboard.
+Diffmogger's dashboard is the native Tauri app in `services/agentic-dashboard/native/`. It is the only user-facing dashboard.
 
-Launch the native app from the starter repo during development:
+The frontend calls `scripts/dashboard_backend_cli.py`, which delegates to package code under `src/diffmogger/dashboard/` and source-kit/runtime modules under `src/diffmogger/`. Backend commands return JSON and are allowlisted by the native Rust layer.
+
+## Run The App
 
 ```bash
 cd services/agentic-dashboard/native
@@ -10,292 +12,132 @@ npm install
 npm run tauri dev
 ```
 
-The native app is a Tauri/React shell over `scripts/dashboard_backend_cli.py`. It does not require opening a browser, and the frontend talks to the backend through allowlisted JSON commands instead of scraping Markdown directly.
-
-The legacy Tkinter dashboard remains available for compatibility checks:
+Packaged build:
 
 ```bash
-python3 scripts/run_dashboard.py
+npm run build
+npm run tauri build
+open src-tauri/target/release/bundle/macos/Diffmogger.app
 ```
 
-The dashboard backend loads optional runtime variables from the Diffmogger starter repo's root `.env` file when it exists. Existing shell environment variables take precedence, values are never printed by the loader, and the file stays local to the starter repo instead of being copied into generated targets or role worktrees. This is useful for optional dashboard and runtime environment variables such as `CONTEXT7_API_KEY`, which dashboard prerequisite checks and dashboard-launched automation processes inherit from the dashboard process.
+Backend smoke:
 
-## Before Starting Automation
+```bash
+python3 scripts/dashboard_backend_cli.py diagnostics.environment
+```
 
-The dashboard checks and lists prerequisites before the combined scaffold/bootstrap run starts:
+The packaged app is source-checkout-backed. Set `DIFFMOGGER_KIT_ROOT=/path/to/Diffmogger` to test another checkout.
+
+## Backend Contract
+
+The dashboard frontend should call backend commands instead of reading arbitrary files or recreating scaffold logic in TypeScript. Important command groups:
+
+- Project: `project.load_snapshot`, `project.list_recent`.
+- Brief: `brief.load`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`.
+- Context: `context.import`.
+- Run and automation: `run.load`, `run.load_log`, `run.once`, `automation.start`, `automation.stop`.
+- Tickets: `ticket.load`, `ticket.add`, `ticket.update`, `ticket.delete`, `ticket.import`, `ticket.draft_from_intake`, `ticket.accept_draft`.
+- Safety: `safety.run_check`.
+- Workers: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`.
+- Observatory and review: `observatory.snapshot`, `observatory.generate_html`, `observatory.load_html`, `review.load`, `review.export_bundle`, `review.mark_reviewed`.
+- Inbox: `inbox.load`, `inbox.send_note`, `inbox.reply_request`.
+- Advanced: `diagnostics.environment`, `diagnostics.run_checks`, `advanced.list_files`, `advanced.load_file`, `advanced.save_file`, `advanced.validate_file`, `advanced.export_debug_bundle`.
+
+All commands validate target paths before reading or writing. Advanced file access uses managed file keys. Debug bundles redact `.env` and secret-like values.
+
+## Setup Flow
+
+The dashboard wizard collects the same intake fields supported by `schemas/project_intake.schema.json`:
+
+- fresh-project or existing-project mode
+- product goal, target user, and first demo
+- tech preferences, constraints, safety rules, and "must never" rules
+- verification commands
+- human bridge mode
+- optional context files
+- optional worker settings
+- optional ticket-campaign mode with seed-ticket entry, bulk import, and review-only Codex draft candidates
+- continuous role conveyor automation
+- optional Context7 and Playwright MCP setup
+- deliverable definition and long-run direction
+
+For existing repos, Diffmogger writes sidecar state under `.diffmogger/` and only manages its marked block in root `AGENTS.md`.
+
+When Ticket Campaign is selected, the wizard shows a **Ticket Queue** panel before review. Seed tickets are saved in the intake as `ticket_run_seed_tickets`; scaffold renders them into `.diffmogger/state/TICKET_RUN.md`. If no seed tickets are provided, scaffold keeps the placeholder ticket.
+
+## Scaffold And Bootstrap
+
+**Scaffold & Bootstrap** runs this source-kit pipeline:
+
+1. write `.diffmogger/agentic/project_intake.json`
+2. copy context files into `.diffmogger/context/`
+3. scaffold target docs, shell scripts, Python wrappers, and `.diffmogger/lib/diffmogger/`
+4. update the target `.git/info/exclude`
+5. run `scripts/check_required_files.py`
+6. optionally start the first Codex bootstrap run
+
+`diffmogger.kit.scaffold_project_docs` is the source of truth for generated files. The dashboard is a UI over that contract.
+
+## Prerequisites
+
+Before automation starts, the dashboard checks:
 
 - Python 3.10+
-- Codex CLI installed and signed in
-- `bash`
-- `git`
+- Codex CLI availability and Codex home access
+- `bash` and `git`
 - writable target parent directory
-- Codex home availability for nested workers
-- macOS Full Disk Access advisory when a target lives under `~/Documents`
-- optional local notifier health when `local_notifier` mode is selected
-- optional macOS desktop notification command when ticket completion notifications are enabled
-- optional Context7 API key visibility when Context7 MCP is selected
+- macOS Full Disk Access advisory for targets under `~/Documents`
+- optional notifier health for notifier modes
+- optional desktop notification command for ticket completion notifications
+- optional Context7/Playwright MCP advisories
+- initialized git repo and initial commit before continuous automation
+- local-only remote opt-in before continuous automation in repos with configured remotes
 
-If a required check fails, the dashboard will not start the bootstrap run.
+## Continuous Automation
 
-## Configuration Wizard
+After scaffold/bootstrap and required-file validation, the Run page can start or stop a detached target-scoped conveyor runner.
 
-The wizard is split into setup steps rather than one long scrolling form:
+- **Start** launches `.diffmogger/scripts/run_conveyor_automation.sh` in a detached local process.
+- **Stop** terminates the recorded runner process group.
+- `run.once` remains available as a developer/debug command for a single wrapped Codex run.
 
-- Basics
-- Product
-- Rules
-- Run Config
-- Progression
-- Context
+Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Runner state lives in `.diffmogger/runtime/automation_runner.json`; conveyor state lives in `.diffmogger/runtime/automation_conveyor_state.json`.
 
-It collects the same project intake fields supported by `schemas/project_intake.schema.json`. The main idea fields include inline guidance so new users know how much detail to provide:
+For scaffolded ticket-campaign targets, the Run page exposes the canonical ticket file through a structured **Ticket Queue** panel. It shows status counts, the next selected ticket, placeholder/dependency validation, and lets users inspect, edit, delete, add, preview/apply Markdown/CSV/JSON imports, draft from intake with Codex, and accept candidates. Draft candidates are stored under `.diffmogger/runtime/ticket_drafts/` and are not applied until accepted.
 
-- project name
-- project type: fresh project or existing project integration
-- target directory
-- product goal: the problem, workflow, value, product shape, and first useful version
-- target user: who uses it, their situation, pain, technical comfort, and success criteria
-- desired first demo: the exact local demo path, user actions, fixture data, and visible result
-- tech preferences: language, framework, storage, testing, styling, dependencies, and repo conventions
-- hard constraints
-- safety constraints
-- external services
-- what the automation must never do
-- additional context files
-- verification commands
-- cadence in whole minutes greater than 30
-- scheduling strategy: periodic sprint, fixed multi-role cadence, or continuous conveyor
-- whether the human bridge is enabled
-- human bridge mode
-- whether freeform human requests should receive direct notifier messages when the notifier is available
-- worker-agent settings, including optional bounded write-worker acceleration disabled by default
-- optional recurring local automation signals, disabled by default
-- optional ticket-campaign mode, including the target-relative ticket Markdown file and local desktop completion notification toggle
-- advanced multi-role automation settings, disabled by default, including a local-only remote opt-in for repos that already have git remotes configured
-- optional Context7 and Playwright MCP integrations, disabled by default and shown as advisory prerequisites
-- meaningful deliverable
-- long-run direction
-- assumptions
+## Review And Safety
 
-## Fresh Or Existing Projects
+**Run Safety Check** runs `scripts/check_integration_safety.py` against the kit source and records the selected target result at `.diffmogger/runtime/integration_safety_check.json`.
 
-For a fresh project, choose a new or empty target directory and describe the product you want Diffmogger to bootstrap.
-
-For an existing project, choose the existing repo directory and select **Integrating into an existing project**. In that mode, use the intake to describe what already exists, which stack and commands should be preserved, and what the first integrated deliverable should prove.
-
-Existing project files are handled conservatively. Diffmogger-owned state is generated under `.diffmogger/`, and an existing root `AGENTS.md` gets only a clearly marked managed automation block that points Codex at the sidecar prompt. Keep project-owned guidance outside that managed block.
-
-For a project that already has Diffmogger files, use the native folder picker or recent-project list. In legacy dashboard builds this action is labeled:
+**Launch Observatory** and **Export Review Bundle** use `.diffmogger/scripts/run_observatory.py`. Review bundles write:
 
 ```text
-Open Diffmogger Project
+/tmp/Diffmogger-review/Diffmogger-observatory.html
+/tmp/Diffmogger-review/Diffmogger-self-review.md
 ```
 
-or choose its target directory with **Browse**. The dashboard loads `.diffmogger/agentic/project_intake.json` and `.diffmogger/agentic/dashboard_state.json` for new sidecar targets, refreshes the monitor, and recomputes the launchd label from the selected target path. Legacy targets without `.diffmogger/manifest.json` may still use `.agentic/`. This lets you reopen the dashboard after closing it and pause, restart, or remove a running or paused schedule without repeating setup.
+The native Observatory view and exported HTML show run state, queue/deferred patches, conveyor state, validation, safety, recent outcomes, and next-run worker strategy.
 
-Dashboard UI state is target-local:
+## First Review Checklist
 
-```text
-.diffmogger/agentic/dashboard_state.json
-```
-
-The starter repo does not keep per-project dashboard state.
-
-You can also add supplemental context files such as PDFs, research notes, CSVs, design docs, or Markdown files. The dashboard copies selected files into:
-
-```text
-.diffmogger/context/
-```
-
-and writes an index at:
-
-```text
-.diffmogger/state/PROJECT_CONTEXT.md
-```
-
-Do not add secrets, credential exports, private production data, or paid-account dumps as context files.
-
-## Scaffold & Bootstrap
-
-The main action is a single button:
-
-```text
-Scaffold & Bootstrap
-```
-
-It performs the setup pipeline:
-
-1. writes `.diffmogger/agentic/project_intake.json` in the target
-2. copies selected context files into `.diffmogger/context/`
-3. scaffolds target automation docs and scripts
-4. writes Diffmogger scaffold/runtime paths to the target repo's local `.git/info/exclude` when the target is a Git worktree
-5. runs `scripts/check_required_files.py`
-6. starts the initial `codex exec --full-auto --skip-git-repo-check` bootstrap run
-
-The scaffold script remains the source of truth for generated files. The dashboard is a convenience layer over that contract.
-
-Use **Environment Access** to choose whether automation may open local `.env*` files directly. The default keeps direct env-file reads off and lets project commands load env normally; the direct mode is for disposable local DBs or explicitly approved live-provider tests. Both modes still forbid printing, storing, or committing secret values.
-
-When **Ticket Campaign** mode is enabled in Run Config, the dashboard scaffolds the ticket source file, usually `.diffmogger/state/TICKET_RUN.md` in new targets. The initial scaffold/bootstrap run is readiness-only for ticket campaigns: it confirms setup, ticket parsing, and verification state but should not implement ticket acceptance criteria. Edit the ticket file's fenced JSON block with ticket IDs, optional `depends_on` arrays, acceptance criteria, verification commands, evidence, and blockers before starting unattended work. Normal campaign runs use `python3 .diffmogger/scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run.
-
-When optional MCP integrations are enabled, the dashboard writes only project-scoped setup. It does not run `codex mcp add`, `codex mcp login`, or mutate user/global Codex config. Context7 is scoped to Planner/Builder and inherits `CONTEXT7_API_KEY` when present in the shell or loaded from the starter repo's root `.env`; Playwright MCP is scoped to Hardener/Integrator validation, and missing or unauthenticated MCP remains an optional warning.
-
-The dashboard keeps its visible run log bounded and starts dashboard-launched subprocesses in their own process group. When a bootstrap/check command exits or is cancelled, the dashboard terminates lingering child processes from that group so a temporary dev server started for smoke testing does not keep running after the dashboard run finishes.
-
-After the scaffold/bootstrap pipeline completes and the target has the required generated files plus updated task state, the dashboard enables the schedule start action. In legacy dashboard builds this action is labeled:
-
-```text
-Start Scheduled Automation
-```
-
-That button writes macOS LaunchAgent plist(s) under `~/Library/LaunchAgents/`, loads them with `launchctl`, and points them at the target project's own local wrappers.
-
-For periodic sprint mode, the job points at:
-
-```bash
-bash .diffmogger/scripts/run_codex_automation.sh
-```
-
-The launchd job uses the dashboard's **Automation Cadence Minutes** control as its `StartInterval` in seconds, sets `RunAtLoad`, and writes logs under:
-
-```text
-.diffmogger/runtime/automation_logs/
-```
-
-If the intake enables multi-role automation and the strategy is **Fixed multi-role cadence**, the same button writes one LaunchAgent per role instead of the single-lane job. The jobs point at:
-
-```bash
-bash .diffmogger/scripts/run_role_automation.sh --role planner
-bash .diffmogger/scripts/run_role_automation.sh --role builder
-bash .diffmogger/scripts/run_role_automation.sh --role hardener
-bash .diffmogger/scripts/run_role_automation.sh --role integrator
-```
-
-The fixed multi-role schedule uses `StartCalendarInterval`: planner at `:00`, builder at `:10` and `:40`, hardener at `:20` and `:50`, and integrator at `:25` and `:55`. The dashboard requires the target to be an initialized git repo with an initial commit before starting this schedule.
-
-If the strategy is **Continuous conveyor**, the dashboard writes one LaunchAgent that points at:
-
-```bash
-bash .diffmogger/scripts/run_conveyor_automation.sh
-```
-
-The conveyor sets `RunAtLoad`, keeps running locally, and chooses the next runnable lane instead of using exact role times. It requires an initialized git repo with an initial commit because role worktrees and conveyor preflight need `HEAD`. It prioritizes queued integration first, clean-HEAD baseline verification preflight or repair routing when needed, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, due planning second, builder momentum by default, and one hardener pass after integrated builder work. Conveyor state stays in `.diffmogger/runtime/automation_conveyor_state.json`; its duplicate-dispatcher lock is `.diffmogger/runtime/automation_conveyor.lock`.
-
-The dashboard can also launch or export review surfaces. In legacy dashboard builds these actions are labeled:
-
-```text
-Launch Observatory
-Export Review Bundle
-```
-
-**Launch Observatory** opens a local browser page backed by `.diffmogger/scripts/run_observatory.py`. The page is meant for live demos and reviews: it shows active signal nudges, clean-HEAD baseline verification state, conveyor health, no-progress circuit breaker state, the active role, upcoming lanes, queued and deferred patches, recent outcomes, progress pulse, and bounded log tails. It reads only target-local files and does not require external services.
-
-The observatory also includes a compact self-review panel and scorecard that pull from local task state, role progress metrics, signal state, queue manifests, conveyor circuit-breaker state, and human bridge files. Use it as the first stop in a local review: it summarizes the current assessment, validation results, the latest recorded integration-safety check result, accepted and deferred patch pressure, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, recent recommendation-history records, the next-run worker strategy, active nudges, queue/conveyor state, known issues, and next sprint recommendation without requiring a tour through every Markdown file.
-
-For a durable local first-review bundle, render the same state to HTML and Markdown:
-
-```bash
-python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review
-```
-
-**Export Review Bundle** runs that command from the dashboard and streams the result into the run log. It writes `/tmp/Diffmogger-review/Diffmogger-observatory.html` and
-`/tmp/Diffmogger-review/Diffmogger-self-review.md`. Each Markdown review export also updates
-`.diffmogger/runtime/action_plan_history.json` with the latest bounded action-plan follow-through record so
-later reviews can show repeated recommendations, no-progress warnings, and accepted/deferred
-follow-through across cycles.
-
-The Run page also includes:
-
-```text
-Run Safety Check
-```
-
-This runs `scripts/check_integration_safety.py` and streams the result into the dashboard run log. When the selected target is not the Diffmogger starter-kit source tree, the dashboard checks the kit source instead so generated target projects are not expected to contain notifier and dashboard service files.
-
-The result is also recorded in the selected target's gitignored
-`.diffmogger/runtime/integration_safety_check.json`. **Export Review Bundle** reads that local marker so the
-HTML and Markdown review can show the latest dashboard safety status even when the selected target
-does not include `scripts/check_integration_safety.py`.
-
-The Run page's **Worker Strategy Controls** panel reads the same target-local state as the
-observatory and shows the next-run worker recommendation. When the recommendation fits, it can run:
-
-- one bounded read-only worker report through `.diffmogger/scripts/spawn_worker_agent.sh`
-- one bounded write worker through `.diffmogger/scripts/spawn_worker_agent.sh --write` after you enter an explicit ownership scope
-- one local integrator lane through `.diffmogger/scripts/run_role_automation.sh --role integrator`
-
-Dashboard-launched worker runs also call `.diffmogger/scripts/summarize_worker_outputs.py` for that run id,
-then surface the latest `.diffmogger/runtime/agent_runs/<run_id>/summary.md` in the Run page so review starts
-from the consolidated worker result instead of raw report hunting. These controls are local helpers
-for the current target. Write workers still require disjoint ownership, and the main agent remains
-responsible for reviewing, integrating, verifying, and updating durable state.
-
-### First Review Checklist
-
-Use the native dashboard as the center of the first review:
-
-1. Run `bash scripts/validate_starter_kit.sh` from the Diffmogger starter-kit source.
+1. Run `bash scripts/validate_starter_kit.sh` in the Diffmogger source checkout.
 2. Open the target with **Open Diffmogger Project**.
-3. Click **Run Safety Check** and confirm the dashboard log reports the local integration-safety result.
-4. Click **Export Review Bundle** or export `python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
-5. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
-6. Check the observatory, Markdown export, or **Worker Strategy Controls** panel for first-review readiness, safety status, validation state, active role or queue, known issues, the next-lane action plan, and the next-run worker strategy.
+3. Run **Run Safety Check**.
+4. Use **Export Review Bundle** or run `python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
+5. Inspect `/tmp/Diffmogger-review/Diffmogger-observatory.html` and `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
 
-For multi-role jobs in repos with configured git remotes, the dashboard blocks scheduling unless the advanced **Allow local-only multi-role automation when this repo has git remotes** option is checked. When checked, LaunchAgents receive `MULTI_ROLE_ALLOW_REMOTES=1`; scripts still refuse pushes, fetches, pulls, remote configuration, and remote-touching git commands.
+## Worker Controls
 
-Pause and remove controls manage all dashboard-owned jobs for that target: periodic, fixed-role, and conveyor.
+The Run page reads the Observatory worker recommendation and can launch:
 
-Use:
+- one bounded read-only worker report
+- one write worker with explicit ownership scope when the target enables write workers
+- one local integrator lane
 
-```text
-Pause Scheduled Automation
-```
+Worker artifacts live under `.diffmogger/runtime/agent_runs/<run_id>/`. The main agent remains responsible for reviewing, integrating, verifying, and updating durable state.
 
-to unload and disable the LaunchAgent, stopping future scheduled runs across login/reboot until you start the schedule again. The pause action does not delete generated project files. The **Cancel Current Dashboard Run** button terminates the currently running dashboard-launched bootstrap/check process group; it is not the scheduler control.
+## Inbox And Advanced Files
 
-Use:
+The Inbox page writes structured notes and replies into generated human bridge Markdown files under `.diffmogger/state/`. Notifier credentials stay in `services/agentic-notifier/.env`; target projects only use file handoff or the loopback notifier API.
 
-```text
-Remove Schedule
-```
-
-to unload the LaunchAgent, clear its disabled state, and delete the plist from `~/Library/LaunchAgents/`. This removes the recurring schedule only; it does not delete generated project files or automation docs.
-
-## Dashboard View
-
-The dashboard renders a small allowlist of Markdown files that are useful while automation is running:
-
-- `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`
-- `.diffmogger/state/PROJECT_CONTEXT.md`
-- `.diffmogger/state/HUMAN_REQUESTS.md`
-- `.diffmogger/state/HUMAN_INBOX.md`
-- `.diffmogger/state/HUMAN_OUTBOX.md`
-- `.diffmogger/state/DAILY_AUTOMATION_REVIEW.md`
-- `.diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md`
-- `.diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md`
-- `.diffmogger/agentic/automation_prompt.md`
-
-It also shows a compact status summary from the task file, including automation status, current product horizon, horizon advancement decision, and human bridge counts.
-
-## Messages
-
-When notifier delivery is disabled or unavailable, use the Messages tab to write to the next automation run. The dashboard uses friendly labels:
-
-- Requests From Automation
-- Messages Waiting For Next Run
-- Sent Updates & Delivery Log
-- Resolved Conversation History
-
-Internally, these still map to the Markdown files the automation reads. When you send a message, the dashboard appends a structured unhandled entry to:
-
-```text
-.diffmogger/state/HUMAN_INBOX.md
-```
-
-The next automation run should process that inbox entry, remove it only after the requested action is complete or intentionally deferred, and archive a concise note in `.diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md`.
-
-For `local_notifier` and `discord_notifier` modes, the dashboard can check whether the notifier health endpoint is reachable, whether Discord is configured, and whether local desktop notifications are enabled. Discord credentials still belong only in:
-
-```text
-services/agentic-notifier/.env
-```
+The Advanced page can read, write, validate, open, or reveal only allowlisted managed files, including raw `.diffmogger/state/TICKET_RUN.md` inspection. It is for inspection and careful repair, not broad filesystem access.

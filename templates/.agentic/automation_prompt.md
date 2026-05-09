@@ -13,7 +13,6 @@ AGENTS.md
 docs/CODEX_AUTOMATION_TASKS.md
 docs/CODEX_AUTOMATION_GUARDRAILS.md
 docs/PROJECT_CONTEXT.md
-{{AUTOMATION_SIGNAL_FILE_READS}}
 {{HUMAN_FILE_READS}}
 docs/AUTONOMY_EXPERIMENT_LOG.md
 ```
@@ -148,7 +147,7 @@ codex exec --disable plugins \
   "You are a read-only worker for {{PROJECT_NAME}}. Read the repo and write a concise test-gap report to target/agent_runs/$CODEX_RUN_ID/worker_tests.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
 ```
 
-Use `--disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` only for nested child workers launched from inside the scheduled parent Codex run. The scheduled parent remains the outer sandbox boundary. The scheduled wrapper should grant the parent run access to `$HOME/.codex` with `--add-dir`; nested Codex startup may touch `state_5.sqlite`, `shell_snapshots`, and `sessions` even when the child command uses `--ephemeral`.
+Use `--disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` only for nested child workers launched from inside a parent automation run. The parent remains the outer sandbox boundary. The automation wrapper should grant the parent run access to `$HOME/.codex` with `--add-dir`; nested Codex startup may touch `state_5.sqlite`, `shell_snapshots`, and `sessions` even when the child command uses `--ephemeral`.
 
 Write-capable worker agents allowed: {{WRITE_WORKER_AGENTS_ALLOWED}}
 
@@ -193,19 +192,15 @@ docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png
 
 Link screenshot-backed bugs in `docs/CODEX_AUTOMATION_TASKS.md` and, when multi-role mode is enabled, `docs/MULTI_ROLE_PROGRESS.md`.
 
-## Automation Signals
-
-{{AUTOMATION_SIGNALS_SECTION}}
-
 ## Human-Intervention Protocol
 
 {{HUMAN_PROTOCOL}}
 
 ## Lock-File Behavior
 
-Scheduled single-lane runs are expected to be launched by the target repo's local `.diffmogger/scripts/run_codex_automation.sh`. Continuous conveyor scheduling uses `.diffmogger/scripts/run_conveyor_automation.sh`, which chooses the next runnable lane and delegates to target-local wrappers. The wrapper for a mutating Codex run still owns lock acquisition and release.
+Single-lane runs are launched by the target repo's local `.diffmogger/scripts/run_codex_automation.sh`. Continuous conveyor automation uses `.diffmogger/scripts/run_conveyor_automation.sh`, which chooses the next runnable lane and delegates to target-local wrappers. The wrapper for a mutating Codex run still owns lock acquisition and release.
 
-This target project must keep relevant automation runtime scripts in its own `.diffmogger/scripts/` directory. During normal scheduled runs, do not import, call, or depend on scripts from the Diffmogger starter repo.
+This target project must keep relevant automation runtime scripts in its own `.diffmogger/scripts/` directory. During normal automation runs, do not import, call, or depend on scripts from the Diffmogger starter repo.
 
 If `CODEX_LOCK_ALREADY_ACQUIRED=true`, the lock is already held by `.diffmogger/scripts/run_codex_automation.sh`. In that case:
 
@@ -213,7 +208,7 @@ If `CODEX_LOCK_ALREADY_ACQUIRED=true`, the lock is already held by `.diffmogger/
 - Do not overwrite `target/codex_automation.lock`.
 - Do not create a fallback lock file manually.
 - Do not release the lock from inside the Codex run.
-- Record in `docs/CODEX_AUTOMATION_TASKS.md` that the scheduler wrapper owned the lock.
+- Record in `docs/CODEX_AUTOMATION_TASKS.md` that the automation wrapper owned the lock.
 
 Default lock path:
 
@@ -242,7 +237,7 @@ If this Codex run acquired the lock itself, release it at the end:
 bash .diffmogger/scripts/release_codex_lock.sh
 ```
 
-If cadence is shorter than maximum run duration, lock-file behavior is required. If acquiring the lock fails because a fresh active lock exists, do not mutate code. If the helper removes a stale lock, record that fact in `docs/CODEX_AUTOMATION_TASKS.md`. Lock scripts reduce overlap risk; they do not remove the need to review diffs.
+Lock-file behavior is required for every mutating automation run. If acquiring the lock fails because a fresh active lock exists, do not mutate code. If the helper removes a stale lock, record that fact in `docs/CODEX_AUTOMATION_TASKS.md`. Lock scripts reduce overlap risk; they do not remove the need to review diffs.
 
 ## Verification
 

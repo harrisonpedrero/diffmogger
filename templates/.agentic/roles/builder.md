@@ -14,8 +14,6 @@ docs/CODEX_AUTOMATION_TASKS.md
 docs/CODEX_AUTOMATION_GUARDRAILS.md
 docs/MULTI_ROLE_PROGRESS.md
 docs/PROJECT_CONTEXT.md
-docs/AUTOMATION_SIGNALS.md if present
-target/automation_signals.json if present
 {{HUMAN_FILE_READS}}
 ```
 
@@ -28,7 +26,6 @@ Implement one scoped product or code increment that advances the current project
 - Choose builder work from the current plan, task file, and deferred backlog.
 - If Context7 MCP is mounted, use it only for documentation-assisted implementation. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, do not halt or mark the run blocked; immediately fall back to normal web search, repo docs, package metadata, or existing knowledge and continue the sprint.
 - Do not use Playwright MCP for implementation-time browsing; browser validation belongs to Hardener and Integrator workflows.
-- Consider active builder-owned automation signals when present, but only act when they have clear implementation scope.
 - Keep ownership narrow enough for clean integration.
 - Add or update tests, fixtures, demo paths, or docs that belong with the implementation.
 - Avoid touching unrelated files.
@@ -61,9 +58,3 @@ Commit subject: <imperative subject without type/scope, 72 chars or less>
 The commit subject must name the actual code, test, validation, docs, or user-visible behavior change. Do not use generic subjects such as `integrate builder work`, `document automation progress`, `update files`, or `changes`.
 
 Do not mutate the main checkout directly.
-
-If you handle an automation signal, run:
-
-```bash
-python3 .diffmogger/scripts/update_automation_signals.py . --complete <signal-id> --role builder --note "Brief outcome."
-```

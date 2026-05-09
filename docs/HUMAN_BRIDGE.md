@@ -26,6 +26,8 @@ Diffmogger supports:
 
 In `file_only` mode, if the human writes `send me a summary`, `status update`, or similar in `.diffmogger/state/HUMAN_INBOX.md`, the automation should answer locally in Markdown or an app artifact. It should not call notifier APIs unless the target project is explicitly configured for notifier mode.
 
+No Discord, webhook, notifier API, or messaging credentials are used in this mode.
+
 ## Markdown Files
 
 Enabled bridge modes use:
@@ -38,6 +40,8 @@ Enabled bridge modes use:
 ```
 
 Codex writes requests. The human or notifier writes replies in `HUMAN_INBOX.md`. A later run handles the reply, removes it only after the requested action is complete or intentionally deferred, and appends a concise archive entry.
+
+Generated targets also include `.diffmogger/state/HUMAN_BRIDGE_SETUP.md` when the bridge is enabled. That generated file is target-local state; this source kit keeps the reusable template under `templates/docs/HUMAN_BRIDGE_SETUP.md`.
 
 ## Bundled Notifier Service
 

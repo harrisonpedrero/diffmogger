@@ -74,9 +74,9 @@ bash .diffmogger/scripts/spawn_worker_agent.sh \
 
 Read-only remains the default. Write mode requires an ownership scope because the main agent must keep file/module ownership disjoint.
 
-Generated scheduled wrappers grant the parent Codex run access to `$HOME/.codex` with `--add-dir`. That parent permission matters because nested `codex` processes may touch `state_5.sqlite`, `shell_snapshots`, and `sessions` during startup even when the child worker uses `--ephemeral`.
+Generated automation wrappers grant the parent Codex run access to `$HOME/.codex` with `--add-dir`. That parent permission matters because nested `codex` processes may touch `state_5.sqlite`, `shell_snapshots`, and `sessions` during startup even when the child worker uses `--ephemeral`.
 
-Generated worker helpers run the nested child with `--disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox`. The bypass is only for the nested child process; the scheduled parent remains the outer sandbox boundary. This avoids macOS nested `sandbox-exec` failures while still keeping scheduled automation constrained by the parent run.
+Generated worker helpers run the nested child with `--disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox`. The bypass is only for the nested child process; the parent automation run remains the outer sandbox boundary. This avoids macOS nested `sandbox-exec` failures while still keeping automation constrained by the parent run.
 
 `summarize_worker_outputs.py` writes `.diffmogger/runtime/agent_runs/<run_id>/summary.md` by mechanically consolidating worker report highlights. The main agent still decides which findings to accept, reject, or defer.
 
@@ -182,7 +182,7 @@ codex exec --disable plugins \
   "You are a read-only worker for this project. Read the repo and write a concise test-gap report to .diffmogger/runtime/agent_runs/$CODEX_RUN_ID/worker_tests.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
 ```
 
-Use this command shape for nested Codex CLI workers launched from an automation run. The parent scheduled run should also allow `$HOME/.codex` with `--add-dir`; without that parent allowance, a child worker may fail while starting inside the parent run's sandbox.
+Use this command shape for nested Codex CLI workers launched from an automation run. The parent automation run should also allow `$HOME/.codex` with `--add-dir`; without that parent allowance, a child worker may fail while starting inside the parent run's sandbox.
 
 Worker rules:
 

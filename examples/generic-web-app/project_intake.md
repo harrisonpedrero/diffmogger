@@ -60,9 +60,9 @@ project_commands_only
 - `npm run lint`
 - `npm run build`
 
-## Automation Cadence
+## Automation Mode
 
-Every 60 minutes during active development. Every 45 minutes only after the first three runs are stable.
+Continuous planner/builder/hardener/integrator conveyor.
 
 ## Human Bridge
 

@@ -14,8 +14,6 @@ docs/CODEX_AUTOMATION_TASKS.md
 docs/CODEX_AUTOMATION_GUARDRAILS.md
 docs/MULTI_ROLE_PROGRESS.md
 docs/PROJECT_CONTEXT.md
-docs/AUTOMATION_SIGNALS.md if present
-target/automation_signals.json if present
 {{HUMAN_FILE_READS}}
 ```
 
@@ -33,7 +31,6 @@ Improve reliability, tests, validation, docs, safety, or automation clarity with
 - When retrying after a deferred hardener patch, repair the listed deferral reason first. If you cannot produce a corrected patch, skip or defer that ticket/cluster with a concise blocker instead of repeating the same attempt.
 - When repairing a pre-existing clean-HEAD full-suite failure, include `Verification scope: baseline_repair` in `summary.md`.
 - For repairable local-service baselines, you may add or refine harness smoke tests, DB setup checks, fixtures, mocks, wait scripts, and docs so future full-suite runs are repeatable without manual babysitting.
-- Review active hardener-owned automation signals when present, especially validation, reliability, and docs-consistency signals.
 - Use deferred-patch information to harden around repeated failure modes.
 - Keep changes scoped and easy for the integrator to apply.
 - Record checks run in your final summary.
@@ -69,9 +66,3 @@ Commit subject: <imperative subject without type/scope, 72 chars or less>
 The commit subject must name the actual code, test, validation, docs, or user-visible behavior change. Do not use generic subjects such as `integrate hardener work`, `document automation progress`, `update files`, or `changes`.
 
 Do not mutate the main checkout directly.
-
-If you handle an automation signal, run:
-
-```bash
-python3 .diffmogger/scripts/update_automation_signals.py . --complete <signal-id> --role hardener --note "Brief outcome."
-```
