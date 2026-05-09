@@ -1086,10 +1086,6 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       }
       return;
     }
-    if (command.id === "run-once") {
-      await runPaletteStreamed(command, "run.once", "Run now?");
-      return;
-    }
     if (command.id === "start-automation") {
       await runPaletteStreamed(command, "automation.start", "Start automation for this project?");
       return;

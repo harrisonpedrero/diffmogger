@@ -160,6 +160,11 @@ def native_prerequisites(target: Path, dashboard_app: Any) -> list[Any]:
 
 def target_multi_role_enabled(target: Path) -> bool:
     for data in (load_intake(target), load_dashboard_state(target)):
+        profile = str(data.get("automation_role_profile") or "").strip()
+        if profile == "single_lane":
+            return False
+        if profile == "planner_builder_hardener_integrator":
+            return bool(data.get("multi_role_automations_allowed", True))
         if "multi_role_automations_allowed" in data:
             return bool(data.get("multi_role_automations_allowed"))
     for marker_path in [
@@ -168,6 +173,10 @@ def target_multi_role_enabled(target: Path) -> bool:
     ]:
         if marker_path.exists():
             text = marker_path.read_text(encoding="utf-8", errors="replace")
+            if "Role profile: `single_lane`" in text:
+                return False
+            if "Role profile: `planner_builder_hardener_integrator`" in text:
+                return True
             if "Multi-role automations allowed: true" in text:
                 return True
             if "Multi-role automations allowed: false" in text:
@@ -436,15 +445,12 @@ def worker_controls_snapshot(target: Path, dashboard_app: Any, strategy: dict[st
     }
 
 def run_controls_snapshot(target: Path, dashboard_app: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
-    ready, ready_reason = run_once_ready(target, dashboard_app)
     active_role_run = snapshot.get("conveyor", {}).get("active_role_run") if isinstance(snapshot.get("conveyor"), dict) else {}
     automation = automation_status_snapshot(target, dashboard_app)
     is_running = bool(active_role_run) or automation.get("state") == "running"
     return {
         "is_scaffolded": target_metadata(target)["automation_task_exists"],
         "is_running": is_running,
-        "can_run_now": ready and not is_running,
-        "run_now_reason": "Ready." if ready and not is_running else ("A role run is already active." if is_running else ready_reason),
         "can_start_automation": bool(automation.get("can_start")) and not bool(active_role_run),
         "start_automation_reason": automation.get("message"),
         "can_stop_automation": bool(automation.get("can_stop")),

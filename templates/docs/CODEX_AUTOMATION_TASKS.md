@@ -75,7 +75,7 @@ Last updated: {{CREATED_AT}}
 
 - Playwright UI artifacts path: `docs/backlog/ui_artifacts/<run_id>/`
 - Current screenshot-backed UI bugs: none yet.
-- When a Hardener or Integrator validation run captures a UI failure, link the screenshot here and in `docs/MULTI_ROLE_PROGRESS.md`.
+- When a validation run captures a UI failure, link the screenshot here. In multi-role mode, also link it in `docs/MULTI_ROLE_PROGRESS.md`.
 
 ## Known Issues
 

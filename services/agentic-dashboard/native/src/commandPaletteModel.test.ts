@@ -16,8 +16,6 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
     run: {
       controls: {
         is_scaffolded: true,
-        can_run_now: true,
-        run_now_reason: "Ready.",
         can_start_automation: true,
         start_automation_reason: "Automation ready.",
         can_stop_automation: false,
@@ -66,20 +64,19 @@ describe("command palette model", () => {
     expect(ids).toContain("open-project");
     expect(ids).toContain("create-new-project");
     expect(ids).toContain("close-project");
-    expect(ids).toContain("run-once");
     expect(ids).toContain("start-automation");
     expect(ids).toContain("stop-automation");
     expect(ids).toContain("export-debug-bundle");
-    expect(ids).toHaveLength(18);
+    expect(ids).toHaveLength(17);
   });
 
   it("explains disabled target-scoped commands without a selected target", () => {
     const commands = buildCommandPaletteModel({ snapshot: null });
-    const run = commands.find((command) => command.id === "run-once");
+    const start = commands.find((command) => command.id === "start-automation");
     const reveal = commands.find((command) => command.id === "reveal-project");
     const close = commands.find((command) => command.id === "close-project");
 
-    expect(run?.disabledReason).toContain("Choose a project folder");
+    expect(start?.disabledReason).toContain("Choose a project folder");
     expect(reveal?.disabledReason).toContain("Choose a project folder");
     expect(close?.disabledReason).toContain("Choose a project folder");
     expect(commands.find((command) => command.id === "open-project")?.disabledReason).toBeUndefined();
@@ -91,8 +88,6 @@ describe("command palette model", () => {
         run: {
           controls: {
             is_scaffolded: true,
-            can_run_now: false,
-            run_now_reason: "A role run is already active.",
             can_start_automation: false,
             start_automation_reason: "Fix prerequisites first.",
             can_stop_automation: true,
@@ -104,7 +99,6 @@ describe("command palette model", () => {
       }),
     });
 
-    expect(commands.find((command) => command.id === "run-once")?.disabledReason).toBe("A role run is already active.");
     expect(commands.find((command) => command.id === "start-automation")?.disabledReason).toBe("Fix prerequisites first.");
     expect(commands.find((command) => command.id === "stop-automation")?.disabledReason).toBeUndefined();
   });

@@ -251,6 +251,22 @@ function enumValue<T extends string>(value: unknown, valid: readonly T[], fallba
   return valid.includes(value as T) ? (value as T) : fallback;
 }
 
+function roleProfileValues(source: Record<string, unknown>): Pick<IntakeDraft, "multi_role_automations_allowed" | "automation_role_profile"> {
+  const rawProfile = enumValue(
+    source.automation_role_profile,
+    ["single_lane", "planner_builder_hardener_integrator"],
+    defaultDraft.automation_role_profile,
+  );
+  const rawMultiRole = boolValue(source.multi_role_automations_allowed, defaultDraft.multi_role_automations_allowed);
+  if (rawProfile === "single_lane" || !rawMultiRole) {
+    return { multi_role_automations_allowed: false, automation_role_profile: "single_lane" };
+  }
+  return {
+    multi_role_automations_allowed: true,
+    automation_role_profile: "planner_builder_hardener_integrator",
+  };
+}
+
 export function automationScopeForDraft(
   draft: Pick<IntakeDraft, "automation_run_mode">,
 ): AutomationScope {
@@ -274,6 +290,7 @@ function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
   const optionalMcp = listValue(source.optional_mcp_servers).filter((item) =>
     ["context7", "playwright"].includes(item),
   );
+  const roleProfile = roleProfileValues(source);
   return {
     ...defaultDraft,
     project_name: stringValue(source.project_name, targetName),
@@ -315,8 +332,8 @@ function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
     write_worker_agents_allowed: boolValue(source.write_worker_agents_allowed, defaultDraft.write_worker_agents_allowed),
     max_write_worker_count: numberValue(source.max_write_worker_count, defaultDraft.max_write_worker_count),
     write_worker_guidance: stringValue(source.write_worker_guidance, defaultDraft.write_worker_guidance),
-    multi_role_automations_allowed: true,
-    automation_role_profile: "planner_builder_hardener_integrator",
+    multi_role_automations_allowed: roleProfile.multi_role_automations_allowed,
+    automation_role_profile: roleProfile.automation_role_profile,
     automation_checkpoint_commits: boolValue(source.automation_checkpoint_commits, defaultDraft.automation_checkpoint_commits),
     multi_role_allow_remotes: boolValue(source.multi_role_allow_remotes, defaultDraft.multi_role_allow_remotes),
     optional_mcp_servers: optionalMcp,
@@ -341,10 +358,11 @@ function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
 
 function serializeDraft(draft: IntakeDraft): Record<string, unknown> {
   const scope = automationScopeForDraft(draft);
+  const roleProfile = roleProfileValues(draft as unknown as Record<string, unknown>);
   const payload: Record<string, unknown> = {
     ...draft,
-    multi_role_automations_allowed: true,
-    automation_role_profile: "planner_builder_hardener_integrator",
+    multi_role_automations_allowed: roleProfile.multi_role_automations_allowed,
+    automation_role_profile: roleProfile.automation_role_profile,
     automation_run_mode: scope === "ticket_campaign" ? "ticket_campaign" : "continuous_improvement",
     ticket_run_seed_tickets: draft.ticket_run_seed_tickets.map((ticket) => normalizeTicket(ticket)),
     human_bridge_mode: draft.human_bridge_enabled ? draft.human_bridge_mode : "disabled",
@@ -994,11 +1012,33 @@ export function BriefWizard(props: {
     return (
       <div className="brief-step-grid">
         <section className="brief-section span-3">
-          <h2>Run mode</h2>
-          <div className="brief-choice-grid one-up">
-            <button className="selected" disabled>
-              <strong>Continuous role conveyor</strong>
-              <span>Planner, builder, hardener, and integrator roles advance from current state.</span>
+          <h2>Automation profile</h2>
+          <div className="brief-choice-grid two-up compact">
+            <button
+              className={draft.automation_role_profile === "single_lane" ? "selected" : ""}
+              onClick={() =>
+                setDraft((current) => ({
+                  ...current,
+                  multi_role_automations_allowed: false,
+                  automation_role_profile: "single_lane",
+                }))
+              }
+            >
+              <strong>Single lane</strong>
+              <span>One continuous agent loop for docs, research, reports, cleanup, and simpler work.</span>
+            </button>
+            <button
+              className={draft.automation_role_profile === "planner_builder_hardener_integrator" ? "selected" : ""}
+              onClick={() =>
+                setDraft((current) => ({
+                  ...current,
+                  multi_role_automations_allowed: true,
+                  automation_role_profile: "planner_builder_hardener_integrator",
+                }))
+              }
+            >
+              <strong>Multi-role conveyor</strong>
+              <span>Planner, builder, hardener, and integrator lanes for larger engineering work.</span>
             </button>
           </div>
         </section>

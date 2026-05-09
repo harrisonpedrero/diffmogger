@@ -9,7 +9,6 @@ export type PaletteCommandId =
   | "continue-brief"
   | "import-context-files"
   | "scaffold-bootstrap"
-  | "run-once"
   | "start-automation"
   | "stop-automation"
   | "run-safety-check"
@@ -148,20 +147,6 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       dangerous: true,
       routesTo: "Brief",
       disabledReason: busyReason ?? targetReason,
-    },
-    {
-      id: "run-once",
-      title: "Run",
-      section: "Run",
-      description: "Run the target-local runner once.",
-      keywords: ["run", "automation", "now"],
-      dangerous: true,
-      disabledReason:
-        busyReason ??
-        targetReason ??
-        (snapshot?.run.controls?.can_run_now === true
-          ? undefined
-          : String(snapshot?.run.controls?.run_now_reason ?? "Runner is not ready.")),
     },
     {
       id: "start-automation",

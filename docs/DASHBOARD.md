@@ -35,7 +35,7 @@ The dashboard frontend should call backend commands instead of reading arbitrary
 - Project: `project.load_snapshot`, `project.list_recent`.
 - Brief: `brief.load`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`.
 - Context: `context.import`.
-- Run and automation: `run.load`, `run.load_log`, `run.once`, `automation.start`, `automation.stop`.
+- Run and automation: `run.load`, `run.load_log`, `automation.start`, `automation.stop`.
 - Tickets: `ticket.load`, `ticket.add`, `ticket.update`, `ticket.delete`, `ticket.import`, `ticket.draft_from_intake`, `ticket.accept_draft`.
 - Safety: `safety.run_check`.
 - Workers: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`.
@@ -99,7 +99,6 @@ After scaffold/bootstrap and required-file validation, the Run page can start or
 
 - **Start** launches `.diffmogger/scripts/run_conveyor_automation.sh` in a detached local process.
 - **Stop** terminates the recorded runner process group.
-- `run.once` remains available as a developer/debug command for a single wrapped Codex run.
 
 Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Runner state lives in `.diffmogger/runtime/automation_runner.json`; conveyor state lives in `.diffmogger/runtime/automation_conveyor_state.json`.
 

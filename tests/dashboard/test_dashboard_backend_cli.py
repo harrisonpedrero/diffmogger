@@ -323,7 +323,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual("UNKNOWN", data["home"]["automation_status"])
             self.assertIn("run", data)
             self.assertFalse(data["run"]["controls"]["is_scaffolded"])
-            self.assertFalse(data["run"]["controls"]["can_run_now"])
+            self.assertNotIn("can_run_now", data["run"]["controls"])
             self.assertEqual("not_ready", data["run"]["automation"]["state"])
 
     def test_unconfigured_target_smoke_supports_initial_native_commands(self) -> None:
@@ -335,7 +335,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             _run_result, run = self.run_cli("run.load", "--target", tmp)
             self.assertTrue(run["ok"])
             self.assertFalse(run["data"]["controls"]["is_scaffolded"])
-            self.assertFalse(run["data"]["controls"]["can_run_now"])
+            self.assertNotIn("can_run_now", run["data"]["controls"])
 
             _diagnostics_result, diagnostics = self.run_cli("diagnostics.run_checks", "--target", tmp)
             self.assertTrue(diagnostics["ok"])
@@ -507,8 +507,12 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertGreater(len(scaffold_payload["data"]["log"]), 0)
             self.assertTrue(generated_path(Path(tmp), ".agentic/project_intake.json").exists())
             self.assertTrue(generated_path(Path(tmp), "docs/INITIAL_BOOTSTRAP_PROMPT.md").exists())
+            self.assertFalse(generated_path(Path(tmp), "scripts/run_role_automation.sh").exists())
+            dashboard_state = json.loads(generated_path(Path(tmp), ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
+            self.assertEqual("single_lane", dashboard_state["automation_role_profile"])
+            self.assertFalse(dashboard_state["multi_role_automations_allowed"])
             _run_result, run_payload = self.run_cli("run.load", "--target", tmp)
-            self.assertTrue(run_payload["data"]["controls"]["can_run_now"])
+            self.assertNotIn("can_run_now", run_payload["data"]["controls"])
 
     def test_scaffold_preview_marks_existing_project_managed_sections_and_skips(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -642,7 +646,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertIn("run_log", run["data"])
             self.assertIn("worker_controls", run["data"])
             self.assertTrue(run["data"]["controls"]["is_scaffolded"])
-            self.assertTrue(run["data"]["controls"]["can_run_now"])
+            self.assertNotIn("can_run_now", run["data"]["controls"])
             self.assertIn("can_start", run["data"]["automation"])
             self.assertIn("git", run["data"])
             self.assertIn("progress", run["data"])

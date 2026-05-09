@@ -27,7 +27,7 @@ Capture:
 15. Whether worker agents are allowed and whether Codex CLI worker reports are expected on broad runs.
 16. Whether optional write-capable worker agents are allowed, the maximum write-worker count from 0-10, and guidance that enabled write workers are bounded acceleration for work that can split into reviewable lanes.
 17. Whether optional recurring automation signals are enabled. Default to disabled unless explicitly requested.
-18. Whether optional multi-role automations are allowed, the role profile, checkpoint-commit preference, base cadence, scheduling strategy, and local-only remote opt-in. Default multi-role to disabled unless explicitly requested.
+18. Automation role profile: use `single_lane` for docs, research, cleanup, reports, small apps, bounded/simple work, and non-engineering workflows; use `planner_builder_hardener_integrator` for larger software engineering work where separate planning, implementation, verification, and integration lanes add value. Capture checkpoint-commit preference and local-only remote opt-in when multi-role is enabled.
 19. What counts as a meaningful integrated deliverable.
 20. Long-run direction after the initial scope, unless the work is a bounded ticket campaign.
 21. What the automation must never do.

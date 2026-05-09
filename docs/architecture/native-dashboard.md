@@ -106,7 +106,7 @@ Current command groups:
 - Project and Brief: `project.load_snapshot`, `project.list_recent`, `brief.load`,
   `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`.
 - Context: `context.import`.
-- Run and automation: `run.load`, `run.load_log`, `run.once`, `automation.start`,
+- Run and automation: `run.load`, `run.load_log`, `automation.start`,
   `automation.stop`, `safety.run_check`.
 - Workers: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`.
 - Observatory and Review: `observatory.snapshot`, `observatory.generate_html`,
@@ -131,8 +131,8 @@ The native app uses backend snapshots to derive page state:
 
 - No target selected: Home offers native folder selection and recent projects.
 - Unconfigured target: Home and Run point to Brief. Run controls remain disabled.
-- Scaffolded target with no runs: Home recommends Run Once Now; Observatory and Review show honest
-  empty states.
+- Scaffolded target with no runs: Home routes to Run; Run presents Start when continuous automation
+  is ready, while Observatory and Review show honest empty states.
 - Running target: Home/Run show running status, sidebar running badge, and log controls.
 - Human input pending: Home routes to Inbox and the sidebar shows an input badge.
 - Environment blocked or critical stop: Home/Run/Observatory use warning or critical tones and route

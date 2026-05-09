@@ -45,7 +45,6 @@ const MUTATING_BACKEND_COMMANDS: &[&str] = &[
     "ticket.accept_draft",
     "inbox.send_note",
     "inbox.reply_request",
-    "run.once",
     "automation.start",
     "automation.stop",
     "safety.run_check",

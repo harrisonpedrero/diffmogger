@@ -54,6 +54,16 @@ describe("Brief automation mode mapping", () => {
     expect(next.automation_role_profile).toBe("planner_builder_hardener_integrator");
   });
 
+  it("keeps single-lane drafts single-role", () => {
+    const next = draft({
+      multi_role_automations_allowed: false,
+      automation_role_profile: "single_lane",
+    });
+
+    expect(next.multi_role_automations_allowed).toBe(false);
+    expect(next.automation_role_profile).toBe("single_lane");
+  });
+
   it("maps build scope between boundless build and ticket campaign", () => {
     const ticket = applyAutomationScope(draft(), "ticket_campaign");
     const boundless = applyAutomationScope(ticket, "boundless_build");

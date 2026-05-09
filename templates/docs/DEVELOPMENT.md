@@ -24,7 +24,7 @@ The commands in that file are the clean-HEAD baseline gate. They must pass on
 the current checkout; keep future desired commands out of this file until the
 corresponding scripts, packages, services, or Make targets exist.
 
-Patch-scoped multi-role smoke checks may be configured in:
+Patch-scoped or sprint-scoped smoke checks may be configured in:
 
 ```text
 .agentic/smoke_commands.txt

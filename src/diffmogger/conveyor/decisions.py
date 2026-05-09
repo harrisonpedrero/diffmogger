@@ -16,6 +16,7 @@ from .queue_state import (
     queued_manifests,
     repeated_hardener_guardrail_deferral_info,
     target_has_multi_role,
+    target_role_profile,
     unhandled_human_inbox_count,
 )
 from .state import *
@@ -36,21 +37,35 @@ def choose_next(
     if active:
         return None, f"main automation lock active: {detail}", False
 
+    role_profile = target_role_profile(target)
+    multi_role_available = target_has_multi_role(target)
+    single_lane_profile = role_profile == "single_lane"
+
     ticket_state, ticket_reason = ticket_campaign_terminal(target)
     if ticket_state == "complete":
         return None, ticket_reason, True
     if ticket_state == "blocked":
         if baseline_preflight_needed(target):
+            if single_lane_profile or not multi_role_available:
+                return "single_lane", (
+                    "ticket campaign is blocked, but baseline verification may be repairable; "
+                    "running single-lane repair sprint"
+                ), False
             return "integrator", (
                 "ticket campaign is blocked, but baseline verification may be repairable; "
                 "running clean-HEAD preflight"
             ), False
         blocked_baseline_route = baseline_repair_route(target, state)
         if blocked_baseline_route:
+            if single_lane_profile or not multi_role_available:
+                _role, route_reason, _stop = blocked_baseline_route
+                return "single_lane", f"{route_reason}; running single-lane repair sprint", False
             return blocked_baseline_route
         return None, ticket_reason, True
 
-    if not target_has_multi_role(target):
+    if single_lane_profile:
+        return "single_lane", "single-lane automation profile selected; running continuous single-lane wrapper", False
+    if not multi_role_available:
         return "single_lane", "multi-role files not found; running single-lane wrapper", False
 
     queue_depth = len(queued_manifests(target))
@@ -177,23 +192,36 @@ def conveyor_decision_queue(
         add(None, "blocked", f"main automation lock active: {detail}")
         return entries[:DECISION_QUEUE_LIMIT]
 
+    role_profile = target_role_profile(target)
+    multi_role_available = target_has_multi_role(target)
+    single_lane_profile = role_profile == "single_lane"
+
     ticket_state, ticket_reason = ticket_campaign_terminal(target)
     if ticket_state == "complete":
         add(None, "blocked", ticket_reason)
         return entries[:DECISION_QUEUE_LIMIT]
     if ticket_state == "blocked":
         if baseline_preflight_needed(target):
-            add("integrator", "ready", "ticket campaign is blocked, but baseline verification may be repairable")
+            if single_lane_profile or not multi_role_available:
+                add("single_lane", "ready", "ticket campaign is blocked, but baseline verification may be repairable")
+            else:
+                add("integrator", "ready", "ticket campaign is blocked, but baseline verification may be repairable")
         else:
             blocked_baseline_route = baseline_repair_route(target, state)
             if blocked_baseline_route:
                 role, reason, _stop = blocked_baseline_route
-                add(role, "ready" if role else "blocked", reason)
+                if single_lane_profile or (role is not None and not multi_role_available):
+                    add("single_lane", "ready", reason)
+                else:
+                    add(role, "ready" if role else "blocked", reason)
             else:
                 add(None, "blocked", ticket_reason)
         return entries[:DECISION_QUEUE_LIMIT]
 
-    if not target_has_multi_role(target):
+    if single_lane_profile:
+        add("single_lane", "ready", "single-lane automation profile selected; running continuous single-lane wrapper")
+        return entries[:DECISION_QUEUE_LIMIT]
+    if not multi_role_available:
         add("single_lane", "ready", "multi-role files not found; running single-lane wrapper")
         return entries[:DECISION_QUEUE_LIMIT]
 

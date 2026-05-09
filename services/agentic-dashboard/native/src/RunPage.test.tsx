@@ -19,7 +19,6 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
       controls: {
         is_scaffolded: true,
         is_running: false,
-        can_run_now: true,
         can_start_automation: false,
         can_stop_automation: true,
         can_run_safety_check: true,
@@ -58,7 +57,7 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
 }
 
 describe("RunPage", () => {
-  it("renders automation controls when backend allows them", () => {
+  it("renders Start and Stop automation controls when backend allows them", () => {
     const html = renderToStaticMarkup(
       <RunPage
         snapshot={snapshot()}
@@ -69,9 +68,9 @@ describe("RunPage", () => {
       />,
     );
 
-    expect(html).toContain("Run");
     expect(html).toContain("Start");
     expect(html).toContain("Stop");
+    expect(html).not.toContain(">Run</button>");
     expect(html).toContain("Continuous automation is running.");
   });
 

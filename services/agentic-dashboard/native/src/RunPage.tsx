@@ -501,12 +501,6 @@ export function RunPage(props: {
           <h2>Controls</h2>
           <div className="run-control-grid">
             <ActionButton
-              action={model.controls.runOnce}
-              onRun={runAction}
-              disabled={isBusy || !model.controls.runOnce.enabled}
-              icon={<Play size={16} />}
-            />
-            <ActionButton
               action={model.controls.startAutomation}
               onRun={runAction}
               disabled={isBusy || !model.controls.startAutomation.enabled}

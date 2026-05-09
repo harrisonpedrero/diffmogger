@@ -151,6 +151,66 @@ class RequiredFilesCheckTests(unittest.TestCase):
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
 
+    def test_single_lane_scaffold_omits_multi_role_only_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.NamedTemporaryFile("w", suffix=".json") as intake:
+            target = Path(tmp)
+            intake.write(
+                """
+{
+  "project_name": "Single Lane Smoke",
+  "product_goal": "Run continuous solo automation for reusable docs and reports.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "Generated docs only.",
+  "human_bridge_enabled": false,
+  "human_bridge_mode": "disabled",
+  "multi_role_automations_allowed": false,
+  "automation_role_profile": "single_lane",
+  "verification_commands": ["npm test"]
+}
+""".strip()
+            )
+            intake.flush()
+
+            self.scaffold_target(target, Path(intake.name))
+
+            self.assertTrue(generated_path(target, "scripts/run_conveyor_automation.sh").exists())
+            self.assertTrue(generated_path(target, "scripts/run_codex_automation.sh").exists())
+            for rel in [
+                ".agentic/roles/planner.md",
+                ".agentic/roles/builder.md",
+                ".agentic/roles/hardener.md",
+                ".agentic/roles/integrator.md",
+                "docs/MULTI_ROLE_PROGRESS.md",
+                "scripts/run_role_automation.sh",
+                "scripts/integrate_role_outputs.py",
+                "scripts/list_deferred_patches.py",
+            ]:
+                self.assertFalse(generated_path(target, rel).exists(), rel)
+
+            agents = (target / "AGENTS.md").read_text(encoding="utf-8")
+            task = generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
+            guardrails = generated_path(target, "docs/CODEX_AUTOMATION_GUARDRAILS.md").read_text(encoding="utf-8")
+            manifest = (target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8")
+            self.assertIn("Automation role profile: single_lane", agents)
+            self.assertIn("Role profile: `single_lane`", task)
+            self.assertIn("Single-role continuous automation", guardrails)
+            self.assertIn('"automation_role_profile": "single_lane"', manifest)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECK_SCRIPT),
+                    "--human-bridge-mode",
+                    "disabled",
+                    str(target),
+                ],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+
     def test_continuous_scaffold_uses_intake_specific_horizons(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)

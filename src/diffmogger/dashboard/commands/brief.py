@@ -60,7 +60,9 @@ def run_required_file_check_for_intake(target: Path, intake: dict[str, Any]) -> 
     ]
     if intake.get("write_worker_agents_allowed"):
         command.append("--write-workers-enabled")
-    command.append("--multi-role-enabled")
+    role_profile = str(intake.get("automation_role_profile") or "").strip()
+    if role_profile != "single_lane" and bool(intake.get("multi_role_automations_allowed", True)):
+        command.append("--multi-role-enabled")
     if str(intake.get("automation_run_mode") or "") == "ticket_campaign":
         command.append("--ticket-campaign-enabled")
     if intake.get("optional_mcp_servers"):
@@ -71,6 +73,8 @@ def run_required_file_check_for_intake(target: Path, intake: dict[str, Any]) -> 
     return result
 
 def scaffold_template_included(scaffold_module: Any, rel_path: str, values: dict[str, str]) -> bool:
+    if hasattr(scaffold_module, "template_included"):
+        return bool(scaffold_module.template_included(rel_path, values))
     if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel_path in scaffold_module.HUMAN_BRIDGE_FILES:
         return False
     if values.get("AUTOMATION_RUN_MODE") != "ticket_campaign" and rel_path in scaffold_module.TICKET_RUN_FILES:

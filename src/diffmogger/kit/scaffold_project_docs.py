@@ -56,6 +56,10 @@ MULTI_ROLE_FILES = {
     "scripts/integrate_role_outputs.py",
     "scripts/list_deferred_patches.py",
 }
+MULTI_ROLE_RUNTIME_ENTRYPOINTS = {
+    "scripts/integrate_role_outputs.py",
+    "scripts/list_deferred_patches.py",
+}
 MCP_FILES = {
     ".codex/config.toml",
     "docs/MCP_INTEGRATIONS.md",
@@ -285,13 +289,31 @@ def normalize_write_worker_count(value: Any, enabled: bool) -> int:
 
 
 def normalize_role_profile(value: Any, multi_role_enabled: bool) -> str:
+    text = str(value or "").strip().lower()
+    text = text.replace("-", "_").replace(" ", "_")
+    if text == "single_lane":
+        return "single_lane"
     if not multi_role_enabled:
         return "single_lane"
-    text = str(value or "planner_builder_hardener_integrator").strip().lower()
-    text = text.replace("-", "_").replace(" ", "_")
+    if not text:
+        text = "planner_builder_hardener_integrator"
     if text in VALID_ROLE_PROFILES:
         return text
     return "planner_builder_hardener_integrator"
+
+
+def multi_role_enabled(data: dict[str, Any]) -> bool:
+    raw_profile = str(data.get("automation_role_profile") or "").strip().lower()
+    raw_profile = raw_profile.replace("-", "_").replace(" ", "_")
+    if raw_profile == "single_lane":
+        return False
+    return normalize_bool(data.get("multi_role_automations_allowed"), True)
+
+
+def automation_role_profile(data: dict[str, Any]) -> str:
+    enabled = multi_role_enabled(data)
+    profile = normalize_role_profile(data.get("automation_role_profile"), enabled)
+    return "planner_builder_hardener_integrator" if enabled and profile != "single_lane" else "single_lane"
 
 
 def normalize_automation_run_mode(value: Any) -> str:
@@ -1073,12 +1095,13 @@ Generated automation should preserve read-only worker-report behavior and keep i
 
 
 def multi_role_values(data: dict[str, Any]) -> dict[str, str]:
-    enabled = True
-    profile = "planner_builder_hardener_integrator"
+    profile = automation_role_profile(data)
+    enabled = profile == "planner_builder_hardener_integrator"
     checkpoint_commits = normalize_bool(data.get("automation_checkpoint_commits"), True)
     allow_remotes = normalize_bool(data.get("multi_role_allow_remotes"), False)
 
-    automation_section = f"""Multi-role automations allowed: true
+    if enabled:
+        automation_section = f"""Multi-role automations allowed: true
 
 Role profile: `{profile}`
 
@@ -1089,7 +1112,7 @@ The dashboard Start button launches `scripts/run_conveyor_automation.sh` as a de
 Multi-role mode is local-only. Roles must never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run any git command that touches a remote. Local commits, local branches, local tags, and local worktrees are allowed. Any remote-touching attempt is a `CRITICAL_STOP`.
 
 Planner, builder, and hardener start from the latest main `HEAD` at run start. They may see partially integrated state from earlier patches in the same cycle; this is accepted. The integrator owns the main checkout, applies queued patches FIFO, verifies, creates local checkpoint commits, updates `docs/CODEX_AUTOMATION_TASKS.md`, updates `docs/MULTI_ROLE_PROGRESS.md`, and enforces retention."""
-    guardrails = """- Multi-role automation is enabled by default and runs through the continuous conveyor.
+        guardrails = """- Multi-role automation is enabled by default and runs through the continuous conveyor.
 - Multi-role role runs require an initialized local git repo.
 - Multi-role mode is local-only: never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run git commands that touch a remote.
 - Role scripts must refuse to run when `git remote -v` is non-empty unless `MULTI_ROLE_ALLOW_REMOTES=1`.
@@ -1097,7 +1120,7 @@ Planner, builder, and hardener start from the latest main `HEAD` at run start. T
 - Planner, builder, and hardener must use isolated worktrees and queue patches instead of mutating the main checkout.
 - Integrator must checkpoint dirty main changes as-is before applying queued patches; do not revert or discard human changes.
 - Integrator must defer conflicting, stale, guardrail-violating, or verification-failing patches with machine-readable deferral reasons."""
-    task_notes = f"""Multi-role automations allowed: true
+        task_notes = f"""Multi-role automations allowed: true
 
 - Role profile: `{profile}`
 - Continuous conveyor: `scripts/run_conveyor_automation.sh`.
@@ -1105,7 +1128,7 @@ Planner, builder, and hardener start from the latest main `HEAD` at run start. T
 - Integrator maintains `docs/MULTI_ROLE_PROGRESS.md` and local checkpoint commits.
 - Deferred patches remain visible through `scripts/list_deferred_patches.py`; use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local triage or add `--decision-template` for a per-manifest cleanup worksheet.
 - Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""
-    development = f"""Multi-role automations allowed: true
+        development = f"""Multi-role automations allowed: true
 
 Role profile: `{profile}`
 
@@ -1135,11 +1158,56 @@ python3 scripts/list_deferred_patches.py . --decision-template
 The Markdown view groups the backlog by reason and recommended local action. The decision template adds per-manifest fields for archive, replace-from-current-HEAD, repair-and-retry, retry-as-is, or keep-deferred choices during integrator cleanup.
 
 The target must be an initialized git repo. Multi-role mode creates local worktrees, local queue artifacts, and local commits only. It never pushes."""
-    bootstrap = f"""Multi-role automations allowed: true
+        bootstrap = f"""Multi-role automations allowed: true
 
 Role profile: `{profile}`
 
 After bootstrap, ensure this target is an initialized git repo before starting continuous automation. The role prompts, conveyor, and helpers are generated locally; no remote git operations are allowed."""
+    else:
+        automation_section = """Multi-role automations allowed: false
+
+Role profile: `single_lane`
+
+Diffmogger uses a single-role continuous conveyor for this target. The dashboard Start button launches `scripts/run_conveyor_automation.sh` as a detached local runner, and the conveyor repeatedly dispatches the target-local single-lane wrapper `scripts/run_codex_automation.sh` when useful work remains.
+
+The solo loop is: read durable state, choose the next valuable deliverable, execute it, verify or review the result, update task state and human-bridge state, then continue, block, or stop according to `AUTOMATION_STATUS`.
+
+Single-lane mode is for simpler software work, documentation, research synthesis, cleanup, reports, small apps, bounded ticket campaigns, and non-engineering workflows. It does not use planner/builder/hardener/integrator role prompts, isolated role worktrees, queued role patches, or `docs/MULTI_ROLE_PROGRESS.md`."""
+        guardrails = """- Single-role continuous automation runs through the conveyor and `scripts/run_codex_automation.sh`.
+- Do not require planner/builder/hardener/integrator role prompts, role worktrees, queued role patches, or integrator-only progress docs in this profile.
+- Treat every run as one integrated solo sprint: read state, choose a deliverable, execute, verify or review, update durable state, and continue/block/stop honestly.
+- Use the same status model as all Diffmogger targets: `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`.
+- Keep generated work target-project agnostic and keep secrets out of docs, prompts, examples, and state."""
+        task_notes = """Multi-role automations allowed: false
+
+- Role profile: `single_lane`
+- Continuous conveyor: `scripts/run_conveyor_automation.sh`.
+- Active work runs through `scripts/run_codex_automation.sh`.
+- The solo loop is read state, pick the next valuable deliverable, execute, verify/review, update task and human-bridge state, then continue, block, or stop.
+- This profile does not generate planner/builder/hardener/integrator role prompts, queued role patches, or `docs/MULTI_ROLE_PROGRESS.md`."""
+        development = """Multi-role automations allowed: false
+
+Role profile: `single_lane`
+
+Use the dashboard Start/Stop buttons or the continuous conveyor directly. The conveyor keeps work moving by rerunning the single-lane wrapper as long as useful work remains:
+
+```bash
+bash scripts/run_conveyor_automation.sh --dry-run
+bash scripts/run_conveyor_automation.sh --once
+```
+
+Manual single-lane run:
+
+```bash
+bash scripts/run_codex_automation.sh
+```
+
+Single-lane mode is still continuous automation. It keeps the lock wrapper, watchdog, task file, worker-decision logging, human bridge, verification guidance, status model, and observatory state, but omits multi-role role prompts and integrator queues."""
+        bootstrap = """Multi-role automations allowed: false
+
+Role profile: `single_lane`
+
+After bootstrap, use the dashboard Start button or `scripts/run_conveyor_automation.sh` for continuous solo automation. The generated target does not need multi-role worktrees, role prompts, or integration queues."""
 
     return {
         "MULTI_ROLE_AUTOMATIONS_ALLOWED": str(enabled).lower(),
@@ -1563,6 +1631,8 @@ def template_included(rel: str, values: dict[str, str]) -> bool:
         return False
     if values.get("AUTOMATION_RUN_MODE") != "ticket_campaign" and rel in TICKET_RUN_FILES:
         return False
+    if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and rel in MULTI_ROLE_FILES:
+        return False
     if values.get("MCP_ENABLED") != "true" and rel in MCP_FILES:
         return False
     if values.get("PLAYWRIGHT_MCP_ENABLED") != "true" and rel in PLAYWRIGHT_MCP_FILES:
@@ -1605,13 +1675,27 @@ def runtime_entrypoints() -> list[dict[str, str]]:
     return normalized
 
 
-def generated_runtime_wrapper_destinations() -> list[str]:
-    return sorted({template_destination_rel(entry["script"]) for entry in runtime_entrypoints()})
+def runtime_entrypoint_included(entry: dict[str, str], values: dict[str, str]) -> bool:
+    if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and entry["script"] in MULTI_ROLE_RUNTIME_ENTRYPOINTS:
+        return False
+    return True
+
+
+def generated_runtime_wrapper_destinations(values: dict[str, str]) -> list[str]:
+    return sorted(
+        {
+            template_destination_rel(entry["script"])
+            for entry in runtime_entrypoints()
+            if runtime_entrypoint_included(entry, values)
+        }
+    )
 
 
 def generated_script_aliases(values: dict[str, str]) -> dict[str, str]:
     aliases: dict[str, str] = {"scripts": ".diffmogger/scripts"}
     for entry in runtime_entrypoints():
+        if not runtime_entrypoint_included(entry, values):
+            continue
         aliases[entry["script"]] = template_destination_rel(entry["script"])
     for template_path in sorted((TEMPLATE_ROOT / "scripts").glob("*")):
         if template_path.is_dir():
@@ -1651,7 +1735,7 @@ def generated_template_destinations(values: dict[str, str]) -> list[str]:
 
 
 def generated_scaffold_destinations(values: dict[str, str]) -> list[str]:
-    return sorted(set([*generated_template_destinations(values), *generated_runtime_wrapper_destinations()]))
+    return sorted(set([*generated_template_destinations(values), *generated_runtime_wrapper_destinations(values)]))
 
 
 def iter_diffmogger_runtime_sources() -> list[Path]:
@@ -1690,18 +1774,15 @@ def copy_diffmogger_runtime_library(target: Path, *, force: bool) -> list[Path]:
     return written
 
 
-def diffmogger_runtime_paths() -> list[str]:
-    return [
+def diffmogger_runtime_paths(values: dict[str, str]) -> list[str]:
+    paths = [
         sidecar_rel("target/action_plan_history.json"),
         sidecar_rel("target/agent_runs"),
         sidecar_rel("target/automation_conveyor.lock"),
         sidecar_rel("target/automation_conveyor_state.json"),
         sidecar_rel("target/automation_logs"),
-        sidecar_rel("target/automation_queue"),
         sidecar_rel("target/automation_runner.json"),
         sidecar_rel("target/automation_venvs"),
-        sidecar_rel("target/automation_worktrees"),
-        sidecar_rel("target/baseline_verification.json"),
         sidecar_rel("target/codex_automation.lock"),
         sidecar_rel("target/first-review"),
         sidecar_rel("target/integration_safety_check.json"),
@@ -1710,6 +1791,15 @@ def diffmogger_runtime_paths() -> list[str]:
         sidecar_rel("target/ticket_run_completion.json"),
         sidecar_rel("target/ticket_run_reports"),
     ]
+    if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") == "true":
+        paths.extend(
+            [
+                sidecar_rel("target/automation_queue"),
+                sidecar_rel("target/automation_worktrees"),
+                sidecar_rel("target/baseline_verification.json"),
+            ]
+        )
+    return paths
 
 
 def diffmogger_human_state_paths(values: dict[str, str]) -> list[str]:
@@ -1725,7 +1815,7 @@ def diffmogger_human_state_paths(values: dict[str, str]) -> list[str]:
 
 
 def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -> dict[str, Any]:
-    runtime_paths = diffmogger_runtime_paths()
+    runtime_paths = diffmogger_runtime_paths(values)
     context_paths = [sidecar_rel("docs/context")]
     owned_paths = sorted(set([MANIFEST_REL, *generated_paths, *runtime_paths, *context_paths]))
     worktree_seed_paths = [
@@ -1744,6 +1834,7 @@ def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -
         features={
             "human_bridge_mode": values.get("HUMAN_BRIDGE_MODE", "file_only"),
             "automation_run_mode": values.get("AUTOMATION_RUN_MODE", "continuous_improvement"),
+            "automation_role_profile": values.get("AUTOMATION_ROLE_PROFILE", "single_lane"),
             "multi_role": values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") == "true",
             "optional_mcp": values.get("MCP_ENABLED") == "true",
             "playwright_mcp": values.get("PLAYWRIGHT_MCP_ENABLED") == "true",
@@ -1922,6 +2013,8 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
             dest.chmod(0o755)
         written.append(dest)
     for entry in runtime_entrypoints():
+        if not runtime_entrypoint_included(entry, values):
+            continue
         dest_rel = template_destination_rel(entry["script"])
         dest = target / dest_rel
         if dest.exists() and not force:

@@ -561,6 +561,38 @@ def optional_mcp_servers(root: Path) -> list[str]:
     return enabled
 
 
+def inferred_multi_role_enabled(root: Path) -> bool:
+    manifest = load_manifest(root)
+    features = manifest.get("features") if isinstance(manifest.get("features"), dict) else {}
+    profile = str(features.get("automation_role_profile") or "").strip()
+    if profile == "single_lane":
+        return False
+    if profile == "planner_builder_hardener_integrator":
+        return True
+    if "multi_role" in features:
+        return bool(features.get("multi_role"))
+
+    intake = project_intake(root)
+    intake_profile = str(intake.get("automation_role_profile") or "").strip()
+    if intake_profile == "single_lane":
+        return False
+    if intake_profile == "planner_builder_hardener_integrator":
+        return bool(intake.get("multi_role_automations_allowed", True))
+    if "multi_role_automations_allowed" in intake:
+        return bool(intake.get("multi_role_automations_allowed"))
+
+    for rel in [".agentic/automation_prompt.md", "docs/CODEX_AUTOMATION_TASKS.md"]:
+        try:
+            text = rel_path(root, rel).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if "Role profile: `single_lane`" in text or "Multi-role automations allowed: false" in text:
+            return False
+        if "Role profile: `planner_builder_hardener_integrator`" in text or "Multi-role automations allowed: true" in text:
+            return True
+    return False
+
+
 def inferred_human_bridge_mode(root: Path) -> str:
     intake_mode = str(project_intake(root).get("human_bridge_mode") or "").strip()
     if intake_mode:
@@ -614,6 +646,7 @@ def main() -> int:
 
     root = Path(args.target).resolve()
     mode = args.human_bridge_mode or ("disabled" if args.no_human_bridge else inferred_human_bridge_mode(root))
+    multi_role_enabled = args.multi_role_enabled or inferred_multi_role_enabled(root)
     mcp_servers = optional_mcp_servers(root) if args.optional_mcp_enabled else []
     required = list(BASE_REQUIRED)
     if sidecar_enabled(root):
@@ -621,14 +654,14 @@ def main() -> int:
             [
                 MANIFEST_REL,
                 "scripts/diffmogger_paths.py",
-                "scripts/integrate_role_outputs.py",
-                "scripts/list_deferred_patches.py",
                 *RUNTIME_LIBRARY_REQUIRED,
             ]
         )
+        if multi_role_enabled:
+            required.extend(["scripts/integrate_role_outputs.py", "scripts/list_deferred_patches.py"])
     if mode != "disabled":
         required.extend(HUMAN_REQUIRED)
-    if args.multi_role_enabled:
+    if multi_role_enabled:
         required.extend(MULTI_ROLE_REQUIRED)
     if args.ticket_campaign_enabled:
         required.extend(TICKET_CAMPAIGN_REQUIRED)
@@ -662,9 +695,14 @@ def main() -> int:
             ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
             ".diffmogger/lib/diffmogger/runtime/paths.py",
             ".diffmogger/lib/diffmogger/runtime/run_observatory.py",
-            ".diffmogger/runtime/automation_queue",
-            ".diffmogger/runtime/automation_worktrees",
         ]
+        if multi_role_enabled:
+            required_owned_paths.extend(
+                [
+                    ".diffmogger/runtime/automation_queue",
+                    ".diffmogger/runtime/automation_worktrees",
+                ]
+            )
         if script_aliases_sidecar:
             required_owned_paths.append(".diffmogger/scripts/diffmogger_paths.py")
         for required_owned in required_owned_paths:
@@ -722,7 +760,7 @@ def main() -> int:
         elif mode == "discord_notifier":
             mode_markers = DISCORD_NOTIFIER_AUTOMATION_REQUIRED_STRINGS
         write_worker_markers = WRITE_WORKER_AUTOMATION_REQUIRED_STRINGS if args.write_workers_enabled else []
-        multi_role_markers = MULTI_ROLE_AUTOMATION_REQUIRED_STRINGS if args.multi_role_enabled else []
+        multi_role_markers = MULTI_ROLE_AUTOMATION_REQUIRED_STRINGS if multi_role_enabled else []
         ticket_markers = ["Automation run mode: `ticket_campaign`", "docs/TICKET_RUN.md"] if args.ticket_campaign_enabled else []
         for marker in AUTOMATION_REQUIRED_STRINGS + mode_markers + write_worker_markers + multi_role_markers + ticket_markers:
             if not has_marker(automation_text, marker):
@@ -742,7 +780,7 @@ def main() -> int:
                 if not has_marker(ticket_text, marker):
                     problems.append(f"{ticket_label}: missing marker {marker!r}")
 
-    if args.multi_role_enabled:
+    if multi_role_enabled:
         guardrails_rel = "docs/CODEX_AUTOMATION_GUARDRAILS.md"
         guardrails_label = rel_label(root, guardrails_rel)
         guardrails_path = rel_path(root, guardrails_rel)
@@ -905,7 +943,7 @@ def main() -> int:
             if not has_marker(ticket_helper_text, marker):
                 problems.append(f"{ticket_helper_label}: missing marker {marker!r}")
 
-    if args.multi_role_enabled:
+    if multi_role_enabled:
         run_role_rel = "scripts/run_role_automation.sh"
         run_role_label = rel_label(root, run_role_rel)
         run_role_path = rel_path(root, run_role_rel)

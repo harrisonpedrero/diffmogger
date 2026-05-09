@@ -32,7 +32,7 @@ docs/CODEX_AUTOMATION_GUARDRAILS.md
 - Use worker agents only for bounded work and record their outputs.
 - Write-capable worker agents allowed: {{WRITE_WORKER_AGENTS_ALLOWED}}; max write workers: {{MAX_WRITE_WORKER_COUNT}}.
 - Use read-only worker reports for exploration. When write-capable workers are enabled, use the most parallelism the task can safely absorb while keeping ownership reviewable and main-agent integration explicit.
-- Multi-role automations allowed: {{MULTI_ROLE_AUTOMATIONS_ALLOWED}}; role profile: {{AUTOMATION_ROLE_PROFILE}}.
+- Automation role profile: {{AUTOMATION_ROLE_PROFILE}}; multi-role automations allowed: {{MULTI_ROLE_AUTOMATIONS_ALLOWED}}.
 {{HUMAN_AGENTS_RULES}}
 - Record `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` every automation run.
 - Update `docs/CODEX_AUTOMATION_TASKS.md` at the end of every automation run.

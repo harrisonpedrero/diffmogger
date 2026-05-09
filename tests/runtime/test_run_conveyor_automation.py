@@ -230,6 +230,55 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertIn("planner gets the next state-machine pass", reason)
                     self.assertFalse(stop)
 
+    def test_explicit_single_lane_profile_runs_single_lane_wrapper(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(
+                        target,
+                        ".diffmogger/manifest.json",
+                        json.dumps(
+                            {
+                                "features": {
+                                    "automation_role_profile": "single_lane",
+                                    "multi_role": False,
+                                }
+                            }
+                        ),
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+                    queue = module.conveyor_decision_queue(target, self.conveyor_state(module), role, reason, 2)
+
+                    self.assertEqual("single_lane", role)
+                    self.assertIn("single-lane automation profile selected", reason)
+                    self.assertFalse(stop)
+                    self.assertEqual("single_lane", queue[0]["role"])
+                    self.assertIn("single-lane automation profile selected", queue[0]["reason"])
+
+    def test_missing_multi_role_files_falls_back_to_single_lane_wrapper(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_text(
+                        target,
+                        "docs/CODEX_AUTOMATION_TASKS.md",
+                        """
+                        # Codex Automation Tasks
+
+                        AUTOMATION_STATUS: ACTIVE
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+
+                    self.assertEqual("single_lane", role)
+                    self.assertIn("multi-role files not found", reason)
+                    self.assertFalse(stop)
+
     def test_queued_patches_preempt_pending_post_builder_hardener(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):

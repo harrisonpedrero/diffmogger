@@ -186,6 +186,14 @@ def dashboard_state_from_intake(
     existing = load_dashboard_state(target)
     optional_mcp = dashboard_app.optional_mcp_servers_from_value(intake.get("optional_mcp_servers"))
     write_workers_enabled = bool(intake.get("write_worker_agents_allowed")) and bool(intake.get("worker_agents_allowed", True))
+    raw_role_profile = str(intake.get("automation_role_profile") or "").strip()
+    requested_multi_role = bool(intake.get("multi_role_automations_allowed", True))
+    if raw_role_profile == "single_lane" or not requested_multi_role:
+        automation_role_profile = "single_lane"
+        multi_role_enabled = False
+    else:
+        automation_role_profile = "planner_builder_hardener_integrator"
+        multi_role_enabled = True
     state = {
         **existing,
         "schema_version": 1,
@@ -205,8 +213,8 @@ def dashboard_state_from_intake(
             intake.get("max_write_worker_count"),
             enabled=write_workers_enabled,
         ),
-        "multi_role_automations_allowed": True,
-        "automation_role_profile": "planner_builder_hardener_integrator",
+        "multi_role_automations_allowed": multi_role_enabled,
+        "automation_role_profile": automation_role_profile,
         "automation_checkpoint_commits": bool(intake.get("automation_checkpoint_commits", True)),
         "multi_role_allow_remotes": bool(intake.get("multi_role_allow_remotes", False)),
         "automation_run_mode": str(intake.get("automation_run_mode") or "continuous_improvement"),

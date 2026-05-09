@@ -65,6 +65,8 @@ Multi-role conveyor automation is the standard mode. CLI intakes can use:
 }
 ```
 
+Use `automation_role_profile: "single_lane"` for docs, research, cleanup, reports, small apps, bounded/simple work, and non-engineering workflows. Use `planner_builder_hardener_integrator` for larger software engineering work where independent planning, implementation, verification, and integration lanes add value.
+
 Continuous automation requires the target to be an initialized git repo with an initial commit before the runner starts.
 
 For bounded ticket work, enable **Ticket Campaign** in the dashboard run config or set these intake fields:
@@ -155,7 +157,7 @@ Recommended path: use the dashboard's **Start** button after bootstrap completes
 bash .diffmogger/scripts/run_conveyor_automation.sh
 ```
 
-The conveyor keeps running locally, chooses the next runnable lane from current state, and records state in `.diffmogger/runtime/automation_conveyor_state.json`. It prioritizes queued integration first, baseline verification preflight or repair routing when needed, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, planner-needed transitions, builder momentum by default, and one hardener pass after integrated builder work. It falls back to `.diffmogger/scripts/run_codex_automation.sh` when multi-role files are absent. Role and single-lane Codex subprocesses run under `.diffmogger/scripts/run_process_watchdog.py`; the conveyor also clears orphaned or over-time `active_role_run` state when restarted.
+The conveyor keeps running locally, chooses the next runnable lane from current state, and records state in `.diffmogger/runtime/automation_conveyor_state.json`. In `single_lane`, it dispatches `.diffmogger/scripts/run_codex_automation.sh` as a continuous solo loop. In `planner_builder_hardener_integrator`, it prioritizes queued integration first, baseline verification preflight or repair routing when needed, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, planner-needed transitions, builder momentum by default, and one hardener pass after integrated builder work. Role and single-lane Codex subprocesses run under `.diffmogger/scripts/run_process_watchdog.py`; the conveyor also clears orphaned or over-time `active_role_run` state when restarted.
 
 The target wrapper can still be run manually for debugging:
 

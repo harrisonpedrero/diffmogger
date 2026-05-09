@@ -29,7 +29,6 @@ export type RunModel = {
     primaryAction: RunAction;
   };
   controls: {
-    runOnce: RunAction;
     startAutomation: RunAction;
     stopAutomation: RunAction;
     safetyCheck: RunAction;
@@ -175,12 +174,6 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
   const automationRunning = automationState === "running";
   const running = bool(controls.is_running) || status.includes("RUNNING") || automationRunning;
 
-  const runOnce = makeAction(
-    "Run",
-    scaffolded && bool(controls.can_run_now),
-    scaffolded ? text(controls.run_now_reason, "Ready.") : "Complete setup before running.",
-    "run.once",
-  );
   const startAutomation = makeAction(
     "Start",
     scaffolded && bool(controls.can_start_automation),
@@ -245,7 +238,6 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
       primaryAction,
     },
     controls: {
-      runOnce,
       startAutomation,
       stopAutomation,
       safetyCheck,

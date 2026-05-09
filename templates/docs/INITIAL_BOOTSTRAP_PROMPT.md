@@ -81,7 +81,7 @@ Create an initial local-first baseline with:
 
 ## Verification
 
-Record full-suite commands in `.agentic/verification_commands.txt`. This file is a clean-HEAD baseline gate, so every command in it must pass against the current checkout. Do not put future project commands there until the backing scripts, packages, services, or Make targets exist. Keep desired future commands in this document, `docs/TICKET_RUN.md`, or `docs/CODEX_AUTOMATION_TASKS.md` until they are real. Use `.agentic/smoke_commands.txt` for narrower multi-role patch checks when useful.
+Record full-suite commands in `.agentic/verification_commands.txt`. This file is a clean-HEAD baseline gate, so every command in it must pass against the current checkout. Do not put future project commands there until the backing scripts, packages, services, or Make targets exist. Keep desired future commands in this document, `docs/TICKET_RUN.md`, or `docs/CODEX_AUTOMATION_TASKS.md` until they are real. Use `.agentic/smoke_commands.txt` for narrower patch or sprint checks when useful.
 
 Bootstrap-safe baseline commands currently scaffolded:
 

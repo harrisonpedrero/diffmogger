@@ -174,7 +174,7 @@ target/agent_runs/<run_id>/worker_<role>.md
 - Record worker activity in `docs/CODEX_AUTOMATION_TASKS.md`.
 - For implementation workers, use isolated branches, worktrees, or scratch directories if there is any chance of file conflicts. Otherwise, keep workers read-only and let the main agent implement.
 
-## Multi-Role Automation
+## Automation Role Profile
 
 {{MULTI_ROLE_AUTOMATION_SECTION}}
 

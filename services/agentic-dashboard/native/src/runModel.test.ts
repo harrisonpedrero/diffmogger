@@ -22,7 +22,6 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
       controls: {
         is_scaffolded: true,
         is_running: false,
-        can_run_now: true,
         can_start_automation: true,
         can_stop_automation: false,
         can_run_safety_check: true,
@@ -70,7 +69,6 @@ describe("buildRunModel", () => {
     const model = buildRunModel(null);
 
     expect(model.banner.primaryAction.label).toBe("Choose project");
-    expect(model.controls.runOnce.enabled).toBe(false);
     expect(model.controls.startAutomation.enabled).toBe(false);
     expect(model.controls.stopAutomation.enabled).toBe(false);
   });
@@ -89,7 +87,6 @@ describe("buildRunModel", () => {
         run: {
           controls: {
             is_scaffolded: false,
-            can_run_now: false,
             can_start_automation: false,
             can_stop_automation: false,
             can_run_safety_check: false,
@@ -100,16 +97,14 @@ describe("buildRunModel", () => {
 
     expect(model.banner.headline).toBe("Not Ready");
     expect(model.banner.primaryAction.label).toBe("Open setup");
-    expect(model.controls.runOnce.enabled).toBe(false);
     expect(model.controls.startAutomation.enabled).toBe(false);
     expect(model.controls.safetyCheck.enabled).toBe(false);
   });
 
-  it("enables Run and Start for ready scaffolded targets", () => {
+  it("enables Start for ready scaffolded targets", () => {
     const model = buildRunModel(snapshot());
 
     expect(model.banner.primaryAction.label).toBe("Start");
-    expect(model.controls.runOnce.enabled).toBe(true);
     expect(model.controls.startAutomation.enabled).toBe(true);
     expect(model.controls.stopAutomation.enabled).toBe(false);
     expect(model.controls.safetyCheck.enabled).toBe(true);
@@ -121,7 +116,6 @@ describe("buildRunModel", () => {
         run: {
           controls: {
             is_running: true,
-            can_run_now: false,
             can_start_automation: false,
             can_stop_automation: true,
             can_run_safety_check: true,
@@ -133,7 +127,6 @@ describe("buildRunModel", () => {
     );
 
     expect(model.isRunning).toBe(true);
-    expect(model.controls.runOnce.enabled).toBe(false);
     expect(model.controls.startAutomation.enabled).toBe(false);
     expect(model.controls.stopAutomation.enabled).toBe(true);
   });
@@ -143,7 +136,6 @@ describe("buildRunModel", () => {
       snapshot({
         run: {
           controls: {
-            can_run_now: true,
             can_start_automation: false,
             can_stop_automation: true,
             can_run_safety_check: true,
@@ -161,7 +153,6 @@ describe("buildRunModel", () => {
       snapshot({
         run: {
           controls: {
-            can_run_now: true,
             can_start_automation: true,
             can_stop_automation: false,
             stop_automation_reason: "No automation is running.",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .state import *
+from diffmogger.runtime.paths import load_manifest
 
 def unhandled_human_inbox_count(target: Path) -> int:
     text = read_text(dpath(target, "docs/HUMAN_INBOX.md"))
@@ -11,6 +12,34 @@ def target_has_multi_role(target: Path) -> bool:
     if not script_path(target, "scripts/run_role_automation.sh").exists():
         return False
     return all(dpath(target, f".agentic/roles/{role}.md").exists() for role in ROLES)
+
+
+def target_role_profile(target: Path) -> str:
+    manifest = load_manifest(target)
+    features = manifest.get("features") if isinstance(manifest.get("features"), dict) else {}
+    profile = str(features.get("automation_role_profile") or "").strip()
+    if profile in {"single_lane", "planner_builder_hardener_integrator"}:
+        return profile
+    if "multi_role" in features:
+        return "planner_builder_hardener_integrator" if features.get("multi_role") else "single_lane"
+
+    for rel in [".agentic/project_intake.json", ".agentic/dashboard_state.json"]:
+        data = read_json(dpath(target, rel))
+        profile = str(data.get("automation_role_profile") or "").strip()
+        if profile == "single_lane":
+            return "single_lane"
+        if profile == "planner_builder_hardener_integrator":
+            return "planner_builder_hardener_integrator" if data.get("multi_role_automations_allowed", True) else "single_lane"
+        if "multi_role_automations_allowed" in data:
+            return "planner_builder_hardener_integrator" if data.get("multi_role_automations_allowed") else "single_lane"
+
+    for rel in [".agentic/automation_prompt.md", "docs/CODEX_AUTOMATION_TASKS.md"]:
+        text = read_text(dpath(target, rel))
+        if "Role profile: `single_lane`" in text or "Multi-role automations allowed: false" in text:
+            return "single_lane"
+        if "Role profile: `planner_builder_hardener_integrator`" in text or "Multi-role automations allowed: true" in text:
+            return "planner_builder_hardener_integrator"
+    return ""
 
 def queued_manifests(target: Path) -> list[Path]:
     queue_root = runtime_path(target, "target/automation_queue")
