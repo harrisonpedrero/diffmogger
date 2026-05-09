@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 native_dir="services/agentic-dashboard/native"
 
-python3 scripts/check_native_rebuild_guardrails.py
+python3 scripts/validation/check_native_rebuild_guardrails.py
 
 (
   cd "$native_dir"

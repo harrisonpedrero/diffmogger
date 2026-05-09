@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility wrapper for diffmogger.kit.check_required_files."""
+"""Compatibility wrapper for diffmogger.kit.check_native_rebuild_guardrails."""
 
 from __future__ import annotations
 
@@ -19,11 +19,11 @@ for _candidate in (
             sys.path.insert(0, _candidate_text)
 
 if __name__ != "__main__":
-    from diffmogger.kit.check_required_files import *  # noqa: F401,F403,E402
+    from diffmogger.kit.check_native_rebuild_guardrails import *  # noqa: F401,F403,E402
 
 
 def _main() -> int:
-    runpy.run_module("diffmogger.kit.check_required_files", run_name="__main__")
+    runpy.run_module("diffmogger.kit.check_native_rebuild_guardrails", run_name="__main__")
     return 0
 
 
