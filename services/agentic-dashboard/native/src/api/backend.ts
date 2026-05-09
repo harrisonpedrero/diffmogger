@@ -88,7 +88,7 @@ export type ProjectSnapshot = {
     empty_states?: Record<string, unknown>;
     logs?: Array<Record<string, unknown>>;
     controls?: Record<string, unknown>;
-    schedule?: Record<string, unknown>;
+    automation?: Record<string, unknown>;
     run_log?: Record<string, unknown>;
     worker_controls?: Record<string, unknown>;
     latest_worker_result?: Record<string, unknown>;
@@ -324,7 +324,7 @@ export type DiagnosticsSnapshot = {
   target_writability: Record<string, unknown>;
   macos_permissions: Record<string, unknown>;
   notifier_health: Record<string, unknown>;
-  schedule: Record<string, unknown>;
+  automation: Record<string, unknown>;
   runtime_environment?: RuntimeEnvironmentSnapshot;
   fix_suggestions?: FixSuggestion[];
   backend: Record<string, unknown>;
@@ -367,7 +367,6 @@ export type EnvironmentDiagnosticsSnapshot = {
 export type AdvancedSettings = {
   reviewExportDir: string;
   preferredEditorCommand: string;
-  scheduleCadenceMinutes: number;
   humanBridgeMode: string;
   appearance: "system" | "light" | "dark" | string;
   density: "compact" | "comfortable" | string;
@@ -406,6 +405,10 @@ export function selectContextFiles(): Promise<PickedContextFile[]> {
   return invoke<PickedContextFile[]>("select_context_files");
 }
 
+export function selectTicketImportFile(): Promise<string | null> {
+  return invoke<string | null>("select_ticket_import_file");
+}
+
 export function loadProjectSnapshot(
   target: string,
 ): Promise<BackendEnvelope<ProjectSnapshot>> {
@@ -430,6 +433,16 @@ export function runBackendCommand<T = unknown>(request: {
   related?: string;
   force?: boolean;
   runCodex?: boolean;
+  ticketJson?: string;
+  ticketId?: string;
+  importFormat?: "markdown" | "csv" | "json" | string;
+  importMode?: "append" | "replace-placeholder" | "replace-all" | string;
+  inputFile?: string;
+  inputJson?: string;
+  inputText?: string;
+  preview?: boolean;
+  draftId?: string;
+  ticketIds?: string;
 }): Promise<BackendEnvelope<T>> {
   return invoke<BackendEnvelope<T>>("run_backend_command", request);
 }
@@ -451,6 +464,16 @@ export function runBackendCommandStreamed<T = unknown>(request: {
   related?: string;
   force?: boolean;
   runCodex?: boolean;
+  ticketJson?: string;
+  ticketId?: string;
+  importFormat?: "markdown" | "csv" | "json" | string;
+  importMode?: "append" | "replace-placeholder" | "replace-all" | string;
+  inputFile?: string;
+  inputJson?: string;
+  inputText?: string;
+  preview?: boolean;
+  draftId?: string;
+  ticketIds?: string;
 }): Promise<BackendEnvelope<T>> {
   return invoke<BackendEnvelope<T>>("run_backend_command_streamed", request);
 }

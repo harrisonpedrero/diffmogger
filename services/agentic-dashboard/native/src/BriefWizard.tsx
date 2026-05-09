@@ -9,6 +9,8 @@ import {
   Hammer,
   RefreshCw,
   SlidersHorizontal,
+  Trash2,
+  WandSparkles,
 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -22,6 +24,18 @@ import {
   runBackendCommandStreamed,
   selectContextFiles,
 } from "./api/backend";
+import {
+  defaultImportMode,
+  emptyTicket,
+  issueLabel,
+  localTicketIssues,
+  normalizeTicket,
+  normalizeTickets,
+  parseTicketImportText,
+  parseTicketJson,
+  ticketToJson,
+  type Ticket,
+} from "./ticketModel";
 
 export type BriefRoute =
   | "Home"
@@ -54,7 +68,6 @@ export type IntakeDraft = {
   external_services: string[];
   env_access_policy: "project_commands_only" | "direct_env_files_allowed";
   verification_commands: string[];
-  desired_cadence: string;
   human_bridge_enabled: boolean;
   human_bridge_mode: "disabled" | "file_only" | "local_notifier" | "discord_notifier";
   human_requested_text_responses: boolean;
@@ -67,13 +80,11 @@ export type IntakeDraft = {
   multi_role_automations_allowed: boolean;
   automation_role_profile: "single_lane" | "planner_builder_hardener_integrator";
   automation_checkpoint_commits: boolean;
-  multi_role_base_cadence_minutes: number;
-  automation_schedule_strategy: "single_lane_interval" | "fixed_multi_role" | "continuous_conveyor";
   multi_role_allow_remotes: boolean;
-  automation_signals_enabled: boolean;
   optional_mcp_servers: string[];
   automation_run_mode: "continuous_improvement" | "ticket_campaign";
   ticket_run_file: string;
+  ticket_run_seed_tickets: Ticket[];
   ticket_completion_notify: boolean;
   meaningful_deliverable: string;
   beyond_mvp: string;
@@ -82,7 +93,6 @@ export type IntakeDraft = {
   overwrite_existing_scaffold_files: boolean;
 };
 
-export type AutomationLane = "single_scheduled_lane" | "multi_role_conveyor";
 export type AutomationScope = "boundless_build" | "ticket_campaign";
 
 type ContextUiFile = PickedContextFile & {
@@ -154,7 +164,7 @@ const steps: Array<{ key: StepKey; label: string }> = [
   { key: "project", label: "Project" },
   { key: "goal", label: "Goal" },
   { key: "stack", label: "Stack" },
-  { key: "mode", label: "Automation" },
+  { key: "mode", label: "Run" },
   { key: "guardrails", label: "Guardrails" },
   { key: "context", label: "Context" },
   { key: "review", label: "Review" },
@@ -175,7 +185,6 @@ const defaultDraft: IntakeDraft = {
   external_services: ["None required for the first demo."],
   env_access_policy: "project_commands_only",
   verification_commands: ["Run the project test suite.", "Run lint/typecheck/build commands when present."],
-  desired_cadence: "every 60 minutes",
   human_bridge_enabled: true,
   human_bridge_mode: "file_only",
   human_requested_text_responses: true,
@@ -186,20 +195,18 @@ const defaultDraft: IntakeDraft = {
   max_write_worker_count: 0,
   write_worker_guidance:
     "Write workers are optional and should be used only for large, well-planned changes with disjoint file or module ownership. Prefer fewer workers when the change can be done clearly by the main agent.",
-  multi_role_automations_allowed: false,
-  automation_role_profile: "single_lane",
+  multi_role_automations_allowed: true,
+  automation_role_profile: "planner_builder_hardener_integrator",
   automation_checkpoint_commits: true,
-  multi_role_base_cadence_minutes: 30,
-  automation_schedule_strategy: "single_lane_interval",
   multi_role_allow_remotes: false,
-  automation_signals_enabled: false,
   optional_mcp_servers: [],
   automation_run_mode: "continuous_improvement",
   ticket_run_file: ".diffmogger/state/TICKET_RUN.md",
+  ticket_run_seed_tickets: [],
   ticket_completion_notify: true,
   meaningful_deliverable: "A runnable, verified change that improves the product or developer workflow.",
-  beyond_mvp: "Continue improving core value, demo quality, integrations, and automation reliability.",
-  assumptions: ["The automation should ask through the human bridge when a decision is genuinely ambiguous."],
+  beyond_mvp: "Continue improving core value, demo quality, integrations, and run reliability.",
+  assumptions: ["Ask through the inbox when a decision is ambiguous."],
   additional_context_files: [],
   overwrite_existing_scaffold_files: false,
 };
@@ -244,44 +251,10 @@ function enumValue<T extends string>(value: unknown, valid: readonly T[], fallba
   return valid.includes(value as T) ? (value as T) : fallback;
 }
 
-export function automationLaneForDraft(
-  draft: Pick<
-    IntakeDraft,
-    "multi_role_automations_allowed" | "automation_role_profile" | "automation_schedule_strategy"
-  >,
-): AutomationLane {
-  if (
-    draft.multi_role_automations_allowed ||
-    draft.automation_role_profile === "planner_builder_hardener_integrator" ||
-    draft.automation_schedule_strategy === "continuous_conveyor" ||
-    draft.automation_schedule_strategy === "fixed_multi_role"
-  ) {
-    return "multi_role_conveyor";
-  }
-  return "single_scheduled_lane";
-}
-
 export function automationScopeForDraft(
   draft: Pick<IntakeDraft, "automation_run_mode">,
 ): AutomationScope {
   return draft.automation_run_mode === "ticket_campaign" ? "ticket_campaign" : "boundless_build";
-}
-
-export function applyAutomationLane(draft: IntakeDraft, lane: AutomationLane): IntakeDraft {
-  if (lane === "multi_role_conveyor") {
-    return {
-      ...draft,
-      multi_role_automations_allowed: true,
-      automation_role_profile: "planner_builder_hardener_integrator",
-      automation_schedule_strategy: "continuous_conveyor",
-    };
-  }
-  return {
-    ...draft,
-    multi_role_automations_allowed: false,
-    automation_role_profile: "single_lane",
-    automation_schedule_strategy: "single_lane_interval",
-  };
 }
 
 export function applyAutomationScope(draft: IntakeDraft, scope: AutomationScope): IntakeDraft {
@@ -301,22 +274,6 @@ function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
   const optionalMcp = listValue(source.optional_mcp_servers).filter((item) =>
     ["context7", "playwright"].includes(item),
   );
-  const scheduleStrategy = enumValue(
-    source.automation_schedule_strategy,
-    ["single_lane_interval", "fixed_multi_role", "continuous_conveyor"],
-    defaultDraft.automation_schedule_strategy,
-  );
-  const roleProfile = enumValue(
-    source.automation_role_profile,
-    ["single_lane", "planner_builder_hardener_integrator"],
-    defaultDraft.automation_role_profile,
-  );
-  const multiRole =
-    boolValue(source.multi_role_automations_allowed, defaultDraft.multi_role_automations_allowed) ||
-    roleProfile === "planner_builder_hardener_integrator" ||
-    scheduleStrategy === "continuous_conveyor" ||
-    scheduleStrategy === "fixed_multi_role";
-
   return {
     ...defaultDraft,
     project_name: stringValue(source.project_name, targetName),
@@ -339,10 +296,6 @@ function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
     verification_commands: listValue(source.verification_commands).length
       ? listValue(source.verification_commands)
       : defaultDraft.verification_commands,
-    desired_cadence:
-      typeof source.cadence_minutes === "number"
-        ? `every ${source.cadence_minutes} minutes`
-        : stringValue(source.desired_cadence, defaultDraft.desired_cadence),
     human_bridge_enabled: boolValue(source.human_bridge_enabled, defaultDraft.human_bridge_enabled),
     human_bridge_mode: enumValue(
       source.human_bridge_mode,
@@ -362,16 +315,10 @@ function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
     write_worker_agents_allowed: boolValue(source.write_worker_agents_allowed, defaultDraft.write_worker_agents_allowed),
     max_write_worker_count: numberValue(source.max_write_worker_count, defaultDraft.max_write_worker_count),
     write_worker_guidance: stringValue(source.write_worker_guidance, defaultDraft.write_worker_guidance),
-    multi_role_automations_allowed: multiRole,
-    automation_role_profile: multiRole ? "planner_builder_hardener_integrator" : "single_lane",
+    multi_role_automations_allowed: true,
+    automation_role_profile: "planner_builder_hardener_integrator",
     automation_checkpoint_commits: boolValue(source.automation_checkpoint_commits, defaultDraft.automation_checkpoint_commits),
-    multi_role_base_cadence_minutes: numberValue(
-      source.multi_role_base_cadence_minutes,
-      defaultDraft.multi_role_base_cadence_minutes,
-    ),
-    automation_schedule_strategy: multiRole ? scheduleStrategy : "single_lane_interval",
     multi_role_allow_remotes: boolValue(source.multi_role_allow_remotes, defaultDraft.multi_role_allow_remotes),
-    automation_signals_enabled: boolValue(source.automation_signals_enabled, defaultDraft.automation_signals_enabled),
     optional_mcp_servers: optionalMcp,
     automation_run_mode: enumValue(
       source.automation_run_mode,
@@ -379,6 +326,7 @@ function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
       defaultDraft.automation_run_mode,
     ),
     ticket_run_file: stringValue(source.ticket_run_file, defaultDraft.ticket_run_file),
+    ticket_run_seed_tickets: normalizeTickets(source.ticket_run_seed_tickets),
     ticket_completion_notify: boolValue(source.ticket_completion_notify, defaultDraft.ticket_completion_notify),
     meaningful_deliverable: stringValue(source.meaningful_deliverable, defaultDraft.meaningful_deliverable),
     beyond_mvp: stringValue(source.beyond_mvp, defaultDraft.beyond_mvp),
@@ -392,18 +340,17 @@ function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
 }
 
 function serializeDraft(draft: IntakeDraft): Record<string, unknown> {
-  const lane = automationLaneForDraft(draft);
   const scope = automationScopeForDraft(draft);
-  return {
+  const payload: Record<string, unknown> = {
     ...draft,
-    multi_role_automations_allowed: lane === "multi_role_conveyor",
-    automation_role_profile: lane === "multi_role_conveyor" ? "planner_builder_hardener_integrator" : "single_lane",
-    automation_schedule_strategy: lane === "multi_role_conveyor" ? "continuous_conveyor" : "single_lane_interval",
+    multi_role_automations_allowed: true,
+    automation_role_profile: "planner_builder_hardener_integrator",
     automation_run_mode: scope === "ticket_campaign" ? "ticket_campaign" : "continuous_improvement",
+    ticket_run_seed_tickets: draft.ticket_run_seed_tickets.map((ticket) => normalizeTicket(ticket)),
     human_bridge_mode: draft.human_bridge_enabled ? draft.human_bridge_mode : "disabled",
     max_write_worker_count: draft.write_worker_agents_allowed ? Math.max(1, Math.min(10, draft.max_write_worker_count)) : 0,
-    multi_role_base_cadence_minutes: Math.max(30, draft.multi_role_base_cadence_minutes),
   };
+  return payload;
 }
 
 function listToText(values: string[]): string {
@@ -483,6 +430,15 @@ function ToggleRow(props: {
   );
 }
 
+function DetailMetric(props: { label: string; value: string | number }) {
+  return (
+    <div>
+      <span>{props.label}</span>
+      <strong>{props.value}</strong>
+    </div>
+  );
+}
+
 export function BriefWizard(props: {
   snapshot: ProjectSnapshot | null;
   recents: RecentTarget[];
@@ -505,6 +461,13 @@ export function BriefWizard(props: {
   const [progressLogs, setProgressLogs] = useState<BackendLogEvent[]>([]);
   const [preview, setPreview] = useState<ScaffoldPreviewResponse | null>(null);
   const [previewState, setPreviewState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [ticketEditorId, setTicketEditorId] = useState<string | null>(null);
+  const [ticketEditorJson, setTicketEditorJson] = useState("");
+  const [ticketImportFormat, setTicketImportFormat] = useState<"markdown" | "csv" | "json">("markdown");
+  const [ticketImportText, setTicketImportText] = useState("");
+  const [ticketMessage, setTicketMessage] = useState<string | null>(null);
+  const [ticketDraftBusy, setTicketDraftBusy] = useState(false);
+  const [ticketDraftCandidates, setTicketDraftCandidates] = useState<Ticket[]>([]);
   const lastSavedRef = useRef("");
   const targetPath = props.snapshot?.target.path;
   const detected = asRecord(props.snapshot?.brief.detected);
@@ -522,6 +485,11 @@ export function BriefWizard(props: {
     setPreview(null);
     setPreviewState("idle");
     setCommandError(null);
+    setTicketEditorId(null);
+    setTicketEditorJson("");
+    setTicketImportText("");
+    setTicketMessage(null);
+    setTicketDraftCandidates([]);
     const imported = nextDraft.additional_context_files.map<ContextUiFile>((relPath) => ({
       path: relPath,
       name: relPath.split("/").pop() || relPath,
@@ -592,6 +560,110 @@ export function BriefWizard(props: {
       if (checked) next.push(server);
       return { ...current, optional_mcp_servers: next };
     });
+  }
+
+  function replaceSeedTickets(tickets: Ticket[], message: string) {
+    setDraft((current) => ({ ...current, ticket_run_seed_tickets: tickets.map((ticket) => normalizeTicket(ticket)) }));
+    setTicketMessage(message);
+  }
+
+  function addSeedTicket() {
+    const ticket = emptyTicket(draft.ticket_run_seed_tickets);
+    setDraft((current) => ({ ...current, ticket_run_seed_tickets: [...current.ticket_run_seed_tickets, ticket] }));
+    setTicketEditorId(ticket.id);
+    setTicketEditorJson(ticketToJson(ticket));
+    setTicketMessage("New seed ticket is ready to edit.");
+  }
+
+  function editSeedTicket(ticket: Ticket) {
+    setTicketEditorId(ticket.id);
+    setTicketEditorJson(ticketToJson(ticket));
+    setTicketMessage(null);
+  }
+
+  function saveSeedTicket() {
+    const parsed = parseTicketJson(ticketEditorJson);
+    if (!parsed.ticket) {
+      setTicketMessage(parsed.error ?? "Ticket JSON did not parse.");
+      return;
+    }
+    setDraft((current) => {
+      const existingId = ticketEditorId;
+      const replacement = normalizeTicket(parsed.ticket);
+      const found = existingId
+        ? current.ticket_run_seed_tickets.some((ticket) => ticket.id === existingId)
+        : false;
+      const next = found
+        ? current.ticket_run_seed_tickets.map((ticket) => (ticket.id === existingId ? replacement : ticket))
+        : [...current.ticket_run_seed_tickets, replacement];
+      return { ...current, ticket_run_seed_tickets: next };
+    });
+    setTicketEditorId(parsed.ticket.id);
+    setTicketEditorJson(ticketToJson(parsed.ticket));
+    setTicketMessage("Seed ticket saved.");
+  }
+
+  function deleteSeedTicket(ticketId: string) {
+    setDraft((current) => ({
+      ...current,
+      ticket_run_seed_tickets: current.ticket_run_seed_tickets.filter((ticket) => ticket.id !== ticketId),
+    }));
+    if (ticketEditorId === ticketId) {
+      setTicketEditorId(null);
+      setTicketEditorJson("");
+    }
+    setTicketMessage("Seed ticket deleted.");
+  }
+
+  function importSeedTickets(mode: "append" | "replace-placeholder" | "replace-all" = defaultImportMode(draft.ticket_run_seed_tickets)) {
+    const parsed = parseTicketImportText(ticketImportText, ticketImportFormat);
+    if (!parsed.tickets) {
+      setTicketMessage(parsed.error ?? "Ticket import did not parse.");
+      return;
+    }
+    const current = draft.ticket_run_seed_tickets;
+    const next =
+      mode === "replace-all" || (mode === "replace-placeholder" && defaultImportMode(current) === "replace-placeholder")
+        ? parsed.tickets
+        : [...current, ...parsed.tickets];
+    replaceSeedTickets(next, `${parsed.tickets.length} ticket candidate${parsed.tickets.length === 1 ? "" : "s"} imported.`);
+  }
+
+  async function draftSeedTicketsFromIntake() {
+    if (!targetPath) {
+      setTicketMessage("Choose a target folder before drafting from intake.");
+      return;
+    }
+    setTicketDraftBusy(true);
+    setTicketMessage(null);
+    try {
+      const envelope = await runBackendCommand<{ candidates?: Ticket[]; candidate_count?: number }>({
+        command: "ticket.draft_from_intake",
+        target: targetPath,
+      });
+      if (!envelope.ok || !envelope.data) throw new Error(envelope.message ?? "Codex draft failed.");
+      const candidates = normalizeTickets(envelope.data.candidates ?? []);
+      setTicketDraftCandidates(candidates);
+      setTicketMessage(`${envelope.data.candidate_count ?? candidates.length} draft ticket candidate${candidates.length === 1 ? "" : "s"} ready to review.`);
+    } catch (error) {
+      setTicketMessage(error instanceof Error ? error.message : "Codex draft failed.");
+    } finally {
+      setTicketDraftBusy(false);
+    }
+  }
+
+  function acceptDraftCandidates(candidates = ticketDraftCandidates) {
+    if (!candidates.length) {
+      setTicketMessage("No draft candidates are ready yet.");
+      return;
+    }
+    importSeedTicketsFromCandidates(candidates);
+  }
+
+  function importSeedTicketsFromCandidates(candidates: Ticket[]) {
+    const mode = defaultImportMode(draft.ticket_run_seed_tickets);
+    const next = mode === "replace-placeholder" ? candidates : [...draft.ticket_run_seed_tickets, ...candidates];
+    replaceSeedTickets(next, `${candidates.length} draft ticket candidate${candidates.length === 1 ? "" : "s"} accepted.`);
   }
 
   async function copyText(value: string, label: string) {
@@ -669,7 +741,7 @@ export function BriefWizard(props: {
       return;
     }
     const requiredFailures = preview?.prerequisites.required_failures ?? [];
-    if (requiredFailures.length && !confirm("Required prerequisites are missing. Continue with scaffold-only setup and skip Codex bootstrap?")) {
+    if (requiredFailures.length && !confirm("Required prerequisites are missing. Continue with setup-only and skip Codex?")) {
       return;
     }
     setScaffoldBusy(true);
@@ -734,15 +806,15 @@ export function BriefWizard(props: {
           <div className="target-picker-row">
             <button className="secondary-action" disabled={props.loading} onClick={props.onChoose}>
               <FolderOpen size={17} />
-              Choose Folder
+              Choose folder
             </button>
             <button className="secondary-action" disabled={!targetPath || props.loading} onClick={props.onRefresh}>
               <RefreshCw size={17} />
-              Refresh Target
+              Refresh target
             </button>
             <button className="secondary-action" disabled={!targetPath} onClick={() => props.onNavigate("Advanced")}>
               <SlidersHorizontal size={17} />
-              Open Advanced
+              Open Debug
             </button>
           </div>
           <div className="copyable-path-row">
@@ -761,7 +833,7 @@ export function BriefWizard(props: {
         </section>
 
         <section className="brief-section">
-          <h2>Recent Targets</h2>
+          <h2>Recent projects</h2>
           {props.recents.length ? (
             <div className="brief-recent-list">
               {props.recents.map((recent) => (
@@ -777,7 +849,7 @@ export function BriefWizard(props: {
         </section>
 
         <section className="brief-section span-3">
-          <h2>Repo Detection</h2>
+          <h2>Repository</h2>
           <div className="brief-metrics">
             <div>
               <span>Target state</span>
@@ -847,7 +919,7 @@ export function BriefWizard(props: {
     return (
       <div className="brief-step-grid">
         <section className="brief-section">
-          <h2>Detected Repo Status</h2>
+          <h2>Detected state</h2>
           <div className="brief-data-list">
             <div>
               <span>Git</span>
@@ -865,7 +937,7 @@ export function BriefWizard(props: {
         </section>
         <section className="brief-section span-2">
           <div className="panel-heading-row">
-            <h2>Detected Commands</h2>
+            <h2>Detected commands</h2>
             <button
               className="icon-text-button"
               disabled={!commandLabel(detected)}
@@ -878,7 +950,7 @@ export function BriefWizard(props: {
           <pre className="command-preview">{commandLabel(detected)}</pre>
         </section>
         <section className="brief-section span-3">
-          <h2>Stack / Existing Repo Context</h2>
+          <h2>Stack</h2>
           <div className="brief-form-grid two">
             <FormField label="Tech preferences">
               <textarea
@@ -915,63 +987,42 @@ export function BriefWizard(props: {
   }
 
   function renderModeStep() {
-    const automationLane = automationLaneForDraft(draft);
     const buildScope = automationScopeForDraft(draft);
     const ticketCampaign = buildScope === "ticket_campaign";
+    const ticketIssues = localTicketIssues(draft.ticket_run_seed_tickets);
 
     return (
       <div className="brief-step-grid">
         <section className="brief-section span-3">
-          <h2>Automation Mode</h2>
-          <div className="brief-choice-grid two-up">
-            <button
-              className={automationLane === "single_scheduled_lane" ? "selected" : ""}
-              onClick={() => setDraft((current) => applyAutomationLane(current, "single_scheduled_lane"))}
-            >
-              <strong>Single scheduled lane</strong>
-              <span>One recurring automation at the chosen cadence.</span>
-            </button>
-            <button
-              className={automationLane === "multi_role_conveyor" ? "selected" : ""}
-              onClick={() => setDraft((current) => applyAutomationLane(current, "multi_role_conveyor"))}
-            >
-              <strong>Planner / builder / hardener / integrator</strong>
-              <span>Continuous conveyor with planner, builder, hardener, and integrator roles.</span>
+          <h2>Run mode</h2>
+          <div className="brief-choice-grid one-up">
+            <button className="selected" disabled>
+              <strong>Continuous role conveyor</strong>
+              <span>Planner, builder, hardener, and integrator roles advance from current state.</span>
             </button>
           </div>
         </section>
         <section className="brief-section span-3">
-          <h2>Build Scope</h2>
+          <h2>Scope</h2>
           <div className="brief-choice-grid two-up compact">
             <button
               className={buildScope === "boundless_build" ? "selected" : ""}
               onClick={() => setDraft((current) => applyAutomationScope(current, "boundless_build"))}
             >
-              <strong>Boundless build</strong>
-              <span>Let Diffmogger keep improving the target from the project goal and guardrails.</span>
+              <strong>Continuous improvement</strong>
+              <span>Use the project goal and guardrails as the ongoing backlog.</span>
             </button>
             <button
               className={ticketCampaign ? "selected" : ""}
               onClick={() => setDraft((current) => applyAutomationScope(current, "ticket_campaign"))}
             >
-              <strong>Ticket campaign</strong>
-              <span>Bound the run to the configured ticket file and completion signal.</span>
+              <strong>Ticket file</strong>
+              <span>Use the configured ticket file and completion signal.</span>
             </button>
           </div>
         </section>
         <section className="brief-section span-3">
-          <div className="brief-form-grid three">
-            <FormField label="Cadence">
-              <input value={draft.desired_cadence} onChange={(event) => updateDraft("desired_cadence", event.target.value)} />
-            </FormField>
-            <FormField label="Multi-role base cadence">
-              <input
-                min={30}
-                type="number"
-                value={draft.multi_role_base_cadence_minutes}
-                onChange={(event) => updateDraft("multi_role_base_cadence_minutes", numberValue(event.target.value, 30))}
-              />
-            </FormField>
+          <div className="brief-form-grid two">
             <FormField label="Ticket run file" help="Used when Ticket campaign is selected.">
               <input
                 disabled={!ticketCampaign}
@@ -980,21 +1031,127 @@ export function BriefWizard(props: {
               />
             </FormField>
           </div>
+          {ticketCampaign && (
+            <div className="ticket-queue-panel seed">
+              <div className="panel-heading-row">
+                <div>
+                  <h2>Ticket Queue</h2>
+                  <p>{draft.ticket_run_seed_tickets.length} seed ticket{draft.ticket_run_seed_tickets.length === 1 ? "" : "s"} will be written into the scaffolded ticket file.</p>
+                </div>
+                <div className="inline-actions">
+                  <button className="icon-text-button" onClick={draftSeedTicketsFromIntake} disabled={ticketDraftBusy || !targetPath}>
+                    <WandSparkles size={14} />
+                    {ticketDraftBusy ? "Drafting" : "Draft from Intake"}
+                  </button>
+                  <button className="icon-text-button" onClick={addSeedTicket}>
+                    <FilePlus2 size={14} />
+                    Add Ticket
+                  </button>
+                </div>
+              </div>
+
+              <div className="ticket-summary-row">
+                <DetailMetric label="Pending" value={draft.ticket_run_seed_tickets.filter((ticket) => ticket.status === "pending").length} />
+                <DetailMetric label="Issues" value={ticketIssues.length} />
+                <DetailMetric label="Import mode" value={defaultImportMode(draft.ticket_run_seed_tickets)} />
+              </div>
+
+              {ticketIssues.length > 0 && (
+                <div className="ticket-issue-list">
+                  {ticketIssues.map((issue, index) => (
+                    <div className={`ticket-issue ${issue.level}`} key={`${issue.type}-${issue.ticket_id ?? index}`}>
+                      <AlertTriangle size={14} />
+                      <span>{issueLabel(issue)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="ticket-list">
+                {draft.ticket_run_seed_tickets.length ? (
+                  draft.ticket_run_seed_tickets.map((ticket) => (
+                    <div className="ticket-row" key={ticket.id}>
+                      <div>
+                        <strong>{ticket.id || "Untitled"}</strong>
+                        <span>{ticket.summary || "No summary yet."}</span>
+                      </div>
+                      <em>{ticket.status}</em>
+                      <button className="icon-text-button" onClick={() => editSeedTicket(ticket)}>Edit</button>
+                      <button className="icon-button danger" title="Delete ticket" onClick={() => deleteSeedTicket(ticket.id)}>
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <p className="empty-copy">Add tickets manually, import a batch, or draft candidates from the intake.</p>
+                )}
+              </div>
+
+              <div className="ticket-edit-grid">
+                <FormField label="Ticket JSON">
+                  <textarea
+                    rows={10}
+                    value={ticketEditorJson}
+                    onChange={(event) => setTicketEditorJson(event.target.value)}
+                    placeholder={ticketToJson(emptyTicket(draft.ticket_run_seed_tickets))}
+                  />
+                </FormField>
+                <div className="ticket-import-box">
+                  <FormField label="Bulk import">
+                    <select value={ticketImportFormat} onChange={(event) => setTicketImportFormat(event.target.value as "markdown" | "csv" | "json")}>
+                      <option value="markdown">Markdown</option>
+                      <option value="csv">CSV</option>
+                      <option value="json">JSON</option>
+                    </select>
+                    <textarea
+                      rows={7}
+                      value={ticketImportText}
+                      onChange={(event) => setTicketImportText(event.target.value)}
+                      placeholder="TICKET-001: Build the first local workflow"
+                    />
+                  </FormField>
+                  <div className="inline-actions">
+                    <button className="secondary-action" onClick={saveSeedTicket} disabled={!ticketEditorJson.trim()}>
+                      Save Ticket
+                    </button>
+                    <button className="secondary-action" onClick={() => importSeedTickets()} disabled={!ticketImportText.trim()}>
+                      Import
+                    </button>
+                    <button className="secondary-action" onClick={() => importSeedTickets("replace-all")} disabled={!ticketImportText.trim()}>
+                      Replace All
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {ticketDraftCandidates.length > 0 && (
+                <details className="ticket-draft-details" open>
+                  <summary>Draft candidates</summary>
+                  <pre className="raw-json">{JSON.stringify(ticketDraftCandidates, null, 2)}</pre>
+                  <button className="secondary-action" onClick={() => acceptDraftCandidates()}>
+                    Accept Candidates
+                  </button>
+                </details>
+              )}
+
+              {ticketMessage && <p className="empty-copy">{ticketMessage}</p>}
+            </div>
+          )}
           <div className="toggle-grid">
             <ToggleRow
               checked={draft.worker_agents_allowed}
-              label="Worker-agent defaults"
+              label="Read-only workers"
               detail="Allow read-only worker report agents when strategy says they help."
               onChange={(checked) => updateDraft("worker_agents_allowed", checked)}
             />
             <ToggleRow
               checked={draft.codex_cli_workers_expected_on_broad_runs}
-              label="Codex CLI workers on broad runs"
+              label="Codex CLI workers"
               onChange={(checked) => updateDraft("codex_cli_workers_expected_on_broad_runs", checked)}
             />
             <ToggleRow
               checked={draft.write_worker_agents_allowed}
-              label="Bounded write-worker opt-in"
+              label="Write workers"
               detail="Keeps write workers explicit, bounded, and ownership-scoped."
               onChange={(checked) =>
                 setDraft((current) => ({
@@ -1005,13 +1162,8 @@ export function BriefWizard(props: {
               }
             />
             <ToggleRow
-              checked={draft.automation_signals_enabled}
-              label="Automation signals"
-              onChange={(checked) => updateDraft("automation_signals_enabled", checked)}
-            />
-            <ToggleRow
               checked={draft.automation_checkpoint_commits}
-              label="Automation checkpoint commits"
+              label="Checkpoint commits"
               onChange={(checked) => updateDraft("automation_checkpoint_commits", checked)}
             />
             <ToggleRow
@@ -1021,7 +1173,7 @@ export function BriefWizard(props: {
             />
             <ToggleRow
               checked={draft.multi_role_allow_remotes}
-              label="Allow multi-role remotes flag"
+              label="Allow remotes"
               onChange={(checked) => updateDraft("multi_role_allow_remotes", checked)}
             />
           </div>
@@ -1062,7 +1214,7 @@ export function BriefWizard(props: {
                 rows={5}
               />
             </FormField>
-            <FormField label="Automation prohibitions">
+            <FormField label="Prohibited actions">
               <textarea
                 value={listToText(draft.automation_must_never_do)}
                 onChange={(event) => updateList("automation_must_never_do", event.target.value)}
@@ -1072,14 +1224,14 @@ export function BriefWizard(props: {
           </div>
         </section>
         <section className="brief-section">
-          <h2>Human Bridge</h2>
+          <h2>Inbox</h2>
           <ToggleRow
             checked={draft.human_bridge_enabled}
-            label="Enable file-only messaging"
-            detail="Generated targets use Markdown handoff files by default."
+            label="Enable inbox files"
+            detail="Generated targets use Markdown inbox files."
             onChange={(checked) => updateDraft("human_bridge_enabled", checked)}
           />
-          <FormField label="Bridge mode">
+          <FormField label="Inbox mode">
             <select
               value={draft.human_bridge_mode}
               onChange={(event) => updateDraft("human_bridge_mode", event.target.value as IntakeDraft["human_bridge_mode"])}
@@ -1092,7 +1244,7 @@ export function BriefWizard(props: {
           </FormField>
           <ToggleRow
             checked={draft.human_requested_text_responses}
-            label="Text responses requested"
+            label="Request text responses"
             onChange={(checked) => updateDraft("human_requested_text_responses", checked)}
           />
           <ToggleRow
@@ -1139,15 +1291,15 @@ export function BriefWizard(props: {
       <div className="brief-step-grid">
         <section className="brief-section span-3">
           <div className="section-heading-row">
-            <h2>Context Files</h2>
+            <h2>Context files</h2>
             <button className="secondary-action" disabled={!targetPath || contextBusy} onClick={addContextFiles}>
               <FilePlus2 size={17} />
-              Add Context Files
+              Add context files
             </button>
           </div>
           <div className="context-drop-zone">
             <FolderOpen size={18} />
-            <span>Files are copied into target-local .diffmogger/context/ and indexed in .diffmogger/state/PROJECT_CONTEXT.md.</span>
+            <span>Files are copied to .diffmogger/context/ and indexed in .diffmogger/state/PROJECT_CONTEXT.md.</span>
           </div>
           {contextFiles.length ? (
             <div className="context-file-list">
@@ -1169,13 +1321,10 @@ export function BriefWizard(props: {
   }
 
   function renderReviewStep() {
-    const laneLabel =
-      automationLaneForDraft(draft) === "multi_role_conveyor"
-        ? "Planner / builder / hardener / integrator conveyor"
-        : "Single scheduled lane";
-    const modeLabel = `${laneLabel} · ${
-      automationScopeForDraft(draft) === "ticket_campaign" ? "ticket campaign" : "boundless build"
+    const modeLabel = `Continuous role conveyor · ${
+      automationScopeForDraft(draft) === "ticket_campaign" ? "ticket file" : "continuous improvement"
     }`;
+    const reviewTicketIssues = localTicketIssues(draft.ticket_run_seed_tickets);
     return (
       <div className="brief-step-grid">
         <section className="brief-section span-2">
@@ -1186,11 +1335,11 @@ export function BriefWizard(props: {
               <strong>{targetPath ?? "No target selected"}</strong>
             </div>
             <div>
-              <span>Automation mode</span>
+              <span>Run mode</span>
               <strong>{modeLabel}</strong>
             </div>
             <div>
-              <span>Human bridge</span>
+              <span>Inbox</span>
               <strong>{draft.human_bridge_enabled ? draft.human_bridge_mode : "disabled"}</strong>
             </div>
             <div>
@@ -1203,9 +1352,27 @@ export function BriefWizard(props: {
             </div>
             <div>
               <span>Run controls</span>
-              <strong>{scaffoldResult ? "Available now" : "Available after bootstrap succeeds"}</strong>
+              <strong>{scaffoldResult ? "Available now" : "Available after scaffold succeeds"}</strong>
             </div>
+            {automationScopeForDraft(draft) === "ticket_campaign" && (
+              <div>
+                <span>Seed tickets</span>
+                <strong>
+                  {draft.ticket_run_seed_tickets.length} ticket{draft.ticket_run_seed_tickets.length === 1 ? "" : "s"} · {reviewTicketIssues.length} issue{reviewTicketIssues.length === 1 ? "" : "s"}
+                </strong>
+              </div>
+            )}
           </div>
+          {automationScopeForDraft(draft) === "ticket_campaign" && reviewTicketIssues.length > 0 && (
+            <div className="ticket-issue-list">
+              {reviewTicketIssues.slice(0, 5).map((issue, index) => (
+                <div className={`ticket-issue ${issue.level}`} key={`${issue.type}-review-${index}`}>
+                  <AlertTriangle size={14} />
+                  <span>{issueLabel(issue)}</span>
+                </div>
+              ))}
+            </div>
+          )}
           {preview?.warnings.length ? (
             <div className="preview-warnings">
               {preview.warnings.map((warning) => (
@@ -1237,9 +1404,9 @@ export function BriefWizard(props: {
                 </span>
                 {scaffoldResult.native_next_state.reason && <small>{scaffoldResult.native_next_state.reason}</small>}
                 <div className="result-actions">
-                  <button className="secondary-action" onClick={() => props.onNavigate("Run")}>Open Run</button>
+                  <button className="secondary-action" onClick={() => props.onNavigate("Run")}>Run</button>
                   {scaffoldResult.native_next_state.state === "FIRST_REVIEW_NEEDED" && (
-                    <button className="secondary-action" onClick={() => props.onNavigate("Review")}>Open Review</button>
+                    <button className="secondary-action" onClick={() => props.onNavigate("Review")}>Review</button>
                   )}
                 </div>
               </div>
@@ -1249,12 +1416,12 @@ export function BriefWizard(props: {
             <div className="brief-failure">
               <strong>{scaffoldFailure.errorType ?? "Scaffold failed"}</strong>
               <p>{scaffoldFailure.message}</p>
-              <button className="secondary-action" onClick={() => props.onNavigate("Advanced")}>Diagnostics</button>
+              <button className="secondary-action" onClick={() => props.onNavigate("Advanced")}>Debug</button>
             </div>
           )}
         </section>
         <section className="brief-section">
-          <h2>File Preview</h2>
+          <h2>Files</h2>
           <div className="generated-preview">
             {preview?.files ? (
               preview.files.map((file) => (
@@ -1267,13 +1434,13 @@ export function BriefWizard(props: {
               ))
             ) : (
               <div className="empty-copy">
-                {previewState === "loading" ? "Building backend scaffold preview." : "Backend preview is not available yet."}
+                {previewState === "loading" ? "Building preview." : "Preview is not available yet."}
               </div>
             )}
           </div>
         </section>
         <section className="brief-section span-3">
-          <h2>Progress Log</h2>
+          <h2>Log</h2>
           <div className="progress-log">
             {progressLogs.length ? (
               progressLogs.map((event, index) => (
@@ -1283,7 +1450,7 @@ export function BriefWizard(props: {
                 </div>
               ))
             ) : (
-              <div className="empty-copy">Progress logs will stream here while scaffold and validation run.</div>
+              <div className="empty-copy">Logs stream here while setup and validation run.</div>
             )}
           </div>
         </section>
@@ -1305,8 +1472,7 @@ export function BriefWizard(props: {
     <section className="brief-wizard">
       <div className="brief-header">
         <div>
-          <div className="brief-eyebrow">Guided Intake</div>
-          <h1>{draft.project_name || "New Project"}</h1>
+          <h1>Setup</h1>
           <p>{targetStatus(props.snapshot)}</p>
         </div>
         <div className={`brief-save-pill ${saveState}`}>
@@ -1345,7 +1511,7 @@ export function BriefWizard(props: {
         ) : (
           <button className="primary-action" disabled={!targetPath || scaffoldBusy || previewState !== "ready"} onClick={scaffoldBootstrap}>
             <Hammer size={17} />
-            {scaffoldBusy ? "Working" : "Scaffold & Bootstrap"}
+            {scaffoldBusy ? "Working" : "Scaffold"}
           </button>
         )}
       </footer>

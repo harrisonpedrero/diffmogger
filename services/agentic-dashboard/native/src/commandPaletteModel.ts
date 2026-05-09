@@ -10,12 +10,10 @@ export type PaletteCommandId =
   | "import-context-files"
   | "scaffold-bootstrap"
   | "run-once"
-  | "start-schedule"
-  | "pause-schedule"
-  | "remove-schedule"
+  | "start-automation"
+  | "stop-automation"
   | "run-safety-check"
   | "open-observatory"
-  | "open-observatory-browser"
   | "export-review-bundle"
   | "send-note-next-run"
   | "open-raw-automation-tasks"
@@ -25,7 +23,7 @@ export type PaletteCommandId =
 export type PaletteCommand = {
   id: PaletteCommandId;
   title: string;
-  section: "Project" | "Brief" | "Run" | "Observatory" | "Review" | "Inbox" | "Advanced";
+  section: "Project" | "Setup" | "Run" | "Activity" | "Review" | "Inbox" | "Debug";
   description: string;
   keywords: string[];
   disabledReason?: string;
@@ -53,8 +51,8 @@ function runControlReason(snapshot: ProjectSnapshot | null, key: string, fallbac
   return value === true ? undefined : String(controls[`${key.replace(/^can_/, "").replace(/_/g, "_")}_reason`] ?? fallback);
 }
 
-function scheduleState(snapshot: ProjectSnapshot | null): string {
-  const value = snapshot?.run.schedule?.state;
+function automationState(snapshot: ProjectSnapshot | null): string {
+  const value = snapshot?.run.automation?.state;
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
@@ -62,7 +60,7 @@ function rawAutomationTasksReason(snapshot: ProjectSnapshot | null): string | un
   const targetReason = reasonForTarget(snapshot);
   if (targetReason) return targetReason;
   const file = snapshot?.files.find((item) => item.key === "monitor.automation_tasks");
-  return file?.exists ? undefined : "Automation tasks file does not exist yet. Finish the Brief first.";
+  return file?.exists ? undefined : "Task file does not exist yet. Complete setup first.";
 }
 
 function reviewExportReason(snapshot: ProjectSnapshot | null): string | undefined {
@@ -71,7 +69,7 @@ function reviewExportReason(snapshot: ProjectSnapshot | null): string | undefine
   const controls = snapshot?.run.controls ?? {};
   return controls.can_export_review === true
     ? undefined
-    : "Finish the Brief before exporting a review bundle.";
+    : "Complete setup before exporting review files.";
 }
 
 export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] {
@@ -91,9 +89,9 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
     },
     {
       id: "create-new-project",
-      title: "Create new project",
+      title: "New project",
       section: "Project",
-      description: "Open the Brief flow for a fresh target folder.",
+      description: "Open setup for a fresh target folder.",
       keywords: ["fresh", "new", "brief"],
       routesTo: "Brief",
       disabledReason: busyReason,
@@ -124,9 +122,9 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
     },
     {
       id: "continue-brief",
-      title: "Continue Brief",
-      section: "Brief",
-      description: "Return to guided intake and scaffold setup.",
+      title: "Open setup",
+      section: "Setup",
+      description: "Return to setup.",
       keywords: ["intake", "setup", "wizard"],
       routesTo: "Brief",
       disabledReason: busyReason,
@@ -134,18 +132,18 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
     {
       id: "import-context-files",
       title: "Import context files",
-      section: "Brief",
+      section: "Setup",
       description: "Choose files and import them into .diffmogger/context through the backend.",
       keywords: ["context", "files", "docs"],
       disabledReason: busyReason ?? targetReason,
     },
     {
       id: "scaffold-bootstrap",
-      title: "Scaffold & Bootstrap",
-      section: "Brief",
+      title: "Scaffold",
+      section: "Setup",
       description: scaffolded
-        ? "Open Brief to review scaffold settings before running this again."
-        : "Open Brief review step before writing generated project files.",
+        ? "Open setup to review scaffold settings before running this again."
+        : "Open setup review before writing generated project files.",
       keywords: ["scaffold", "bootstrap", "setup"],
       dangerous: true,
       routesTo: "Brief",
@@ -153,9 +151,9 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
     },
     {
       id: "run-once",
-      title: "Run once now",
+      title: "Run",
       section: "Run",
-      description: "Run the target-local automation script once.",
+      description: "Run the target-local runner once.",
       keywords: ["run", "automation", "now"],
       dangerous: true,
       disabledReason:
@@ -163,49 +161,35 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
         targetReason ??
         (snapshot?.run.controls?.can_run_now === true
           ? undefined
-          : String(snapshot?.run.controls?.run_now_reason ?? "Automation is not ready to run.")),
+          : String(snapshot?.run.controls?.run_now_reason ?? "Runner is not ready.")),
     },
     {
-      id: "start-schedule",
-      title: "Start schedule",
+      id: "start-automation",
+      title: "Start",
       section: "Run",
-      description: "Start dashboard-managed scheduled automation.",
-      keywords: ["schedule", "launchd", "start"],
+      description: "Start automation.",
+      keywords: ["automation", "conveyor", "start"],
       dangerous: true,
       disabledReason:
         busyReason ??
         targetReason ??
-        (snapshot?.run.controls?.can_start_schedule === true
+        (snapshot?.run.controls?.can_start_automation === true
           ? undefined
-          : String(snapshot?.run.controls?.start_schedule_reason ?? "Schedule is not ready to start.")),
+          : String(snapshot?.run.controls?.start_automation_reason ?? "Automation is not ready to start.")),
     },
     {
-      id: "pause-schedule",
-      title: "Pause schedule",
+      id: "stop-automation",
+      title: "Stop",
       section: "Run",
-      description: "Pause dashboard-managed scheduled automation.",
-      keywords: ["schedule", "launchd", "pause"],
+      description: "Stop automation.",
+      keywords: ["automation", "conveyor", "stop"],
       dangerous: true,
       disabledReason:
         busyReason ??
         targetReason ??
-        (snapshot?.run.controls?.can_pause_schedule === true && scheduleState(snapshot) === "running"
+        (snapshot?.run.controls?.can_stop_automation === true && automationState(snapshot) === "running"
           ? undefined
-          : String(snapshot?.run.controls?.pause_schedule_reason ?? "No schedule is available to pause.")),
-    },
-    {
-      id: "remove-schedule",
-      title: "Remove schedule",
-      section: "Run",
-      description: "Remove dashboard-managed LaunchAgent plist(s) without deleting generated project files.",
-      keywords: ["schedule", "launchd", "remove", "delete", "plist"],
-      dangerous: true,
-      disabledReason:
-        busyReason ??
-        targetReason ??
-        (snapshot?.run.controls?.can_remove_schedule === true
-          ? undefined
-          : String(snapshot?.run.controls?.remove_schedule_reason ?? "No schedule is available to remove.")),
+          : String(snapshot?.run.controls?.stop_automation_reason ?? "No automation is running.")),
     },
     {
       id: "run-safety-check",
@@ -220,26 +204,18 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
     },
     {
       id: "open-observatory",
-      title: "Open Observatory",
-      section: "Observatory",
-      description: "Open the native Observatory page.",
+      title: "Open activity",
+      section: "Activity",
+      description: "Open Activity.",
       keywords: ["log", "build", "observatory"],
       routesTo: "Observatory",
       disabledReason: busyReason ?? targetReason,
     },
     {
-      id: "open-observatory-browser",
-      title: "Open Observatory in browser",
-      section: "Observatory",
-      description: "Generate the old HTML Observatory and open it in the default browser.",
-      keywords: ["html", "browser", "autonomous build log"],
-      disabledReason: busyReason ?? targetReason,
-    },
-    {
       id: "export-review-bundle",
-      title: "Export review bundle",
+      title: "Export review",
       section: "Review",
-      description: "Export Observatory HTML and self-review Markdown.",
+      description: "Export review files.",
       keywords: ["review", "bundle", "export"],
       disabledReason: busyReason ?? reviewExportReason(snapshot),
     },
@@ -247,33 +223,33 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       id: "send-note-next-run",
       title: "Send note to next run",
       section: "Inbox",
-      description: "Open Inbox to write a file-only note for the next automation run.",
-      keywords: ["inbox", "human bridge", "note"],
+      description: "Write a file-based note for the next run.",
+      keywords: ["inbox", "note"],
       routesTo: "Inbox",
       disabledReason: busyReason ?? targetReason,
     },
     {
       id: "open-raw-automation-tasks",
-      title: "Open raw automation tasks",
-      section: "Advanced",
+      title: "Open task state",
+      section: "Debug",
       description: "Open .diffmogger/state/CODEX_AUTOMATION_TASKS.md through the managed file allowlist.",
       keywords: ["raw", "tasks", "markdown"],
       disabledReason: busyReason ?? rawAutomationTasksReason(snapshot),
     },
     {
       id: "open-diagnostics",
-      title: "Open Diagnostics",
-      section: "Advanced",
-      description: "Open Advanced diagnostics.",
+      title: "Open diagnostics",
+      section: "Debug",
+      description: "Open diagnostics.",
       keywords: ["doctor", "checks", "diagnostics"],
       routesTo: "Advanced",
       disabledReason: busyReason ?? targetReason,
     },
     {
       id: "export-debug-bundle",
-      title: "Export debug bundle",
-      section: "Advanced",
-      description: "Export a redacted support bundle without .env contents.",
+      title: "Export debug ZIP",
+      section: "Debug",
+      description: "Export redacted debug files without .env contents.",
       keywords: ["debug", "support", "zip", "diagnostics"],
       disabledReason: busyReason ?? targetReason,
     },

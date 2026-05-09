@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   type IntakeDraft,
-  applyAutomationLane,
   applyAutomationScope,
-  automationLaneForDraft,
   automationScopeForDraft,
 } from "./BriefWizard";
 
@@ -21,7 +19,6 @@ function draft(overrides: Partial<IntakeDraft> = {}): IntakeDraft {
     external_services: [],
     env_access_policy: "project_commands_only",
     verification_commands: [],
-    desired_cadence: "every 60 minutes",
     human_bridge_enabled: true,
     human_bridge_mode: "file_only",
     human_requested_text_responses: true,
@@ -31,16 +28,14 @@ function draft(overrides: Partial<IntakeDraft> = {}): IntakeDraft {
     write_worker_agents_allowed: false,
     max_write_worker_count: 0,
     write_worker_guidance: "",
-    multi_role_automations_allowed: false,
-    automation_role_profile: "single_lane",
+    multi_role_automations_allowed: true,
+    automation_role_profile: "planner_builder_hardener_integrator",
     automation_checkpoint_commits: true,
-    multi_role_base_cadence_minutes: 30,
-    automation_schedule_strategy: "single_lane_interval",
     multi_role_allow_remotes: false,
-    automation_signals_enabled: false,
     optional_mcp_servers: [],
     automation_run_mode: "continuous_improvement",
     ticket_run_file: ".diffmogger/state/TICKET_RUN.md",
+    ticket_run_seed_tickets: [],
     ticket_completion_notify: true,
     meaningful_deliverable: "A useful change.",
     beyond_mvp: "Keep improving.",
@@ -52,50 +47,11 @@ function draft(overrides: Partial<IntakeDraft> = {}): IntakeDraft {
 }
 
 describe("Brief automation mode mapping", () => {
-  it("maps the simplified single-lane choice to legacy backend fields", () => {
-    const next = applyAutomationLane(
-      draft({
-        multi_role_automations_allowed: true,
-        automation_role_profile: "planner_builder_hardener_integrator",
-        automation_schedule_strategy: "continuous_conveyor",
-      }),
-      "single_scheduled_lane",
-    );
-
-    expect(next.multi_role_automations_allowed).toBe(false);
-    expect(next.automation_role_profile).toBe("single_lane");
-    expect(next.automation_schedule_strategy).toBe("single_lane_interval");
-    expect(automationLaneForDraft(next)).toBe("single_scheduled_lane");
-  });
-
-  it("maps the P/B/H/I conveyor choice to legacy backend fields", () => {
-    const next = applyAutomationLane(draft(), "multi_role_conveyor");
+  it("defaults to the continuous role conveyor", () => {
+    const next = draft();
 
     expect(next.multi_role_automations_allowed).toBe(true);
     expect(next.automation_role_profile).toBe("planner_builder_hardener_integrator");
-    expect(next.automation_schedule_strategy).toBe("continuous_conveyor");
-    expect(automationLaneForDraft(next)).toBe("multi_role_conveyor");
-  });
-
-  it("normalizes legacy conveyor combinations for display", () => {
-    expect(
-      automationLaneForDraft(
-        draft({
-          multi_role_automations_allowed: false,
-          automation_role_profile: "single_lane",
-          automation_schedule_strategy: "continuous_conveyor",
-        }),
-      ),
-    ).toBe("multi_role_conveyor");
-    expect(
-      automationLaneForDraft(
-        draft({
-          multi_role_automations_allowed: false,
-          automation_role_profile: "planner_builder_hardener_integrator",
-          automation_schedule_strategy: "single_lane_interval",
-        }),
-      ),
-    ).toBe("multi_role_conveyor");
   });
 
   it("maps build scope between boundless build and ticket campaign", () => {
@@ -106,5 +62,15 @@ describe("Brief automation mode mapping", () => {
     expect(automationScopeForDraft(ticket)).toBe("ticket_campaign");
     expect(boundless.automation_run_mode).toBe("continuous_improvement");
     expect(automationScopeForDraft(boundless)).toBe("boundless_build");
+  });
+
+  it("carries seed tickets in ticket-campaign drafts", () => {
+    const ticket = draft({
+      automation_run_mode: "ticket_campaign",
+      ticket_run_seed_tickets: [{ id: "TICKET-001", summary: "Inspect queue", status: "pending", depends_on: [], acceptance_criteria: [], verification_commands: [], evidence: [], related_commits: [], blocker: "" }],
+    });
+
+    expect(ticket.ticket_run_seed_tickets).toHaveLength(1);
+    expect(ticket.ticket_run_seed_tickets[0].status).toBe("pending");
   });
 });

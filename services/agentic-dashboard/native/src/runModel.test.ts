@@ -23,17 +23,13 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
         is_scaffolded: true,
         is_running: false,
         can_run_now: true,
-        can_start_schedule: true,
-        can_pause_schedule: false,
-        can_remove_schedule: false,
+        can_start_automation: true,
+        can_stop_automation: false,
         can_run_safety_check: true,
       },
-      schedule: {
-        state: "not_installed",
-        message: "Schedule is ready to start.",
-        strategy_label: "Periodic sprint",
-        cadence_seconds: 3600,
-        active_labels: ["com.diffmogger.automation.project"],
+      automation: {
+        state: "stopped",
+        message: "Continuous automation is ready to start.",
       },
       worker_strategy: {
         strategy: "NO_WORKERS",
@@ -73,11 +69,10 @@ describe("buildRunModel", () => {
   it("disables run controls when no target is selected", () => {
     const model = buildRunModel(null);
 
-    expect(model.banner.primaryAction.label).toBe("Choose Project");
+    expect(model.banner.primaryAction.label).toBe("Choose project");
     expect(model.controls.runOnce.enabled).toBe(false);
-    expect(model.controls.startSchedule.enabled).toBe(false);
-    expect(model.controls.pauseSchedule.enabled).toBe(false);
-    expect(model.controls.removeSchedule.enabled).toBe(false);
+    expect(model.controls.startAutomation.enabled).toBe(false);
+    expect(model.controls.stopAutomation.enabled).toBe(false);
   });
 
   it("maps unscaffolded targets to the Brief gate", () => {
@@ -95,47 +90,43 @@ describe("buildRunModel", () => {
           controls: {
             is_scaffolded: false,
             can_run_now: false,
-            can_start_schedule: false,
-            can_pause_schedule: false,
-            can_remove_schedule: false,
+            can_start_automation: false,
+            can_stop_automation: false,
             can_run_safety_check: false,
           },
         },
       }),
     );
 
-    expect(model.banner.headline).toBe("Finish the Brief before running automation.");
-    expect(model.banner.primaryAction.label).toBe("Go to Brief");
+    expect(model.banner.headline).toBe("Not Ready");
+    expect(model.banner.primaryAction.label).toBe("Open setup");
     expect(model.controls.runOnce.enabled).toBe(false);
-    expect(model.controls.startSchedule.enabled).toBe(false);
+    expect(model.controls.startAutomation.enabled).toBe(false);
     expect(model.controls.safetyCheck.enabled).toBe(false);
-    expect(model.controls.removeSchedule.enabled).toBe(false);
   });
 
-  it("enables Run Once Now and Start Schedule for ready scaffolded targets", () => {
+  it("enables Run and Start for ready scaffolded targets", () => {
     const model = buildRunModel(snapshot());
 
-    expect(model.banner.primaryAction.label).toBe("Run Once Now");
+    expect(model.banner.primaryAction.label).toBe("Start");
     expect(model.controls.runOnce.enabled).toBe(true);
-    expect(model.controls.startSchedule.enabled).toBe(true);
-    expect(model.controls.pauseSchedule.enabled).toBe(false);
-    expect(model.controls.removeSchedule.enabled).toBe(false);
+    expect(model.controls.startAutomation.enabled).toBe(true);
+    expect(model.controls.stopAutomation.enabled).toBe(false);
     expect(model.controls.safetyCheck.enabled).toBe(true);
   });
 
-  it("disables launch controls while a run is active", () => {
+  it("disables start controls while automation is active", () => {
     const model = buildRunModel(
       snapshot({
         run: {
           controls: {
             is_running: true,
             can_run_now: false,
-            can_start_schedule: false,
-            can_pause_schedule: true,
-            can_remove_schedule: false,
+            can_start_automation: false,
+            can_stop_automation: true,
             can_run_safety_check: true,
           },
-          schedule: { state: "running", message: "Schedule is running via launchd." },
+          automation: { state: "running", message: "Continuous automation is running." },
           task: { status: "RUNNING" },
         },
       }),
@@ -143,51 +134,45 @@ describe("buildRunModel", () => {
 
     expect(model.isRunning).toBe(true);
     expect(model.controls.runOnce.enabled).toBe(false);
-    expect(model.controls.startSchedule.enabled).toBe(false);
-    expect(model.controls.pauseSchedule.enabled).toBe(true);
-    expect(model.controls.removeSchedule.enabled).toBe(false);
+    expect(model.controls.startAutomation.enabled).toBe(false);
+    expect(model.controls.stopAutomation.enabled).toBe(true);
   });
 
-  it("enables Pause Schedule only when a schedule is running", () => {
+  it("enables Stop only when automation is running", () => {
     const model = buildRunModel(
       snapshot({
         run: {
           controls: {
             can_run_now: true,
-            can_start_schedule: true,
-            can_pause_schedule: true,
-            can_remove_schedule: true,
+            can_start_automation: false,
+            can_stop_automation: true,
             can_run_safety_check: true,
           },
-          schedule: { state: "running", message: "Schedule is running via launchd.", can_remove: true },
+          automation: { state: "running", message: "Continuous automation is running." },
         },
       }),
     );
 
-    expect(model.controls.pauseSchedule.enabled).toBe(true);
-    expect(model.controls.removeSchedule.enabled).toBe(true);
-    expect(model.schedule.canRemove).toBe(true);
+    expect(model.controls.stopAutomation.enabled).toBe(true);
   });
 
-  it("keeps Pause Schedule disabled for installed schedules that are not running", () => {
+  it("keeps Stop disabled when automation is stopped", () => {
     const model = buildRunModel(
       snapshot({
         run: {
           controls: {
             can_run_now: true,
-            can_start_schedule: true,
-            can_pause_schedule: true,
-            pause_schedule_reason: "Schedule plist exists but is not loaded.",
-            can_remove_schedule: true,
+            can_start_automation: true,
+            can_stop_automation: false,
+            stop_automation_reason: "No automation is running.",
             can_run_safety_check: true,
           },
-          schedule: { state: "installed", message: "Schedule plist exists but is not loaded.", can_remove: true },
+          automation: { state: "stopped", message: "Continuous automation is ready to start." },
         },
       }),
     );
 
-    expect(model.controls.pauseSchedule.enabled).toBe(false);
-    expect(model.controls.removeSchedule.enabled).toBe(true);
+    expect(model.controls.stopAutomation.enabled).toBe(false);
   });
 
   it("translates read-only worker strategy strings into human copy", () => {
@@ -207,7 +192,7 @@ describe("buildRunModel", () => {
       }),
     );
 
-    expect(model.worker.headline).toBe("Recommended: one read-only review worker for builder work.");
+    expect(model.worker.headline).toBe("Read-only workers: one for builder.");
     expect(model.worker.actions.readOnly.enabled).toBe(true);
     expect(model.worker.actions.write.enabled).toBe(false);
   });

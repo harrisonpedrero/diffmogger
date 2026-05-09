@@ -28,7 +28,7 @@ function projectSnapshot(): ProjectSnapshot {
       title: "Project",
       automation_status: "ACTIVE",
       current_horizon: "H1 Runnable baseline",
-      next_action: "Run Once Now",
+      next_action: "Run",
       pending_human_requests: 0,
       unhandled_inbox: 0,
       queued_patches: 0,
@@ -42,8 +42,8 @@ function observatorySnapshot(overrides: DeepPartial<ObservatorySnapshot> = {}): 
     schema_version: 1,
     generated_at: "2026-05-06T12:00:00+00:00",
     target: projectSnapshot().target,
-    title: "Diffmogger Autonomous Build Log",
-    subtitle: "Diffmogger Observatory view: replay-style automation progress reconstructed from conveyor events, commits, and diff stats.",
+    title: "Activity",
+    subtitle: "Run, queue, commit, and check state from the selected target.",
     mission: {
       project_name: "Project",
       automation_status: "ACTIVE",
@@ -113,7 +113,7 @@ describe("ObservatoryPage", () => {
       <ObservatoryPage snapshot={null} loading={false} onChoose={() => undefined} onRefresh={() => undefined} />,
     );
 
-    expect(html).toContain("Diffmogger Autonomous Build Log");
+    expect(html).toContain("Activity");
     expect(html).toContain("Choose a project folder");
   });
 
@@ -122,8 +122,8 @@ describe("ObservatoryPage", () => {
       observatorySnapshot({ conveyor: { active_run: { role: "builder", status: "running" } } }),
     );
 
-    expect(html).toContain("builder is running");
     expect(html).toContain("Running now");
+    expect(html).toContain("Running: Builder");
   });
 
   it("renders a queued patch", () => {
@@ -156,14 +156,12 @@ describe("ObservatoryPage", () => {
       }),
     );
 
-    expect(html).toContain("Human input is needed");
     expect(html).toContain("BLOCKED_ON_USER");
   });
 
   it("renders a critical stop", () => {
     const html = render(observatorySnapshot({ mission: { automation_status: "CRITICAL_STOP" } }));
 
-    expect(html).toContain("Critical stop is active");
     expect(html).toContain("CRITICAL_STOP");
   });
 });

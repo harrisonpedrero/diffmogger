@@ -31,7 +31,6 @@ import {
   listRecentProjects,
   loadProjectSnapshot,
   openManagedFile,
-  openObservatoryFile,
   openProjectInEditor,
   revealProject,
   runBackendCommand,
@@ -68,14 +67,14 @@ export type ViewKey =
 type LoadState = "idle" | "loading" | "loaded" | "error";
 type CachedRouteVisits = Record<ViewKey, boolean>;
 
-const views: Array<{ key: ViewKey; icon: typeof Home }> = [
-  { key: "Home", icon: Home },
-  { key: "Brief", icon: FileText },
-  { key: "Run", icon: PlayCircle },
-  { key: "Observatory", icon: Telescope },
-  { key: "Inbox", icon: Inbox },
-  { key: "Review", icon: ClipboardCheck },
-  { key: "Advanced", icon: SlidersHorizontal },
+const views: Array<{ key: ViewKey; label: string; icon: typeof Home }> = [
+  { key: "Home", label: "Home", icon: Home },
+  { key: "Brief", label: "Setup", icon: FileText },
+  { key: "Run", label: "Run", icon: PlayCircle },
+  { key: "Observatory", label: "Activity", icon: Telescope },
+  { key: "Inbox", label: "Inbox", icon: Inbox },
+  { key: "Review", label: "Review", icon: ClipboardCheck },
+  { key: "Advanced", label: "Debug", icon: SlidersHorizontal },
 ];
 
 const transparentBackground: [number, number, number, number] = [0, 0, 0, 0];
@@ -102,31 +101,35 @@ const targetRequiredCopy: Record<
   { title: string; body: string; detail: string }
 > = {
   Run: {
-    title: "Open a project before running automation",
-    body: "Run controls, schedule state, worker strategy, and logs are target-local.",
-    detail: "Choose a project folder to load readiness and automation controls, or continue the Brief to create a new target.",
+    title: "Select a project to run jobs",
+    body: "Run controls, automation state, worker strategy, and logs are target-local.",
+    detail: "Choose a project folder or complete setup for a new target.",
   },
   Observatory: {
-    title: "Open a project to view the Observatory",
-    body: "The Observatory reconstructs automation progress from the selected target's commits, conveyor events, and patch queues.",
-    detail: "Once a project is selected, this page shows the native build log and keeps the old HTML export available.",
+    title: "Select a project to view activity",
+    body: "Activity is built from the selected target's commits, role events, checks, and patch queues.",
+    detail: "Choose a project folder to load current target activity.",
   },
   Inbox: {
-    title: "Open a project to use the human bridge",
-    body: "Requests, replies, and notes to the next run live in target-local Markdown bridge files.",
-    detail: "Choose a target to see pending requests or start a new Brief to configure file-only messaging.",
+    title: "Select a project to open the inbox",
+    body: "Requests, replies, and next-run notes live in target-local Markdown files.",
+    detail: "Choose a target to see pending requests or complete setup for file-based messaging.",
   },
   Review: {
-    title: "Open a project before reviewing automation",
+    title: "Select a project to review a run",
     body: "Review evidence is generated from the selected target's latest run, changed files, validation, and safety results.",
-    detail: "After a project is loaded, you can export the review bundle or send follow-up notes to the next run.",
+    detail: "After a project is loaded, you can export review files or send a next-run note.",
   },
   Advanced: {
-    title: "Open a project to access managed files",
-    body: "Diagnostics, raw Markdown editing, settings, and debug bundles are scoped to a selected target.",
+    title: "Select a project to inspect debug tools",
+    body: "Diagnostics, managed files, settings, and debug exports are scoped to a selected target.",
     detail: "Choose a project folder to inspect allowed files and run readiness checks.",
   },
 };
+
+function viewLabel(view: ViewKey): string {
+  return views.find((item) => item.key === view)?.label ?? view;
+}
 
 export function viewRequiresTarget(view: ViewKey): view is TargetRequiredView {
   return view !== "Home" && view !== "Brief";
@@ -183,12 +186,12 @@ function buildSidebarBadges(snapshot: ProjectSnapshot | null): Partial<Record<Vi
   if (!snapshot) return {};
   const task = recordValue(snapshot.run.task);
   const controls = recordValue(snapshot.run.controls);
-  const schedule = recordValue(snapshot.run.schedule);
+  const automation = recordValue(snapshot.run.automation);
   const status = textValue(task.status, snapshot.home.automation_status).toUpperCase();
   const running =
     boolValue(controls.is_running) ||
     status.includes("RUNNING") ||
-    textValue(schedule.state).toLowerCase() === "running";
+    textValue(automation.state).toLowerCase() === "running";
   const needsInput =
     status.includes("PENDING_USER_INPUT") ||
     status.includes("BLOCKED_ON_USER") ||
@@ -339,7 +342,7 @@ function HomePage(props: {
   onNavigate: (view: HomeRoute) => void;
   onRefresh: () => void;
   onRunEnvironmentDiagnostics?: () => void;
-  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug bundle";
+  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug";
 }) {
   const model = buildHomeModel(props.snapshot);
 
@@ -351,7 +354,6 @@ function HomePage(props: {
 
   const noTarget = !props.snapshot;
   const hasRecentTargets = noTarget && props.recents.length > 0;
-  const showFirstRunEmpty = props.snapshot && model.hasNoRuns && !model.isUnconfigured;
 
   async function copyCommand(command: string) {
     try {
@@ -365,7 +367,6 @@ function HomePage(props: {
     <section className={`home-page ${noTarget ? "no-target" : "with-target"} ${hasRecentTargets ? "has-recents" : "no-recents"}`}>
       <div className={`home-banner ${model.statusTone}`}>
         <div>
-          <div className="home-eyebrow">{model.projectName}</div>
           <h1>{model.headline}</h1>
           <p>{model.subheadline}</p>
           <div className="home-actions">
@@ -388,14 +389,6 @@ function HomePage(props: {
               </button>
             ))}
           </div>
-        </div>
-        <div className={`state-badge ${model.statusTone}`}>
-          {model.statusTone === "critical" || model.statusTone === "warn" ? (
-            <AlertTriangle size={17} />
-          ) : (
-            <CheckCircle2 size={17} />
-          )}
-          {model.statusLabel}
         </div>
       </div>
 
@@ -432,8 +425,8 @@ function HomePage(props: {
         <div className="panel home-setup-doctor span-3">
           <div className="panel-heading-row">
             <div>
-              <h2>Native Setup Doctor</h2>
-              <p>Check the backend runtime the packaged app will use after cloning and building Diffmogger.</p>
+              <h2>Backend checks</h2>
+              <p>Check the backend runtime used by the packaged app.</p>
             </div>
             <button
               className="secondary-action"
@@ -473,28 +466,15 @@ function HomePage(props: {
             </>
           ) : (
             <div className="empty-copy">
-              The native app uses a Homebrew-friendly backend PATH so GUI launches see the same tools as scheduled automation.
+              Run checks to verify the backend PATH and required tools.
             </div>
           )}
         </div>
       )}
 
-      {showFirstRunEmpty && (
-        <div className="home-education panel span-3">
-          <h2>No Automation Runs Yet</h2>
-          <p>
-            Diffmogger has scaffolded state for this project. The first run will create the initial
-            evidence trail: validation notes, role outcomes, queue pressure, and review context.
-          </p>
-          <button className="secondary-action" onClick={() => props.onNavigate("Run")}>
-            Run Once Now
-          </button>
-        </div>
-      )}
-
       <div className="home-grid">
         <article className="panel home-card next-action-card">
-          <h2>Recommended Next Action</h2>
+          <h2>Next action</h2>
           <strong>{model.recommendation.title}</strong>
           <p>{model.recommendation.reason}</p>
           <button
@@ -529,8 +509,7 @@ function HomePage(props: {
           <h2>{model.progress.headline}</h2>
           {model.progress.empty ? (
             <div className="empty-copy">
-              No landed automation work is recorded yet. Recent commits, role outcomes, and conveyor
-              events will appear here after the first run.
+              No commits or role results recorded yet.
             </div>
           ) : (
             <div className="progress-list">
@@ -546,7 +525,7 @@ function HomePage(props: {
         </article>
 
         <article className="panel home-card human-card">
-          <h2>Human Bridge</h2>
+          <h2>Inbox</h2>
           <div className="human-counts">
             <StatTile label="Pending requests" value={model.humanBridge.pending} tone={model.humanBridge.pending ? "warn" : "good"} />
             <StatTile label="Unhandled notes" value={model.humanBridge.unhandled} tone={model.humanBridge.unhandled ? "warn" : "good"} />
@@ -581,17 +560,17 @@ function TargetRequiredPlaceholder(props: {
       <div className="empty-mark">
         <Icon size={26} />
       </div>
-      <span className="target-placeholder-eyebrow">{props.view}</span>
+      <span className="target-placeholder-eyebrow">{viewLabel(props.view)}</span>
       <h1>{copy.title}</h1>
       <p>{copy.body}</p>
       <small>{copy.detail}</small>
       <div className="target-placeholder-actions">
         <button className="primary-action" onClick={props.onChoose}>
           <FolderOpen size={18} />
-          Choose Project Folder
+          Choose project
         </button>
         <button className="secondary-action" onClick={() => props.onNavigate("Brief")}>
-          Continue Brief
+          Open setup
         </button>
       </div>
       {props.recents.length > 0 && (
@@ -620,7 +599,7 @@ function LoadedView(props: {
   onOpenRecent: (target: RecentTarget) => void;
   onNavigate: (view: HomeRoute) => void;
   onRefresh: () => void;
-  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug bundle";
+  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug";
 }) {
   const { snapshot } = props;
   if (props.activeView === "Home") {
@@ -719,7 +698,7 @@ type CachedRouteSurfaceProps = {
   onOpenRecent: (target: RecentTarget) => void;
   onNavigate: (view: HomeRoute) => void;
   onRefresh: () => void;
-  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug bundle";
+  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug";
 };
 
 const CachedRouteSurface = memo(function CachedRouteSurface(props: CachedRouteSurfaceProps) {
@@ -761,7 +740,7 @@ function CachedLoadedView(props: {
   onNavigate: (view: HomeRoute) => void;
   onRefresh: () => void;
   cachedRoutes: CachedRouteVisits;
-  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug bundle";
+  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug";
 }) {
   return (
     <>
@@ -806,13 +785,14 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
   const [cachedRoutes, setCachedRoutes] = useState<CachedRouteVisits>(() => createCachedRouteVisits());
   const [cachedRoutesTargetPath, setCachedRoutesTargetPath] = useState("");
   const [advancedInitialTab, setAdvancedInitialTab] = useState<
-    "Files" | "Diagnostics" | "Settings" | "Debug bundle" | undefined
+    "Files" | "Diagnostics" | "Settings" | "Debug" | undefined
   >();
   const projectMenuRef = useRef<HTMLDivElement>(null);
 
   const topbarModel = useMemo(() => buildHomeModel(snapshot), [snapshot]);
   const status = topbarModel.statusLabel;
   const tone = topbarModel.statusTone;
+  const showStatusPill = tone !== "good" || !["active", "ready"].includes(status.toLowerCase());
   const sidebarBadges = useMemo(() => buildSidebarBadges(snapshot), [snapshot]);
   const paletteCommands = useMemo(
     () => buildCommandPaletteModel({
@@ -930,12 +910,12 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
         command: "diagnostics.environment",
       });
       if (!payload.ok || !payload.data) {
-        setError(payload.message ?? "Could not run native environment diagnostics.");
+        setError(payload.message ?? "Could not run backend environment checks.");
         return;
       }
       setEnvironmentDiagnostics(payload.data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not run native environment diagnostics.");
+      setError(err instanceof Error ? err.message : "Could not run backend environment checks.");
     } finally {
       setEnvironmentDiagnosticsLoading(false);
     }
@@ -1107,70 +1087,19 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       return;
     }
     if (command.id === "run-once") {
-      await runPaletteStreamed(command, "run.once", "Run automation once now?");
+      await runPaletteStreamed(command, "run.once", "Run now?");
       return;
     }
-    if (command.id === "start-schedule") {
-      await runPaletteStreamed(command, "schedule.start", "Start scheduled automation for this project?");
+    if (command.id === "start-automation") {
+      await runPaletteStreamed(command, "automation.start", "Start automation for this project?");
       return;
     }
-    if (command.id === "pause-schedule") {
-      await runPaletteStreamed(command, "schedule.pause", "Pause scheduled automation for this project?");
-      return;
-    }
-    if (command.id === "remove-schedule") {
-      setPaletteBusyId(command.id);
-      setPaletteError("");
-      setPaletteMessage("Remove schedule started.");
-      try {
-        const payload = await runBackendCommand<Record<string, unknown>>({
-          command: "schedule.remove",
-          target,
-        });
-        if (!payload.ok) {
-          setPaletteError(payload.message ?? "Remove schedule failed.");
-          return;
-        }
-        const removedCount = typeof payload.data?.removed_count === "number" ? payload.data.removed_count : 0;
-        setPaletteMessage(
-          removedCount === 1
-            ? "Removed 1 LaunchAgent plist."
-            : removedCount > 1
-              ? `Removed ${removedCount} LaunchAgent plists.`
-              : "No LaunchAgent plist was found for this target.",
-        );
-        await refreshProject();
-      } catch (caught) {
-        setPaletteError(caught instanceof Error ? caught.message : String(caught));
-      } finally {
-        setPaletteBusyId("");
-      }
+    if (command.id === "stop-automation") {
+      await runPaletteStreamed(command, "automation.stop", "Stop automation for this project?");
       return;
     }
     if (command.id === "run-safety-check") {
       await runPaletteStreamed(command, "safety.run_check");
-      return;
-    }
-    if (command.id === "open-observatory-browser") {
-      setPaletteBusyId(command.id);
-      try {
-        const payload = await runBackendCommand<{ html_path: string }>({
-          command: "observatory.load_html",
-          target,
-          reviewDir: targetSubdir(target, "native-observatory"),
-        });
-        if (!payload.ok || !payload.data) {
-          setPaletteError(payload.message ?? "Could not generate Observatory HTML.");
-          return;
-        }
-        await openObservatoryFile(payload.data.html_path);
-        setPaletteMessage("Observatory opened in browser.");
-        setPaletteOpen(false);
-      } catch (caught) {
-        setPaletteError(caught instanceof Error ? caught.message : String(caught));
-      } finally {
-        setPaletteBusyId("");
-      }
       return;
     }
     if (command.id === "export-review-bundle") {
@@ -1182,10 +1111,10 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
           reviewDir: targetSubdir(target, "first-review"),
         });
         if (!payload.ok) {
-          setPaletteError(payload.message ?? "Could not export the review bundle.");
+          setPaletteError(payload.message ?? "Could not export the review files.");
           return;
         }
-        setPaletteMessage("Review bundle exported.");
+        setPaletteMessage("Review export written.");
         await refreshProject();
       } catch (caught) {
         setPaletteError(caught instanceof Error ? caught.message : String(caught));
@@ -1217,10 +1146,10 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
           outputDir,
         });
         if (!payload.ok) {
-          setPaletteError(payload.message ?? "Could not export the debug bundle.");
+          setPaletteError(payload.message ?? "Could not export the debug files.");
           return;
         }
-        setPaletteMessage("Debug bundle exported.");
+        setPaletteMessage("Debug export written.");
       } catch (caught) {
         setPaletteError(caught instanceof Error ? caught.message : String(caught));
       } finally {
@@ -1319,17 +1248,27 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
         <nav>
           {views.map((view) => {
             const Icon = view.icon;
+            const badge = sidebarBadges[view.key];
+            const badgeLabel = badge?.label ?? "";
+            const visibleBadgeLabel = /^\d+$/.test(badgeLabel) ? badgeLabel : "";
             return (
               <button
+                aria-label={view.label}
                 className={activeView === view.key ? "active" : ""}
+                data-sidebar-view={view.key}
                 key={view.key}
                 onClick={() => navigate(view.key)}
+                title={view.label}
               >
                 <Icon size={18} />
-                <span>{view.key}</span>
-                {sidebarBadges[view.key] && (
-                  <em className={`sidebar-badge ${sidebarBadges[view.key]?.tone}`}>
-                    {sidebarBadges[view.key]?.label}
+                <span className="sidebar-label">{view.label}</span>
+                {badge && (
+                  <em
+                    aria-label={badgeLabel}
+                    className={`sidebar-badge ${badge.tone} ${visibleBadgeLabel ? "has-label" : ""}`}
+                    title={badgeLabel}
+                  >
+                    {visibleBadgeLabel}
                   </em>
                 )}
               </button>
@@ -1356,11 +1295,11 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
                 <div className="project-menu-group">
                   <button onClick={chooseProject}>
                     <FolderOpen size={15} />
-                    Switch Project...
+                    Switch project...
                   </button>
                   <button onClick={() => navigate("Brief")}>
                     <FileText size={15} />
-                    Create New Project
+                    New project
                   </button>
                 </div>
                 {recents.length > 0 && (
@@ -1391,10 +1330,12 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
               </div>
             )}
           </div>
-          <div className={`status-pill ${tone}`}>
-            {tone === "critical" || tone === "warn" ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} />}
-            {status}
-          </div>
+          {showStatusPill && (
+            <div className={`status-pill ${tone}`}>
+              {tone === "critical" || tone === "warn" ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} />}
+              {status}
+            </div>
+          )}
           <div className="topbar-meta">{refreshing ? "Refreshing..." : formatLastUpdated(lastUpdatedAt)}</div>
           <button
             className={`icon-button ${refreshing ? "refreshing" : ""}`}
@@ -1460,7 +1401,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
               <div className="error-actions">
                 <button className="primary-action" onClick={chooseProject}>
                   <FolderOpen size={18} />
-                  Choose Project Folder
+                  Choose project
                 </button>
                 {selectedTarget && (
                   <button className="secondary-action" onClick={refreshProject}>

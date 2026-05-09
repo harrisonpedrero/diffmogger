@@ -22,8 +22,8 @@ function snapshot(overrides: DeepPartial<ObservatorySnapshot> = {}): Observatory
       dashboard_state_exists: true,
       automation_task_exists: true,
     },
-    title: "Diffmogger Autonomous Build Log",
-    subtitle: "Diffmogger Observatory view: replay-style automation progress reconstructed from conveyor events, commits, and diff stats.",
+    title: "Activity",
+    subtitle: "Run, queue, commit, and check state from the selected target.",
     mission: {
       project_name: "Project",
       automation_status: "ACTIVE",
@@ -78,8 +78,8 @@ describe("buildObservatoryViewModel", () => {
     const model = buildObservatoryViewModel(null);
 
     expect(model.empty).toBe(true);
-    expect(model.headline).toBe("Diffmogger Autonomous Build Log");
-    expect(model.tabs).toEqual(["Summary", "Timeline", "Patches", "Metrics"]);
+    expect(model.headline).toBe("Activity");
+    expect(model.tabs).toEqual(["Summary", "Events", "Queue", "Metrics"]);
   });
 
   it("covers an active builder", () => {
@@ -112,7 +112,7 @@ describe("buildObservatoryViewModel", () => {
     );
 
     expect(model.needsHuman).toBe(true);
-    expect(model.headline).toBe("Human input is needed");
+    expect(model.headline).toBe("Input needed");
     expect(model.tone).toBe("warn");
   });
 

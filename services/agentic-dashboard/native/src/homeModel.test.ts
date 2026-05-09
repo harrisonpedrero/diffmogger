@@ -98,7 +98,7 @@ describe("buildHomeModel", () => {
     const model = buildHomeModel(null);
 
     expect(model.primaryAction).toMatchObject({
-      label: "Choose Project Folder",
+      label: "Choose project",
       kind: "choose-project",
     });
     expect(model.headline).not.toContain("UNKNOWN");
@@ -120,16 +120,16 @@ describe("buildHomeModel", () => {
       }),
     );
 
-    expect(model.headline).toBe("This project is not configured yet");
+    expect(model.headline).toBe("Setup incomplete");
     expect(model.primaryAction).toMatchObject({
-      label: "Continue Brief",
+      label: "Open setup",
       kind: "navigate",
       route: "Brief",
     });
     expect(model.primaryAction.label).not.toContain("Scaffold");
   });
 
-  it("maps scaffolded targets with no runs to Run Once Now", () => {
+  it("maps scaffolded targets with no runs to Run", () => {
     const model = buildHomeModel(
       snapshot({
         run: {
@@ -141,9 +141,9 @@ describe("buildHomeModel", () => {
       }),
     );
 
-    expect(model.headline).toBe("Ready for the first automation run");
+    expect(model.headline).toBe("Ready");
     expect(model.primaryAction).toMatchObject({
-      label: "Run Once Now",
+      label: "Run",
       route: "Run",
     });
   });
@@ -163,7 +163,7 @@ describe("buildHomeModel", () => {
 
     expect(model.headline).toBe("builder lane is running");
     expect(model.primaryAction).toMatchObject({
-      label: "Open Run",
+      label: "Run",
       route: "Run",
     });
   });
@@ -179,9 +179,9 @@ describe("buildHomeModel", () => {
       }),
     );
 
-    expect(model.headline).toBe("User input is needed");
+    expect(model.headline).toBe("Input needed");
     expect(model.primaryAction).toMatchObject({
-      label: "Open Inbox",
+      label: "Inbox",
       route: "Inbox",
     });
   });
@@ -205,9 +205,9 @@ describe("buildHomeModel", () => {
       }),
     );
 
-    expect(model.headline).toBe("Diffmogger is blocked");
+    expect(model.headline).toBe("Blocked");
     expect(model.primaryAction).toMatchObject({
-      label: "Open Review",
+      label: "Review",
       route: "Review",
     });
   });

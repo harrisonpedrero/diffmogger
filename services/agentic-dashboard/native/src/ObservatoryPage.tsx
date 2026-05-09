@@ -1,8 +1,5 @@
 import {
-  Clipboard,
-  ExternalLink,
   FileDown,
-  FolderOpen,
   Loader2,
   RefreshCw,
   Telescope,
@@ -16,14 +13,9 @@ import type {
   ObservatorySnapshot,
   ProjectSnapshot,
 } from "./api/backend";
-import { openObservatoryFile, revealReviewArtifact, runBackendCommand } from "./api/backend";
-import { buildObservatoryViewModel, type ObservatoryTab } from "./observatoryModel";
+import { runBackendCommand } from "./api/backend";
+import type { ObservatoryTab } from "./observatoryModel";
 import { useChunkedLimit } from "./performance";
-
-type ObservatoryHtmlData = {
-  html_path: string;
-  snapshot_generated_at?: string;
-};
 
 type ReviewExportData = {
   html_path: string;
@@ -31,7 +23,7 @@ type ReviewExportData = {
   snapshot_generated_at?: string;
 };
 
-const tabs: ObservatoryTab[] = ["Summary", "Timeline", "Patches", "Metrics"];
+const tabs: ObservatoryTab[] = ["Summary", "Events", "Queue", "Metrics"];
 
 function targetSubdir(target: string, leaf: string): string {
   return `${target.replace(/[\\/]+$/, "")}/target/${leaf}`;
@@ -59,12 +51,6 @@ function tone(value: unknown): string {
   const raw = text(value, "info").toLowerCase();
   if (["good", "warn", "warning", "critical", "bad", "info", "quiet", "running", "next", "failed"].includes(raw)) return raw;
   return "info";
-}
-
-function tagValue(snapshot: ObservatorySnapshot | null, label: string): string {
-  const normalized = label.toLowerCase();
-  const tag = snapshot?.mission.tags.find((item) => item.label.toLowerCase() === normalized);
-  return text(tag?.value, "");
 }
 
 function roleLabel(value: unknown): string {
@@ -108,39 +94,39 @@ function ObsSection(props: { title: string; children: ReactNode; className?: str
 
 function MissionStrip(props: {
   snapshot: ObservatorySnapshot | null;
-  projectSnapshot: ProjectSnapshot;
   activeRun: Record<string, unknown>;
 }) {
   const snapshot = props.snapshot;
-  const branch = text(props.projectSnapshot.run.git?.branch ?? tagValue(snapshot, "Branch"), "No branch recorded");
   const knownIssue = hasKnownIssue(snapshot?.mission.known_issue);
+  const status = text(snapshot?.mission.automation_status, "").toUpperCase();
   const items = [
+    ...(status && status !== "ACTIVE" && status !== "UNKNOWN"
+      ? [{
+          label: "Status",
+          value: readableState(snapshot?.mission.automation_status, "No status recorded"),
+          tone: tone(snapshot?.mission.automation_status),
+        }]
+      : []),
     {
-      label: "Status",
-      value: readableState(snapshot?.mission.automation_status, "No automation status recorded yet"),
-      tone: tone(snapshot?.mission.automation_status),
-    },
-    {
-      label: "Current horizon",
-      value: readableState(snapshot?.mission.current_horizon, "No horizon recorded yet"),
+      label: "Plan",
+      value: readableState(snapshot?.mission.current_horizon, "No plan recorded"),
       tone: "info",
     },
-    { label: "Branch", value: branch, tone: "quiet" },
     { label: "Running / next lane", value: laneLabel(snapshot, props.activeRun), tone: text(props.activeRun.role, "") ? "running" : "next" },
     {
-      label: "Best next milestone",
+      label: "Next milestone",
       value: text(snapshot?.mission.best_next_milestone, "No milestone recorded yet."),
       tone: "good",
     },
     {
-      label: "Known issue / blocker",
+      label: "Blocker",
       value: text(snapshot?.mission.known_issue, "No active issue summary."),
       tone: knownIssue ? "warn" : "quiet",
     },
   ];
 
   return (
-    <section className="obs-mission-strip" aria-label="Mission State">
+    <section className="obs-mission-strip" aria-label="Target state">
       {items.map((item) => (
         <div className={`obs-mission-strip-item ${item.tone}`} key={item.label}>
           <span>{item.label}</span>
@@ -177,9 +163,9 @@ function ConveyorSection(props: {
 }) {
   const roles = props.snapshot?.conveyor.roles ?? [];
   return (
-    <ObsSection title="Conveyor Belt" className={`obs-conveyor-section ${props.className ?? ""}`}>
+    <ObsSection title="Conveyor" className={`obs-conveyor-section ${props.className ?? ""}`}>
       <div className="obs-conveyor-layout">
-        <div className="obs-horizontal-scroll" aria-label="Conveyor roles">
+        <div className="obs-horizontal-scroll" aria-label="Roles">
           <div className="obs-belt">
             {roles.length ? (
               roles.map((role, index) => (
@@ -189,7 +175,7 @@ function ConveyorSection(props: {
                 </div>
               ))
             ) : (
-              <p className="obs-muted">No conveyor roles recorded yet.</p>
+              <p className="obs-muted">No role state recorded.</p>
             )}
           </div>
         </div>
@@ -205,12 +191,12 @@ function ConveyorSection(props: {
           ) : (
             <div className="obs-running-banner quiet">
               <strong>No role running now</strong>
-              <div>The conveyor is waiting for the next eligible automation decision.</div>
+              <div>Conveyor idle.</div>
             </div>
           )}
           <div className={`obs-health ${tone(props.health.status)}`}>
             <strong>{text(props.health.status, "ok").toUpperCase()}</strong>
-            <p>{text(props.health.summary, "builder-first conveyor policy active.")}</p>
+            <p>{text(props.health.summary, "Conveyor policy active.")}</p>
           </div>
           <div className="obs-conveyor-kpis">
             <div>
@@ -218,8 +204,8 @@ function ConveyorSection(props: {
               <strong>{number(props.snapshot?.conveyor.cycles)}</strong>
             </div>
             <div>
-              <span>Signals</span>
-              <strong>{number(props.snapshot?.signals.active_count)}</strong>
+              <span>Queued</span>
+              <strong>{number(props.snapshot?.patches.queue_totals.queued)}</strong>
             </div>
           </div>
         </div>
@@ -233,7 +219,7 @@ function CommitCard(props: { commit: ObservatoryCommit; compact?: boolean; rail?
   const showFiles = (!props.compact || props.rail) && Array.isArray(commit.files) && commit.files.length > 0;
   return (
     <div className={`obs-commit-card ${props.rail ? "rail" : ""}`}>
-      <div className="obs-commit-title">{text(commit.subject, "Commit landed")}</div>
+      <div className="obs-commit-title">{text(commit.subject, "Commit")}</div>
       <div className="obs-commit-summary">{text(commit.summary, "No commit summary recorded.")}</div>
       <div className="obs-commit-meta">
         <code>{text(commit.hash, "no-hash")}</code>
@@ -258,15 +244,15 @@ function CommitCard(props: { commit: ObservatoryCommit; compact?: boolean; rail?
 
 function LandedWorkSection(props: { snapshot: ObservatorySnapshot | null; className?: string }) {
   return (
-    <ObsSection title="Landed Work" className={props.className}>
-      <div className="obs-horizontal-scroll" aria-label="Landed work">
+    <ObsSection title="Commits" className={props.className}>
+      <div className="obs-horizontal-scroll" aria-label="Commits">
         <div className="obs-landed-rail">
           {(props.snapshot?.progress.landed_work_feed ?? []).length ? (
             props.snapshot?.progress.landed_work_feed.slice(0, 6).map((commit, index) => (
               <CommitCard commit={commit} rail key={`${commit.hash}-${index}`} />
             ))
           ) : (
-            <p className="obs-muted">No landed work recorded yet.</p>
+            <p className="obs-muted">No commits recorded.</p>
           )}
         </div>
       </div>
@@ -289,37 +275,14 @@ function ManifestRow(props: { item: Record<string, unknown> }) {
 
 function RecentOutcomesSection(props: { snapshot: ObservatorySnapshot | null; className?: string }) {
   return (
-    <ObsSection title="Recent Outcomes" className={props.className}>
+    <ObsSection title="Recent role results" className={props.className}>
       <div className="obs-list">
         {(props.snapshot?.progress.recent_outcomes ?? []).length ? (
           props.snapshot?.progress.recent_outcomes.slice(0, 5).map((item, index) => (
             <ManifestRow item={item} key={`${text(item.run_id, "outcome")}-${index}`} />
           ))
         ) : (
-          <p className="obs-muted">No recent applied, failed, or skipped role outputs yet.</p>
-        )}
-      </div>
-    </ObsSection>
-  );
-}
-
-function SignalNudgesSection(props: { snapshot: ObservatorySnapshot | null; className?: string }) {
-  return (
-    <ObsSection title="Signal Nudges" className={props.className}>
-      <div className="obs-list">
-        {(props.snapshot?.signals.nudges ?? []).length ? (
-          props.snapshot?.signals.nudges.map((item, index) => (
-            <div className="obs-item-row" key={`${text(item.id, "signal")}-${index}`}>
-              <div className="obs-item-title">
-                <strong>{text(item.id, "signal")}</strong>
-                <CompactBadge value={item.priority ?? "medium"} tone={text(item.priority, "info")} />
-              </div>
-              <p>{text(item.instructions, "No instructions recorded.")}</p>
-              <small>{text(item.owner_role, "unknown")} · due {text(item.next_due_at, "unknown")}</small>
-            </div>
-          ))
-        ) : (
-          <p className="obs-muted">No active automation signals.</p>
+          <p className="obs-muted">No role results yet.</p>
         )}
       </div>
     </ObsSection>
@@ -341,30 +304,10 @@ function MetricTable(props: { rows: Array<Record<string, unknown>> }) {
   );
 }
 
-function ProgressStorySection(props: {
-  snapshot: ObservatorySnapshot | null;
-  latest: ObservatoryCommit;
-  className?: string;
-}) {
-  return (
-    <ObsSection title="Progress Story" className={props.className}>
-      <div className="obs-story">
-        <h3>{text(props.snapshot?.progress.story, "No progress pulse yet.")}</h3>
-        {Object.keys(props.latest).length > 0 && (
-          <div className="obs-latest">
-            <strong>Latest landed work</strong>
-            <CommitCard commit={props.latest} compact />
-          </div>
-        )}
-      </div>
-    </ObsSection>
-  );
-}
-
 function RuntimeMetricsSection(props: { snapshot: ObservatorySnapshot | null; className?: string }) {
   const metricEntries = useMemo(() => Object.entries(props.snapshot?.metrics ?? {}), [props.snapshot?.metrics]);
   return (
-    <ObsSection title="Runtime Metrics" className={props.className}>
+    <ObsSection title="Runtime" className={props.className}>
       <div className="obs-compact-table">
         {metricEntries.length ? (
           metricEntries.map(([key, value]) => (
@@ -384,7 +327,7 @@ function TimelineSection(props: { snapshot: ObservatorySnapshot | null }) {
   const visibleTimeline = useMemo(() => timeline.slice(0, limit), [limit, timeline]);
 
   return (
-    <ObsSection title="Event Timeline" className="obs-tab-section">
+    <ObsSection title="Events" className="obs-tab-section">
       <div className="obs-timeline">
         {timeline.length ? (
           visibleTimeline.map((item, index) => (
@@ -395,9 +338,9 @@ function TimelineSection(props: { snapshot: ObservatorySnapshot | null }) {
             </div>
           ))
         ) : (
-          <p className="obs-muted">No conveyor history yet.</p>
+          <p className="obs-muted">No events recorded.</p>
         )}
-        {limit < timeline.length && <p className="obs-muted">Rendering remaining timeline events...</p>}
+        {limit < timeline.length && <p className="obs-muted">Rendering more events...</p>}
       </div>
     </ObsSection>
   );
@@ -414,7 +357,7 @@ function PatchesSection(props: { snapshot: ObservatorySnapshot | null }) {
 
   return (
     <div className="obs-tab-grid">
-      <ObsSection title="Queued / Deferred Patches" className="span-2">
+      <ObsSection title="Patch queue" className="span-2">
         <div className="obs-list">
           {manifests.length ? (
             visibleManifests.map((item, index) => (
@@ -423,7 +366,7 @@ function PatchesSection(props: { snapshot: ObservatorySnapshot | null }) {
           ) : (
             <p className="obs-muted">No queued or deferred patches yet.</p>
           )}
-          {manifestLimit < manifests.length && <p className="obs-muted">Rendering remaining patches...</p>}
+          {manifestLimit < manifests.length && <p className="obs-muted">Rendering more patches...</p>}
         </div>
       </ObsSection>
       <ObsSection title="Queue Totals">
@@ -433,13 +376,13 @@ function PatchesSection(props: { snapshot: ObservatorySnapshot | null }) {
           ))}
         </div>
       </ObsSection>
-      <ObsSection title="Recent Outcomes" className="span-3">
+      <ObsSection title="Recent results" className="span-3">
         <div className="obs-list two">
           {visibleOutcomes.map((item, index) => (
             <ManifestRow item={item} key={`${text(item.run_id, "outcome")}-${index}`} />
           ))}
         </div>
-        {outcomeLimit < outcomes.length && <p className="obs-muted">Rendering remaining outcomes...</p>}
+        {outcomeLimit < outcomes.length && <p className="obs-muted">Rendering more results...</p>}
       </ObsSection>
     </div>
   );
@@ -451,11 +394,11 @@ function ValidationSafetySection(props: { snapshot: ObservatorySnapshot | null; 
     { label: "Validation", record: safety.validation },
     { label: "Integration safety", record: safety.integration_safety },
     { label: "Baseline verification", record: safety.baseline_verification },
-    { label: "First review", record: safety.first_review },
+    { label: "Review", record: safety.first_review },
   ];
 
   return (
-    <ObsSection title="Validation / Safety" className={props.className}>
+    <ObsSection title="Checks" className={props.className}>
       <div className="obs-validation-grid">
         {cards.map((card) => {
           const status = text(card.record?.status ?? card.record?.state ?? card.record?.result, "not recorded");
@@ -483,16 +426,11 @@ export function ObservatoryPage(props: {
 }) {
   const target = props.snapshot?.target.path ?? "";
   const generatedMarker = props.snapshot?.run.snapshot_generated_at ?? "";
-  const reviewDir = useMemo(() => (target ? targetSubdir(target, "native-observatory") : ""), [target]);
   const exportDir = useMemo(() => (target ? targetSubdir(target, "first-review") : ""), [target]);
   const [snapshot, setSnapshot] = useState<ObservatorySnapshot | null>(props.initialSnapshot ?? null);
   const [activeTab, setActiveTab] = useState<ObservatoryTab>("Summary");
-  const [htmlPath, setHtmlPath] = useState("");
-  const [markdownPath, setMarkdownPath] = useState("");
-  const [busy, setBusy] = useState<"refresh" | "open" | "reveal" | "export" | null>(null);
+  const [busy, setBusy] = useState<"refresh" | "export" | null>(null);
   const [error, setError] = useState("");
-  const [copied, setCopied] = useState(false);
-  const model = useMemo(() => buildObservatoryViewModel(snapshot), [snapshot]);
 
   async function loadSnapshot(options: { refreshProject?: boolean } = {}) {
     if (!target) return;
@@ -504,53 +442,11 @@ export function ObservatoryPage(props: {
         target,
       });
       if (!payload.ok || !payload.data) {
-        setError(payload.message ?? "Could not load the Observatory snapshot.");
+        setError(payload.message ?? "Could not load activity.");
         return;
       }
       setSnapshot(payload.data);
       if (options.refreshProject) props.onRefresh();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function generateHtmlPath(): Promise<string> {
-    if (htmlPath) return htmlPath;
-    const payload: BackendEnvelope<ObservatoryHtmlData> = await runBackendCommand({
-      command: "observatory.load_html",
-      target,
-      reviewDir,
-    });
-    if (!payload.ok || !payload.data) {
-      throw new Error(payload.message ?? "Could not generate the Observatory HTML.");
-    }
-    setHtmlPath(payload.data.html_path);
-    return payload.data.html_path;
-  }
-
-  async function openInBrowser() {
-    if (!target) return;
-    setBusy("open");
-    setError("");
-    try {
-      const path = await generateHtmlPath();
-      await openObservatoryFile(path);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function revealGeneratedHtml() {
-    if (!target) return;
-    setBusy("reveal");
-    setError("");
-    try {
-      const path = await generateHtmlPath();
-      await revealReviewArtifact(path);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -569,11 +465,9 @@ export function ObservatoryPage(props: {
         reviewDir: exportDir,
       });
       if (!payload.ok || !payload.data) {
-        setError(payload.message ?? "Could not export the review bundle.");
+        setError(payload.message ?? "Could not export review files.");
         return;
       }
-      setHtmlPath(payload.data.html_path);
-      setMarkdownPath(payload.data.markdown_path);
       props.onRefresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -582,38 +476,23 @@ export function ObservatoryPage(props: {
     }
   }
 
-  async function copyPath() {
-    const path = htmlPath || markdownPath;
-    if (!path) return;
-    try {
-      await navigator.clipboard.writeText(path);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1400);
-    } catch {
-      setError("Could not copy the Observatory path from this environment.");
-    }
-  }
-
   useEffect(() => {
     if (!target) {
       setSnapshot(null);
-      setHtmlPath("");
-      setMarkdownPath("");
       return;
     }
     void loadSnapshot();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target, generatedMarker]);
 
-  const selectedSnapshot = props.snapshot;
-  if (!target || !selectedSnapshot) {
+  if (!target || !props.snapshot) {
     return (
       <section className="observatory-page native">
         <div className="observatory-shell empty">
           <Telescope size={22} />
-          <h1>Diffmogger Autonomous Build Log</h1>
-          <p>Choose a project folder to load the native Observatory.</p>
-          <button className="primary-action" onClick={props.onChoose}>Choose Project Folder</button>
+          <h1>Activity</h1>
+          <p>Choose a project folder to load activity.</p>
+          <button className="primary-action" onClick={props.onChoose}>Choose project</button>
         </div>
       </section>
     );
@@ -622,59 +501,33 @@ export function ObservatoryPage(props: {
   const disabled = props.loading || busy !== null;
   const activeRun = snapshot?.conveyor.active_run ?? {};
   const health = snapshot?.conveyor.health ?? {};
-  const latest = snapshot?.progress.latest_landed_work ?? {};
 
   return (
     <section className="observatory-page native">
       <header className="obs-page-header">
         <div className="obs-page-title">
-          <span className="obs-eyebrow">Native Observatory</span>
-          <h1>{snapshot?.title ?? "Diffmogger Autonomous Build Log"}</h1>
-          <p>{snapshot?.subtitle ?? "Diffmogger Observatory view: replay-style automation progress reconstructed from conveyor events, commits, and diff stats."}</p>
-          <div className="obs-chips">
-            {(snapshot?.mission.tags ?? []).map((item) => (
-              <CompactBadge key={`${item.label}-${item.value}`} label={item.label} value={item.value} tone={item.tone} />
-            ))}
-          </div>
+          <h1>Activity</h1>
+          <p>Run, queue, commit, and check state from the selected target.</p>
         </div>
-        <aside className="obs-project-panel">
-          <span>Project</span>
-          <strong>{text(snapshot?.mission.project_name, selectedSnapshot.target.name ?? "target")}</strong>
-          <small>Updated {text(snapshot?.generated_at, "not yet")}</small>
-          <div className={`obs-status-callout ${tone(snapshot?.mission.automation_status)}`}>
-            <b>{model.headline}</b>
-            <em>{model.subheadline}</em>
-          </div>
+        <aside className="obs-project-panel actions-only">
           <div className="observatory-actions">
             <button className="icon-text-button" disabled={disabled} onClick={() => loadSnapshot({ refreshProject: true })}>
               {busy === "refresh" ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
               Refresh
             </button>
-            <button className="icon-text-button" disabled={disabled} onClick={openInBrowser}>
-              <ExternalLink size={14} />
-              Open in Browser
-            </button>
             <button className="icon-text-button" disabled={disabled} onClick={exportBundle}>
               {busy === "export" ? <Loader2 size={14} className="spin" /> : <FileDown size={14} />}
-              Export Bundle
-            </button>
-            <button className="icon-text-button" disabled={disabled} onClick={revealGeneratedHtml}>
-              <FolderOpen size={14} />
-              Reveal
-            </button>
-            <button className="icon-text-button" disabled={!htmlPath && !markdownPath} onClick={copyPath}>
-              <Clipboard size={14} />
-              {copied ? "Copied" : "Copy path"}
+              Export review
             </button>
           </div>
         </aside>
       </header>
 
-      <MissionStrip snapshot={snapshot} projectSnapshot={selectedSnapshot} activeRun={activeRun} />
+      <MissionStrip snapshot={snapshot} activeRun={activeRun} />
 
       {error && <div className="observatory-error">{error}</div>}
 
-      <div className="obs-tabs" role="tablist" aria-label="Observatory sections">
+      <div className="obs-tabs" role="tablist" aria-label="Activity sections">
         {tabs.map((tab) => (
           <button
             key={tab}
@@ -692,16 +545,15 @@ export function ObservatoryPage(props: {
           <ConveyorSection snapshot={snapshot} activeRun={activeRun} health={health} className="obs-summary-conveyor" />
           <LandedWorkSection snapshot={snapshot} className="obs-summary-landed" />
           <div className="obs-summary-lower">
-            <ProgressStorySection snapshot={snapshot} latest={latest} />
             <RecentOutcomesSection snapshot={snapshot} />
-            <SignalNudgesSection snapshot={snapshot} />
+            <RuntimeMetricsSection snapshot={snapshot} />
           </div>
         </main>
       )}
 
-      {activeTab === "Timeline" && <TimelineSection snapshot={snapshot} />}
+      {activeTab === "Events" && <TimelineSection snapshot={snapshot} />}
 
-      {activeTab === "Patches" && <PatchesSection snapshot={snapshot} />}
+      {activeTab === "Queue" && <PatchesSection snapshot={snapshot} />}
 
       {activeTab === "Metrics" && (
         <div className="obs-tab-grid">

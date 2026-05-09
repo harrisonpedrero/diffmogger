@@ -210,21 +210,21 @@ function primaryForSnapshot(snapshot: ProjectSnapshot): HomeAction {
   const active = activeRoleRun(snapshot);
 
   if (isUnconfigured(snapshot)) {
-    return { label: "Continue Brief", kind: "navigate", route: "Brief" };
+    return { label: "Open setup", kind: "navigate", route: "Brief" };
   }
   if (isUserBlocked(snapshot, status)) {
-    return { label: "Open Inbox", kind: "navigate", route: "Inbox" };
+    return { label: "Inbox", kind: "navigate", route: "Inbox" };
   }
   if (isEnvironmentBlocked(snapshot, status)) {
-    return { label: "Open Review", kind: "navigate", route: "Review" };
+    return { label: "Review", kind: "navigate", route: "Review" };
   }
   if (text(active.status, "") === "running") {
-    return { label: "Open Run", kind: "navigate", route: "Run" };
+    return { label: "Run", kind: "navigate", route: "Run" };
   }
   if (!hasRunHistory(snapshot)) {
-    return { label: "Run Once Now", kind: "navigate", route: "Run" };
+    return { label: "Run", kind: "navigate", route: "Run" };
   }
-  return { label: "Open Run", kind: "navigate", route: "Run" };
+  return { label: "Run", kind: "navigate", route: "Run" };
 }
 
 function bannerForSnapshot(snapshot: ProjectSnapshot): Pick<
@@ -233,20 +233,19 @@ function bannerForSnapshot(snapshot: ProjectSnapshot): Pick<
 > {
   const status = text(snapshot.run.task?.status ?? snapshot.home.automation_status, "");
   const active = activeRoleRun(snapshot);
-  const project = snapshot.home.title || snapshot.target.name;
 
   if (isUnconfigured(snapshot)) {
     return {
-      headline: "This project is not configured yet",
-      subheadline: `Finish the Brief for ${project} so Diffmogger can scaffold target-local automation state.`,
-      statusLabel: "Needs brief",
+      headline: "Setup incomplete",
+      subheadline: "Complete setup to write target-local files.",
+      statusLabel: "Setup needed",
       statusTone: "warn",
     };
   }
   if (isUserBlocked(snapshot, status)) {
     return {
-      headline: "User input is needed",
-      subheadline: "Diffmogger has a human bridge item that may change scope or unblock the next run.",
+      headline: "Input needed",
+      subheadline: "A target-local inbox item is waiting.",
       statusLabel: "Input needed",
       statusTone: "warn",
     };
@@ -254,21 +253,21 @@ function bannerForSnapshot(snapshot: ProjectSnapshot): Pick<
   if (status === "CRITICAL_STOP") {
     return {
       headline: "Critical stop recorded",
-      subheadline: "Review the recorded stop condition before allowing any further automation work.",
+      subheadline: "Review the recorded stop condition before allowing another run.",
       statusLabel: "Critical stop",
       statusTone: "critical",
     };
   }
   if (isEnvironmentBlocked(snapshot, status)) {
     return {
-      headline: "Diffmogger is blocked",
+      headline: "Blocked",
       subheadline: "Safety, validation, or environment state needs attention before the next run.",
       statusLabel: humanizeStatus(status) || "Blocked",
       statusTone: "warn",
     };
   }
   if (text(active.status, "") === "running") {
-    const role = text(active.role, "automation");
+    const role = text(active.role, "run");
     return {
       headline: `${role} lane is running`,
       subheadline: "Watch the current run and avoid overlapping local changes until it finishes.",
@@ -278,14 +277,14 @@ function bannerForSnapshot(snapshot: ProjectSnapshot): Pick<
   }
   if (!hasRunHistory(snapshot)) {
     return {
-      headline: "Ready for the first automation run",
-      subheadline: "Diffmogger has project state, but no conveyor cycles or role outcomes have landed yet.",
+      headline: "Ready",
+      subheadline: "No runs recorded yet.",
       statusLabel: "Ready",
       statusTone: "good",
     };
   }
   return {
-    headline: "Diffmogger is ready",
+    headline: "Ready",
     subheadline: text(snapshot.home.next_action, "Review the next action and run the next local lane when ready."),
     statusLabel: status && status !== "UNKNOWN" ? status.replace(/_/g, " ") : "Ready",
     statusTone: toneForStatus(status || "ACTIVE"),
@@ -294,18 +293,18 @@ function bannerForSnapshot(snapshot: ProjectSnapshot): Pick<
 
 function metricRow(snapshot: ProjectSnapshot): HomeMetric[] {
   const cycles = number(snapshot.run.conveyor?.cycles);
-  const nextRun = text(snapshot.brief.dashboard_state?.next_run_at, "Not scheduled");
+  const nextRun = text(snapshot.brief.dashboard_state?.next_run_at, "Not configured");
   return [
-    { label: "Conveyor cycles", value: cycles, tone: cycles ? "info" : "quiet" },
-    { label: "Accepted patches", value: acceptedTotal(snapshot), tone: "good" },
+    { label: "Cycles", value: cycles, tone: cycles ? "info" : "quiet" },
+    { label: "Applied patches", value: acceptedTotal(snapshot), tone: "good" },
     { label: "Queued patches", value: queuedTotal(snapshot), tone: queuedTotal(snapshot) ? "warn" : "quiet" },
     { label: "Deferred patches", value: deferredTotal(snapshot), tone: deferredTotal(snapshot) ? "warn" : "quiet" },
     {
-      label: "Human input pending",
+      label: "Input pending",
       value: pendingHuman(snapshot) + unhandledInbox(snapshot),
       tone: pendingHuman(snapshot) + unhandledInbox(snapshot) ? "warn" : "good",
     },
-    { label: "Next run", value: nextRun, tone: nextRun === "Not scheduled" ? "quiet" : "info" },
+    { label: "Next run", value: nextRun, tone: nextRun === "Not configured" ? "quiet" : "info" },
   ];
 }
 
@@ -323,7 +322,7 @@ function safetyItems(snapshot: ProjectSnapshot): HomeSafetyItem[] {
 
   return [
     {
-      label: "Latest safety check",
+      label: "Safety check",
       value: safetyStatus(snapshot).replace(/_/g, " "),
       tone: safetyStatus(snapshot) === "pass" ? "good" : safetyStatus(snapshot) === "fail" ? "critical" : "warn",
       detail: text(integrationSafety.summary, "No safety check result is recorded yet."),
@@ -341,12 +340,12 @@ function safetyItems(snapshot: ProjectSnapshot): HomeSafetyItem[] {
       detail: `Branch ${text(git.branch, "unknown")}.`,
     },
     {
-      label: "Environment blockers",
+      label: "Blockers",
       value: blockers.length ? `${blockers.length} blocker(s)` : "None recorded",
       tone: blockers.length ? "warn" : "good",
       detail: blockers.length
         ? blockers.join(", ")
-        : `First review is ${firstReview.replace(/_/g, " ")}; no environment blocker is recorded in the snapshot.`,
+        : `Review is ${firstReview.replace(/_/g, " ")}; no environment blocker is recorded.`,
     },
   ];
 }
@@ -355,8 +354,8 @@ function progressItems(snapshot: ProjectSnapshot): HomeProgressItem[] {
   const commits = list(snapshot.run.git?.commits).map(record).slice(0, 3);
   if (commits.length) {
     return commits.map((commit) => ({
-      title: text(commit.subject, "Commit landed"),
-      detail: text(commit.summary, "Recent repository commit."),
+      title: text(commit.subject, "Commit"),
+      detail: text(commit.summary, "Recent commit."),
       meta: `${text(commit.hash, "")} ${text(commit.time, "")}`.trim(),
       tone: "good",
     }));
@@ -392,9 +391,9 @@ function recommendation(snapshot: ProjectSnapshot): HomeModel["recommendation"] 
         : "Review";
   return {
     title: text(plan.recommendation, snapshot.home.next_action || "Choose the next local action."),
-    reason: text(plan.why, "This recommendation is derived from the backend Observatory snapshot."),
+    reason: text(plan.why, "This recommendation is derived from the backend activity snapshot."),
     action: {
-      label: route === "Inbox" ? "Open Inbox" : route === "Run" ? "Open Run" : "Open Review",
+      label: route === "Inbox" ? "Inbox" : route === "Run" ? "Run" : "Review",
       kind: "navigate",
       route,
     },
@@ -407,29 +406,29 @@ export function buildHomeModel(snapshot: ProjectSnapshot | null): HomeModel {
       projectName: "No project selected",
       statusLabel: "No target",
       statusTone: "quiet",
-      headline: "Choose a project to begin",
-      subheadline: "Diffmogger will load project state through the Python backend once you choose a folder.",
-      primaryAction: { label: "Choose Project Folder", kind: "choose-project" },
+      headline: "Choose a project",
+      subheadline: "Select a target folder to load state.",
+      primaryAction: { label: "Choose project", kind: "choose-project" },
       secondaryActions: [],
       metrics: [
-        { label: "Conveyor cycles", value: "N/A", tone: "quiet" },
-        { label: "Accepted patches", value: "N/A", tone: "quiet" },
+        { label: "Cycles", value: "N/A", tone: "quiet" },
+        { label: "Applied patches", value: "N/A", tone: "quiet" },
         { label: "Queued patches", value: "N/A", tone: "quiet" },
         { label: "Deferred patches", value: "N/A", tone: "quiet" },
-        { label: "Human input pending", value: "N/A", tone: "quiet" },
+        { label: "Input pending", value: "N/A", tone: "quiet" },
         { label: "Next run", value: "N/A", tone: "quiet" },
       ],
       recommendation: {
-        title: "Choose a project folder.",
-        reason: "Home needs a target-local snapshot before it can recommend work.",
-        action: { label: "Choose Project Folder", kind: "choose-project" },
+        title: "Choose a project folder",
+        reason: "A target snapshot is required.",
+        action: { label: "Choose project", kind: "choose-project" },
       },
       safety: {
-        headline: "Safety is checked after a target is selected",
+        headline: "No target selected",
         items: [],
       },
       progress: {
-        headline: "Recent progress",
+        headline: "Recent activity",
         empty: true,
         items: [],
       },
@@ -438,7 +437,7 @@ export function buildHomeModel(snapshot: ProjectSnapshot | null): HomeModel {
         unhandled: 0,
         outbound: 0,
         latestStatus: "No target selected",
-        action: { label: "Open Inbox", kind: "disabled", route: "Inbox" },
+        action: { label: "Inbox", kind: "disabled", route: "Inbox" },
       },
       isUnconfigured: false,
       hasNoRuns: true,
@@ -456,19 +455,19 @@ export function buildHomeModel(snapshot: ProjectSnapshot | null): HomeModel {
     primaryAction,
     secondaryActions: [
       { label: "Refresh", kind: "refresh" },
-      { label: "Open Observatory", kind: "navigate", route: "Observatory" },
-      { label: "Open Review", kind: "navigate", route: "Review" },
+      { label: "Activity", kind: "navigate", route: "Observatory" },
+      { label: "Review", kind: "navigate", route: "Review" },
     ],
     metrics: metricRow(snapshot),
     recommendation: recommendation(snapshot),
     safety: {
       headline: isEnvironmentBlocked(snapshot, text(snapshot.run.task?.status, ""))
         ? "Attention needed before running"
-        : "Safety and readiness",
+        : "Checks",
       items: safetyItems(snapshot),
     },
     progress: {
-      headline: "Recent progress",
+      headline: "Recent activity",
       empty: progress.length === 0,
       items: progress,
     },
@@ -478,9 +477,9 @@ export function buildHomeModel(snapshot: ProjectSnapshot | null): HomeModel {
       outbound: number(snapshot.run.human?.outbound_records),
       latestStatus:
         pendingHuman(snapshot) || unhandledInbox(snapshot)
-          ? "Waiting on human bridge review"
-          : "No user input needed",
-      action: { label: "Open Inbox", kind: "navigate", route: "Inbox" },
+          ? "Input pending"
+          : "No input pending",
+      action: { label: "Inbox", kind: "navigate", route: "Inbox" },
     },
     isUnconfigured: isUnconfigured(snapshot),
     hasNoRuns: noRuns,

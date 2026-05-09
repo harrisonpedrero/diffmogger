@@ -4,6 +4,7 @@ import {
   Clipboard,
   ExternalLink,
   FileDown,
+  FilePlus2,
   Pause,
   Play,
   RefreshCw,
@@ -11,16 +12,28 @@ import {
   Terminal,
   Trash2,
   Users,
+  WandSparkles,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { BackendEnvelope, BackendLogEvent, ProjectSnapshot } from "./api/backend";
 import {
   listenBackendLogs,
   runBackendCommand,
   runBackendCommandStreamed,
+  selectTicketImportFile,
 } from "./api/backend";
 import { buildRunModel, type RunAction, type RunRoute } from "./runModel";
+import {
+  defaultImportMode,
+  emptyTicket,
+  issueLabel,
+  normalizeTickets,
+  parseTicketJson,
+  ticketToJson,
+  type Ticket,
+  type TicketSnapshot,
+} from "./ticketModel";
 
 type RunLogEvent = BackendLogEvent & { capturedAt: string };
 
@@ -43,12 +56,23 @@ function value(value: string, fallback = "Not recorded"): string {
   return value.trim() ? value : fallback;
 }
 
-function scheduleRemovalMessage(data?: Record<string, unknown>): string {
-  const rawRemovedCount = data?.removed_count;
-  const removedCount = typeof rawRemovedCount === "number" ? rawRemovedCount : 0;
-  if (removedCount === 1) return "Removed 1 LaunchAgent plist.";
-  if (removedCount > 1) return `Removed ${removedCount} LaunchAgent plists.`;
-  return "No LaunchAgent plist was found for this target.";
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function textValue(value: unknown, fallback = ""): string {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function isTicketCampaign(snapshot: ProjectSnapshot | null): boolean {
+  const records = [
+    asRecord(snapshot?.brief?.intake),
+    asRecord(snapshot?.brief?.draft_intake),
+    asRecord(snapshot?.brief?.dashboard_state),
+  ];
+  return records.some((record) => textValue(record.automation_run_mode) === "ticket_campaign");
 }
 
 function ActionButton(props: {
@@ -95,9 +119,33 @@ export function RunPage(props: {
   const [commandMessage, setCommandMessage] = useState<string | null>(null);
   const [logOverride, setLogOverride] = useState<Record<string, unknown> | null>(null);
   const [writeOwnership, setWriteOwnership] = useState("");
+  const [ticketSnapshot, setTicketSnapshot] = useState<TicketSnapshot | null>(null);
+  const [ticketBusy, setTicketBusy] = useState<string | null>(null);
+  const [ticketError, setTicketError] = useState<string | null>(null);
+  const [ticketMessage, setTicketMessage] = useState<string | null>(null);
+  const [ticketEditorId, setTicketEditorId] = useState<string | null>(null);
+  const [ticketEditorJson, setTicketEditorJson] = useState("");
+  const [ticketImportFormat, setTicketImportFormat] = useState<"markdown" | "csv" | "json">("markdown");
+  const [ticketImportMode, setTicketImportMode] = useState<"append" | "replace-placeholder" | "replace-all">("append");
+  const [ticketImportText, setTicketImportText] = useState("");
+  const [ticketImportFile, setTicketImportFile] = useState("");
+  const [ticketImportPreview, setTicketImportPreview] = useState<TicketSnapshot | null>(null);
+  const [ticketDraft, setTicketDraft] = useState<{ draft_id?: string; candidates: Ticket[] } | null>(null);
   const isBusy = props.loading || busyCommand !== null;
 
   const target = props.snapshot?.target.path;
+  const ticketCampaign = isTicketCampaign(props.snapshot);
+  const ticketTickets = normalizeTickets(ticketSnapshot?.tickets ?? []);
+  const ticketIssues = ticketSnapshot?.validation_issues ?? [];
+  const ticketCounts = ticketSnapshot?.summary?.counts ?? {};
+
+  useEffect(() => {
+    if (!target || !model.isScaffolded || !ticketCampaign) {
+      setTicketSnapshot(null);
+      return;
+    }
+    void loadTickets();
+  }, [target, model.isScaffolded, ticketCampaign]);
   const displayedLog = logOverride
     ? {
         exists: logOverride.exists === true,
@@ -138,27 +186,6 @@ export function RunPage(props: {
     }
     if (!action.command || !target || !action.enabled) return;
     const command = action.command;
-    if (command === "schedule.remove") {
-      setBusyCommand(command);
-      setLogs([]);
-      try {
-        const payload = await runBackendCommand<Record<string, unknown>>({
-          command,
-          target,
-        });
-        if (!payload.ok) {
-          setCommandError(payload.message ?? "Backend command failed.");
-          return;
-        }
-        setCommandMessage(scheduleRemovalMessage(payload.data));
-        props.onRefresh();
-      } catch (error) {
-        setCommandError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setBusyCommand(null);
-      }
-      return;
-    }
     if (command === "worker.run_write" && !writeOwnership.trim()) {
       setCommandError("Enter a disjoint ownership scope before launching a write worker.");
       return;
@@ -186,6 +213,199 @@ export function RunPage(props: {
     } finally {
       unlisten?.();
       setBusyCommand(null);
+    }
+  }
+
+  async function loadTickets() {
+    if (!target) return;
+    setTicketError(null);
+    try {
+      const payload = await runBackendCommand<TicketSnapshot>({
+        command: "ticket.load",
+        target,
+      });
+      if (!payload.ok || !payload.data) {
+        setTicketError(payload.message ?? "Could not load the ticket queue.");
+        return;
+      }
+      const data = payload.data;
+      setTicketSnapshot(data);
+      setTicketImportMode(defaultImportMode(normalizeTickets(data.tickets ?? [])));
+    } catch (error) {
+      setTicketError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function editTicket(ticket: Ticket) {
+    setTicketEditorId(ticket.id);
+    setTicketEditorJson(ticketToJson(ticket));
+    setTicketMessage(null);
+    setTicketError(null);
+  }
+
+  function newTicket() {
+    const ticket = emptyTicket(ticketTickets);
+    setTicketEditorId(null);
+    setTicketEditorJson(ticketToJson(ticket));
+    setTicketMessage("New ticket is ready to save.");
+  }
+
+  async function saveTicket() {
+    if (!target) return;
+    const parsed = parseTicketJson(ticketEditorJson);
+    if (!parsed.ticket) {
+      setTicketError(parsed.error ?? "Ticket JSON did not parse.");
+      return;
+    }
+    const command = ticketEditorId ? "ticket.update" : "ticket.add";
+    setTicketBusy(command);
+    setTicketError(null);
+    try {
+      const payload = await runBackendCommand<TicketSnapshot>({
+        command,
+        target,
+        ticketId: ticketEditorId ?? undefined,
+        ticketJson: JSON.stringify(parsed.ticket),
+      });
+      if (!payload.ok || !payload.data) {
+        setTicketError(payload.message ?? "Ticket write failed.");
+        return;
+      }
+      setTicketSnapshot(payload.data);
+      setTicketMessage(ticketEditorId ? "Ticket updated." : "Ticket added.");
+      setTicketEditorId(parsed.ticket.id);
+      await Promise.resolve(props.onRefresh());
+    } catch (error) {
+      setTicketError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTicketBusy(null);
+    }
+  }
+
+  async function deleteTicket(ticketId: string) {
+    if (!target) return;
+    setTicketBusy(`delete-${ticketId}`);
+    setTicketError(null);
+    try {
+      const payload = await runBackendCommand<TicketSnapshot>({
+        command: "ticket.delete",
+        target,
+        ticketId,
+      });
+      if (!payload.ok || !payload.data) {
+        setTicketError(payload.message ?? "Ticket delete failed.");
+        return;
+      }
+      setTicketSnapshot(payload.data);
+      if (ticketEditorId === ticketId) {
+        setTicketEditorId(null);
+        setTicketEditorJson("");
+      }
+      setTicketMessage("Ticket deleted.");
+      await Promise.resolve(props.onRefresh());
+    } catch (error) {
+      setTicketError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTicketBusy(null);
+    }
+  }
+
+  async function pickTicketImportFile() {
+    try {
+      const file = await selectTicketImportFile();
+      if (file) setTicketImportFile(file);
+    } catch (error) {
+      setTicketError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function importTickets(preview: boolean) {
+    if (!target) return;
+    setTicketBusy(preview ? "ticket.import.preview" : "ticket.import");
+    setTicketError(null);
+    try {
+      const source =
+        ticketImportFile.trim()
+          ? { inputFile: ticketImportFile.trim() }
+          : ticketImportFormat === "json"
+            ? { inputJson: ticketImportText }
+            : { inputText: ticketImportText };
+      const payload = await runBackendCommand<TicketSnapshot>({
+        command: "ticket.import",
+        target,
+        importFormat: ticketImportFormat,
+        importMode: ticketImportMode,
+        preview,
+        ...source,
+      });
+      if (!payload.ok || !payload.data) {
+        setTicketError(payload.message ?? "Ticket import failed.");
+        return;
+      }
+      if (preview) {
+        setTicketImportPreview(payload.data);
+        setTicketMessage("Import preview ready.");
+      } else {
+        setTicketSnapshot(payload.data);
+        setTicketImportPreview(null);
+        setTicketMessage("Ticket import applied.");
+        await Promise.resolve(props.onRefresh());
+      }
+    } catch (error) {
+      setTicketError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTicketBusy(null);
+    }
+  }
+
+  async function draftTickets() {
+    if (!target) return;
+    setTicketBusy("ticket.draft_from_intake");
+    setTicketError(null);
+    try {
+      const payload = await runBackendCommand<{ draft_id?: string; candidates?: Ticket[] }>({
+        command: "ticket.draft_from_intake",
+        target,
+      });
+      if (!payload.ok || !payload.data) {
+        setTicketError(payload.message ?? "Ticket draft failed.");
+        return;
+      }
+      setTicketDraft({
+        draft_id: payload.data.draft_id,
+        candidates: normalizeTickets(payload.data.candidates ?? []),
+      });
+      setTicketMessage("Draft candidates are ready to review.");
+    } catch (error) {
+      setTicketError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTicketBusy(null);
+    }
+  }
+
+  async function acceptTicketDraft() {
+    if (!target || !ticketDraft?.draft_id) return;
+    setTicketBusy("ticket.accept_draft");
+    setTicketError(null);
+    try {
+      const payload = await runBackendCommand<TicketSnapshot>({
+        command: "ticket.accept_draft",
+        target,
+        draftId: ticketDraft.draft_id,
+        importMode: ticketImportMode,
+      });
+      if (!payload.ok || !payload.data) {
+        setTicketError(payload.message ?? "Could not accept the draft tickets.");
+        return;
+      }
+      setTicketSnapshot(payload.data);
+      setTicketDraft(null);
+      setTicketMessage("Draft tickets accepted.");
+      await Promise.resolve(props.onRefresh());
+    } catch (error) {
+      setTicketError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTicketBusy(null);
     }
   }
 
@@ -224,7 +444,6 @@ export function RunPage(props: {
       <section className="run-page">
         <div className={`run-banner ${model.banner.tone}`}>
           <div>
-            <span className="state-badge">{model.banner.badge}</span>
             <h1>{model.banner.headline}</h1>
             <p>{model.banner.subheadline}</p>
           </div>
@@ -241,7 +460,6 @@ export function RunPage(props: {
     <section className="run-page">
       <div className={`run-banner ${model.banner.tone}`}>
         <div>
-          <span className="state-badge">{model.banner.badge}</span>
           <h1>{model.banner.headline}</h1>
           <p>{model.banner.subheadline}</p>
         </div>
@@ -272,15 +490,15 @@ export function RunPage(props: {
 
       <div className="run-layout">
         <article className="panel run-readiness">
-          <h2>Run Readiness</h2>
+          <h2>Readiness</h2>
           <DetailRow label="Current status" value={model.latestRun.status} />
-          <DetailRow label="Horizon" value={model.latestRun.horizon} />
+          <DetailRow label="Plan" value={model.latestRun.horizon} />
           <DetailRow label="Last updated" value={model.latestRun.lastUpdated} />
           <p className="empty-copy">{model.latestRun.summary}</p>
         </article>
 
         <article className="panel run-controls-panel">
-          <h2>Run Controls</h2>
+          <h2>Controls</h2>
           <div className="run-control-grid">
             <ActionButton
               action={model.controls.runOnce}
@@ -289,22 +507,16 @@ export function RunPage(props: {
               icon={<Play size={16} />}
             />
             <ActionButton
-              action={model.controls.startSchedule}
+              action={model.controls.startAutomation}
               onRun={runAction}
-              disabled={isBusy || !model.controls.startSchedule.enabled}
+              disabled={isBusy || !model.controls.startAutomation.enabled}
               icon={<RefreshCw size={16} />}
             />
             <ActionButton
-              action={model.controls.pauseSchedule}
+              action={model.controls.stopAutomation}
               onRun={runAction}
-              disabled={isBusy || !model.controls.pauseSchedule.enabled}
+              disabled={isBusy || !model.controls.stopAutomation.enabled}
               icon={<Pause size={16} />}
-            />
-            <ActionButton
-              action={model.controls.removeSchedule}
-              onRun={runAction}
-              disabled={isBusy || !model.controls.removeSchedule.enabled}
-              icon={<Trash2 size={16} />}
             />
             <ActionButton
               action={model.controls.safetyCheck}
@@ -315,38 +527,182 @@ export function RunPage(props: {
           </div>
           <button className="link-action" onClick={() => props.onNavigate("Review")}>
             <FileDown size={14} />
-            Export Review Bundle
+            Review export
           </button>
         </article>
 
-        <article className="panel">
-          <h2>Schedule Status</h2>
-          <DetailRow label="State" value={model.schedule.state} />
-          <DetailRow label="Strategy" value={model.schedule.strategyLabel} />
-          <DetailRow label="Cadence" value={model.schedule.cadence} />
-          <p className="empty-copy">{model.schedule.message}</p>
-          {model.schedule.labels.length > 0 && (
-            <details>
-              <summary>LaunchAgent labels</summary>
-              <div className="raw-details">
-                {model.schedule.labels.map((label) => (
-                  <code key={label}>{label}</code>
+        {ticketCampaign && (
+          <article className="panel span-2 ticket-queue-panel">
+            <div className="panel-heading-row">
+              <div>
+                <h2>Ticket Queue</h2>
+                <p>{ticketSnapshot?.ticket_file ?? "Ticket file not loaded yet."}</p>
+              </div>
+              <div className="inline-actions">
+                <button className="icon-text-button" onClick={loadTickets} disabled={ticketBusy !== null}>
+                  <RefreshCw size={14} />
+                  Refresh
+                </button>
+                <button className="icon-text-button" onClick={draftTickets} disabled={ticketBusy !== null}>
+                  <WandSparkles size={14} />
+                  Draft
+                </button>
+                <button className="icon-text-button" onClick={newTicket} disabled={ticketBusy !== null}>
+                  <FilePlus2 size={14} />
+                  Add
+                </button>
+              </div>
+            </div>
+
+            {ticketError && (
+              <div className="brief-error">
+                <AlertTriangle size={16} />
+                {ticketError}
+              </div>
+            )}
+            {ticketMessage && (
+              <div className="success-callout quiet">
+                <CheckCircle2 size={16} />
+                <strong>{ticketMessage}</strong>
+              </div>
+            )}
+
+            <div className="ticket-summary-row">
+              <DetailRow label="Pending" value={ticketCounts.pending ?? 0} />
+              <DetailRow label="In progress" value={ticketCounts.in_progress ?? 0} />
+              <DetailRow label="Done" value={ticketCounts.done ?? 0} />
+              <DetailRow label="Blocked" value={ticketCounts.blocked ?? 0} />
+            </div>
+
+            <div className="ticket-next-row">
+              <strong>Next</strong>
+              <span>
+                {ticketSnapshot?.next?.ticket?.id
+                  ? `${ticketSnapshot.next.ticket.id}: ${ticketSnapshot.next.ticket.summary ?? ""}`
+                  : ticketSnapshot?.next?.reason ?? "No ticket selected yet."}
+              </span>
+            </div>
+
+            {ticketIssues.length > 0 && (
+              <div className="ticket-issue-list">
+                {ticketIssues.map((issue, index) => (
+                  <div className={`ticket-issue ${issue.level}`} key={`${issue.type}-${issue.ticket_id ?? index}`}>
+                    <AlertTriangle size={14} />
+                    <span>{issueLabel(issue)}</span>
+                  </div>
                 ))}
               </div>
-            </details>
-          )}
-        </article>
+            )}
+
+            <div className="ticket-list">
+              {ticketTickets.length ? (
+                ticketTickets.map((ticket) => (
+                  <div className="ticket-row" key={ticket.id}>
+                    <div>
+                      <strong>{ticket.id || "Untitled"}</strong>
+                      <span>{ticket.summary || "No summary recorded."}</span>
+                    </div>
+                    <em>{ticket.status}</em>
+                    <button className="icon-text-button" onClick={() => editTicket(ticket)}>Inspect</button>
+                    <button className="icon-button danger" title="Delete ticket" onClick={() => deleteTicket(ticket.id)} disabled={ticketBusy !== null}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <p className="empty-copy">No tickets loaded yet.</p>
+              )}
+            </div>
+
+            <div className="ticket-edit-grid">
+              <label className="brief-field">
+                <span>{ticketEditorId ? `Editing ${ticketEditorId}` : "Ticket JSON"}</span>
+                <textarea
+                  rows={11}
+                  value={ticketEditorJson}
+                  onChange={(event) => setTicketEditorJson(event.target.value)}
+                  placeholder={ticketToJson(emptyTicket(ticketTickets))}
+                />
+              </label>
+              <div className="ticket-import-box">
+                <div className="brief-form-grid two">
+                  <label className="brief-field">
+                    <span>Import format</span>
+                    <select value={ticketImportFormat} onChange={(event) => setTicketImportFormat(event.target.value as "markdown" | "csv" | "json")}>
+                      <option value="markdown">Markdown</option>
+                      <option value="csv">CSV</option>
+                      <option value="json">JSON</option>
+                    </select>
+                  </label>
+                  <label className="brief-field">
+                    <span>Import mode</span>
+                    <select value={ticketImportMode} onChange={(event) => setTicketImportMode(event.target.value as "append" | "replace-placeholder" | "replace-all")}>
+                      <option value="replace-placeholder">Replace placeholder</option>
+                      <option value="append">Append</option>
+                      <option value="replace-all">Replace all</option>
+                    </select>
+                  </label>
+                </div>
+                <label className="brief-field">
+                  <span>Import text</span>
+                  <textarea
+                    rows={7}
+                    value={ticketImportText}
+                    onChange={(event) => {
+                      setTicketImportText(event.target.value);
+                      if (event.target.value.trim()) setTicketImportFile("");
+                    }}
+                    placeholder="TICKET-002: Add a focused local workflow"
+                  />
+                </label>
+                {ticketImportFile && <p className="log-path">{ticketImportFile}</p>}
+                <div className="inline-actions">
+                  <button className="secondary-action" onClick={saveTicket} disabled={ticketBusy !== null || !ticketEditorJson.trim()}>
+                    Save Ticket
+                  </button>
+                  <button className="secondary-action" onClick={pickTicketImportFile} disabled={ticketBusy !== null}>
+                    Pick File
+                  </button>
+                  <button className="secondary-action" onClick={() => importTickets(true)} disabled={ticketBusy !== null || (!ticketImportText.trim() && !ticketImportFile)}>
+                    Preview Import
+                  </button>
+                  <button className="secondary-action" onClick={() => importTickets(false)} disabled={ticketBusy !== null || (!ticketImportText.trim() && !ticketImportFile)}>
+                    Apply Import
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {ticketImportPreview && (
+              <details className="ticket-draft-details" open>
+                <summary>Import preview</summary>
+                <pre className="raw-json">{JSON.stringify(ticketImportPreview.tickets ?? [], null, 2)}</pre>
+              </details>
+            )}
+
+            {ticketDraft && (
+              <details className="ticket-draft-details" open>
+                <summary>Codex draft candidates</summary>
+                <pre className="raw-json">{JSON.stringify(ticketDraft.candidates, null, 2)}</pre>
+                <button className="secondary-action" onClick={acceptTicketDraft} disabled={ticketBusy !== null || !ticketDraft.draft_id}>
+                  Accept Draft
+                </button>
+              </details>
+            )}
+          </article>
+        )}
 
         <article className="panel">
-          <h2>Current / Latest Run</h2>
-          <DetailRow label="Status" value={model.latestRun.status} />
-          <DetailRow label="Horizon" value={model.latestRun.horizon} />
-          <DetailRow label="Updated" value={model.latestRun.lastUpdated} />
+          <h2>Automation</h2>
+          <DetailRow label="State" value={model.automation.state} />
+          <DetailRow label="PID" value={model.automation.pid || "Not running"} />
+          <DetailRow label="Started" value={model.automation.startedAt || "Not running"} />
+          <p className="empty-copy">{model.automation.message}</p>
         </article>
 
         <article className="panel span-2">
           <div className="panel-heading-row">
-            <h2>Run Log</h2>
+            <h2>Log</h2>
             <div className="inline-actions">
               <button className="icon-text-button" disabled={terminalLines.length === 0 && !displayedLog.content} onClick={copyLog}>
                 <Clipboard size={14} />
@@ -369,7 +725,7 @@ export function RunPage(props: {
             ) : (
               <div className="terminal-empty">
                 <Terminal size={16} />
-                No automation log has been recorded yet.
+                No log recorded yet.
               </div>
             )}
           </div>
@@ -377,7 +733,7 @@ export function RunPage(props: {
         </article>
 
         <article className="panel worker-card">
-          <h2>Worker Strategy</h2>
+          <h2>Workers</h2>
           <div className="worker-headline">
             <Users size={18} />
             <strong>{model.worker.headline}</strong>
@@ -385,7 +741,7 @@ export function RunPage(props: {
           <p className="empty-copy">{model.worker.summary}</p>
           <DetailRow label="Latest result" value={model.worker.latest} />
           <details>
-            <summary>Raw strategy details</summary>
+            <summary>Raw details</summary>
             <pre className="raw-json">{JSON.stringify(model.worker.raw, null, 2)}</pre>
           </details>
           <div className="worker-actions">
@@ -416,7 +772,7 @@ export function RunPage(props: {
         </article>
 
         <article className="panel blockers-card">
-          <h2>Environment Blockers</h2>
+          <h2>Blockers</h2>
           {model.blockers.length > 0 ? (
             <div className="blocker-list">
               {model.blockers.map((blocker) => (
@@ -427,7 +783,7 @@ export function RunPage(props: {
               ))}
             </div>
           ) : (
-            <p className="empty-copy">No required environment blockers are recorded for the current target.</p>
+            <p className="empty-copy">No blockers recorded.</p>
           )}
         </article>
       </div>

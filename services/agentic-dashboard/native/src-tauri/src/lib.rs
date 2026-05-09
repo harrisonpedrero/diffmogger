@@ -21,6 +21,7 @@ const READ_ONLY_BACKEND_COMMANDS: &[&str] = &[
     "diagnostics.environment",
     "brief.load",
     "brief.scaffold_preview",
+    "ticket.load",
     "inbox.load",
     "run.load",
     "run.load_log",
@@ -36,12 +37,17 @@ const MUTATING_BACKEND_COMMANDS: &[&str] = &[
     "brief.save_draft",
     "brief.scaffold_bootstrap",
     "context.import",
+    "ticket.add",
+    "ticket.update",
+    "ticket.delete",
+    "ticket.import",
+    "ticket.draft_from_intake",
+    "ticket.accept_draft",
     "inbox.send_note",
     "inbox.reply_request",
     "run.once",
-    "schedule.start",
-    "schedule.pause",
-    "schedule.remove",
+    "automation.start",
+    "automation.stop",
     "safety.run_check",
     "worker.run_read_only",
     "worker.run_write",
@@ -92,7 +98,6 @@ struct RecentTarget {
 struct AdvancedSettings {
     review_export_dir: String,
     preferred_editor_command: String,
-    schedule_cadence_minutes: u64,
     human_bridge_mode: String,
     appearance: String,
     density: String,
@@ -103,7 +108,6 @@ impl Default for AdvancedSettings {
         Self {
             review_export_dir: String::new(),
             preferred_editor_command: String::new(),
-            schedule_cadence_minutes: 60,
             human_bridge_mode: "file_only".to_string(),
             appearance: "system".to_string(),
             density: "comfortable".to_string(),
@@ -426,7 +430,6 @@ fn sanitize_advanced_settings(settings: AdvancedSettings) -> Result<AdvancedSett
     Ok(AdvancedSettings {
         review_export_dir: settings.review_export_dir.trim().to_string(),
         preferred_editor_command: settings.preferred_editor_command.trim().to_string(),
-        schedule_cadence_minutes: settings.schedule_cadence_minutes.clamp(5, 1440),
         human_bridge_mode,
         appearance,
         density,
@@ -571,6 +574,16 @@ fn build_backend_args(
     related: Option<&str>,
     force: Option<bool>,
     run_codex: Option<bool>,
+    ticket_json: Option<&str>,
+    ticket_id: Option<&str>,
+    import_format: Option<&str>,
+    import_mode: Option<&str>,
+    input_file: Option<&str>,
+    input_json: Option<&str>,
+    input_text: Option<&str>,
+    preview: Option<bool>,
+    draft_id: Option<&str>,
+    ticket_ids: Option<&str>,
     stream_jsonl: bool,
 ) -> Result<(PathBuf, Vec<String>), CommandError> {
     if !backend_command_allowed(command) {
@@ -743,43 +756,145 @@ fn build_backend_args(
         }
     }
 
+    if matches!(command, "ticket.add" | "ticket.update") {
+        let payload = ticket_json.ok_or_else(|| {
+            CommandError::new(
+                "missing_ticket_json",
+                "A ticket JSON payload is required for this ticket command.",
+                json!({ "command": command }),
+            )
+        })?;
+        args.push("--ticket-json".to_string());
+        args.push(payload.to_string());
+    }
+
+    if matches!(command, "ticket.update" | "ticket.delete") {
+        let id = ticket_id.ok_or_else(|| {
+            CommandError::new(
+                "missing_ticket_id",
+                "A ticket id is required for this ticket command.",
+                json!({ "command": command }),
+            )
+        })?;
+        args.push("--ticket-id".to_string());
+        args.push(id.to_string());
+    }
+
+    if command == "ticket.import" {
+        let format = import_format.ok_or_else(|| {
+            CommandError::new(
+                "missing_import_format",
+                "An import format is required for ticket.import.",
+                json!({ "command": command }),
+            )
+        })?;
+        args.push("--format".to_string());
+        args.push(format.to_string());
+        if let Some(mode) = import_mode.filter(|value| !value.trim().is_empty()) {
+            args.push("--mode".to_string());
+            args.push(mode.to_string());
+        }
+        let sources = [
+            ("--input-file", input_file),
+            ("--input-json", input_json),
+            ("--input-text", input_text),
+        ];
+        let provided: Vec<(&str, &str)> = sources
+            .into_iter()
+            .filter_map(|(flag, value)| value.filter(|item| !item.trim().is_empty()).map(|item| (flag, item)))
+            .collect();
+        if provided.len() != 1 {
+            return Err(CommandError::new(
+                "missing_ticket_import_source",
+                "Provide exactly one import source for ticket.import.",
+                json!({ "command": command }),
+            ));
+        }
+        args.push(provided[0].0.to_string());
+        args.push(provided[0].1.to_string());
+        if preview.unwrap_or(false) {
+            args.push("--preview".to_string());
+        }
+    }
+
+    if command == "ticket.accept_draft" {
+        let id = draft_id.ok_or_else(|| {
+            CommandError::new(
+                "missing_draft_id",
+                "A draft id is required for ticket.accept_draft.",
+                json!({ "command": command }),
+            )
+        })?;
+        args.push("--draft-id".to_string());
+        args.push(id.to_string());
+        if let Some(ids) = ticket_ids.filter(|value| !value.trim().is_empty()) {
+            args.push("--ticket-ids".to_string());
+            args.push(ids.to_string());
+        }
+        if let Some(mode) = import_mode.filter(|value| !value.trim().is_empty()) {
+            args.push("--mode".to_string());
+            args.push(mode.to_string());
+        }
+    }
+
     Ok((root, args))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_python_backend(
-    command: &str,
-    target: Option<&str>,
-    review_dir: Option<&str>,
-    output_dir: Option<&str>,
-    file_key: Option<&str>,
-    intake_json: Option<&str>,
-    files_json: Option<&str>,
-    project_name: Option<&str>,
-    ownership: Option<&str>,
-    request_id: Option<&str>,
-    body: Option<&str>,
-    intent: Option<&str>,
-    related: Option<&str>,
+#[derive(Default)]
+struct BackendArgs<'a> {
+    target: Option<&'a str>,
+    review_dir: Option<&'a str>,
+    output_dir: Option<&'a str>,
+    file_key: Option<&'a str>,
+    intake_json: Option<&'a str>,
+    files_json: Option<&'a str>,
+    project_name: Option<&'a str>,
+    ownership: Option<&'a str>,
+    request_id: Option<&'a str>,
+    body: Option<&'a str>,
+    intent: Option<&'a str>,
+    related: Option<&'a str>,
     force: Option<bool>,
     run_codex: Option<bool>,
-) -> Result<Value, CommandError> {
+    ticket_json: Option<&'a str>,
+    ticket_id: Option<&'a str>,
+    import_format: Option<&'a str>,
+    import_mode: Option<&'a str>,
+    input_file: Option<&'a str>,
+    input_json: Option<&'a str>,
+    input_text: Option<&'a str>,
+    preview: Option<bool>,
+    draft_id: Option<&'a str>,
+    ticket_ids: Option<&'a str>,
+}
+
+fn run_python_backend(command: &str, options: BackendArgs<'_>) -> Result<Value, CommandError> {
     let (root, args) = build_backend_args(
         command,
-        target,
-        review_dir,
-        output_dir,
-        file_key,
-        intake_json,
-        files_json,
-        project_name,
-        ownership,
-        request_id,
-        body,
-        intent,
-        related,
-        force,
-        run_codex,
+        options.target,
+        options.review_dir,
+        options.output_dir,
+        options.file_key,
+        options.intake_json,
+        options.files_json,
+        options.project_name,
+        options.ownership,
+        options.request_id,
+        options.body,
+        options.intent,
+        options.related,
+        options.force,
+        options.run_codex,
+        options.ticket_json,
+        options.ticket_id,
+        options.import_format,
+        options.import_mode,
+        options.input_file,
+        options.input_json,
+        options.input_text,
+        options.preview,
+        options.draft_id,
+        options.ticket_ids,
         false,
     )?;
 
@@ -829,22 +944,13 @@ fn list_recent_projects(app: AppHandle) -> Result<Vec<RecentTarget>, CommandErro
 #[tauri::command]
 fn load_project_snapshot(app: AppHandle, target: String) -> Result<Value, CommandError> {
     let resolved = validate_target_path(&target)?;
+    let target_text = resolved.display().to_string();
     let snapshot = run_python_backend(
         "project.load_snapshot",
-        Some(&resolved.display().to_string()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        BackendArgs {
+            target: Some(&target_text),
+            ..Default::default()
+        },
     )?;
 
     if snapshot.get("ok").and_then(Value::as_bool).unwrap_or(false) {
@@ -864,22 +970,13 @@ fn select_project_folder(app: AppHandle) -> Result<Option<ProjectLoadResult>, Co
     };
 
     let resolved = validate_target_path(&folder.display().to_string())?;
+    let target_text = resolved.display().to_string();
     let snapshot = run_python_backend(
         "project.load_snapshot",
-        Some(&resolved.display().to_string()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        BackendArgs {
+            target: Some(&target_text),
+            ..Default::default()
+        },
     )?;
 
     let recent = if snapshot.get("ok").and_then(Value::as_bool).unwrap_or(false) {
@@ -915,23 +1012,45 @@ fn run_backend_command(
     related: Option<String>,
     force: Option<bool>,
     run_codex: Option<bool>,
+    ticket_json: Option<String>,
+    ticket_id: Option<String>,
+    import_format: Option<String>,
+    import_mode: Option<String>,
+    input_file: Option<String>,
+    input_json: Option<String>,
+    input_text: Option<String>,
+    preview: Option<bool>,
+    draft_id: Option<String>,
+    ticket_ids: Option<String>,
 ) -> Result<Value, CommandError> {
     run_python_backend(
         &command,
-        target.as_deref(),
-        review_dir.as_deref(),
-        output_dir.as_deref(),
-        file_key.as_deref(),
-        intake_json.as_deref(),
-        files_json.as_deref(),
-        project_name.as_deref(),
-        ownership.as_deref(),
-        request_id.as_deref(),
-        body.as_deref(),
-        intent.as_deref(),
-        related.as_deref(),
-        force,
-        run_codex,
+        BackendArgs {
+            target: target.as_deref(),
+            review_dir: review_dir.as_deref(),
+            output_dir: output_dir.as_deref(),
+            file_key: file_key.as_deref(),
+            intake_json: intake_json.as_deref(),
+            files_json: files_json.as_deref(),
+            project_name: project_name.as_deref(),
+            ownership: ownership.as_deref(),
+            request_id: request_id.as_deref(),
+            body: body.as_deref(),
+            intent: intent.as_deref(),
+            related: related.as_deref(),
+            force,
+            run_codex,
+            ticket_json: ticket_json.as_deref(),
+            ticket_id: ticket_id.as_deref(),
+            import_format: import_format.as_deref(),
+            import_mode: import_mode.as_deref(),
+            input_file: input_file.as_deref(),
+            input_json: input_json.as_deref(),
+            input_text: input_text.as_deref(),
+            preview,
+            draft_id: draft_id.as_deref(),
+            ticket_ids: ticket_ids.as_deref(),
+        },
     )
 }
 
@@ -955,6 +1074,16 @@ fn run_backend_command_streamed(
     related: Option<String>,
     force: Option<bool>,
     run_codex: Option<bool>,
+    ticket_json: Option<String>,
+    ticket_id: Option<String>,
+    import_format: Option<String>,
+    import_mode: Option<String>,
+    input_file: Option<String>,
+    input_json: Option<String>,
+    input_text: Option<String>,
+    preview: Option<bool>,
+    draft_id: Option<String>,
+    ticket_ids: Option<String>,
 ) -> Result<Value, CommandError> {
     let (root, args) = build_backend_args(
         &command,
@@ -972,6 +1101,16 @@ fn run_backend_command_streamed(
         related.as_deref(),
         force,
         run_codex,
+        ticket_json.as_deref(),
+        ticket_id.as_deref(),
+        import_format.as_deref(),
+        import_mode.as_deref(),
+        input_file.as_deref(),
+        input_json.as_deref(),
+        input_text.as_deref(),
+        preview,
+        draft_id.as_deref(),
+        ticket_ids.as_deref(),
         true,
     )?;
 
@@ -1204,20 +1343,11 @@ fn managed_file_path(target: &str, file_key: &str) -> Result<PathBuf, CommandErr
     let target_text = resolved_target.display().to_string();
     let payload = run_python_backend(
         "advanced.load_file",
-        Some(&target_text),
-        None,
-        None,
-        Some(file_key),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        BackendArgs {
+            target: Some(&target_text),
+            file_key: Some(file_key),
+            ..Default::default()
+        },
     )?;
     if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         return Err(CommandError::new(
@@ -1355,6 +1485,32 @@ fn select_context_files() -> Result<Vec<PickedContextFile>, CommandError> {
 }
 
 #[tauri::command]
+fn select_ticket_import_file() -> Result<Option<String>, CommandError> {
+    let picked = rfd::FileDialog::new()
+        .set_title("Choose ticket import file")
+        .add_filter("Ticket imports", &["md", "markdown", "csv", "json", "txt"])
+        .pick_file();
+    let Some(file) = picked else {
+        return Ok(None);
+    };
+    let resolved = file.canonicalize().map_err(|error| {
+        CommandError::new(
+            "invalid_ticket_import_file",
+            "Could not resolve selected ticket import file.",
+            json!({ "path": file, "exception": error.to_string() }),
+        )
+    })?;
+    if !resolved.is_file() {
+        return Err(CommandError::new(
+            "invalid_ticket_import_file",
+            "Selected ticket import path must be a file.",
+            json!({ "path": resolved }),
+        ));
+    }
+    Ok(Some(resolved.display().to_string()))
+}
+
+#[tauri::command]
 fn select_settings_directory() -> Result<Option<String>, CommandError> {
     let picked = rfd::FileDialog::new()
         .set_title("Choose directory")
@@ -1387,6 +1543,7 @@ pub fn run() {
             load_project_snapshot,
             select_project_folder,
             select_context_files,
+            select_ticket_import_file,
             select_settings_directory,
             get_advanced_settings,
             update_advanced_settings,
@@ -1410,24 +1567,7 @@ mod tests {
 
     #[test]
     fn rejects_unallowlisted_backend_command() {
-        let error = run_python_backend(
-            "shell.exec",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap_err();
+        let error = run_python_backend("shell.exec", BackendArgs::default()).unwrap_err();
 
         assert_eq!(error.kind, "command_not_allowed");
     }
@@ -1438,20 +1578,10 @@ mod tests {
         let root_text = root.display().to_string();
         let payload = run_python_backend(
             "project.load_snapshot",
-            Some(&root_text),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            BackendArgs {
+                target: Some(&root_text),
+                ..Default::default()
+            },
         )
         .expect("project.load_snapshot should return a JSON envelope");
 
@@ -1495,5 +1625,13 @@ mod tests {
         assert!(validate_review_artifact_path(&other.display().to_string()).is_err());
 
         let _ = fs::remove_dir_all(valid_dir);
+    }
+
+    #[test]
+    fn allows_ticket_backend_commands() {
+        assert!(backend_command_allowed("ticket.load"));
+        assert!(backend_command_allowed("ticket.add"));
+        assert!(backend_command_allowed("ticket.import"));
+        assert!(backend_command_allowed("ticket.accept_draft"));
     }
 }

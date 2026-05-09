@@ -18,15 +18,14 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
         is_scaffolded: true,
         can_run_now: true,
         run_now_reason: "Ready.",
-        can_start_schedule: true,
-        start_schedule_reason: "Schedule ready.",
-        can_pause_schedule: false,
-        pause_schedule_reason: "No schedule is running.",
-        can_remove_schedule: false,
-        remove_schedule_reason: "No schedule is installed.",
+        can_start_automation: true,
+        start_automation_reason: "Automation ready.",
+        can_stop_automation: false,
+        stop_automation_reason: "No automation is running.",
         can_run_safety_check: true,
         can_export_review: true,
       },
+      automation: { state: "stopped", message: "Continuous automation is ready to start." },
     },
     files: [
       {
@@ -68,10 +67,10 @@ describe("command palette model", () => {
     expect(ids).toContain("create-new-project");
     expect(ids).toContain("close-project");
     expect(ids).toContain("run-once");
-    expect(ids).toContain("remove-schedule");
-    expect(ids).toContain("open-observatory-browser");
+    expect(ids).toContain("start-automation");
+    expect(ids).toContain("stop-automation");
     expect(ids).toContain("export-debug-bundle");
-    expect(ids).toHaveLength(20);
+    expect(ids).toHaveLength(18);
   });
 
   it("explains disabled target-scoped commands without a selected target", () => {
@@ -94,50 +93,44 @@ describe("command palette model", () => {
             is_scaffolded: true,
             can_run_now: false,
             run_now_reason: "A role run is already active.",
-            can_start_schedule: false,
-            start_schedule_reason: "Fix prerequisites first.",
-            can_pause_schedule: true,
-            can_remove_schedule: true,
+            can_start_automation: false,
+            start_automation_reason: "Fix prerequisites first.",
+            can_stop_automation: true,
             can_run_safety_check: true,
             can_export_review: true,
           },
-          schedule: { state: "running", message: "Schedule is running via launchd." },
+          automation: { state: "running", message: "Continuous automation is running." },
         },
       }),
     });
 
     expect(commands.find((command) => command.id === "run-once")?.disabledReason).toBe("A role run is already active.");
-    expect(commands.find((command) => command.id === "start-schedule")?.disabledReason).toBe("Fix prerequisites first.");
-    expect(commands.find((command) => command.id === "pause-schedule")?.disabledReason).toBeUndefined();
-    expect(commands.find((command) => command.id === "remove-schedule")?.disabledReason).toBeUndefined();
+    expect(commands.find((command) => command.id === "start-automation")?.disabledReason).toBe("Fix prerequisites first.");
+    expect(commands.find((command) => command.id === "stop-automation")?.disabledReason).toBeUndefined();
   });
 
-  it("disables Pause schedule when a plist exists but launchd is not running it", () => {
+  it("disables Stop when automation is not running", () => {
     const commands = buildCommandPaletteModel({
       snapshot: snapshot({
         run: {
           controls: {
             is_scaffolded: true,
-            can_pause_schedule: true,
-            pause_schedule_reason: "Schedule plist exists but is not loaded.",
+            can_stop_automation: false,
+            stop_automation_reason: "No automation is running.",
           },
-          schedule: { state: "installed", message: "Schedule plist exists but is not loaded." },
+          automation: { state: "stopped", message: "Continuous automation is ready to start." },
         },
       }),
     });
 
-    expect(commands.find((command) => command.id === "pause-schedule")?.disabledReason).toBe(
-      "Schedule plist exists but is not loaded.",
-    );
+    expect(commands.find((command) => command.id === "stop-automation")?.disabledReason).toBe("No automation is running.");
   });
 
   it("searches command title, section, description, and keywords", () => {
     const commands = buildCommandPaletteModel({ snapshot: snapshot() });
 
-    expect(filterPaletteCommands(commands, "autonomous build").map((command) => command.id)).toEqual([
-      "open-observatory-browser",
-    ]);
-    expect(filterPaletteCommands(commands, "human bridge").map((command) => command.id)).toContain("send-note-next-run");
+    expect(filterPaletteCommands(commands, "activity").map((command) => command.id)).toEqual(["open-observatory"]);
+    expect(filterPaletteCommands(commands, "inbox note").map((command) => command.id)).toContain("send-note-next-run");
     expect(filterPaletteCommands(commands, "raw tasks").map((command) => command.id)).toEqual([
       "open-raw-automation-tasks",
     ]);

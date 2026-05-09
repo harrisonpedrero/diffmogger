@@ -20,18 +20,15 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
         is_scaffolded: true,
         is_running: false,
         can_run_now: true,
-        can_start_schedule: true,
-        can_pause_schedule: true,
-        can_remove_schedule: true,
+        can_start_automation: false,
+        can_stop_automation: true,
         can_run_safety_check: true,
       },
-      schedule: {
+      automation: {
         state: "running",
-        message: "Schedule is running via launchd.",
-        strategy_label: "Continuous conveyor",
-        cadence_seconds: 3600,
-        active_labels: ["com.diffmogger.automation.project"],
-        can_remove: true,
+        message: "Continuous automation is running.",
+        pid: 1234,
+        started_at: "2026-05-07T12:00:00+00:00",
       },
       worker_strategy: { strategy: "NO_WORKERS" },
       worker_controls: { can_run_read_only: false, can_run_write: false, can_run_integrator: false },
@@ -61,7 +58,7 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
 }
 
 describe("RunPage", () => {
-  it("renders Remove Schedule beside the other run controls when backend allows it", () => {
+  it("renders automation controls when backend allows them", () => {
     const html = renderToStaticMarkup(
       <RunPage
         snapshot={snapshot()}
@@ -72,10 +69,25 @@ describe("RunPage", () => {
       />,
     );
 
-    expect(html).toContain("Run Once Now");
-    expect(html).toContain("Start Schedule");
-    expect(html).toContain("Pause Schedule");
-    expect(html).toContain("Remove Schedule");
-    expect(html).toContain("Schedule is running via launchd.");
+    expect(html).toContain("Run");
+    expect(html).toContain("Start");
+    expect(html).toContain("Stop");
+    expect(html).toContain("Continuous automation is running.");
+  });
+
+  it("renders ticket queue controls for ticket campaign targets", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({ brief: { intake: { automation_run_mode: "ticket_campaign" } } })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Ticket Queue");
+    expect(html).toContain("Preview Import");
+    expect(html).toContain("Apply Import");
   });
 });

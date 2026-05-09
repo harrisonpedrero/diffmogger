@@ -2,8 +2,8 @@ import type { ObservatorySnapshot } from "./api/backend";
 
 export type ObservatoryTone = "good" | "warn" | "critical" | "info" | "quiet";
 
-// Conveyor remains a preserved Summary surface rather than a separate tab.
-export type ObservatoryTab = "Summary" | "Timeline" | "Patches" | "Metrics";
+// Runtime state remains on Summary rather than a separate tab.
+export type ObservatoryTab = "Summary" | "Events" | "Queue" | "Metrics";
 
 export type ObservatoryViewModel = {
   empty: boolean;
@@ -39,14 +39,14 @@ function toneFromStatus(status: string): ObservatoryTone {
 }
 
 export function buildObservatoryViewModel(snapshot: ObservatorySnapshot | null): ObservatoryViewModel {
-  const tabs: ObservatoryTab[] = ["Summary", "Timeline", "Patches", "Metrics"];
+  const tabs: ObservatoryTab[] = ["Summary", "Events", "Queue", "Metrics"];
   if (!snapshot) {
     return {
       empty: true,
       status: "NO_TARGET",
       tone: "quiet",
-      headline: "Diffmogger Autonomous Build Log",
-      subheadline: "Choose a project folder to load the native Observatory.",
+      headline: "Activity",
+      subheadline: "Choose a project folder to load activity.",
       activeRole: "",
       hasQueuedPatch: false,
       needsHuman: false,
@@ -66,10 +66,10 @@ export function buildObservatoryViewModel(snapshot: ObservatorySnapshot | null):
   const headline = criticalStop
     ? "Critical stop is active"
     : needsHuman
-      ? "Human input is needed"
+      ? "Input needed"
       : activeRole
         ? `${activeRole} is running`
-        : "Diffmogger Autonomous Build Log";
+        : "Activity";
 
   return {
     empty: false,

@@ -35,21 +35,20 @@ import {
 import { buildAdvancedEditorModel } from "./advancedModel";
 import { scheduleAfterPaint } from "./performance";
 
-type AdvancedTab = "Files" | "Diagnostics" | "Settings" | "Debug bundle";
+type AdvancedTab = "Files" | "Diagnostics" | "Settings" | "Debug";
 
-const tabs: AdvancedTab[] = ["Files", "Diagnostics", "Settings", "Debug bundle"];
+const tabs: AdvancedTab[] = ["Files", "Diagnostics", "Settings", "Debug"];
 const fileCategories = [
   "Core state",
-  "Human bridge",
+  "Inbox",
   "Review",
   "Context",
-  "Multi-role / conveyor",
+  "Roles / conveyor",
 ];
 
 const defaultSettings: AdvancedSettings = {
   reviewExportDir: "",
   preferredEditorCommand: "",
-  scheduleCadenceMinutes: 60,
   humanBridgeMode: "file_only",
   appearance: "system",
   density: "comfortable",
@@ -129,9 +128,9 @@ function RuntimeEnvironmentCard(props: {
   const suggestions = props.suggestions ?? [];
   return (
     <article className="panel span-2">
-      <h2>Native Environment Doctor</h2>
+      <h2>Backend environment</h2>
       <p className="advanced-muted">
-        These checks use the same backend PATH that the native app passes to Python commands.
+        These checks use the backend PATH passed to Python commands.
       </p>
       <div className="advanced-runtime-grid">
         <DetailRow label="Backend Python" value={environment?.backend_python ?? "Not loaded"} />
@@ -140,7 +139,7 @@ function RuntimeEnvironmentCard(props: {
         <DetailRow label=".env loaded" value={environment?.dotenv_loaded ? "Yes" : "No"} />
       </div>
       <div className="advanced-path-row">
-        <code>{environment?.effective_path ?? "Run diagnostics to inspect the native runtime PATH."}</code>
+        <code>{environment?.effective_path ?? "Run diagnostics to inspect the backend PATH."}</code>
         <button
           className="secondary-action"
           disabled={!environment?.effective_path}
@@ -157,7 +156,7 @@ function RuntimeEnvironmentCard(props: {
       </div>
       {suggestions.length > 0 && (
         <div className="advanced-fix-list">
-          <h3>Guided fixes</h3>
+          <h3>Fixes</h3>
           {suggestions.map((item) => (
             <div className="advanced-fix-row" key={item.id}>
               <div>
@@ -178,6 +177,8 @@ function RuntimeEnvironmentCard(props: {
 }
 
 function categoryOf(file: RegisteredFile): string {
+  if (file.category === "Human bridge") return "Inbox";
+  if (file.category === "Multi-role / conveyor") return "Roles / conveyor";
   return file.category || "Core state";
 }
 
@@ -404,11 +405,11 @@ export function AdvancedPage(props: {
         outputDir: debugOutputDir || `${target}/target/debug-bundles`,
       });
       if (!payload.ok || !payload.data) {
-        setError(payload.message ?? "Could not export the debug bundle.");
+        setError(payload.message ?? "Could not export debug files.");
         return;
       }
       setDebugBundle(payload.data);
-      setNotice("Debug bundle exported without .env files or secret-like values.");
+      setNotice("Debug export written without .env files or secret-like values.");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -497,18 +498,17 @@ export function AdvancedPage(props: {
     <section className="advanced-page">
       <div className="advanced-header">
         <div>
-          <span className="brief-eyebrow">Advanced</span>
-          <h1>Power Tools</h1>
-          <p>Managed file editing, diagnostics, local settings, and safe debug exports live here.</p>
+          <h1>Debug</h1>
+          <p>Managed files, diagnostics, settings, and debug exports.</p>
         </div>
         <div className="advanced-header-actions">
           <button className="secondary-action" disabled={props.loading || !!busy} onClick={() => void loadFiles(selectedKey, { loadSelected: activeTab === "Files" })}>
             <RefreshCw size={16} />
-            Refresh Files
+            Refresh files
           </button>
           <button className="secondary-action" disabled={props.loading || !!busy} onClick={props.onRefresh}>
             <RefreshCw size={16} />
-            Refresh Snapshot
+            Refresh snapshot
           </button>
         </div>
       </div>
@@ -592,7 +592,7 @@ export function AdvancedPage(props: {
               <button
                 className="primary-action"
                 disabled={!editorModel.canSave}
-                title={!selectedFile?.editable ? "This managed file is read-only from Advanced." : undefined}
+                title={!selectedFile?.editable ? "This managed file is read-only here." : undefined}
                 onClick={() => void saveFile()}
               >
                 <Save size={15} />
@@ -607,7 +607,7 @@ export function AdvancedPage(props: {
               </button>
               <button className="secondary-action" disabled={!editorModel.canOpen} onClick={() => void openFile()}>
                 <ExternalLink size={15} />
-                Open in external editor
+                Open externally
               </button>
               <button className="secondary-action" disabled={!editorModel.canReveal} onClick={() => void revealFile()}>
                 <FolderOpen size={15} />
@@ -647,11 +647,11 @@ export function AdvancedPage(props: {
             <div className="panel-heading-row">
               <div>
                 <h2>Diagnostics</h2>
-                <p>Prerequisite checks and readiness details from the existing dashboard backend.</p>
+                <p>Backend prerequisite and target checks.</p>
               </div>
               <button className="secondary-action" disabled={busy === "diagnostics"} onClick={() => void runDiagnostics()}>
                 <TerminalSquare size={15} />
-                Run Checks
+                Run checks
               </button>
             </div>
             <div className="advanced-check-list">
@@ -660,7 +660,7 @@ export function AdvancedPage(props: {
           </article>
 
           <article className="panel">
-            <h2>Tool Status</h2>
+            <h2>Tools</h2>
             <p className="advanced-muted">Codex CLI, Python, bash, and git status.</p>
             <div className="advanced-check-list compact">
               {toolRows.map((row) => (
@@ -670,28 +670,28 @@ export function AdvancedPage(props: {
           </article>
 
           <article className="panel">
-            <h2>Target Writability</h2>
+            <h2>Target write access</h2>
             <DetailRow label="Target" value={diagnostics?.target_writability.target === true ? "Writable" : "Review"} />
             <DetailRow label="Docs" value={diagnostics?.target_writability.docs === true ? "Writable" : "Review"} />
             <DetailRow label="Status" value={diagnostics?.target_writability.status ?? "unknown"} />
           </article>
 
           <article className="panel">
-            <h2>Schedule / launchd</h2>
-            <DetailRow label="State" value={diagnostics?.schedule.state ?? "unknown"} />
-            <DetailRow label="Strategy" value={diagnostics?.schedule.strategy_label ?? diagnostics?.schedule.strategy ?? "unknown"} />
-            <DetailRow label="Message" value={diagnostics?.schedule.message ?? "No schedule status loaded."} />
+            <h2>Automation</h2>
+            <DetailRow label="State" value={diagnostics?.automation.state ?? "unknown"} />
+            <DetailRow label="PID" value={diagnostics?.automation.pid ?? "not running"} />
+            <DetailRow label="Message" value={diagnostics?.automation.message ?? "No automation status loaded."} />
           </article>
 
           <article className="panel">
-            <h2>Notifier Health</h2>
-            <DetailRow label="Bridge mode" value={diagnostics?.notifier_health.bridge_mode ?? "file_only"} />
+            <h2>Notifier</h2>
+            <DetailRow label="Inbox mode" value={diagnostics?.notifier_health.bridge_mode ?? "file_only"} />
             <DetailRow label="Status" value={diagnostics?.notifier_health.status ?? "not_configured"} />
             <p className="empty-copy">{text(diagnostics?.notifier_health.detail, "No notifier health detail recorded.")}</p>
           </article>
 
           <article className="panel">
-            <h2>Backend Schema Versions</h2>
+            <h2>Backend versions</h2>
             <DetailRow label="Schema" value={diagnostics?.backend.schema_version ?? 1} />
             <DetailRow label="Required files" value={diagnostics?.required_files.status ?? "not_run"} />
             <DetailRow label="Safety" value={diagnostics?.integration_safety.status ?? "unknown"} />
@@ -721,17 +721,7 @@ export function AdvancedPage(props: {
                 />
               </label>
               <label className="brief-field">
-                <span>Schedule cadence defaults</span>
-                <input
-                  min={5}
-                  max={1440}
-                  type="number"
-                  value={settings.scheduleCadenceMinutes}
-                  onChange={(event) => setSettings((current) => ({ ...current, scheduleCadenceMinutes: Number(event.target.value || 60) }))}
-                />
-              </label>
-              <label className="brief-field">
-                <span>Human bridge mode</span>
+                <span>Inbox mode</span>
                 <select
                   value={settings.humanBridgeMode}
                   onChange={(event) => setSettings((current) => ({ ...current, humanBridgeMode: event.target.value }))}
@@ -771,31 +761,31 @@ export function AdvancedPage(props: {
               </button>
               <button className="primary-action" disabled={busy === "settings"} onClick={() => void saveSettings()}>
                 <Save size={15} />
-                Save Settings
+                Save settings
               </button>
             </div>
           </article>
 
           <article className="panel">
-            <h2>Persistence</h2>
+            <h2>Storage</h2>
             <p className="empty-copy">
-              These preferences are stored in the native app config. Project state remains target-local in .agentic/dashboard_state.json.
+              Preferences are stored in the app config. Project state remains target-local in .agentic/dashboard_state.json.
             </p>
           </article>
         </div>
       )}
 
-      {activeTab === "Debug bundle" && (
+      {activeTab === "Debug" && (
         <div className="advanced-debug-grid">
           <article className="panel span-2">
             <div className="panel-heading-row">
               <div>
-                <h2>Debug bundle</h2>
-                <p>Exports app notes, backend command metadata, dashboard state, latest safety check, and diagnostics without secrets.</p>
+                <h2>Debug export</h2>
+                <p>Exports app notes, backend command metadata, dashboard state, safety checks, and diagnostics without secrets.</p>
               </div>
               <button className="primary-action" disabled={busy === "debug-bundle"} onClick={() => void exportDebugBundle()}>
                 <FileArchive size={15} />
-                Export Debug Bundle
+                Export debug ZIP
               </button>
             </div>
             <label className="brief-field">
@@ -813,13 +803,13 @@ export function AdvancedPage(props: {
               </div>
               <div>
                 <XCircle size={15} />
-                <span>Arbitrary project source files are not bundled.</span>
+                <span>Arbitrary project source files are not exported.</span>
               </div>
             </div>
           </article>
 
           <article className="panel">
-            <h2>Latest Bundle</h2>
+            <h2>Latest export</h2>
             {debugBundle ? (
               <div className="advanced-bundle-result">
                 <code>{debugBundle.bundle_path}</code>
@@ -837,7 +827,7 @@ export function AdvancedPage(props: {
                 ))}
               </div>
             ) : (
-              <div className="empty-copy">No debug bundle exported in this session.</div>
+              <div className="empty-copy">No debug export in this session.</div>
             )}
           </article>
         </div>

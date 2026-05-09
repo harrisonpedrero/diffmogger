@@ -20,7 +20,7 @@ function projectSnapshot(): ProjectSnapshot {
       title: "Project",
       automation_status: "ACTIVE",
       current_horizon: "H1",
-      next_action: "Run Once Now",
+      next_action: "Run",
       pending_human_requests: 0,
       unhandled_inbox: 0,
       queued_patches: 0,
@@ -66,7 +66,7 @@ describe("InboxPage", () => {
     expect(html).toContain("New note");
     expect(html).toContain("Related request, ticket, file, or run");
     expect(html).toContain("Message body");
-    expect(html).toContain("Send To Next Run");
+    expect(html).toContain("Send to next run");
     expect(html).not.toContain("docs/HUMAN_INBOX.md");
   });
 });

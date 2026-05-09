@@ -48,15 +48,18 @@ button {
 
 select {
   appearance: none;
-  background-image:
-    linear-gradient(45deg, transparent 50%, currentColor 50%),
-    linear-gradient(135deg, currentColor 50%, transparent 50%);
-  background-position:
-    calc(100% - 17px) 52%,
-    calc(100% - 12px) 52%;
+  -webkit-appearance: none;
+  background-color: #202121;
+  background-image: none;
   background-repeat: no-repeat;
-  background-size: 5px 5px, 5px 5px;
+  background-position: right 12px center;
+  background-size: 14px 14px;
+  color-scheme: dark;
   padding-right: 34px !important;
+}
+
+select::-ms-expand {
+  display: none;
 }
 
 button:focus-visible,
@@ -69,16 +72,14 @@ textarea:focus-visible {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 208px minmax(0, 1fr);
+  grid-template-columns: 64px minmax(0, 1fr);
   grid-template-rows: 38px minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 180px),
-    #111214;
+  background: #111214;
   box-shadow: 0 22px 76px rgba(0, 0, 0, 0.34);
 }
 
@@ -179,7 +180,7 @@ textarea:focus-visible {
 
 .sidebar {
   grid-row: 2;
-  padding: 16px 12px;
+  padding: 14px 10px;
   border-right: 1px solid #272727;
   background: #151618;
 }
@@ -187,19 +188,22 @@ textarea:focus-visible {
 .sidebar nav {
   display: grid;
   gap: 4px;
+  justify-items: center;
 }
 
 .sidebar button {
+  position: relative;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) auto;
+  grid-template-columns: 1fr;
+  justify-items: center;
   align-items: center;
-  gap: 8px;
-  min-height: 38px;
-  padding: 0 10px;
-  border-radius: 7px;
+  width: 40px;
+  min-height: 40px;
+  padding: 0;
+  border-radius: 0;
   color: #a9a79e;
   background: transparent;
-  text-align: left;
+  text-align: center;
 }
 
 .sidebar button:hover {
@@ -212,30 +216,48 @@ textarea:focus-visible {
   background: #83dfc6;
 }
 
-.sidebar button span {
+.sidebar-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
   overflow: hidden;
-  text-overflow: ellipsis;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
   white-space: nowrap;
 }
 
 .sidebar-badge {
-  justify-self: end;
-  min-width: 18px;
-  max-width: 58px;
-  padding: 3px 6px;
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 8px;
+  min-width: 8px;
+  height: 8px;
+  max-width: none;
+  padding: 0;
   overflow: hidden;
   border: 1px solid #3a3d37;
   border-radius: 999px;
   color: #bdb7aa;
   background: #242525;
-  font-size: 9px;
+  font-size: 0;
   font-style: normal;
   font-weight: 900;
   line-height: 1;
   text-align: center;
-  text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
+}
+
+.sidebar-badge.has-label {
+  top: 3px;
+  right: 3px;
+  width: auto;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  font-size: 9px;
+  line-height: 14px;
 }
 
 .sidebar-badge.running {
@@ -295,7 +317,7 @@ textarea:focus-visible {
   padding: 0 12px;
   overflow: hidden;
   border: 1px solid #32342f;
-  border-radius: 7px;
+  border-radius: 0;
   color: #ebe7dc;
   background: #1b1c1d;
   font-size: 13px;
@@ -327,10 +349,10 @@ textarea:focus-visible {
   left: 0;
   z-index: 80;
   display: grid;
-  width: min(360px, calc(100vw - 236px));
+  width: min(360px, calc(100vw - 92px));
   padding: 8px;
   border: 1px solid #343831;
-  border-radius: 8px;
+  border-radius: 0;
   background: #1a1b1c;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
 }
@@ -366,7 +388,7 @@ textarea:focus-visible {
   align-items: center;
   min-height: 34px;
   padding: 7px 9px;
-  border-radius: 7px;
+  border-radius: 0;
   color: #ece7da;
   background: transparent;
   text-align: left;
@@ -405,7 +427,7 @@ textarea:focus-visible {
   height: 32px;
   padding: 0 11px;
   border: 1px solid #353631;
-  border-radius: 7px;
+  border-radius: 0;
   color: #d9d6cb;
   background: #1b1c1d;
   font-size: 12px;
@@ -452,7 +474,7 @@ textarea:focus-visible {
   justify-content: center;
   gap: 8px;
   height: 34px;
-  border-radius: 7px;
+  border-radius: 0;
   font-size: 13px;
   font-weight: 800;
 }
@@ -550,7 +572,7 @@ textarea:focus-visible {
   margin-bottom: 18px;
   place-items: center;
   border: 1px solid #3c3d37;
-  border-radius: 8px;
+  border-radius: 0;
   color: #83dfc6;
   background: #1d1e1f;
 }
@@ -634,16 +656,14 @@ textarea:focus-visible {
   position: relative;
   overflow: hidden;
   border: 1px solid #30312d;
-  border-radius: 8px;
+  border-radius: 0;
   background: #191a1b;
 }
 
 .skeleton-banner {
   min-height: 210px;
   padding: 22px;
-  background:
-    linear-gradient(135deg, rgba(131, 223, 198, 0.1), rgba(103, 166, 255, 0.06), transparent),
-    #15191c;
+  background: #15191c;
 }
 
 .skeleton-banner::after,
@@ -651,7 +671,7 @@ textarea:focus-visible {
   position: absolute;
   inset: 0;
   transform: translateX(-100%);
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.065), transparent);
+  background: rgba(255, 255, 255, 0.065);
   animation: skeleton-shimmer 1.5s ease-in-out infinite;
   content: "";
 }
@@ -660,7 +680,7 @@ textarea:focus-visible {
 .skeleton-pill {
   height: 14px;
   margin-top: 12px;
-  border-radius: 999px;
+  border-radius: 0;
   background: #2a2c2b;
 }
 
@@ -693,7 +713,7 @@ textarea:focus-visible {
   width: 132px;
   height: 34px;
   margin-top: 0;
-  border-radius: 7px;
+  border-radius: 0;
 }
 
 .skeleton-pill.short {
@@ -768,7 +788,7 @@ textarea:focus-visible {
   min-height: 42px;
   padding: 0 12px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   color: #ece8dc;
   background: #1a1b1c;
 }
@@ -804,7 +824,7 @@ textarea:focus-visible {
   width: min(520px, calc(100vw - 36px));
   padding: 12px;
   border: 1px solid #3a3b35;
-  border-radius: 8px;
+  border-radius: 0;
   background: #1b1c1d;
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.38);
   color: #e8e3d6;
@@ -827,7 +847,7 @@ textarea:focus-visible {
   min-height: 28px;
   padding: 0 9px;
   border: 1px solid rgba(255, 156, 165, 0.35);
-  border-radius: 7px;
+  border-radius: 0;
   color: #ffe1e4;
   background: rgba(80, 30, 36, 0.32);
   font-size: 12px;
@@ -844,7 +864,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 16px;
   border: 1px solid #30312d;
-  border-radius: 8px;
+  border-radius: 0;
   background: #191a1b;
 }
 
@@ -874,7 +894,7 @@ textarea:focus-visible {
   min-height: 78px;
   padding: 12px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -922,7 +942,7 @@ textarea:focus-visible {
   margin-top: 14px;
   padding: 13px;
   border-left: 3px solid #83dfc6;
-  border-radius: 0 7px 7px 0;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -958,10 +978,150 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.ticket-queue-panel {
+  display: grid;
+  gap: 13px;
+}
+
+.ticket-queue-panel.seed {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #2c2d29;
+}
+
+.ticket-summary-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ticket-summary-row > div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #2e302c;
+  background: #202121;
+}
+
+.ticket-summary-row span {
+  display: block;
+  margin-bottom: 6px;
+  color: #918e84;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.ticket-summary-row strong {
+  display: block;
+  color: #f7f1e5;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.ticket-next-row,
+.ticket-row,
+.ticket-issue {
+  display: grid;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.ticket-next-row {
+  grid-template-columns: 70px minmax(0, 1fr);
+  padding: 10px;
+  border: 1px solid #2e302c;
+  background: #202121;
+}
+
+.ticket-next-row strong,
+.ticket-row strong {
+  color: #f7f1e5;
+  font-size: 13px;
+}
+
+.ticket-next-row span,
+.ticket-row span {
+  min-width: 0;
+  color: #c8c3b7;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.ticket-list,
+.ticket-issue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.ticket-row {
+  grid-template-columns: minmax(0, 1fr) 118px auto 36px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid #2e302c;
+  background: #202121;
+}
+
+.ticket-row > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ticket-row em {
+  color: #9cc8ff;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.ticket-issue {
+  grid-template-columns: 16px minmax(0, 1fr);
+  padding: 9px;
+  border: 1px solid rgba(242, 189, 93, 0.32);
+  color: #f0d39a;
+  background: rgba(71, 54, 27, 0.26);
+  font-size: 13px;
+}
+
+.ticket-issue.error {
+  border-color: rgba(255, 156, 165, 0.42);
+  color: #ffbec4;
+  background: rgba(80, 30, 36, 0.28);
+}
+
+.ticket-edit-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.85fr);
+  gap: 12px;
+}
+
+.ticket-import-box {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ticket-draft-details {
+  display: grid;
+  gap: 10px;
+}
+
+.ticket-draft-details summary {
+  color: #f2ecdd;
+  font-size: 13px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.icon-button.danger {
+  color: #ffbec4;
+}
+
 .file-table {
   display: grid;
   border: 1px solid #2e302c;
-  border-radius: 8px;
+  border-radius: 0;
   overflow: hidden;
 }
 
@@ -1023,10 +1183,8 @@ textarea:focus-visible {
   gap: 16px;
   padding: 20px;
   border: 1px solid #303a3c;
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(131, 223, 198, 0.12), rgba(103, 166, 255, 0.08) 48%, transparent),
-    #15191c;
+  border-radius: 0;
+  background: #15191c;
 }
 
 .advanced-header h1 {
@@ -1057,14 +1215,14 @@ textarea:focus-visible {
   gap: 6px;
   padding: 4px;
   border: 1px solid #30312d;
-  border-radius: 8px;
+  border-radius: 0;
   background: #191a1b;
 }
 
 .advanced-tabs button {
   min-height: 34px;
   padding: 0 13px;
-  border-radius: 7px;
+  border-radius: 0;
   color: #bdb7aa;
   background: transparent;
   font-size: 12px;
@@ -1114,7 +1272,7 @@ textarea:focus-visible {
   min-height: 40px;
   padding: 8px 9px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   color: #ece8dc;
   background: #202121;
   text-align: left;
@@ -1172,7 +1330,7 @@ textarea:focus-visible {
   min-height: 28px;
   padding: 7px 10px;
   border: 1px solid rgba(107, 209, 155, 0.38);
-  border-radius: 7px;
+  border-radius: 0;
   color: #a6edc7;
   background: rgba(33, 65, 54, 0.28);
   font-size: 11px;
@@ -1199,7 +1357,7 @@ textarea:focus-visible {
   min-height: 34px;
   padding: 9px 10px;
   border: 1px solid #2e302c;
-  border-radius: 7px;
+  border-radius: 0;
   color: #83dfc6;
   background: #202121;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -1211,7 +1369,7 @@ textarea:focus-visible {
   min-height: 430px;
   padding: 12px;
   border: 1px solid #2e302c;
-  border-radius: 8px;
+  border-radius: 0;
   color: #efeade;
   background: #151617;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -1235,7 +1393,7 @@ textarea:focus-visible {
   gap: 5px;
   padding: 11px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -1294,7 +1452,7 @@ textarea:focus-visible {
   gap: 5px 10px;
   padding: 10px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -1376,7 +1534,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 12px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -1413,7 +1571,7 @@ textarea:focus-visible {
   min-height: 36px;
   padding: 0 10px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   color: #c8c3b7;
   background: #202121;
   font-size: 13px;
@@ -1432,7 +1590,7 @@ textarea:focus-visible {
   display: block;
   padding: 7px 9px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   color: #c8c3b7;
   background: #202121;
   font-size: 12px;
@@ -1448,7 +1606,7 @@ textarea:focus-visible {
   gap: 6px;
   padding: 8px;
   border: 1px solid #3a3b35;
-  border-radius: 8px;
+  border-radius: 0;
   background: #1b1c1d;
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.38);
 }
@@ -1459,7 +1617,7 @@ textarea:focus-visible {
   gap: 10px;
   min-height: 36px;
   padding: 0 10px;
-  border-radius: 7px;
+  border-radius: 0;
   color: #eee8db;
   background: transparent;
   text-align: left;
@@ -1494,7 +1652,7 @@ textarea:focus-visible {
   width: min(720px, calc(100vw - 48px));
   overflow: hidden;
   border: 1px solid #3a3b35;
-  border-radius: 8px;
+  border-radius: 0;
   background: #18191a;
   box-shadow: 0 26px 90px rgba(0, 0, 0, 0.52);
 }
@@ -1526,7 +1684,7 @@ textarea:focus-visible {
   min-width: 36px;
   padding: 4px 7px;
   border: 1px solid #3a3b35;
-  border-radius: 6px;
+  border-radius: 0;
   color: #bdb7aa;
   background: #151617;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -1539,7 +1697,7 @@ textarea:focus-visible {
   width: 30px;
   height: 30px;
   place-items: center;
-  border-radius: 7px;
+  border-radius: 0;
   color: #c8c3b7;
   background: transparent;
 }
@@ -1563,7 +1721,7 @@ textarea:focus-visible {
   align-items: center;
   min-height: 58px;
   padding: 8px 10px;
-  border-radius: 7px;
+  border-radius: 0;
   color: #e8e3d6;
   background: transparent;
   text-align: left;
@@ -1584,7 +1742,7 @@ textarea:focus-visible {
   height: 30px;
   place-items: center;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   color: #83dfc6;
   background: #1b1c1d;
 }
@@ -1613,7 +1771,7 @@ textarea:focus-visible {
 
 .palette-command-list em {
   padding: 4px 7px;
-  border-radius: 999px;
+  border-radius: 0;
   color: #bdb7aa;
   background: #2a2b29;
   font-size: 10px;
@@ -1632,7 +1790,7 @@ textarea:focus-visible {
   margin: 8px 8px 0;
   padding: 10px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   color: #c8c3b7;
   background: #202121;
   font-size: 13px;
@@ -1706,24 +1864,18 @@ textarea:focus-visible {
   min-height: 214px;
   padding: 22px;
   border: 1px solid #303a3c;
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(131, 223, 198, 0.16), rgba(103, 166, 255, 0.08) 46%, transparent),
-    #15191c;
+  border-radius: 0;
+  background: #15191c;
 }
 
 .home-banner.warn {
   border-color: rgba(242, 189, 93, 0.42);
-  background:
-    linear-gradient(135deg, rgba(242, 189, 93, 0.14), rgba(103, 166, 255, 0.06) 48%, transparent),
-    #15191c;
+  background: #1b1a16;
 }
 
 .home-banner.critical {
   border-color: rgba(217, 108, 117, 0.5);
-  background:
-    linear-gradient(135deg, rgba(217, 108, 117, 0.16), rgba(242, 189, 93, 0.08) 48%, transparent),
-    #15191c;
+  background: #1c1517;
 }
 
 .home-banner.info {
@@ -1776,7 +1928,7 @@ textarea:focus-visible {
   max-width: 230px;
   padding: 0 11px;
   border: 1px solid rgba(131, 223, 198, 0.52);
-  border-radius: 7px;
+  border-radius: 0;
   color: #a6edc7;
   background: rgba(14, 20, 20, 0.72);
   font-size: 12px;
@@ -1853,7 +2005,7 @@ textarea:focus-visible {
 .progress-item {
   padding: 11px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -1912,7 +2064,7 @@ textarea:focus-visible {
 .empty-copy {
   padding: 14px;
   border: 1px dashed #3a3c37;
-  border-radius: 7px;
+  border-radius: 0;
   color: #bdb7aa;
   background: #1d1e1f;
   font-size: 14px;
@@ -1975,7 +2127,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 12px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -2045,10 +2197,8 @@ textarea:focus-visible {
   gap: 16px;
   padding: 20px;
   border: 1px solid #303a3c;
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(131, 223, 198, 0.14), rgba(103, 166, 255, 0.08) 48%, transparent),
-    #15191c;
+  border-radius: 0;
+  background: #15191c;
 }
 
 .brief-eyebrow {
@@ -2078,7 +2228,7 @@ textarea:focus-visible {
   min-height: 30px;
   padding: 7px 10px;
   border: 1px solid #3c3d38;
-  border-radius: 7px;
+  border-radius: 0;
   color: #c8c3b7;
   background: rgba(14, 20, 20, 0.72);
   font-size: 12px;
@@ -2114,7 +2264,7 @@ textarea:focus-visible {
   gap: 8px;
   padding: 0 9px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   color: #bdb7aa;
   background: #191a1b;
   font-size: 12px;
@@ -2137,7 +2287,7 @@ textarea:focus-visible {
   width: 20px;
   height: 20px;
   place-items: center;
-  border-radius: 50%;
+  border-radius: 0;
   background: rgba(255, 255, 255, 0.08);
   font-size: 11px;
 }
@@ -2149,7 +2299,7 @@ textarea:focus-visible {
   align-items: flex-start;
   gap: 9px;
   padding: 11px;
-  border-radius: 7px;
+  border-radius: 0;
   font-size: 13px;
   line-height: 1.45;
 }
@@ -2212,7 +2362,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 16px;
   border: 1px solid #30312d;
-  border-radius: 8px;
+  border-radius: 0;
   background: #191a1b;
 }
 
@@ -2265,7 +2415,7 @@ textarea:focus-visible {
   padding: 10px 12px;
   overflow: hidden;
   border: 1px solid #2e302c;
-  border-radius: 7px;
+  border-radius: 0;
   color: #83dfc6;
   background: #202121;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -2308,7 +2458,7 @@ textarea:focus-visible {
   width: 100%;
   min-width: 0;
   border: 1px solid #343631;
-  border-radius: 7px;
+  border-radius: 0;
   color: #f2ecdd;
   background: #202121;
   font: inherit;
@@ -2356,7 +2506,7 @@ textarea:focus-visible {
   min-height: 48px;
   padding: 8px 10px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   color: #ece8dc;
   background: #202121;
   text-align: left;
@@ -2389,7 +2539,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 11px;
   border: 1px solid #2e302c;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -2423,7 +2573,7 @@ textarea:focus-visible {
   padding: 12px;
   overflow: auto;
   border: 1px solid #2e302c;
-  border-radius: 7px;
+  border-radius: 0;
   color: #d8e7df;
   background: #202121;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -2452,7 +2602,7 @@ textarea:focus-visible {
   min-height: 116px;
   padding: 13px;
   border: 1px solid #30312d;
-  border-radius: 8px;
+  border-radius: 0;
   color: #d8d2c5;
   background: #202121;
   text-align: left;
@@ -2494,7 +2644,7 @@ textarea:focus-visible {
   min-height: 54px;
   padding: 11px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -2525,7 +2675,7 @@ textarea:focus-visible {
   min-height: 52px;
   padding: 0 12px;
   border: 1px dashed #3a3c37;
-  border-radius: 8px;
+  border-radius: 0;
   color: #c8c3b7;
   background: #202121;
   font-size: 13px;
@@ -2535,7 +2685,7 @@ textarea:focus-visible {
   display: grid;
   margin-top: 12px;
   border: 1px solid #2e302c;
-  border-radius: 8px;
+  border-radius: 0;
   overflow: hidden;
 }
 
@@ -2595,7 +2745,7 @@ textarea:focus-visible {
   align-items: center;
   padding: 8px 9px;
   border: 1px solid #2e302c;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -2612,7 +2762,7 @@ textarea:focus-visible {
 .preview-file span,
 .preview-file em {
   padding: 3px 7px;
-  border-radius: 999px;
+  border-radius: 0;
   color: #c8c3b7;
   background: #2a2b29;
   font-size: 10px;
@@ -2657,7 +2807,7 @@ textarea:focus-visible {
   gap: 9px;
   padding: 10px;
   border: 1px solid rgba(156, 200, 255, 0.34);
-  border-radius: 7px;
+  border-radius: 0;
   color: #c8dfff;
   background: rgba(28, 43, 65, 0.28);
   font-size: 13px;
@@ -2682,7 +2832,7 @@ textarea:focus-visible {
   margin-top: 12px;
   padding: 12px;
   border: 1px solid rgba(255, 156, 165, 0.45);
-  border-radius: 7px;
+  border-radius: 0;
   color: #ffbec4;
   background: rgba(80, 30, 36, 0.32);
 }
@@ -2709,7 +2859,7 @@ textarea:focus-visible {
   overflow: auto;
   padding: 8px;
   border: 1px solid #2e302c;
-  border-radius: 8px;
+  border-radius: 0;
   background: #151617;
 }
 
@@ -2719,7 +2869,7 @@ textarea:focus-visible {
   gap: 10px;
   align-items: start;
   padding: 8px;
-  border-radius: 7px;
+  border-radius: 0;
   color: #d8d2c5;
   background: #202121;
   font-size: 12px;
@@ -2764,10 +2914,8 @@ textarea:focus-visible {
   gap: 18px;
   padding: 22px;
   border: 1px solid #27352f;
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(14, 22, 27, 0.98), rgba(19, 33, 42, 0.96)),
-    #101820;
+  border-radius: 0;
+  background: #101820;
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.05);
 }
 
@@ -2851,7 +2999,7 @@ textarea:focus-visible {
 .icon-text-button {
   padding: 6px 8px;
   border: 1px solid #343b35;
-  border-radius: 7px;
+  border-radius: 0;
   color: #d9e7df;
   background: #242724;
 }
@@ -2888,7 +3036,7 @@ textarea:focus-visible {
   overflow: auto;
   padding: 10px;
   border: 1px solid #2e302c;
-  border-radius: 8px;
+  border-radius: 0;
   background: #111314;
   color: #d9e7df;
 }
@@ -2941,7 +3089,7 @@ textarea:focus-visible {
   align-items: flex-start;
   padding: 10px;
   border: 1px solid rgba(85, 201, 149, 0.24);
-  border-radius: 7px;
+  border-radius: 0;
   color: #ecf8f0;
   background: rgba(21, 48, 42, 0.28);
 }
@@ -2953,7 +3101,7 @@ textarea:focus-visible {
   margin-top: 8px;
   padding: 10px;
   border: 1px solid #2e302c;
-  border-radius: 7px;
+  border-radius: 0;
   background: #171918;
   color: #d8d2c5;
   overflow: auto;
@@ -2971,7 +3119,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 10px 11px;
   border: 1px solid #343a35;
-  border-radius: 7px;
+  border-radius: 0;
   background: #181a19;
   color: #f3efe6;
   font: inherit;
@@ -2988,7 +3136,7 @@ textarea:focus-visible {
   gap: 4px;
   padding: 10px;
   border: 1px solid rgba(242, 189, 93, 0.36);
-  border-radius: 7px;
+  border-radius: 0;
   color: #f0d39a;
   background: rgba(71, 54, 27, 0.26);
 }
@@ -3022,10 +3170,8 @@ textarea:focus-visible {
   min-width: 0;
   padding: 20px;
   border: 1px solid #303a3c;
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(131, 223, 198, 0.14), rgba(103, 166, 255, 0.08) 48%, transparent),
-    #15191c;
+  border-radius: 0;
+  background: #15191c;
 }
 
 .obs-page-title {
@@ -3065,7 +3211,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 14px;
   border: 1px solid rgba(131, 223, 198, 0.18);
-  border-radius: 8px;
+  border-radius: 0;
   background: rgba(14, 20, 20, 0.55);
 }
 
@@ -3090,7 +3236,7 @@ textarea:focus-visible {
   margin-top: 6px;
   padding: 10px;
   border: 1px solid rgba(103, 166, 255, 0.28);
-  border-radius: 7px;
+  border-radius: 0;
   background: rgba(22, 34, 45, 0.52);
 }
 
@@ -3146,7 +3292,7 @@ textarea:focus-visible {
   padding: 3px 8px;
   overflow: hidden;
   border: 1px solid #343b35;
-  border-radius: 999px;
+  border-radius: 0;
   color: #bdb7aa;
   background: rgba(25, 26, 27, 0.68);
   font-size: 12px;
@@ -3201,7 +3347,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 10px;
   border: 1px solid #30312d;
-  border-radius: 8px;
+  border-radius: 0;
   background: #191a1b;
 }
 
@@ -3212,7 +3358,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 10px;
   border: 1px solid #2e3330;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -3264,7 +3410,7 @@ textarea:focus-visible {
 .observatory-error {
   padding: 10px 12px;
   border: 1px solid rgba(255, 156, 165, 0.45);
-  border-radius: 7px;
+  border-radius: 0;
   color: #ffbec4;
   background: rgba(80, 30, 36, 0.32);
   font-size: 13px;
@@ -3278,10 +3424,8 @@ textarea:focus-visible {
   min-height: 520px;
   padding: 28px;
   border: 1px solid #303b40;
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(15, 19, 22, 0.98), rgba(20, 30, 34, 0.96)),
-    #0f1316;
+  border-radius: 0;
+  background: #0f1316;
   color: #f4f1ea;
 }
 
@@ -3313,14 +3457,14 @@ textarea:focus-visible {
   max-width: 100%;
   padding: 4px;
   border: 1px solid #30312d;
-  border-radius: 8px;
+  border-radius: 0;
   background: #191a1b;
 }
 
 .obs-tabs button {
   min-height: 34px;
   padding: 0 13px;
-  border-radius: 7px;
+  border-radius: 0;
   color: #bdb7aa;
   background: transparent;
   font-size: 12px;
@@ -3378,7 +3522,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 16px;
   border: 1px solid #30312d;
-  border-radius: 8px;
+  border-radius: 0;
   background: #191a1b;
 }
 
@@ -3436,9 +3580,7 @@ textarea:focus-visible {
 
 .obs-conveyor-section {
   border-color: rgba(131, 223, 198, 0.28);
-  background:
-    linear-gradient(135deg, rgba(131, 223, 198, 0.06), rgba(103, 166, 255, 0.035)),
-    #191a1b;
+  background: #191a1b;
 }
 
 .obs-conveyor-layout {
@@ -3503,7 +3645,7 @@ textarea:focus-visible {
   min-height: 172px;
   padding: 12px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -3592,7 +3734,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 12px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -3928,8 +4070,8 @@ textarea:focus-visible {
   gap: 16px;
   padding: 20px;
   border: 1px solid #d8ded9;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #16211f 0%, #172336 100%);
+  border-radius: 0;
+  background: #172336;
   color: #f6fbf8;
 }
 
@@ -3967,7 +4109,7 @@ textarea:focus-visible {
   min-height: 34px;
   padding: 0 12px;
   border: 1px solid #345f4d;
-  border-radius: 999px;
+  border-radius: 0;
   background: rgba(95, 214, 139, 0.12);
   color: #90d6ae;
   font-size: 13px;
@@ -3983,7 +4125,7 @@ textarea:focus-visible {
 .inbox-metrics div {
   padding: 14px;
   border: 1px solid #dde3df;
-  border-radius: 8px;
+  border-radius: 0;
   background: #ffffff;
 }
 
@@ -4003,7 +4145,7 @@ textarea:focus-visible {
 .inbox-error,
 .inbox-notice {
   padding: 12px 14px;
-  border-radius: 8px;
+  border-radius: 0;
   font-size: 14px;
 }
 
@@ -4025,13 +4167,13 @@ textarea:focus-visible {
   gap: 8px;
   padding: 4px;
   border: 1px solid #dde3df;
-  border-radius: 8px;
+  border-radius: 0;
   background: #f6f8f7;
 }
 
 .inbox-tabs button {
   border: 0;
-  border-radius: 6px;
+  border-radius: 0;
   background: transparent;
   padding: 9px 12px;
   color: #49534e;
@@ -4061,7 +4203,7 @@ textarea:focus-visible {
   gap: 12px;
   padding: 16px;
   border: 1px solid #dde3df;
-  border-radius: 8px;
+  border-radius: 0;
   background: #ffffff;
 }
 
@@ -4087,7 +4229,7 @@ textarea:focus-visible {
   padding: 14px;
   border: 1px solid #dbe3de;
   border-left: 4px solid #70a8ff;
-  border-radius: 8px;
+  border-radius: 0;
   background: #fbfcfb;
   color: #17211d;
   text-align: left;
@@ -4138,7 +4280,7 @@ textarea:focus-visible {
 
 .message-card-head em,
 .chat-bubble footer em {
-  border-radius: 999px;
+  border-radius: 0;
   background: #eef3f6;
   padding: 4px 8px;
   color: #2e5d83;
@@ -4154,7 +4296,7 @@ textarea:focus-visible {
 }
 
 .message-chips span {
-  border-radius: 999px;
+  border-radius: 0;
   background: #eef6f1;
   padding: 4px 8px;
   color: #2f6742;
@@ -4182,7 +4324,7 @@ textarea:focus-visible {
 .archive-search input {
   width: 100%;
   border: 1px solid #cbd5cf;
-  border-radius: 7px;
+  border-radius: 0;
   background: #ffffff;
   color: #17211d;
   font: inherit;
@@ -4206,7 +4348,7 @@ textarea:focus-visible {
   gap: 6px;
   padding: 12px;
   border: 1px solid #dbe3de;
-  border-radius: 8px;
+  border-radius: 0;
   background: #f7faf8;
 }
 
@@ -4216,7 +4358,7 @@ textarea:focus-visible {
   justify-self: start;
   max-width: min(760px, 100%);
   padding: 12px 14px;
-  border-radius: 8px 8px 8px 2px;
+  border-radius: 0;
   background: #eef5ff;
   color: #17211d;
 }
@@ -4251,7 +4393,7 @@ textarea:focus-visible {
   gap: 8px;
   min-height: 180px;
   border: 1px dashed #cbd5cf;
-  border-radius: 8px;
+  border-radius: 0;
   background: #f8faf9;
   color: #5d6962;
   text-align: center;
@@ -4274,7 +4416,7 @@ textarea:focus-visible {
   gap: 8px;
   min-width: min(360px, 100%);
   border: 1px solid #cbd5cf;
-  border-radius: 7px;
+  border-radius: 0;
   padding: 0 10px;
   background: #ffffff;
 }
@@ -4292,7 +4434,7 @@ textarea:focus-visible {
 
 .raw-file-actions button {
   border: 1px solid #cbd5cf;
-  border-radius: 7px;
+  border-radius: 0;
   background: #f7faf8;
   padding: 8px 10px;
   color: #17211d;
@@ -4308,7 +4450,7 @@ textarea:focus-visible {
   max-height: 420px;
   margin: 0;
   border: 1px solid #dbe3de;
-  border-radius: 8px;
+  border-radius: 0;
   background: #111817;
   padding: 14px;
   color: #dce7e2;
@@ -4324,9 +4466,7 @@ textarea:focus-visible {
 .inbox-hero {
   min-width: 0;
   border-color: #303a3c;
-  background:
-    linear-gradient(135deg, rgba(131, 223, 198, 0.14), rgba(103, 166, 255, 0.08) 48%, transparent),
-    #15191c;
+  background: #15191c;
   color: #f6fbf8;
 }
 
@@ -4391,7 +4531,7 @@ textarea:focus-visible {
 .inbox-tabs button {
   min-height: 34px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 0;
   color: #bdb7aa;
   background: transparent;
   font-size: 12px;
@@ -4572,10 +4712,8 @@ textarea:focus-visible {
   min-width: 0;
   padding: 20px;
   border: 1px solid #303a3c;
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(131, 223, 198, 0.14), rgba(103, 166, 255, 0.08) 48%, transparent),
-    #15191c;
+  border-radius: 0;
+  background: #15191c;
 }
 
 .review-eyebrow {
@@ -4615,7 +4753,7 @@ textarea:focus-visible {
   gap: 12px;
   padding: 14px;
   border: 1px solid rgba(131, 223, 198, 0.18);
-  border-radius: 8px;
+  border-radius: 0;
   background: rgba(14, 20, 20, 0.55);
 }
 
@@ -4633,7 +4771,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 10px;
   border: 1px solid #30312d;
-  border-radius: 8px;
+  border-radius: 0;
   background: #191a1b;
 }
 
@@ -4644,7 +4782,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 10px;
   border: 1px solid #2e3330;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -4712,7 +4850,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 16px;
   border: 1px solid #30312d;
-  border-radius: 8px;
+  border-radius: 0;
   background: #191a1b;
 }
 
@@ -4735,7 +4873,7 @@ textarea:focus-visible {
   align-content: center;
   padding: 12px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -4748,7 +4886,7 @@ textarea:focus-visible {
   padding: 3px 8px;
   overflow: hidden;
   border: 1px solid #343b35;
-  border-radius: 999px;
+  border-radius: 0;
   color: #bdb7aa;
   background: rgba(25, 26, 27, 0.68);
   font-size: 12px;
@@ -4819,7 +4957,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 12px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -4851,7 +4989,7 @@ textarea:focus-visible {
   padding: 12px;
   border: 1px solid #30312d;
   border-left: 4px solid #70a8ff;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -4911,7 +5049,7 @@ textarea:focus-visible {
   padding: 12px;
   border: 1px solid #30312d;
   border-left: 4px solid #70a8ff;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -4955,7 +5093,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 5px 7px;
   border: 1px solid rgba(103, 166, 255, 0.2);
-  border-radius: 6px;
+  border-radius: 0;
   background: rgba(9, 13, 16, 0.65);
   color: #9cc8ff;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -4992,7 +5130,7 @@ textarea:focus-visible {
   padding: 10px;
   border: 1px solid #30312d;
   border-left: 4px solid #70a8ff;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -5049,7 +5187,7 @@ textarea:focus-visible {
   min-width: 280px;
   padding: 13px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -5074,7 +5212,7 @@ textarea:focus-visible {
 
 .review-alert {
   padding: 10px 12px;
-  border-radius: 7px;
+  border-radius: 0;
   font-size: 13px;
 }
 
@@ -5111,7 +5249,7 @@ textarea:focus-visible {
   width: 100%;
   min-width: 0;
   border: 1px solid #303a3c;
-  border-radius: 7px;
+  border-radius: 0;
   background: #101416;
   color: #f4f1ea;
   font: inherit;
@@ -5131,6 +5269,40 @@ textarea:focus-visible {
 .review-followup select {
   min-height: 38px;
   padding: 0 10px;
+}
+
+select,
+.brief-field select,
+.reply-panel select,
+.review-followup select {
+  appearance: none;
+  -webkit-appearance: none;
+  border-radius: 0;
+  background-color: #202121;
+  background-image: url("data:image/svg+xml,%3Csvg width='14' height='14' viewBox='0 0 14 14' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3.5 5.25L7 8.75L10.5 5.25' stroke='%23c8c3b7' stroke-width='1.6' stroke-linecap='square' stroke-linejoin='miter'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 14px 14px;
+  box-shadow: none;
+  color-scheme: dark;
+  padding-right: 38px !important;
+}
+
+.reply-panel select,
+.review-followup select {
+  background-color: #101416;
+}
+
+select:hover,
+.brief-field select:hover,
+.reply-panel select:hover,
+.review-followup select:hover {
+  border-color: #464a43;
+}
+
+select option {
+  color: #f4f1ea;
+  background: #151618;
 }
 
 .review-mark-card {
@@ -5187,7 +5359,7 @@ textarea:focus-visible {
   max-height: 260px;
   margin: 0;
   border: 1px solid #30312d;
-  border-radius: 8px;
+  border-radius: 0;
   background: #0e1112;
   padding: 14px;
   color: #dce7e2;
@@ -5209,7 +5381,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 10px;
   border: 1px solid #30312d;
-  border-radius: 7px;
+  border-radius: 0;
   background: #202121;
 }
 
@@ -5263,7 +5435,7 @@ textarea:focus-visible {
   gap: 10px;
   min-height: 460px;
   border: 1px dashed #303a3c;
-  border-radius: 8px;
+  border-radius: 0;
   background: #15191c;
   color: #c8c3b7;
   text-align: center;
@@ -5313,7 +5485,7 @@ textarea:focus-visible {
 
 @media (max-width: 980px) {
   .app-shell {
-    grid-template-columns: 180px minmax(0, 1fr);
+    grid-template-columns: 64px minmax(0, 1fr);
   }
 
   .titlebar {
@@ -5329,7 +5501,7 @@ textarea:focus-visible {
   }
 
   .sidebar button {
-    padding: 0 8px;
+    padding: 0;
   }
 
   .topbar {
@@ -5372,6 +5544,15 @@ textarea:focus-visible {
 
   .stats-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ticket-summary-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ticket-edit-grid,
+  .ticket-row {
+    grid-template-columns: 1fr;
   }
 
   .home-banner,

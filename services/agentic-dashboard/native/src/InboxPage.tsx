@@ -137,7 +137,7 @@ export function InboxPage(props: {
         target,
       });
       if (!payload.ok || !payload.data) {
-        setError(payload.message ?? "Could not load the human bridge inbox.");
+        setError(payload.message ?? "Could not load the inbox.");
         return;
       }
       setSnapshot(payload.data);
@@ -243,11 +243,9 @@ export function InboxPage(props: {
     <section className="inbox-page">
       <div className="inbox-hero">
         <div>
-          <span>File-only human bridge</span>
           <h1>Inbox</h1>
           <p>
-            Review automation requests, queue replies, and leave precise instructions for the next
-            automation run without relying on notifier credentials.
+            Review requests, queue replies, and leave instructions for the next run.
           </p>
         </div>
         <div className="inbox-hero-actions">
@@ -301,7 +299,7 @@ export function InboxPage(props: {
               <div className="inbox-empty">
                 <Inbox size={22} />
                 <strong>No pending requests</strong>
-                <p>When automation asks for a manual unlock or decision, it will appear here.</p>
+                <p>Manual decisions appear here.</p>
               </div>
             )}
           </section>
@@ -330,13 +328,13 @@ export function InboxPage(props: {
                 </label>
                 <button className="primary-action" disabled={disabled || !replyBody.trim()} onClick={sendReply}>
                   {busy === "reply" ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
-                  Send Reply
+                  Send reply
                 </button>
               </>
             ) : (
               <div className="inbox-empty">
                 <strong>No request selected</strong>
-                <p>Replies are enabled once there is an active automation request.</p>
+                <p>Replies are enabled when a request is active.</p>
               </div>
             )}
           </section>
@@ -366,12 +364,12 @@ export function InboxPage(props: {
               <textarea
                 value={noteBody}
                 onChange={(event) => setNoteBody(event.target.value)}
-                placeholder="Tell the next automation run what to prioritize, avoid, inspect, or report back."
+                placeholder="Tell the next run what to check or avoid."
               />
             </label>
             <button className="primary-action" disabled={disabled || !noteBody.trim()} onClick={sendNote}>
               {busy === "note" ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
-              Send To Next Run
+              Send to next run
             </button>
           </section>
 
@@ -384,7 +382,7 @@ export function InboxPage(props: {
             ) : (
               <div className="inbox-empty">
                 <strong>No notes queued</strong>
-                <p>Use this when you want the next run to adjust focus without changing the Brief.</p>
+                <p>Use notes to adjust the next run without changing setup.</p>
               </div>
             )}
           </section>
@@ -411,7 +409,7 @@ export function InboxPage(props: {
             <div className="inbox-empty">
               <Archive size={22} />
               <strong>No archived messages yet</strong>
-              <p>Handled requests and consumed replies will appear here after automation archives them.</p>
+              <p>Handled requests and consumed replies appear here after archiving.</p>
             </div>
           )}
         </section>

@@ -30,20 +30,17 @@ export type RunModel = {
   };
   controls: {
     runOnce: RunAction;
-    startSchedule: RunAction;
-    pauseSchedule: RunAction;
-    removeSchedule: RunAction;
+    startAutomation: RunAction;
+    stopAutomation: RunAction;
     safetyCheck: RunAction;
     exportReview: RunAction;
   };
-  schedule: {
+  automation: {
     state: string;
     message: string;
-    strategyLabel: string;
-    cadence: string;
-    labels: string[];
+    pid: string;
+    startedAt: string;
     logDir: string;
-    canRemove: boolean;
   };
   latestRun: {
     status: string;
@@ -90,22 +87,6 @@ function bool(value: unknown): boolean {
   return value === true;
 }
 
-function number(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && Number.isFinite(Number(value))) return Number(value);
-  return 0;
-}
-
-function cadenceLabel(seconds: unknown): string {
-  const value = number(seconds);
-  if (!value) return "Not scheduled";
-  const minutes = Math.round(value / 60);
-  if (minutes < 60) return `${minutes} min`;
-  if (minutes % 1440 === 0) return `${minutes / 1440} d`;
-  if (minutes % 60 === 0) return `${minutes / 60} hr`;
-  return `${minutes} min`;
-}
-
 function makeAction(
   label: string,
   enabled: boolean,
@@ -146,19 +127,20 @@ function displayStatus(status: string): string {
 
 function workerHeadline(strategy: Record<string, unknown>): string {
   const name = text(strategy.strategy, "NO_WORKERS");
-  const budget = number(strategy.parallelism_budget);
+  const rawBudget = strategy.parallelism_budget;
+  const budget = typeof rawBudget === "number" && Number.isFinite(rawBudget) ? rawBudget : Number(rawBudget || 0);
   const lane = text(strategy.action_lane, "local");
   const budgetText = budget === 1 ? "one" : budget > 1 ? String(budget) : "no";
   if (name === "READ_ONLY_REPORTS") {
-    return `Recommended: ${budgetText} read-only review worker${budget === 1 ? "" : "s"} for ${lane} work.`;
+    return `Read-only workers: ${budgetText} for ${lane}.`;
   }
   if (name === "WRITE_WORKERS") {
-    return `Recommended: ${budgetText} bounded write worker${budget === 1 ? "" : "s"} for ${lane} work.`;
+    return `Write workers: ${budgetText} for ${lane}.`;
   }
   if (name === "INTEGRATION_ONLY") {
-    return "Recommended: run the integrator lane.";
+    return "Integrator lane recommended.";
   }
-  return "No worker launch is recommended right now.";
+  return "No worker run recommended.";
 }
 
 function runLog(snapshot: ProjectSnapshot | null): RunModel["runLog"] {
@@ -183,79 +165,73 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
   const scaffolded = isScaffolded(snapshot);
   const task = record(snapshot?.run.task);
   const controls = record(snapshot?.run.controls);
-  const schedule = record(snapshot?.run.schedule);
+  const automation = record(snapshot?.run.automation);
   const workerStrategy = record(snapshot?.run.worker_strategy);
   const workerControls = record(snapshot?.run.worker_controls);
   const latestWorker = record(snapshot?.run.latest_worker_result);
   const blockers = list(snapshot?.run.environment_blockers).map(record);
   const status = text(task.status, snapshot ? "UNKNOWN" : "NO_TARGET");
-  const scheduleState = text(schedule.state, "").toLowerCase();
-  const scheduleRunning = scheduleState === "running";
-  const running = bool(controls.is_running) || status.includes("RUNNING") || scheduleRunning;
+  const automationState = text(automation.state, "").toLowerCase();
+  const automationRunning = automationState === "running";
+  const running = bool(controls.is_running) || status.includes("RUNNING") || automationRunning;
 
   const runOnce = makeAction(
-    "Run Once Now",
+    "Run",
     scaffolded && bool(controls.can_run_now),
-    scaffolded ? text(controls.run_now_reason, "Ready.") : "Finish the Brief before running automation.",
+    scaffolded ? text(controls.run_now_reason, "Ready.") : "Complete setup before running.",
     "run.once",
   );
-  const startSchedule = makeAction(
-    "Start Schedule",
-    scaffolded && bool(controls.can_start_schedule),
-    scaffolded ? text(controls.start_schedule_reason, text(schedule.message, "Schedule is not ready.")) : "Finish the Brief before running automation.",
-    "schedule.start",
+  const startAutomation = makeAction(
+    "Start",
+    scaffolded && bool(controls.can_start_automation),
+    scaffolded ? text(controls.start_automation_reason, text(automation.message, "Automation is not ready.")) : "Complete setup before running.",
+    "automation.start",
   );
-  const pauseSchedule = makeAction(
-    "Pause Schedule",
-    scaffolded && bool(controls.can_pause_schedule) && scheduleRunning,
-    scaffolded ? text(controls.pause_schedule_reason, text(schedule.message, "No schedule is loaded.")) : "Finish the Brief before running automation.",
-    "schedule.pause",
-  );
-  const removeSchedule = makeAction(
-    "Remove Schedule",
-    scaffolded && bool(controls.can_remove_schedule),
-    scaffolded ? text(controls.remove_schedule_reason, text(schedule.message, "No schedule is available to remove.")) : "Finish the Brief before running automation.",
-    "schedule.remove",
+  const stopAutomation = makeAction(
+    "Stop",
+    scaffolded && bool(controls.can_stop_automation) && automationRunning,
+    scaffolded ? text(controls.stop_automation_reason, text(automation.message, "No automation is running.")) : "Complete setup before running.",
+    "automation.stop",
   );
   const safetyCheck = makeAction(
-    "Run Safety Check",
+    "Run safety check",
     scaffolded && bool(controls.can_run_safety_check),
-    scaffolded ? "Records the latest integration safety result in the target." : "Finish the Brief before running automation.",
+    scaffolded ? "Records the integration safety result." : "Complete setup before running.",
     "safety.run_check",
   );
-  const exportReview = routeAction("Open Review Export", "Review", "Review bundles live on the Review page.");
+  const exportReview = routeAction("Review export", "Review", "Review files live on the Review page.");
   exportReview.enabled = scaffolded;
   exportReview.kind = scaffolded ? "navigate" : "disabled";
 
   let headline = "No project selected";
-  let subheadline = "Choose a project folder before running automation.";
-  let badge = "No Target";
-  let primaryAction: RunAction = { label: "Choose Project", kind: "choose-project", enabled: true, reason: "Select a target folder." };
+  let subheadline = "Choose a project before running.";
+  let badge = "No target";
+  let primaryAction: RunAction = { label: "Choose project", kind: "choose-project", enabled: true, reason: "Select a target folder." };
   if (snapshot && !scaffolded) {
-    headline = "Finish the Brief before running automation.";
-    subheadline = "Run controls unlock after the Brief creates the target Diffmogger contract.";
-    badge = "Brief Needed";
-    primaryAction = routeAction("Go to Brief", "Brief", "The Brief page owns scaffold and bootstrap.");
+    headline = "Not Ready";
+    subheadline = "Complete setup before running.";
+    badge = "Setup needed";
+    primaryAction = routeAction("Open setup", "Brief", "Confirm the target setup.");
   } else if (snapshot && running) {
-    headline = "Automation activity is in progress";
-    subheadline = text(schedule.message, "Refresh to inspect the latest run state.");
+    headline = "Run in progress";
+    subheadline = text(automation.message, "Refresh to inspect the latest run state.");
     badge = "Running";
-    primaryAction = routeAction("Refresh Run", "Run", "Reload the latest run state.");
+    primaryAction = routeAction("Refresh", "Run", "Reload the latest run state.");
   } else if (snapshot && blockers.length > 0) {
-    headline = "Check blockers before running";
+    headline = "Not Ready";
     subheadline = blockers.map((item) => text(item.name, "Environment blocker")).join(", ");
     badge = "Blocked";
     primaryAction = safetyCheck;
-  } else if (snapshot && runOnce.enabled) {
-    headline = "Ready to run automation";
-    subheadline = "The target contract is present and the current status is schedulable.";
+  } else if (snapshot && startAutomation.enabled) {
+    headline = "Ready";
+    subheadline = "The target files are present and continuous automation can start.";
     badge = "Ready";
-    primaryAction = runOnce;
+    primaryAction = startAutomation;
   } else if (snapshot) {
-    headline = "Run controls need attention";
-    subheadline = text(controls.run_now_reason, text(schedule.message, "Refresh diagnostics before running."));
+    headline = "Not Ready";
+    subheadline = text(controls.start_automation_reason, text(automation.message, "Refresh diagnostics before running."));
     badge = status === "UNKNOWN" ? "Needs Review" : status.replace(/_/g, " ");
-    primaryAction = safetyCheck.enabled ? safetyCheck : routeAction("Go to Brief", "Brief", "Confirm the target setup.");
+    primaryAction = safetyCheck.enabled ? safetyCheck : routeAction("Open setup", "Brief", "Confirm the target setup.");
   }
 
   return {
@@ -270,48 +246,45 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
     },
     controls: {
       runOnce,
-      startSchedule,
-      pauseSchedule,
-      removeSchedule,
+      startAutomation,
+      stopAutomation,
       safetyCheck,
       exportReview,
     },
-    schedule: {
-      state: text(schedule.state, "not_installed"),
-      message: text(schedule.message, "Schedule has not been installed yet."),
-      strategyLabel: text(schedule.strategy_label, text(schedule.strategy, "Not selected")),
-      cadence: cadenceLabel(schedule.cadence_seconds),
-      labels: list(schedule.active_labels).map((item) => text(item, "")).filter(Boolean),
-      logDir: text(schedule.log_dir, ""),
-      canRemove: bool(schedule.can_remove),
+    automation: {
+      state: text(automation.state, "stopped"),
+      message: text(automation.message, "Automation has not been started yet."),
+      pid: text(automation.pid, ""),
+      startedAt: text(automation.started_at, ""),
+      logDir: text(automation.log_dir, ""),
     },
     latestRun: {
       status: displayStatus(status),
-      horizon: text(task.horizon, "No horizon recorded yet"),
+      horizon: text(task.horizon, "No plan recorded"),
       lastUpdated: text(task.last_updated, text(snapshot?.run.snapshot_generated_at, "Not recorded")),
-      summary: text(snapshot?.run.progress_recent, text(task.suggested_next_task, "No automation run has been recorded yet.")),
+      summary: text(snapshot?.run.progress_recent, text(task.suggested_next_task, "No run has been recorded yet.")),
     },
     runLog: runLog(snapshot),
     worker: {
       headline: workerHeadline(workerStrategy),
       summary: text(workerStrategy.summary, text(workerStrategy.reason, "No worker strategy detail recorded yet.")),
       raw: workerStrategy,
-      latest: text(latestWorker.label, "Latest worker result: none yet."),
+      latest: text(latestWorker.label, "No worker result recorded."),
       actions: {
         readOnly: makeAction(
-          "Run Read-Only Worker",
+          "Run read-only worker",
           scaffolded && bool(workerControls.can_run_read_only),
           text(workerControls.read_only_reason, "Not supported by the current strategy."),
           "worker.run_read_only",
         ),
         write: makeAction(
-          "Run Write Worker",
+          "Run write worker",
           scaffolded && bool(workerControls.can_run_write),
           text(workerControls.write_reason, "Not supported by the current strategy."),
           "worker.run_write",
         ),
         integrator: makeAction(
-          "Run Integrator",
+          "Run integrator",
           scaffolded && bool(workerControls.can_run_integrator),
           text(workerControls.integrator_reason, "Not supported by the current strategy."),
           "worker.run_integrator",
