@@ -942,7 +942,7 @@ for marker in [
     "Automation",
     "Current status",
     "Log",
-    "Workers",
+    "Helper Strategy",
     "Blockers",
     "worker.run_write",
     "Copy",
@@ -984,8 +984,12 @@ for marker in [
         raise SystemExit(1)
 
 native_review = Path("services/agentic-dashboard/native/src/ReviewPage.tsx").read_text(encoding="utf-8")
+native_review_model = Path("services/agentic-dashboard/native/src/reviewModel.ts").read_text(encoding="utf-8")
 for marker in [
     "review-trust-summary",
+    "Latest Run Review",
+    "Run in progress",
+    "Review status",
     "Next action",
     "Changed files",
     "Commits",
@@ -994,17 +998,16 @@ for marker in [
     "Skipped checks",
     "Markdown preview",
     "Review export",
-    "Next-run note",
     "review.load",
     "review.export_bundle",
     "review.mark_reviewed",
-    "inbox.send_note",
     "openReviewArtifact",
     "Open Markdown",
-    "Reveal",
-    "Mark reviewed",
+    "Reveal folder",
+    "Open Inbox",
+    "Mark latest snapshot reviewed",
 ]:
-    if marker not in native_review:
+    if marker not in native_review and marker not in native_review_model:
         print(f"Native Review page missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 

@@ -159,6 +159,34 @@ describe("ObservatoryPage", () => {
     expect(html).toContain("BLOCKED_ON_USER");
   });
 
+  it("labels planned later-ticket work as a known issue, not a blocker", () => {
+    const html = render(
+      observatorySnapshot({
+        mission: {
+          automation_status: "ACTIVE",
+          known_issue: "Core vector database, storage, HNSW, embedding, HTTP, CLI operations, and frontend behavior remain intentionally unimplemented until later tickets.",
+        },
+      }),
+    );
+
+    expect(html).toContain("Known issue");
+    expect(html).toContain("later tickets");
+    expect(html).not.toContain(">Blocker<");
+  });
+
+  it("keeps the blocker label for actually blocked automation states", () => {
+    const html = render(
+      observatorySnapshot({
+        mission: {
+          automation_status: "BLOCKED_ON_USER",
+          known_issue: "Needs a human decision before continuing.",
+        },
+      }),
+    );
+
+    expect(html).toContain(">Blocker<");
+  });
+
   it("renders a critical stop", () => {
     const html = render(observatorySnapshot({ mission: { automation_status: "CRITICAL_STOP" } }));
 

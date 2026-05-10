@@ -244,6 +244,7 @@ export type ReviewChangedFile = {
 export type ReviewSnapshot = {
   target: TargetMetadata;
   generated_at?: string;
+  review_fingerprint?: string;
   latest_run: {
     status: string;
     horizon: string;
@@ -279,6 +280,8 @@ export type ReviewSnapshot = {
     reviewed_at?: string;
     note?: string;
     snapshot_generated_at?: string;
+    review_fingerprint?: string;
+    is_current_snapshot?: boolean;
   };
   empty_states?: Record<string, unknown>;
 };

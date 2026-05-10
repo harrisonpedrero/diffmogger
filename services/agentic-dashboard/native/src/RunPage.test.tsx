@@ -92,8 +92,14 @@ describe("RunPage", () => {
     );
 
     expect(html).toContain("Ticket Queue");
+    expect(html).toContain("Draft candidates");
+    expect(html).toContain("Draft New Tickets");
+    expect(html).toContain("Manual ticket");
+    expect(html).toContain("New Ticket");
     expect(html).toContain("Preview Import");
     expect(html).toContain("Apply Import");
+    expect(html).toContain("Run Codex to propose only new pending tickets");
+    expect(html).toContain("Create a blank pending ticket in the editor");
   });
 
   it("keeps the ready run banner badge-only instead of duplicating the headline", () => {
@@ -122,4 +128,41 @@ describe("RunPage", () => {
     expect(html).toContain(">Ready</span>");
     expect(html).not.toContain("<h1>Ready</h1>");
   });
+
+  it("renders helper strategy as an advanced manual control", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            worker_strategy: {
+              strategy: "READ_ONLY_REPORTS",
+              parallelism_budget: 1,
+              action_lane: "builder",
+              summary: "Use one read-only report for broad builder work; keep edits in the main agent.",
+            },
+            worker_controls: {
+              can_run_read_only: true,
+              can_run_write: false,
+              can_run_integrator: false,
+              read_only_reason: "Supported by current worker strategy.",
+            },
+            latest_worker_result: { label: "Latest worker result: none yet." },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Helper Strategy");
+    expect(html).toContain("Recommended: one read-only builder report");
+    expect(html).toContain("target/agent_runs/&lt;run-id&gt;/worker_builder_strategy.md");
+    expect(html).toContain("Advanced helper controls");
+    expect(html).toContain("Run read-only worker");
+    expect(html).not.toContain("Run write worker");
+    expect(html).not.toContain("Run integrator");
+  });
+
 });

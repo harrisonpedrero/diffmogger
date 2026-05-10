@@ -65,6 +65,10 @@ export type RunModel = {
   };
   worker: {
     headline: string;
+    mode: string;
+    tone: RunTone;
+    focus: string;
+    output: string;
     summary: string;
     raw: Record<string, unknown>;
     latest: string;
@@ -172,17 +176,39 @@ function workerHeadline(strategy: Record<string, unknown>): string {
   const rawBudget = strategy.parallelism_budget;
   const budget = typeof rawBudget === "number" && Number.isFinite(rawBudget) ? rawBudget : Number(rawBudget || 0);
   const lane = text(strategy.action_lane, "local");
-  const budgetText = budget === 1 ? "one" : budget > 1 ? String(budget) : "no";
   if (name === "READ_ONLY_REPORTS") {
-    return `Read-only workers: ${budgetText} for ${lane}.`;
+    return `Recommended: ${budget === 1 ? "one" : Math.max(1, budget)} read-only ${lane} report`;
   }
   if (name === "WRITE_WORKERS") {
-    return `Write workers: ${budgetText} for ${lane}.`;
+    return `Recommended: up to ${Math.max(1, budget)} bounded ${lane} write worker${Math.max(1, budget) === 1 ? "" : "s"}`;
   }
   if (name === "INTEGRATION_ONLY") {
-    return "Integrator lane recommended.";
+    return "Recommended: integration-only pass";
   }
-  return "No worker run recommended.";
+  return "No manual helper run recommended";
+}
+
+function workerMode(strategy: Record<string, unknown>): string {
+  const name = text(strategy.strategy, "NO_WORKERS");
+  if (name === "READ_ONLY_REPORTS") return "Read-only report";
+  if (name === "WRITE_WORKERS") return "Write helper";
+  if (name === "INTEGRATION_ONLY") return "Integrator";
+  return "No helper";
+}
+
+function workerTone(strategy: Record<string, unknown>): RunTone {
+  const name = text(strategy.strategy, "NO_WORKERS");
+  if (name === "WRITE_WORKERS") return "warn";
+  if (name === "READ_ONLY_REPORTS" || name === "INTEGRATION_ONLY") return "info";
+  return "quiet";
+}
+
+function workerRole(strategy: Record<string, unknown>): string {
+  const lane = text(strategy.action_lane, "review").toLowerCase();
+  if (["planner", "builder", "hardener", "integrator"].includes(lane)) return `${lane}_strategy`;
+  return `${text(strategy.strategy, "review").toLowerCase()}_strategy`
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
 }
 
 function runLog(snapshot: ProjectSnapshot | null): RunModel["runLog"] {
@@ -387,6 +413,10 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
     runLog: runLog(snapshot),
     worker: {
       headline: workerHeadline(workerStrategy),
+      mode: workerMode(workerStrategy),
+      tone: workerTone(workerStrategy),
+      focus: `${text(workerStrategy.action_lane, "local")} lane`,
+      output: `target/agent_runs/<run-id>/worker_${workerRole(workerStrategy)}.md`,
       summary: text(workerStrategy.summary, text(workerStrategy.reason, "No worker strategy detail recorded yet.")),
       raw: workerStrategy,
       latest: text(latestWorker.label, "No worker result recorded."),

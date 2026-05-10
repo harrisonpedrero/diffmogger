@@ -4,7 +4,11 @@ import App, {
   AUTO_REFRESH_ACTIVE_INTERVAL_MS,
   AUTO_REFRESH_FOCUS_STALE_MS,
   AUTO_REFRESH_IDLE_INTERVAL_MS,
+  AUTO_REFRESH_MIN_OVERDUE_MS,
+  autoRefreshBlocker,
   autoRefreshIntervalMs,
+  autoRefreshOverdueMs,
+  buildAutoRefreshChipState,
   canAutoRefreshProject,
   hasBusyRouteState,
   hasDirtyRouteState,
@@ -151,6 +155,71 @@ describe("App shell", () => {
         deferred_patches: 0,
       },
     }))).toBe(AUTO_REFRESH_ACTIVE_INTERVAL_MS);
+  });
+
+  it("waits past the refresh cadence before calling a snapshot overdue", () => {
+    expect(autoRefreshOverdueMs(snapshotWith())).toBe(AUTO_REFRESH_IDLE_INTERVAL_MS * 2);
+    expect(autoRefreshOverdueMs(snapshotWith({
+      run: {
+        automation: { state: "running" },
+        controls: { is_running: false },
+        conveyor: {},
+        human: {},
+      },
+    }))).toBe(AUTO_REFRESH_MIN_OVERDUE_MS);
+
+    const loadedAt = 1_000;
+    const beforeOverdue = buildAutoRefreshChipState({
+      lastUpdatedAt: loadedAt,
+      now: loadedAt + AUTO_REFRESH_IDLE_INTERVAL_MS + 1,
+      refreshing: false,
+      pauseReason: null,
+      overdueMs: autoRefreshOverdueMs(snapshotWith()),
+    });
+    const overdue = buildAutoRefreshChipState({
+      lastUpdatedAt: loadedAt,
+      now: loadedAt + autoRefreshOverdueMs(snapshotWith()) + 1,
+      refreshing: false,
+      pauseReason: null,
+      overdueMs: autoRefreshOverdueMs(snapshotWith()),
+    });
+
+    expect(beforeOverdue.label).toContain("Updated");
+    expect(overdue.label).toBe("Refresh delayed");
+    expect(overdue.tone).toBe("warn");
+  });
+
+  it("explains why quiet auto-refresh is paused or failed", () => {
+    expect(autoRefreshBlocker({
+      hasSelectedTarget: true,
+      loadState: "loaded",
+      refreshInFlight: false,
+      hasDirtyRoutes: true,
+      hasBusyCommands: false,
+    })).toBe("dirty_route");
+
+    const paused = buildAutoRefreshChipState({
+      lastUpdatedAt: 1_000,
+      now: 140_000,
+      refreshing: false,
+      pauseReason: "dirty_route",
+      pauseDetail: "Setup has unsaved plan changes.",
+      overdueMs: AUTO_REFRESH_MIN_OVERDUE_MS,
+    });
+    const failed = buildAutoRefreshChipState({
+      lastUpdatedAt: 1_000,
+      now: 140_000,
+      refreshing: false,
+      pauseReason: null,
+      failureMessage: "Backend CLI did not return valid JSON.",
+      overdueMs: AUTO_REFRESH_MIN_OVERDUE_MS,
+    });
+
+    expect(paused.label).toBe("Auto-refresh paused");
+    expect(paused.title).toContain("Setup has unsaved plan changes.");
+    expect(paused.paused).toBe(true);
+    expect(failed.label).toBe("Refresh failed");
+    expect(failed.title).toContain("Backend CLI did not return valid JSON.");
   });
 
   it("guards quiet auto-refresh while the dashboard is already busy or locally dirty", () => {

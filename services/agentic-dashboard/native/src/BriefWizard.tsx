@@ -134,7 +134,7 @@ type ScaffoldResponse = {
   log_excerpt?: BackendLogEvent[];
 };
 
-type ScaffoldPreviewFile = {
+export type ScaffoldPreviewFile = {
   rel_path: string;
   action: "create" | "overwrite" | "skip_existing" | "managed_section_update" | "update_local_exclude" | string;
   exists: boolean;
@@ -436,6 +436,10 @@ function actionLabel(action: string): string {
   if (action === "skip_existing") return "Not overwritten";
   if (action === "update_local_exclude") return "Local exclude";
   return action.replace(/_/g, " ");
+}
+
+export function visibleScaffoldPreviewFiles(files: ScaffoldPreviewFile[]): ScaffoldPreviewFile[] {
+  return files.filter((file) => file.action !== "skip_existing");
 }
 
 function logEventKey(event: BackendLogEvent, index: number): string {
@@ -1616,6 +1620,8 @@ export function BriefWizard(props: {
       automationScopeForDraft(draft) === "ticket_campaign" ? "ticket file" : "continuous improvement"
     }`;
     const reviewTicketIssues = localTicketIssues(draft.ticket_run_seed_tickets);
+    const previewFiles = preview ? visibleScaffoldPreviewFiles(preview.files) : null;
+    const preservedPreviewCount = preview ? preview.files.length - (previewFiles?.length ?? 0) : 0;
     return (
       <div className="brief-step-grid">
         <section className="brief-section span-2">
@@ -1714,15 +1720,26 @@ export function BriefWizard(props: {
         <section className="brief-section">
           <h2>Files</h2>
           <div className="generated-preview">
-            {preview?.files ? (
-              preview.files.map((file) => (
-                <div className={`preview-file ${file.action}`} key={file.rel_path}>
-                  <code>{file.rel_path}</code>
-                  <span>{actionLabel(file.action)}</span>
-                  {file.managed_section && <em>managed</em>}
-                  <small>{file.detail}</small>
-                </div>
-              ))
+            {previewFiles ? (
+              <>
+                {previewFiles.length ? (
+                  previewFiles.map((file) => (
+                    <div className={`preview-file ${file.action}`} key={file.rel_path}>
+                      <code>{file.rel_path}</code>
+                      <span>{actionLabel(file.action)}</span>
+                      {file.managed_section && <em>managed</em>}
+                      <small>{file.detail}</small>
+                    </div>
+                  ))
+                ) : (
+                  <div className="empty-copy">No scaffold files need to be created or updated.</div>
+                )}
+                {preservedPreviewCount > 0 && (
+                  <div className="empty-copy">
+                    {preservedPreviewCount} existing sidecar file{preservedPreviewCount === 1 ? "" : "s"} will be preserved.
+                  </div>
+                )}
+              </>
             ) : (
               <div className="empty-copy">
                 {previewState === "loading" ? "Building preview." : "Preview is not available yet."}

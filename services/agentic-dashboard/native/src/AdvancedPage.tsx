@@ -188,6 +188,11 @@ function categoryOf(file: RegisteredFile): string {
   return file.category || "Core state";
 }
 
+export function syncedSelectedFileKey(files: RegisteredFile[], currentKey: string): string {
+  if (currentKey && files.some((file) => file.key === currentKey)) return currentKey;
+  return files[0]?.key ?? "";
+}
+
 export function AdvancedPage(props: {
   snapshot: ProjectSnapshot;
   loading?: boolean;
@@ -195,9 +200,16 @@ export function AdvancedPage(props: {
   initialTab?: AdvancedTab;
 }) {
   const target = props.snapshot.target.path;
+  const snapshotFiles = props.snapshot.files ?? [];
+  const snapshotFilesSignature = snapshotFiles
+    .map(
+      (file) =>
+        `${file.key}:${file.label}:${file.rel_path}:${file.path ?? ""}:${file.exists ? 1 : 0}:${file.size_bytes ?? ""}:${file.modified_at ?? ""}`,
+    )
+    .join("|");
   const [activeTab, setActiveTab] = useState<AdvancedTab>("Files");
-  const [files, setFiles] = useState<RegisteredFile[]>(props.snapshot.files ?? []);
-  const [selectedKey, setSelectedKey] = useState(props.snapshot.files[0]?.key ?? "");
+  const [files, setFiles] = useState<RegisteredFile[]>(snapshotFiles);
+  const [selectedKey, setSelectedKey] = useState(snapshotFiles[0]?.key ?? "");
   const [loadedFile, setLoadedFile] = useState<AdvancedLoadedFile | null>(null);
   const [editorContent, setEditorContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
@@ -455,8 +467,8 @@ export function AdvancedPage(props: {
   }
 
   useEffect(() => {
-    setFiles(props.snapshot.files ?? []);
-    const initialKey = props.snapshot.files[0]?.key ?? "";
+    setFiles(snapshotFiles);
+    const initialKey = snapshotFiles[0]?.key ?? "";
     setSelectedKey(initialKey);
     setLoadedFile(null);
     setEditorContent("");
@@ -470,6 +482,17 @@ export function AdvancedPage(props: {
     return cancel;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target]);
+
+  useEffect(() => {
+    setFiles(snapshotFiles);
+    setSelectedKey((currentKey) => syncedSelectedFileKey(snapshotFiles, currentKey));
+    setLoadedFile((current) => {
+      if (!current) return current;
+      const updatedFile = snapshotFiles.find((file) => file.key === current.file.key);
+      return updatedFile ? { ...current, file: updatedFile } : null;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshotFilesSignature]);
 
   useEffect(() => {
     if (activeTab !== "Files" || !selectedKey) return undefined;

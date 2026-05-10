@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { AdvancedPage } from "./AdvancedPage";
-import type { ProjectSnapshot } from "./api/backend";
+import { AdvancedPage, syncedSelectedFileKey } from "./AdvancedPage";
+import type { ProjectSnapshot, RegisteredFile } from "./api/backend";
 
 function projectSnapshot(): ProjectSnapshot {
   return {
@@ -59,5 +59,28 @@ describe("AdvancedPage", () => {
     expect(html).toContain("Settings");
     expect(html).toContain("Debug bundle");
     expect(html).toContain("Automation Tasks");
+  });
+
+  it("keeps the selected managed file when snapshot file metadata refreshes", () => {
+    const files: RegisteredFile[] = [
+      {
+        ...projectSnapshot().files[0],
+        key: "state.integration_safety",
+        label: "Integration Safety Record",
+        exists: true,
+        size_bytes: 605,
+      },
+      {
+        ...projectSnapshot().files[0],
+        key: "review.self_review",
+        label: "Self-Review Markdown",
+        exists: true,
+        size_bytes: 7787,
+      },
+    ];
+
+    expect(syncedSelectedFileKey(files, "review.self_review")).toBe("review.self_review");
+    expect(syncedSelectedFileKey(files, "missing.old_snapshot_key")).toBe("state.integration_safety");
+    expect(syncedSelectedFileKey([], "missing.old_snapshot_key")).toBe("");
   });
 });

@@ -93,6 +93,11 @@ function hasKnownIssue(value: unknown): boolean {
   return Boolean(raw && !["no active issue summary.", "no active issue summary", "no active issue", "none"].includes(raw));
 }
 
+function missionIssueLabel(status: string, knownIssue: boolean): string {
+  if (!knownIssue) return "Known issue";
+  return status.includes("BLOCKED") || status.includes("CRITICAL") ? "Blocker" : "Known issue";
+}
+
 function eventTime(item: Record<string, unknown>): string {
   return text(item.finished_at ?? item.timestamp ?? item.time ?? item.updated_at ?? item.created_at ?? item.generated_at, "No time");
 }
@@ -196,6 +201,7 @@ function MissionStrip(props: {
   const snapshot = props.snapshot;
   const knownIssue = hasKnownIssue(snapshot?.mission.known_issue);
   const status = text(snapshot?.mission.automation_status, "").toUpperCase();
+  const issueLabel = missionIssueLabel(status, knownIssue);
   const items = [
     ...(status && status !== "ACTIVE" && status !== "UNKNOWN"
       ? [{
@@ -216,7 +222,7 @@ function MissionStrip(props: {
       tone: "good",
     },
     {
-      label: "Blocker",
+      label: issueLabel,
       value: text(snapshot?.mission.known_issue, "No active issue summary."),
       tone: knownIssue ? "warn" : "quiet",
     },

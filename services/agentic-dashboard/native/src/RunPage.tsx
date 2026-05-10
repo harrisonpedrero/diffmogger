@@ -13,7 +13,7 @@ import {
   Users,
   WandSparkles,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { BackendEnvelope, BackendLogEvent, ProjectSnapshot } from "./api/backend";
 import {
@@ -38,6 +38,16 @@ import {
 } from "./ticketModel";
 
 type RunLogEvent = BackendLogEvent & { capturedAt: string };
+type TicketDraftState = {
+  draft_id?: string;
+  generation_mode?: string;
+  message?: string;
+  candidate_count?: number;
+  dropped_existing_count?: number;
+  renumbered_count?: number;
+  dropped_dependency_count?: number;
+  candidates: Ticket[];
+};
 
 function routeFromRun(route: RunRoute): "Brief" | "Run" | "Review" | "Advanced" | "Inbox" {
   return route;
@@ -94,6 +104,28 @@ function ActionButton(props: {
     >
       {props.icon}
       {props.action.label}
+    </button>
+  );
+}
+
+function QueueActionButton(props: {
+  children: ReactNode;
+  tooltip: string;
+  onClick: () => void;
+  disabled?: boolean;
+  className?: string;
+  ariaLabel?: string;
+}) {
+  return (
+    <button
+      className={`${props.className ?? "icon-text-button"} queue-action-button`}
+      data-tooltip={props.tooltip}
+      title={props.tooltip}
+      aria-label={props.ariaLabel}
+      onClick={props.onClick}
+      disabled={props.disabled}
+    >
+      {props.children}
     </button>
   );
 }
@@ -188,12 +220,14 @@ export function RunPage(props: {
   const [ticketImportText, setTicketImportText] = useState("");
   const [ticketImportFile, setTicketImportFile] = useState("");
   const [ticketImportPreview, setTicketImportPreview] = useState<TicketSnapshot | null>(null);
-  const [ticketDraft, setTicketDraft] = useState<{ draft_id?: string; candidates: Ticket[] } | null>(null);
+  const [ticketDraft, setTicketDraft] = useState<TicketDraftState | null>(null);
+  const [ticketDraftLogs, setTicketDraftLogs] = useState<RunLogEvent[]>([]);
   const [ticketPendingAction, setTicketPendingAction] = useState<
     | { kind: "delete"; ticketId: string }
     | { kind: "import"; mode: "append" | "replace-placeholder" | "replace-all" }
     | null
   >(null);
+  const ticketDraftSectionRef = useRef<HTMLElement | null>(null);
   const isBusy = props.loading || busyCommand !== null;
 
   const target = props.snapshot?.target.path;
@@ -201,6 +235,9 @@ export function RunPage(props: {
   const ticketTickets = normalizeTickets(ticketSnapshot?.tickets ?? []);
   const ticketIssues = ticketSnapshot?.validation_issues ?? [];
   const ticketCounts = ticketSnapshot?.summary?.counts ?? {};
+  const ticketDraftBusy = ticketBusy === "ticket.draft_from_intake";
+  const ticketWriteBusy = ticketBusy !== null;
+  const ticketDraftCandidates = ticketDraft?.candidates ?? [];
   const selectedTicketJson = useMemo(() => {
     if (!ticketEditorId) return "";
     const ticket = ticketTickets.find((item) => item.id === ticketEditorId);
@@ -271,6 +308,15 @@ export function RunPage(props: {
           level: line.level,
         }))
       : displayedLog.lines.map((line) => ({ ...line, level: "info" }));
+
+  function focusTicketDraftSection() {
+    window.requestAnimationFrame(() => {
+      const element = ticketDraftSectionRef.current;
+      if (!element) return;
+      element.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      element.focus({ preventScroll: true });
+    });
+  }
 
   async function runAction(action: RunAction) {
     setCommandError(null);
@@ -497,8 +543,19 @@ export function RunPage(props: {
     if (!target) return;
     setTicketBusy("ticket.draft_from_intake");
     setTicketError(null);
+    setTicketDraft(null);
+    setTicketDraftLogs([]);
+    setTicketMessage("Drafting new ticket candidates.");
+    setTicketPendingAction(null);
+    focusTicketDraftSection();
+    const runId = `ticket-draft-${Date.now()}`;
+    let unlisten: (() => void) | null = null;
     try {
-      const payload = await runBackendCommand<{ draft_id?: string; candidates?: Ticket[] }>({
+      unlisten = await listenBackendLogs(runId, (event) => {
+        setTicketDraftLogs((current) => [...current, { ...event, capturedAt: new Date().toISOString() }].slice(-20));
+      });
+      const payload = await runBackendCommandStreamed<TicketDraftState>({
+        runId,
         command: "ticket.draft_from_intake",
         target,
       });
@@ -506,21 +563,29 @@ export function RunPage(props: {
         setTicketError(payload.message ?? "Ticket draft failed.");
         return;
       }
+      const candidates = normalizeTickets(payload.data.candidates ?? []);
       setTicketDraft({
+        ...payload.data,
         draft_id: payload.data.draft_id,
-        candidates: normalizeTickets(payload.data.candidates ?? []),
+        candidates,
       });
-      setTicketMessage("Draft candidates are ready to review.");
-      setTicketPendingAction(null);
+      setTicketMessage(
+        payload.data.message ??
+          (candidates.length
+            ? `${candidates.length} draft ticket candidate${candidates.length === 1 ? "" : "s"} ready to add.`
+            : "No new draft tickets were found."),
+      );
+      focusTicketDraftSection();
     } catch (error) {
       setTicketError(error instanceof Error ? error.message : String(error));
     } finally {
+      unlisten?.();
       setTicketBusy(null);
     }
   }
 
   async function acceptTicketDraft() {
-    if (!target || !ticketDraft?.draft_id) return;
+    if (!target || !ticketDraft?.draft_id || ticketDraftCandidates.length === 0) return;
     setTicketBusy("ticket.accept_draft");
     setTicketError(null);
     try {
@@ -528,7 +593,7 @@ export function RunPage(props: {
         command: "ticket.accept_draft",
         target,
         draftId: ticketDraft.draft_id,
-        importMode: ticketImportMode,
+        importMode: "append",
       });
       if (!payload.ok || !payload.data) {
         setTicketError(payload.message ?? "Could not accept the draft tickets.");
@@ -536,7 +601,8 @@ export function RunPage(props: {
       }
       setTicketSnapshot(payload.data);
       setTicketDraft(null);
-      setTicketMessage("Draft tickets accepted.");
+      setTicketDraftLogs([]);
+      setTicketMessage("Draft tickets added to the queue.");
       setTicketPendingAction(null);
       await Promise.resolve(props.onRefresh());
     } catch (error) {
@@ -578,6 +644,10 @@ export function RunPage(props: {
 
   const writeDisabled =
     !model.worker.actions.write.enabled || isBusy || !writeOwnership.trim();
+  const helperControlsAvailable =
+    model.worker.actions.readOnly.enabled ||
+    model.worker.actions.write.enabled ||
+    model.worker.actions.integrator.enabled;
 
   return (
     <section className="run-page run-control-page" aria-label="Run Control">
@@ -657,18 +727,14 @@ export function RunPage(props: {
                 <p>{ticketSnapshot?.ticket_file ?? "Ticket file not loaded yet."}</p>
               </div>
               <div className="inline-actions">
-                <button className="icon-text-button" onClick={loadTickets} disabled={ticketBusy !== null}>
+                <QueueActionButton
+                  tooltip="Reload the ticket queue from the local ticket-run file."
+                  onClick={loadTickets}
+                  disabled={ticketBusy !== null}
+                >
                   <RefreshCw size={14} />
                   Refresh
-                </button>
-                <button className="icon-text-button" onClick={draftTickets} disabled={ticketBusy !== null}>
-                  <WandSparkles size={14} />
-                  Draft
-                </button>
-                <button className="icon-text-button" onClick={newTicket} disabled={ticketBusy !== null}>
-                  <FilePlus2 size={14} />
-                  Add
-                </button>
+                </QueueActionButton>
               </div>
             </div>
 
@@ -684,6 +750,84 @@ export function RunPage(props: {
                 <strong>{ticketMessage}</strong>
               </div>
             )}
+
+            <section className="ticket-workflow-section ticket-draft-section" ref={ticketDraftSectionRef} tabIndex={-1}>
+              <div className="ticket-section-heading">
+                <div>
+                  <h3>Draft candidates</h3>
+                  <span>{ticketDraftBusy ? "Drafting" : ticketDraft ? `${ticketDraftCandidates.length} ready` : "None"}</span>
+                </div>
+                <div className="inline-actions">
+                  <QueueActionButton
+                    tooltip="Run Codex to propose only new pending tickets. Nothing is written until you add the draft tickets."
+                    onClick={draftTickets}
+                    disabled={ticketWriteBusy}
+                  >
+                    {ticketDraftBusy ? <RefreshCw className="spin" size={14} /> : <WandSparkles size={14} />}
+                    {ticketDraftBusy ? "Drafting" : "Draft New Tickets"}
+                  </QueueActionButton>
+                  <QueueActionButton
+                    className="secondary-action"
+                    tooltip="Append the visible draft candidates to the ticket queue."
+                    onClick={acceptTicketDraft}
+                    disabled={ticketWriteBusy || !ticketDraft?.draft_id || ticketDraftCandidates.length === 0}
+                  >
+                    <FilePlus2 size={14} />
+                    Add Draft Tickets
+                  </QueueActionButton>
+                </div>
+              </div>
+
+              {ticketDraftBusy && (
+                <div className="ticket-draft-progress" role="status" aria-live="polite">
+                  <div>
+                    <RefreshCw className="spin" size={15} />
+                    <strong>Drafting with Codex</strong>
+                  </div>
+                  <div className="ticket-draft-log">
+                    {ticketDraftLogs.length ? (
+                      ticketDraftLogs.map((line, index) => (
+                        <code key={`${line.capturedAt}-${index}`}>[{line.stage}] {line.message}</code>
+                      ))
+                    ) : (
+                      <code>Starting ticket draft...</code>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {!ticketDraftBusy && ticketDraft && (
+                <>
+                  {ticketDraftCandidates.length ? (
+                    <div className="ticket-candidate-list">
+                      {ticketDraftCandidates.map((ticket) => (
+                        <div className="ticket-candidate-row" key={ticket.id}>
+                          <div>
+                            <strong>{ticket.id || "Untitled"}</strong>
+                            <span>{ticket.summary || "No summary recorded."}</span>
+                          </div>
+                          <em>{ticket.depends_on.length ? `depends on ${ticket.depends_on.join(", ")}` : "no dependencies"}</em>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="empty-copy">{ticketDraft.message ?? "No new draft tickets were found."}</p>
+                  )}
+                  <div className="ticket-draft-meta">
+                    <span>{ticketDraft.generation_mode ?? "append"}</span>
+                    <span>{ticketDraft.dropped_existing_count ?? 0} skipped</span>
+                    <span>{ticketDraft.renumbered_count ?? 0} renumbered</span>
+                    <span>{ticketDraft.dropped_dependency_count ?? 0} deps dropped</span>
+                  </div>
+                  <details className="ticket-draft-details">
+                    <summary>Raw draft JSON</summary>
+                    <pre className="raw-json">{JSON.stringify(ticketDraft, null, 2)}</pre>
+                  </details>
+                </>
+              )}
+
+              {!ticketDraftBusy && !ticketDraft && <p className="empty-copy">No draft candidates ready.</p>}
+            </section>
 
             <div className="ticket-summary-row">
               <DetailRow label="Pending" value={ticketCounts.pending ?? 0} />
@@ -716,21 +860,28 @@ export function RunPage(props: {
               {ticketTickets.length ? (
                 ticketTickets.map((ticket) => (
                   <div className="ticket-row" key={ticket.id}>
-                    <div>
+                    <div className="ticket-row-main">
                       <strong>{ticket.id || "Untitled"}</strong>
                       <span>{ticket.summary || "No summary recorded."}</span>
                     </div>
                     <em>{ticket.status}</em>
-                    <button className="icon-text-button" onClick={() => editTicket(ticket)}>Inspect</button>
-                    <button
-                      className="icon-button danger"
-                      aria-label={`Delete ticket ${ticket.id || "Untitled"}`}
-                      title="Delete ticket"
-                      onClick={() => deleteTicket(ticket.id)}
-                      disabled={ticketBusy !== null}
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    <div className="ticket-row-actions" role="group" aria-label={`Actions for ${ticket.id || "Untitled"}`}>
+                      <QueueActionButton
+                        tooltip="Load this ticket into the editor without writing changes."
+                        onClick={() => editTicket(ticket)}
+                      >
+                        Inspect
+                      </QueueActionButton>
+                      <QueueActionButton
+                        className="icon-button danger"
+                        ariaLabel={`Delete ticket ${ticket.id || "Untitled"}`}
+                        tooltip="Remove this ticket from the queue after a second confirmation click."
+                        onClick={() => deleteTicket(ticket.id)}
+                        disabled={ticketWriteBusy}
+                      >
+                        <Trash2 size={14} />
+                      </QueueActionButton>
+                    </div>
                   </div>
                 ))
               ) : (
@@ -738,12 +889,47 @@ export function RunPage(props: {
               )}
             </div>
 
-            <div className="ticket-edit-grid">
-              <TicketFields
-                ticket={ticketEditorTicket}
-                onChange={updateTicketEditor}
-                title={ticketEditorId ? `Editing ${ticketEditorId}` : "Ticket fields"}
-              />
+            <section className="ticket-workflow-section ticket-manual-section">
+              <div className="ticket-section-heading">
+                <div>
+                  <h3>Manual ticket</h3>
+                  <span>{ticketEditorId ? `Editing ${ticketEditorId}` : ticketEditorJson.trim() ? "Unsaved" : "Ready"}</span>
+                </div>
+                <QueueActionButton
+                  tooltip="Create a blank pending ticket in the editor. Nothing is written until Save Ticket."
+                  onClick={newTicket}
+                  disabled={ticketWriteBusy}
+                >
+                  <FilePlus2 size={14} />
+                  New Ticket
+                </QueueActionButton>
+              </div>
+              <div className="ticket-editor-panel">
+                <TicketFields
+                  ticket={ticketEditorTicket}
+                  onChange={updateTicketEditor}
+                  title={ticketEditorId ? `Editing ${ticketEditorId}` : "Ticket fields"}
+                />
+                <div className="inline-actions">
+                  <QueueActionButton
+                    className="secondary-action"
+                    tooltip="Write the ticket currently shown in the editor to the queue."
+                    onClick={saveTicket}
+                    disabled={ticketWriteBusy || !ticketEditorJson.trim()}
+                  >
+                    Save Ticket
+                  </QueueActionButton>
+                </div>
+              </div>
+            </section>
+
+            <section className="ticket-workflow-section ticket-import-section">
+              <div className="ticket-section-heading">
+                <div>
+                  <h3>Bulk import</h3>
+                  <span>{ticketImportMode}</span>
+                </div>
+              </div>
               <div className="ticket-import-box">
                 <div className="brief-form-grid two">
                   <label className="brief-field">
@@ -791,36 +977,38 @@ export function RunPage(props: {
                 </label>
                 {ticketImportFile && <p className="log-path">{ticketImportFile}</p>}
                 <div className="inline-actions">
-                  <button className="secondary-action" onClick={saveTicket} disabled={ticketBusy !== null || !ticketEditorJson.trim()}>
-                    Save Ticket
-                  </button>
-                  <button className="secondary-action" onClick={pickTicketImportFile} disabled={ticketBusy !== null}>
+                  <QueueActionButton
+                    className="secondary-action"
+                    tooltip="Choose a Markdown, CSV, JSON, or text file to import."
+                    onClick={pickTicketImportFile}
+                    disabled={ticketWriteBusy}
+                  >
                     Pick File
-                  </button>
-                  <button className="secondary-action" onClick={() => importTickets(true)} disabled={ticketBusy !== null || (!ticketImportText.trim() && !ticketImportFile)}>
+                  </QueueActionButton>
+                  <QueueActionButton
+                    className="secondary-action"
+                    tooltip="Preview the parsed import without writing to the ticket queue."
+                    onClick={() => importTickets(true)}
+                    disabled={ticketWriteBusy || (!ticketImportText.trim() && !ticketImportFile)}
+                  >
                     Preview Import
-                  </button>
-                  <button className="secondary-action" onClick={() => importTickets(false)} disabled={ticketBusy !== null || (!ticketImportText.trim() && !ticketImportFile)}>
+                  </QueueActionButton>
+                  <QueueActionButton
+                    className="secondary-action"
+                    tooltip="Apply the import using the selected import mode."
+                    onClick={() => importTickets(false)}
+                    disabled={ticketWriteBusy || (!ticketImportText.trim() && !ticketImportFile)}
+                  >
                     Apply Import
-                  </button>
+                  </QueueActionButton>
                 </div>
               </div>
-            </div>
+            </section>
 
             {ticketImportPreview && (
               <details className="ticket-draft-details" open>
                 <summary>Import preview</summary>
                 <pre className="raw-json">{JSON.stringify(ticketImportPreview.tickets ?? [], null, 2)}</pre>
-              </details>
-            )}
-
-            {ticketDraft && (
-              <details className="ticket-draft-details" open>
-                <summary>Codex draft candidates</summary>
-                <pre className="raw-json">{JSON.stringify(ticketDraft.candidates, null, 2)}</pre>
-                <button className="secondary-action" onClick={acceptTicketDraft} disabled={ticketBusy !== null || !ticketDraft.draft_id}>
-                  Accept Draft
-                </button>
               </details>
             )}
           </article>
@@ -859,42 +1047,68 @@ export function RunPage(props: {
         </article>
 
         <article className="panel worker-card">
-          <h2>Workers</h2>
+          <div className="panel-heading-row helper-heading">
+            <div>
+              <h2>Helper Strategy</h2>
+              <p>Automation-first; manual helper runs are advanced.</p>
+            </div>
+            <RunTonePill tone={model.worker.tone}>{model.worker.mode}</RunTonePill>
+          </div>
           <div className="worker-headline">
             <Users size={18} />
-            <strong>{model.worker.headline}</strong>
+            <div>
+              <span>{model.worker.focus}</span>
+              <strong>{model.worker.headline}</strong>
+            </div>
           </div>
           <p className="empty-copy">{model.worker.summary}</p>
           <DetailRow label="Latest result" value={model.worker.latest} />
-          <details>
-            <summary>Raw details</summary>
-            <pre className="raw-json">{JSON.stringify(model.worker.raw, null, 2)}</pre>
+          <DetailRow label="Helper output" value={model.worker.output} />
+          <details className="helper-advanced">
+            <summary>Advanced helper controls</summary>
+            {helperControlsAvailable ? (
+              <div className="worker-actions">
+                {model.worker.actions.readOnly.enabled && (
+                  <ActionButton
+                    action={model.worker.actions.readOnly}
+                    onRun={runAction}
+                    primary={!model.worker.actions.write.enabled && !model.worker.actions.integrator.enabled}
+                    disabled={isBusy}
+                  />
+                )}
+                {model.worker.actions.write.enabled && (
+                  <div className="write-worker-row">
+                    <input
+                      value={writeOwnership}
+                      onChange={(event) => setWriteOwnership(event.target.value)}
+                      placeholder="Ownership scope, e.g. docs/** only"
+                      disabled={isBusy}
+                    />
+                    <ActionButton
+                      action={model.worker.actions.write}
+                      onRun={runAction}
+                      primary
+                      disabled={writeDisabled}
+                    />
+                  </div>
+                )}
+                {model.worker.actions.integrator.enabled && (
+                  <ActionButton
+                    action={model.worker.actions.integrator}
+                    onRun={runAction}
+                    primary
+                    disabled={isBusy}
+                  />
+                )}
+              </div>
+            ) : (
+              <p className="helper-unavailable">No manual helper launch is available for this strategy.</p>
+            )}
+            <details className="strategy-json">
+              <summary>Strategy JSON</summary>
+              <pre className="raw-json">{JSON.stringify(model.worker.raw, null, 2)}</pre>
+            </details>
           </details>
-          <div className="worker-actions">
-            <ActionButton
-              action={model.worker.actions.readOnly}
-              onRun={runAction}
-              disabled={isBusy || !model.worker.actions.readOnly.enabled}
-            />
-            <div className="write-worker-row">
-              <input
-                value={writeOwnership}
-                onChange={(event) => setWriteOwnership(event.target.value)}
-                placeholder="Ownership scope, e.g. docs/** only"
-                disabled={!model.worker.actions.write.enabled || isBusy}
-              />
-              <ActionButton
-                action={model.worker.actions.write}
-                onRun={runAction}
-                disabled={writeDisabled}
-              />
-            </div>
-            <ActionButton
-              action={model.worker.actions.integrator}
-              onRun={runAction}
-              disabled={isBusy || !model.worker.actions.integrator.enabled}
-            />
-          </div>
         </article>
 
         <article className="panel blockers-card">

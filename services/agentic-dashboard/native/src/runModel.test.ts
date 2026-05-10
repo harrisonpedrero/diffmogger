@@ -194,7 +194,10 @@ describe("buildRunModel", () => {
       }),
     );
 
-    expect(model.worker.headline).toBe("Read-only workers: one for builder.");
+    expect(model.worker.headline).toBe("Recommended: one read-only builder report");
+    expect(model.worker.mode).toBe("Read-only report");
+    expect(model.worker.focus).toBe("builder lane");
+    expect(model.worker.output).toBe("target/agent_runs/<run-id>/worker_builder_strategy.md");
     expect(model.worker.actions.readOnly.enabled).toBe(true);
     expect(model.worker.actions.write.enabled).toBe(false);
   });

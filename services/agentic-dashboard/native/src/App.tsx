@@ -103,7 +103,23 @@ const transparentBackground: [number, number, number, number] = [0, 0, 0, 0];
 export const AUTO_REFRESH_ACTIVE_INTERVAL_MS = 30_000;
 export const AUTO_REFRESH_IDLE_INTERVAL_MS = 60_000;
 export const AUTO_REFRESH_FOCUS_STALE_MS = 60_000;
+export const AUTO_REFRESH_MIN_OVERDUE_MS = 90_000;
 const ACTIVE_AUTOMATION_STATES = new Set(["running", "starting", "stopping"]);
+
+export type AutoRefreshBlocker =
+  | "no_target"
+  | "not_loaded"
+  | "refreshing"
+  | "dirty_route"
+  | "busy_command";
+
+export type AutoRefreshChipState = {
+  label: string;
+  title: string;
+  tone: "quiet" | "info" | "warn" | "critical";
+  overdue: boolean;
+  paused: boolean;
+};
 
 function createCachedRouteVisits(
   overrides: Partial<CachedRouteVisits> = {},
@@ -233,6 +249,25 @@ export function autoRefreshIntervalMs(snapshot: ProjectSnapshot | null): number 
     : AUTO_REFRESH_IDLE_INTERVAL_MS;
 }
 
+export function autoRefreshOverdueMs(snapshot: ProjectSnapshot | null): number {
+  return Math.max(AUTO_REFRESH_MIN_OVERDUE_MS, autoRefreshIntervalMs(snapshot) * 2);
+}
+
+export function autoRefreshBlocker(options: {
+  hasSelectedTarget: boolean;
+  loadState: LoadState;
+  refreshInFlight: boolean;
+  hasDirtyRoutes: boolean;
+  hasBusyCommands: boolean;
+}): AutoRefreshBlocker | null {
+  if (!options.hasSelectedTarget) return "no_target";
+  if (options.loadState !== "loaded") return "not_loaded";
+  if (options.refreshInFlight) return "refreshing";
+  if (options.hasDirtyRoutes) return "dirty_route";
+  if (options.hasBusyCommands) return "busy_command";
+  return null;
+}
+
 export function canAutoRefreshProject(options: {
   hasSelectedTarget: boolean;
   loadState: LoadState;
@@ -240,17 +275,86 @@ export function canAutoRefreshProject(options: {
   hasDirtyRoutes: boolean;
   hasBusyCommands: boolean;
 }): boolean {
-  return (
-    options.hasSelectedTarget &&
-    options.loadState === "loaded" &&
-    !options.refreshInFlight &&
-    !options.hasDirtyRoutes &&
-    !options.hasBusyCommands
-  );
+  return autoRefreshBlocker(options) === null;
 }
 
 export function shouldRefreshOnFocus(lastUpdatedAt: number | null, now = Date.now()): boolean {
   return Boolean(lastUpdatedAt && now - lastUpdatedAt >= AUTO_REFRESH_FOCUS_STALE_MS);
+}
+
+export function buildAutoRefreshChipState(options: {
+  lastUpdatedAt: number | null;
+  now: number;
+  refreshing: boolean;
+  pauseReason: AutoRefreshBlocker | null;
+  pauseDetail?: string | null;
+  failureMessage?: string | null;
+  overdueMs: number;
+}): AutoRefreshChipState {
+  if (options.refreshing || options.pauseReason === "refreshing") {
+    return {
+      label: "Refreshing...",
+      title: "Refreshing the selected project.",
+      tone: "info",
+      overdue: false,
+      paused: false,
+    };
+  }
+
+  if (!options.lastUpdatedAt) {
+    return {
+      label: "Not loaded yet",
+      title: "Not loaded yet",
+      tone: "quiet",
+      overdue: false,
+      paused: false,
+    };
+  }
+
+  if (options.pauseReason && options.pauseReason !== "no_target") {
+    const title =
+      options.pauseReason === "dirty_route"
+        ? `Auto-refresh paused: ${options.pauseDetail || "local dashboard edits are still unsaved."}`
+        : options.pauseReason === "busy_command"
+          ? "Auto-refresh paused while a dashboard command is running."
+          : "Auto-refresh paused until the selected project is loaded.";
+    return {
+      label: "Auto-refresh paused",
+      title,
+      tone: options.pauseReason === "not_loaded" ? "quiet" : "warn",
+      overdue: false,
+      paused: true,
+    };
+  }
+
+  if (options.failureMessage) {
+    return {
+      label: "Refresh failed",
+      title: `Auto-refresh failed: ${options.failureMessage}`,
+      tone: "warn",
+      overdue: false,
+      paused: false,
+    };
+  }
+
+  const overdue = options.now - options.lastUpdatedAt > options.overdueMs;
+  if (overdue) {
+    return {
+      label: "Refresh delayed",
+      title: `Last successful refresh ${new Date(options.lastUpdatedAt).toLocaleString()}; waiting for the next automatic refresh.`,
+      tone: "warn",
+      overdue: true,
+      paused: false,
+    };
+  }
+
+  return {
+    label: formatLastUpdated(options.lastUpdatedAt),
+    title: `Updated ${new Date(options.lastUpdatedAt).toLocaleString()}`,
+    tone: "quiet",
+    overdue: false,
+    paused: false,
+  };
 }
 
 function formatLastUpdated(value: number | null): string {
@@ -476,40 +580,6 @@ function MetricSignalStrip(props: { metrics: HomeMetric[] }) {
           <strong>{metric.value}</strong>
         </div>
       ))}
-    </section>
-  );
-}
-
-function ConveyorMap(props: { model: HomeModel["conveyor"] }) {
-  return (
-    <section className="control-panel conveyor-map-panel" aria-label="Conveyor map" data-testid="conveyor-map">
-      <div className="control-panel-heading">
-        <div>
-          <h2>Conveyor</h2>
-          <p>{props.model.summary}</p>
-        </div>
-        <TonePill tone={props.model.activeLane ? "info" : "quiet"}>{props.model.cycles} cycles</TonePill>
-      </div>
-      <div className="conveyor-lanes">
-        {props.model.lanes.map((lane, index) => (
-          <div className="conveyor-lane-step" key={lane.role}>
-            <article className={`conveyor-lane ${lane.tone}`}>
-              <header>
-                <h3>{lane.label}</h3>
-                <TonePill tone={lane.tone}>{lane.badge}</TonePill>
-              </header>
-              <p title={lane.reason}>{lane.reason}</p>
-              <div className="lane-counts">
-                <span>Q {lane.counts.queued}</span>
-                <span>A {lane.counts.applied}</span>
-                <span>D {lane.counts.deferred}</span>
-                <span>F {lane.counts.failed}</span>
-              </div>
-            </article>
-            {index < props.model.lanes.length - 1 && <span className="conveyor-connector" aria-hidden="true" />}
-          </div>
-        ))}
-      </div>
     </section>
   );
 }
@@ -802,13 +872,12 @@ function HomePage(props: {
             onAction={runAction}
             rows={model.queueLedger.rows}
           />
-          <ConveyorMap model={model.conveyor} />
+          <HumanBridgeMini model={model.humanBridge} onAction={runAction} />
           <SafetyMatrix onAction={runAction} rows={model.safety.rows} />
           <EventLedger
             emptyMessage={model.eventLedger.emptyMessage}
             rows={model.eventLedger.rows}
           />
-          <HumanBridgeMini model={model.humanBridge} onAction={runAction} />
         </div>
       )}
     </section>
@@ -1058,6 +1127,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
   const [error, setError] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshFailure, setRefreshFailure] = useState<{ message: string; at: number } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteBusyId, setPaletteBusyId] = useState<PaletteCommandId | "">("");
   const [paletteError, setPaletteError] = useState("");
@@ -1094,13 +1164,27 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
   const branchLabel = textValue(snapshot?.run.git?.branch, snapshot ? "Unknown branch" : "No branch");
   const dirtyCount = numberValue(snapshot?.run.git?.dirty_count);
   const dirtyLabel = formatDirtyLabel(dirtyCount, Boolean(snapshot));
-  const stale = Boolean(lastUpdatedAt && nowTick - lastUpdatedAt > 60_000);
   const routeBusy = hasBusyRouteState(busyRoutes);
   const shellBusy = Boolean(paletteBusyId) || routeBusy;
-  const updatedLabel = refreshing ? "Refreshing..." : stale ? "Refresh needed" : formatLastUpdated(lastUpdatedAt);
-  const updatedTitle = lastUpdatedAt
-    ? `${stale ? "Last refreshed" : "Updated"} ${new Date(lastUpdatedAt).toLocaleString()}`
-    : "Not loaded yet";
+  const dirtyRouteMessage = Object.values(dirtyRoutes).find((message): message is string => Boolean(message)) ?? null;
+  const refreshPauseReason = autoRefreshBlocker({
+    hasSelectedTarget: Boolean(selectedTarget),
+    loadState,
+    refreshInFlight: refreshInFlightRef.current,
+    hasDirtyRoutes: hasDirtyRouteState(dirtyRoutes),
+    hasBusyCommands: shellBusy,
+  });
+  const updatedChip = buildAutoRefreshChipState({
+    lastUpdatedAt,
+    now: nowTick,
+    refreshing,
+    pauseReason: refreshPauseReason,
+    pauseDetail: dirtyRouteMessage,
+    failureMessage: refreshFailure?.message ?? null,
+    overdueMs: autoRefreshOverdueMs(snapshot),
+  });
+  const updatedLabel = updatedChip.label;
+  const updatedTitle = updatedChip.title;
   const paletteCommands = useMemo(
     () => buildCommandPaletteModel({
       snapshot,
@@ -1192,6 +1276,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       },
     );
     setError(null);
+    setRefreshFailure(null);
     setLastUpdatedAt(Date.now());
     setLoadState("loaded");
     if (options.announceLoaded !== false) {
@@ -1304,6 +1389,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
     if (!silent) {
       setRefreshing(true);
       setError(null);
+      setRefreshFailure(null);
       announce("Refreshing target.");
     }
     try {
@@ -1316,6 +1402,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       if (selectedTargetPathRef.current !== refreshTarget.path) return;
       if (!envelope.ok || !envelope.data) {
         const message = envelope.message ?? "Could not refresh the selected project.";
+        setRefreshFailure({ message, at: Date.now() });
         if (!silent) {
           setError(message);
           announce(message);
@@ -1327,6 +1414,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       if (!silent) announce("Target refreshed.");
     } catch (err) {
       const message = err instanceof Error ? err.message : "Could not refresh the selected project.";
+      setRefreshFailure({ message, at: Date.now() });
       if (!silent) {
         setError(message);
         announce(message);
@@ -1378,6 +1466,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
     setSelectedTarget(null);
     setError(null);
     setLastUpdatedAt(null);
+    setRefreshFailure(null);
     setRefreshing(false);
     setLoadState("idle");
     setAdvancedInitialTab(undefined);
@@ -1947,7 +2036,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
               </span>
             )}
             <span
-              className={`context-chip ${stale ? "warn" : "quiet"} updated-chip`}
+              className={`context-chip ${updatedChip.tone} updated-chip`}
               data-testid="target-context-updated"
               title={updatedTitle}
             >

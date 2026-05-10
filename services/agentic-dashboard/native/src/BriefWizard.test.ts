@@ -4,6 +4,7 @@ import {
   applyAutomationScope,
   automationScopeForDraft,
   lowCortisolDraftFromGeneratedIntake,
+  visibleScaffoldPreviewFiles,
 } from "./BriefWizard";
 
 function draft(overrides: Partial<IntakeDraft> = {}): IntakeDraft {
@@ -114,5 +115,26 @@ describe("Brief automation mode mapping", () => {
     expect(next.human_bridge_mode).toBe("file_only");
     expect(next.ticket_run_seed_tickets).toHaveLength(1);
     expect(next.additional_context_files).toEqual([".diffmogger/context/notes.md"]);
+  });
+
+  it("hides preserved sidecar files from the setup review file list", () => {
+    const visible = visibleScaffoldPreviewFiles([
+      {
+        rel_path: ".diffmogger/state/PROJECT_CONTEXT.md",
+        action: "skip_existing",
+        exists: true,
+        managed_section: false,
+        detail: "Will not overwrite the existing sidecar file with force disabled.",
+      },
+      {
+        rel_path: ".diffmogger/state/AGENTS.md",
+        action: "create",
+        exists: false,
+        managed_section: true,
+        detail: "Will create this target-local generated file.",
+      },
+    ]);
+
+    expect(visible.map((file) => file.rel_path)).toEqual([".diffmogger/state/AGENTS.md"]);
   });
 });

@@ -7,13 +7,13 @@ import {
   FolderOpen,
   Loader2,
   RefreshCw,
-  Send,
 } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { BackendEnvelope, ObservatoryCommit, ProjectSnapshot, ReviewChangedFile, ReviewSnapshot } from "./api/backend";
 import { openReviewArtifact, revealReviewArtifact, runBackendCommand } from "./api/backend";
 import { useChunkedLimit, useDeferredStage } from "./performance";
+import { buildReviewDecision, reviewFreshness, reviewFreshnessLabel, type ReviewDecision } from "./reviewModel";
 
 type ReviewExportData = {
   html_path: string;
@@ -26,14 +26,6 @@ type MarkReviewedData = {
   marker_path: string;
   reviewed: ReviewSnapshot["reviewed"];
 };
-
-const followupIntents = [
-  { value: "info", label: "General note" },
-  { value: "done", label: "Done / completed" },
-  { value: "approve", label: "Approved" },
-  { value: "reject", label: "Rejected" },
-  { value: "unknown", label: "Not sure" },
-];
 
 type EvidenceSnapshotItem = {
   label: string;
@@ -110,11 +102,12 @@ function countSummary(counts: Record<string, number> | undefined): string {
 function buildEvidenceSnapshot(snapshot: ReviewSnapshot | null, projectSnapshot: ProjectSnapshot): EvidenceSnapshotItem[] {
   const counts = snapshot?.verification.counts ?? {};
   const human = number(projectSnapshot.home.pending_human_requests) + number(projectSnapshot.home.unhandled_inbox);
+  const freshness = reviewFreshness(snapshot);
   return [
     {
-      label: "Marker",
-      value: snapshot?.reviewed.exists ? "Reviewed" : "Pending",
-      tone: snapshot?.reviewed.exists ? "good" : "warn",
+      label: "Review",
+      value: reviewFreshnessLabel(freshness),
+      tone: freshness === "current" ? "good" : "warn",
     },
     {
       label: "Safety",
@@ -132,7 +125,7 @@ function buildEvidenceSnapshot(snapshot: ReviewSnapshot | null, projectSnapshot:
       tone: (snapshot?.changed_files.length ?? 0) > 0 ? "info" : "quiet",
     },
     {
-      label: "Limitations",
+      label: "Skipped checks",
       value: `${snapshot?.limitations.length ?? 0}`,
       tone: (snapshot?.limitations.length ?? 0) > 0 ? "warn" : "good",
     },
@@ -166,6 +159,7 @@ function buildTrustVerdict(snapshot: ReviewSnapshot | null, projectSnapshot: Pro
   const human = number(projectSnapshot.home.pending_human_requests) + number(projectSnapshot.home.unhandled_inbox);
   const status = text(snapshot.latest_run.status, projectSnapshot.home.automation_status).toUpperCase();
   const safetyTone = statusTone(snapshot.safety.status);
+  const freshness = reviewFreshness(snapshot);
 
   if (status.includes("CRITICAL") || status.includes("BLOCKED") || safetyTone === "bad") {
     return {
@@ -181,11 +175,25 @@ function buildTrustVerdict(snapshot: ReviewSnapshot | null, projectSnapshot: Pro
       summary: "Failed verification or pending input is attached to this run.",
     };
   }
-  if (warn > 0 || pending > 0 || limitations > 0 || !snapshot.reviewed.exists) {
+  if (warn > 0 || pending > 0) {
     return {
       label: "Review needed",
       tone: "warn",
-      summary: "Some checks are pending, skipped, or unreviewed.",
+      summary: "Some verification checks need attention.",
+    };
+  }
+  if (limitations > 0) {
+    return {
+      label: "Review needed",
+      tone: "warn",
+      summary: "Skipped checks or environment blockers are listed below.",
+    };
+  }
+  if (freshness !== "current") {
+    return {
+      label: "Review needed",
+      tone: "warn",
+      summary: "The latest snapshot has not been marked reviewed.",
     };
   }
   return {
@@ -205,7 +213,7 @@ const TrustSummaryCard = memo(function TrustSummaryCard(props: {
   const items = [
     { label: "Safety", value: text(props.snapshot?.safety.status, "pending"), tone: props.snapshot?.safety.status },
     { label: "Human input", value: human ? `${human} pending` : "none pending", tone: human ? "warn" : "good" },
-    { label: "Skipped / limited", value: `${props.snapshot?.limitations.length ?? 0} recorded`, tone: (props.snapshot?.limitations.length ?? 0) > 0 ? "warn" : "good" },
+    { label: "Skipped checks", value: `${props.snapshot?.limitations.length ?? 0} recorded`, tone: (props.snapshot?.limitations.length ?? 0) > 0 ? "warn" : "good" },
     { label: "Changed files", value: `${props.snapshot?.changed_files.length ?? 0} files`, tone: (props.snapshot?.changed_files.length ?? 0) > 0 ? "info" : "quiet" },
     { label: "Verification", value: countSummary(counts), tone: number(counts.fail) > 0 ? "bad" : number(counts.warn) > 0 || number(counts.pending) > 0 ? "warn" : "good", wide: true },
   ];
@@ -244,32 +252,72 @@ const LatestRunSummaryCard = memo(function LatestRunSummaryCard(props: {
   );
 });
 
-const ReviewMarkerCard = memo(function ReviewMarkerCard(props: {
+const ReviewStatusCard = memo(function ReviewStatusCard(props: {
   snapshot: ReviewSnapshot | null;
+  decision: ReviewDecision;
   reviewNote: string;
   disabled: boolean;
   busy: string | null;
   onNote: (value: string) => void;
   onMarkReviewed: () => void;
+  onOpenInbox: () => void;
 }) {
+  const freshness = reviewFreshness(props.snapshot);
+  const actionDisabled = props.disabled || !props.decision.primaryAction.enabled;
   return (
-    <ReviewSection title="Review marker" className="review-evidence-card review-marker-section">
+    <ReviewSection title="Review status" className={`review-evidence-card review-marker-section ${props.decision.mode}`}>
+      <div className={`review-decision-panel ${props.decision.tone}`}>
+        <strong>{props.decision.title}</strong>
+        <p>{props.decision.detail}</p>
+      </div>
       <div className="review-mark-card">
         <CheckCircle2 size={18} />
         <div>
-          <strong>{props.snapshot?.reviewed.exists ? "Reviewed" : "Not reviewed yet"}</strong>
-          <span>{formatTimestamp(props.snapshot?.reviewed.reviewed_at)}</span>
+          <strong>{reviewFreshnessLabel(freshness)}</strong>
+          <span>{props.decision.summary}</span>
         </div>
-        <ReviewBadge value={props.snapshot?.reviewed.exists ? "reviewed" : "pending"} tone={props.snapshot?.reviewed.exists ? "good" : "warn"} />
+        <ReviewBadge value={reviewFreshnessLabel(freshness)} tone={freshness === "current" ? "good" : "warn"} />
       </div>
+      <div className="review-snapshot-facts">
+        <div>
+          <span>Latest snapshot</span>
+          <strong>{formatTimestamp(props.snapshot?.generated_at)}</strong>
+        </div>
+        <div>
+          <span>Last reviewed</span>
+          <strong>{props.snapshot?.reviewed.exists ? formatTimestamp(props.snapshot.reviewed.reviewed_at) : "Not reviewed yet"}</strong>
+        </div>
+      </div>
+      {props.decision.hasHumanBlocker && (
+        <button className="secondary-action" disabled={props.disabled} onClick={props.onOpenInbox}>
+          Open Inbox
+        </button>
+      )}
       <label className="review-note-label">
-        Optional note
-        <textarea value={props.reviewNote} onChange={(event) => props.onNote(event.target.value)} />
+        Review note
+        <textarea
+          value={props.reviewNote}
+          disabled={actionDisabled}
+          onChange={(event) => props.onNote(event.target.value)}
+          placeholder="Optional audit note for this reviewed snapshot."
+        />
       </label>
-      <button className="primary-action" disabled={props.disabled} onClick={props.onMarkReviewed}>
+      <button className="primary-action" disabled={actionDisabled} onClick={props.onMarkReviewed} title={props.decision.primaryAction.reason}>
         {props.busy === "mark" ? <Loader2 className="spin" size={16} /> : <ClipboardCheck size={16} />}
-        Mark reviewed
+        {props.decision.primaryAction.label}
       </button>
+      {!props.decision.primaryAction.enabled && <small>{props.decision.primaryAction.reason}</small>}
+      <details className="review-technical-details">
+        <summary>Technical details</summary>
+        <div>
+          <span>Marker path</span>
+          <code>{props.snapshot?.reviewed.path ?? "Not recorded"}</code>
+        </div>
+        <div>
+          <span>Reviewed snapshot</span>
+          <code>{props.snapshot?.reviewed.snapshot_generated_at || "Not recorded"}</code>
+        </div>
+      </details>
     </ReviewSection>
   );
 });
@@ -457,8 +505,6 @@ const ArtifactCard = memo(function ArtifactCard(props: {
   copied: boolean;
   disabled: boolean;
   onCopy: () => void;
-  onOpen?: () => void;
-  onReveal: () => void;
 }) {
   return (
     <div className="review-artifact-card">
@@ -468,16 +514,6 @@ const ArtifactCard = memo(function ArtifactCard(props: {
         <button className="icon-text-button" disabled={props.disabled || !props.path} onClick={props.onCopy}>
           <Clipboard size={13} />
           {props.copied ? "Copied" : "Copy"}
-        </button>
-        {props.onOpen && (
-          <button className="icon-text-button" disabled={props.disabled || !props.path} onClick={props.onOpen}>
-            <ExternalLink size={13} />
-            Open
-          </button>
-        )}
-        <button className="icon-text-button" disabled={props.disabled || !props.path} onClick={props.onReveal}>
-          <FolderOpen size={13} />
-          Reveal
         </button>
       </div>
     </div>
@@ -490,14 +526,14 @@ const ReviewBundleActions = memo(function ReviewBundleActions(props: {
   copiedPath: string;
   disabled: boolean;
   busy: string | null;
+  exportLabel: string;
   onCopyPath: (path: string, label: string) => void;
   onOpen: () => void;
-  onReveal: () => void;
   onRevealDirectory: () => void;
   onExport: () => void;
 }) {
   return (
-    <ReviewSection title="Export and artifacts" className="review-evidence-card review-artifacts-section">
+    <ReviewSection title="Review export" className="review-evidence-card review-artifacts-section">
       <div className="review-bundle-paths">
         <ArtifactCard
           label="Self-review Markdown"
@@ -505,8 +541,6 @@ const ReviewBundleActions = memo(function ReviewBundleActions(props: {
           copied={props.copiedPath === "self-review"}
           disabled={props.disabled}
           onCopy={() => props.onCopyPath(props.selfReviewPath, "self-review")}
-          onOpen={props.onOpen}
-          onReveal={props.onReveal}
         />
         <ArtifactCard
           label="Review directory"
@@ -514,21 +548,20 @@ const ReviewBundleActions = memo(function ReviewBundleActions(props: {
           copied={props.copiedPath === "review-dir"}
           disabled={props.disabled}
           onCopy={() => props.onCopyPath(props.reviewDir, "review-dir")}
-          onReveal={props.onRevealDirectory}
         />
       </div>
       <div className="review-export-actions">
         <button className="primary-action" disabled={props.disabled} onClick={props.onExport}>
           {props.busy === "export" ? <Loader2 className="spin" size={16} /> : <FileDown size={16} />}
-          Export review
+          {props.exportLabel}
         </button>
         <button className="secondary-action" disabled={props.disabled} onClick={props.onOpen}>
           <ExternalLink size={15} />
           Open Markdown
         </button>
-        <button className="secondary-action" disabled={props.disabled} onClick={props.onReveal}>
+        <button className="secondary-action" disabled={props.disabled} onClick={props.onRevealDirectory}>
           <FolderOpen size={15} />
-          Reveal
+          Reveal folder
         </button>
       </div>
     </ReviewSection>
@@ -543,14 +576,12 @@ export function ReviewPage(props: {
 }) {
   const target = props.snapshot.target.path;
   const [snapshot, setSnapshot] = useState<ReviewSnapshot | null>(null);
-  const [busy, setBusy] = useState<"load" | "export" | "open" | "reveal" | "mark" | "followup" | null>(null);
+  const [busy, setBusy] = useState<"load" | "export" | "open" | "reveal" | "mark" | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [markdownPath, setMarkdownPath] = useState("");
   const [copiedPath, setCopiedPath] = useState("");
   const [reviewNote, setReviewNote] = useState("");
-  const [followup, setFollowup] = useState("");
-  const [followupIntent, setFollowupIntent] = useState("info");
 
   const reviewDir = useMemo(
     () => snapshot?.bundle.review_dir ?? `${target.replace(/[\\/]+$/, "")}/target/first-review`,
@@ -569,6 +600,10 @@ export function ReviewPage(props: {
   );
   const evidenceSnapshot = useMemo(
     () => buildEvidenceSnapshot(snapshot, props.snapshot),
+    [props.snapshot, snapshot],
+  );
+  const decision = useMemo(
+    () => buildReviewDecision(props.snapshot, snapshot),
     [props.snapshot, snapshot],
   );
 
@@ -638,20 +673,6 @@ export function ReviewPage(props: {
     }
   }
 
-  async function revealArtifact() {
-    setBusy("reveal");
-    setError("");
-    try {
-      const bundle = await ensureBundle();
-      if (!bundle) return;
-      await revealReviewArtifact(bundle.markdown_path);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setBusy(null);
-    }
-  }
-
   async function revealReviewDirectory() {
     setBusy("reveal");
     setError("");
@@ -678,6 +699,7 @@ export function ReviewPage(props: {
   }
 
   async function markReviewed() {
+    if (!decision.primaryAction.enabled) return;
     setBusy("mark");
     setError("");
     try {
@@ -690,35 +712,9 @@ export function ReviewPage(props: {
         setError(payload.message ?? "Could not mark this target reviewed.");
         return;
       }
-      setNotice("Review marker recorded.");
+      setNotice("Latest snapshot marked reviewed.");
       setReviewNote("");
       await loadReview({ refreshProject: true });
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function sendFollowup() {
-    if (!followup.trim()) return;
-    setBusy("followup");
-    setError("");
-    try {
-      const payload: BackendEnvelope<{ inbox_id: string }> = await runBackendCommand({
-        command: "inbox.send_note",
-        target,
-        body: followup,
-        intent: followupIntent,
-        related: "review-follow-up",
-      });
-      if (!payload.ok || !payload.data) {
-        setError(payload.message ?? "Could not send the follow-up note.");
-        return;
-      }
-      setNotice(`Follow-up queued as ${payload.data.inbox_id}.`);
-      setFollowup("");
-      props.onRefresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -764,26 +760,18 @@ export function ReviewPage(props: {
 
   return (
     <section className="review-page">
-      <header className={`review-hero ${verdict.tone}`}>
+      <header className={`review-hero ${decision.tone}`}>
         <div className="review-hero-main">
-          <h1>Review</h1>
-          <p>{snapshot?.latest_run.summary ?? "Loading review evidence from the backend snapshot."}</p>
+          <h1>Latest Run Review</h1>
+          <p>{decision.summary}</p>
         </div>
-        <div className="review-hero-side">
-          <div className="review-actions">
-            <button className="icon-text-button" disabled={disabled} onClick={() => loadReview({ refreshProject: true })}>
-              {busy === "load" ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
-              Refresh
-            </button>
-            <button className="icon-text-button" disabled={disabled} onClick={() => openArtifact()}>
-              <ExternalLink size={14} />
-              Open Markdown
-            </button>
-            <button className="icon-text-button" disabled={disabled} onClick={exportBundle}>
-              {busy === "export" ? <Loader2 size={14} className="spin" /> : <FileDown size={14} />}
-              Export review
-            </button>
-          </div>
+        <div className="review-hero-side review-mode-summary">
+          <strong>{decision.title}</strong>
+          <p>{snapshot?.latest_run.summary ?? "Loading review evidence from the backend snapshot."}</p>
+          <button className="icon-text-button" disabled={disabled} onClick={() => loadReview({ refreshProject: true })}>
+            {busy === "load" ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+            Refresh
+          </button>
         </div>
       </header>
 
@@ -801,26 +789,28 @@ export function ReviewPage(props: {
 
       <div className="review-layout review-evidence-layout">
         <main className="review-main-column review-evidence-stack">
-          <ReviewMarkerCard
+          <ReviewStatusCard
             snapshot={snapshot}
+            decision={decision}
             reviewNote={reviewNote}
             disabled={disabled}
             busy={busy}
             onNote={setReviewNote}
             onMarkReviewed={markReviewed}
+            onOpenInbox={() => props.onNavigate("Inbox")}
           />
-          <SafetyCheckCard snapshot={snapshot} />
           {snapshot && deferredStage >= 1 ? (
             <>
-              <VerificationEvidenceList snapshot={snapshot} />
               <ChangedFilesList files={changedFiles} source={snapshot.changed_files_source} />
+              <VerificationEvidenceList snapshot={snapshot} />
             </>
           ) : (
             <>
-              <DeferredReviewSection title="Verification" />
               <DeferredReviewSection title="Changed files" />
+              <DeferredReviewSection title="Verification" />
             </>
           )}
+          <SafetyCheckCard snapshot={snapshot} />
           {snapshot && deferredStage >= 2 ? (
             <>
               <SkippedChecksCard limitations={limitations} />
@@ -867,29 +857,12 @@ export function ReviewPage(props: {
             copiedPath={copiedPath}
             disabled={disabled}
             busy={busy}
+            exportLabel={decision.exportLabel}
             onCopyPath={copyArtifactPath}
             onOpen={() => void openArtifact()}
-            onReveal={() => void revealArtifact()}
             onRevealDirectory={() => void revealReviewDirectory()}
             onExport={() => void exportBundle()}
           />
-
-          <ReviewSection title="Next-run note" className="review-rail-card">
-            <div className="review-followup">
-              <select value={followupIntent} onChange={(event) => setFollowupIntent(event.target.value)}>
-                {followupIntents.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-              </select>
-              <textarea
-                value={followup}
-                onChange={(event) => setFollowup(event.target.value)}
-                placeholder="Tell the next run what to check or avoid."
-              />
-              <button className="primary-action" disabled={disabled || !followup.trim()} onClick={sendFollowup}>
-                {busy === "followup" ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
-                Send follow-up
-              </button>
-            </div>
-          </ReviewSection>
         </aside>
       </div>
     </section>
