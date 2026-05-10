@@ -7,18 +7,27 @@ The frontend calls `scripts/dashboard_backend_cli.py`, which delegates to packag
 ## Run The App
 
 ```bash
+bash scripts/build_native_dashboard_app.sh
+open Diffmogger.app
+```
+
+Development mode:
+
+```bash
 cd services/agentic-dashboard/native
 npm install
 npm run tauri dev
 ```
 
-Packaged build:
+Manual packaged build:
 
 ```bash
 npm run build
 npm run tauri build
 open src-tauri/target/release/bundle/macos/Diffmogger.app
 ```
+
+The root build helper creates `Diffmogger.app` at the checkout root as a macOS Finder alias when possible, with a symlink fallback.
 
 Backend smoke:
 
@@ -90,7 +99,7 @@ Before automation starts, the dashboard checks:
 - optional notifier health for notifier modes
 - optional desktop notification command for ticket completion notifications
 - optional Context7/Playwright MCP advisories
-- initialized git repo and initial commit before continuous automation
+- initialized git repo and initial commit before continuous automation; scaffold creates them automatically when `HEAD` is missing
 - local-only remote opt-in before continuous automation in repos with configured remotes
 
 ## Continuous Automation

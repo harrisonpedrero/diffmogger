@@ -2,6 +2,17 @@
 
 This is the active Tauri v2 dashboard for Diffmogger.
 
+Quickstart from the repository root:
+
+```bash
+bash scripts/build_native_dashboard_app.sh
+open Diffmogger.app
+```
+
+The root helper builds the packaged macOS app and creates `Diffmogger.app` at the checkout root as a Finder alias when possible, with a symlink fallback.
+
+Development commands from this directory:
+
 ```bash
 npm install
 npm test

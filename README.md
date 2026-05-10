@@ -22,14 +22,13 @@ It is not a hosted agent platform or a product-specific app. Diffmogger is built
 git clone https://github.com/harrisonpedrero/diffmogger.git Diffmogger
 cd Diffmogger
 bash scripts/validate_starter_kit.sh
-cd services/agentic-dashboard/native
-npm install
-npm run tauri dev
+bash scripts/build_native_dashboard_app.sh
+open Diffmogger.app
 ```
 
 In the dashboard:
 
-1. Pick a fresh or existing target repo.
+1. Pick a fresh or existing target folder.
 2. Fill in the project intake.
 3. Add optional context files.
 4. Run **Scaffold & Bootstrap**.
@@ -45,6 +44,8 @@ python3 scripts/scaffold_project_docs.py \
 
 python3 scripts/check_required_files.py /tmp/Diffmogger-smoke
 ```
+
+Scaffold initializes git and creates a local `chore: initial commit` automatically when the target does not already have `HEAD`.
 
 ## Source Layout
 
@@ -102,9 +103,10 @@ The native dashboard is the only user-facing dashboard. It lives in `services/ag
 
 For ticket-campaign targets, the dashboard manages the canonical `.diffmogger/state/TICKET_RUN.md` through a structured Ticket Queue. Users can seed tickets before scaffold, inspect/edit/delete tickets after scaffold, preview/apply Markdown/CSV/JSON imports, and accept review-only Codex draft candidates stored under `.diffmogger/runtime/ticket_drafts/`.
 
-Useful dashboard commands during development:
+Useful dashboard commands:
 
 ```bash
+bash scripts/build_native_dashboard_app.sh
 cd services/agentic-dashboard/native
 npm test
 npm run build

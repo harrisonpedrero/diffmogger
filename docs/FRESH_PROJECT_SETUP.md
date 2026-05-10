@@ -1,15 +1,15 @@
 # Fresh Project Setup
 
-Use this checklist to start a new target repo from Diffmogger without keeping a runtime dependency on the Diffmogger repo. The same flow can retrofit an existing repo when project mode is set to `existing_project`.
+Use this checklist to start a new target folder from Diffmogger without keeping a runtime dependency on the Diffmogger repo. The same flow can retrofit an existing repo when project mode is set to `existing_project`.
 
 ## 1. Launch The Dashboard Or Create An Intake
 
 Recommended path:
 
 ```bash
-cd /path/to/Diffmogger/services/agentic-dashboard/native
-npm install
-npm run tauri dev
+cd /path/to/Diffmogger
+bash scripts/build_native_dashboard_app.sh
+open Diffmogger.app
 ```
 
 The native dashboard opens a local window and calls the Diffmogger backend command layer. Before automation starts, review the prerequisite list:
@@ -24,7 +24,7 @@ The native dashboard opens a local window and calls the Diffmogger backend comma
 - optional local notifier health when using `local_notifier`
 - optional macOS desktop notification command when ticket completion notifications are enabled
 
-Fill in the wizard, choose the target directory, optionally add context files such as PDFs or research notes, then click **Scaffold & Bootstrap**. Choose fresh-project mode for a new target directory. Choose existing-project mode when the target is an existing repo and describe the first integrated change in the intake. The dashboard writes `.diffmogger/agentic/project_intake.json`, copies context files into `.diffmogger/context/`, creates `.diffmogger/state/PROJECT_CONTEXT.md`, scaffolds required files, validates them, and starts the initial Codex bootstrap run.
+Fill in the wizard, choose the target directory, optionally add context files such as PDFs or research notes, then click **Scaffold & Bootstrap**. Choose fresh-project mode for a new target directory. Choose existing-project mode when the target already has project files and describe the first integrated change in the intake. The dashboard writes `.diffmogger/agentic/project_intake.json`, copies context files into `.diffmogger/context/`, creates `.diffmogger/state/PROJECT_CONTEXT.md`, scaffolds required files, validates them, starts the initial Codex bootstrap run when requested, and ensures the target has a local git repo with an initial `chore: initial commit` when `HEAD` does not exist.
 
 When integrating into an existing repo, Diffmogger preserves project-owned files by keeping Diffmogger state under `.diffmogger/`. If root `AGENTS.md` exists, Diffmogger adds or updates a managed block that points Codex at the sidecar prompt. Keep repo-owned instructions outside that managed block.
 
@@ -67,7 +67,7 @@ Multi-role conveyor automation is the standard mode. CLI intakes can use:
 
 Use `automation_role_profile: "single_lane"` for docs, research, cleanup, reports, small apps, bounded/simple work, and non-engineering workflows. Use `planner_builder_hardener_integrator` for larger software engineering work where independent planning, implementation, verification, and integration lanes add value.
 
-Continuous automation requires the target to be an initialized git repo with an initial commit before the runner starts.
+Scaffold creates a local git repo and initial `chore: initial commit` automatically when the selected target does not already have `HEAD`. Continuous automation still checks this before the runner starts.
 
 For bounded ticket work, enable **Ticket Campaign** in the dashboard run config or set these intake fields:
 

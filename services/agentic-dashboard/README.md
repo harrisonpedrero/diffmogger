@@ -2,6 +2,13 @@
 
 The user-facing dashboard is the native Tauri app in `services/agentic-dashboard/native/`. Backend commands live behind `scripts/dashboard_backend_cli.py` and package modules under `src/diffmogger/dashboard/`.
 
+## Quickstart
+
+```bash
+bash scripts/build_native_dashboard_app.sh
+open Diffmogger.app
+```
+
 ## Development
 
 ```bash
@@ -12,12 +19,14 @@ npm run build
 npm run tauri dev
 ```
 
-Packaged build:
+Manual packaged build:
 
 ```bash
 npm run tauri build
 open src-tauri/target/release/bundle/macos/Diffmogger.app
 ```
+
+The root helper creates `Diffmogger.app` at the checkout root as a macOS Finder alias when possible, with a symlink fallback.
 
 The packaged app is source-checkout-backed. Keep the cloned Diffmogger checkout in place, or launch with:
 
