@@ -562,7 +562,7 @@ def scorecard_action_plan(
             role = "builder"
             recommendation = "Continue builder momentum with the next scoped local increment."
         else:
-            recommendation = f"Continue with the `{role}` lane."
+            recommendation = f"Continue with the {role} lane."
         return {
             "label": "Continue builder momentum" if role == "builder" else f"Continue {role}",
             "lane": role,
@@ -641,7 +641,7 @@ def scorecard_snapshot(
         if pass_count or fail_count
         else validation.get("summary") or "No validation checks recorded yet."
     )
-    integration_status = clean_text(integration_safety.get("status") or "not_recorded", limit=40)
+    integration_status = clean_text(integration_safety.get("status") or "pending", limit=40)
     integration_kind = {
         "pass": "good",
         "fail": "bad",
@@ -687,7 +687,7 @@ def scorecard_snapshot(
             {
                 "label": "Integration safety",
                 "value": integration_status.replace("_", " "),
-                "detail": integration_safety.get("summary") or "No integration-safety check result recorded yet.",
+                "detail": integration_safety.get("summary") or "Integration-safety check has not run yet.",
                 "kind": integration_kind,
             },
             {

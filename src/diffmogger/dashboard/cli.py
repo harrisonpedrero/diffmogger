@@ -17,6 +17,7 @@ from .commands.advanced import (
     command_advanced_validate_file,
 )
 from .commands.brief import (
+    command_brief_generate_intake,
     command_brief_load,
     command_brief_save_draft,
     command_brief_scaffold_bootstrap,
@@ -54,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         "project.load_snapshot": command_project_load_snapshot,
         "project.list_recent": command_project_list_recent,
         "brief.load": command_brief_load,
+        "brief.generate_intake": command_brief_generate_intake,
         "brief.save_draft": command_brief_save_draft,
         "brief.scaffold_preview": command_brief_scaffold_preview,
         "brief.scaffold_bootstrap": command_brief_scaffold_bootstrap,
@@ -106,6 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument("--output-dir", required=True, help="Directory for the generated debug bundle")
         if name in {"brief.save_draft", "brief.scaffold_preview", "brief.scaffold_bootstrap"}:
             subparser.add_argument("--intake-json", required=True, help="JSON object with intake fields")
+        if name == "brief.generate_intake":
+            subparser.add_argument("--body", required=True, help="Short description of what the user wants to build")
         if name == "context.import":
             subparser.add_argument("--files-json", required=True, help="JSON list of context file paths")
             subparser.add_argument("--project-name", default="", help="Project name for the context index")

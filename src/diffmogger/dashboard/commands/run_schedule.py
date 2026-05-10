@@ -7,6 +7,7 @@ from ..jsonio import *
 from ..target import *
 
 from .inbox import inbox_snapshot
+from diffmogger.runtime import ticket_run
 
 RUNNER_STOP_GRACE_SECONDS = 8
 
@@ -189,6 +190,12 @@ def target_ticket_campaign_enabled(target: Path) -> bool:
             return True
     return False
 
+def target_relative_display(target: Path, path: Path) -> str:
+    try:
+        return path.relative_to(target).as_posix()
+    except ValueError:
+        return str(path)
+
 def target_allow_remotes(target: Path) -> bool:
     for data in (load_dashboard_state(target), load_intake(target)):
         if "multi_role_allow_remotes" in data:
@@ -208,6 +215,7 @@ def target_git_remotes(target: Path) -> str:
 
 def automation_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
     target = target.expanduser().resolve()
+    ticket_campaign_enabled = target_ticket_campaign_enabled(target)
     required = [
         existing_or_target_path(target, ".agentic/project_intake.json"),
         existing_or_target_path(target, ".agentic/automation_prompt.md"),
@@ -230,9 +238,9 @@ def automation_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
                 target_script_path(target, "scripts/list_deferred_patches.py"),
             ]
         )
-    if target_ticket_campaign_enabled(target):
-        required.append(existing_or_target_path(target, "docs/TICKET_RUN.md"))
-    missing = [path.relative_to(target).as_posix() for path in required if not path.exists()]
+    if ticket_campaign_enabled:
+        required.append(ticket_run.ticket_file_path(target))
+    missing = [target_relative_display(target, path) for path in required if not path.exists()]
     if missing:
         return False, "Missing " + ", ".join(missing)
     if not dashboard_app.target_has_initial_commit(target):
@@ -242,14 +250,20 @@ def automation_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
         encoding="utf-8",
         errors="replace",
     )
-    if "Current baseline: not bootstrapped yet" in task_text:
-        return False, "Bootstrap has not completed yet."
     status_match = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", task_text, re.MULTILINE)
     if not status_match:
-        return False, f"Missing AUTOMATION_STATUS in {task_path.relative_to(target)}."
+        return False, f"Missing AUTOMATION_STATUS in {target_relative_display(target, task_path)}."
     status = status_match.group(1).strip().upper()
     if status not in dashboard_app.SCHEDULABLE_STATUSES:
         return False, f"Automation status is {status}; scheduling requires ACTIVE or ACTIVE_WITH_PENDING_USER_INPUT."
+    if ticket_campaign_enabled:
+        ticket_state = ticket_run.ticket_source_state(target)
+        if not bool(ticket_state.get("actionable")):
+            return False, str(ticket_state.get("start_reason") or "Ticket campaign has no actionable ticket.")
+        if "Current baseline: not bootstrapped yet" in task_text:
+            return True, str(ticket_state.get("start_reason") or "Ready to run ticket campaign bootstrap.")
+    elif "Current baseline: not bootstrapped yet" in task_text:
+        return False, "Bootstrap has not completed yet."
     return True, "Ready."
 
 def run_once_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
@@ -344,7 +358,7 @@ def automation_prerequisites(target: Path, dashboard_app: Any) -> list[Any]:
             True,
             "Target has an initial git commit."
             if has_initial_commit
-            else "Run `git init`, `git add .`, and `git commit -m 'chore: initial commit'` before starting continuous automation.",
+            else "Run scaffold again to create the local git repo and initial commit, or manually run `git init`, `git add .`, and `git commit -m 'chore: initial commit'`.",
         )
     )
     if (

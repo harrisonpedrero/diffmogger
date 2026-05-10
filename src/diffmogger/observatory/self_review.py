@@ -25,7 +25,7 @@ def validation_snapshot(text: str) -> dict[str, Any]:
             status = "fail"
         elif lower.startswith("warn"):
             status = "warn"
-        elif "not run" in lower:
+        elif lower.startswith("pending") or "not run" in lower:
             status = "pending"
         counts[status] += 1
         checks.append({"status": status, "text": bullet})
@@ -76,6 +76,7 @@ def integration_safety_record_snapshot(target: Path) -> dict[str, Any]:
 
 def integration_safety_snapshot(validation: dict[str, Any], target: Path | None = None) -> dict[str, Any]:
     items = [item for item in list(validation.get("items") or []) if isinstance(item, dict)]
+    pending_snapshot: dict[str, Any] | None = None
     for item in items:
         text = clean_text(item.get("text") or "", limit=420)
         lower = text.lower()
@@ -91,26 +92,34 @@ def integration_safety_snapshot(validation: dict[str, Any], target: Path | None 
         elif status == "warn":
             summary = f"Latest recorded integration-safety check has a warning: `{command}`."
         elif status == "pending":
-            summary = f"Integration-safety check is recorded as pending: `{command}`."
+            summary = f"Integration-safety check has not run yet; use dashboard Run Safety Check to record `{command}`."
         else:
             summary = f"Integration-safety check was recorded without pass/fail status: `{command}`."
-        return {
+        item_snapshot = {
             "status": status,
             "summary": summary,
             "command": command,
             "recorded_text": text,
         }
+        if status == "pending":
+            pending_snapshot = item_snapshot
+            continue
+        return item_snapshot
 
     if target is not None:
         record_snapshot = integration_safety_record_snapshot(target)
         if record_snapshot:
             return record_snapshot
 
+    if pending_snapshot:
+        return pending_snapshot
+
     return {
-        "status": "not_recorded",
-        "summary": "No integration-safety check result is recorded in the latest task-state checks.",
+        "status": "pending",
+        "summary": "Integration-safety check has not run yet for this target; use dashboard Run Safety Check before the first review or unattended automation.",
         "command": "python3 scripts/check_integration_safety.py",
         "recorded_text": "",
+        "source": "target/integration_safety_check.json",
     }
 
 def first_review_doc_coverage(target: Path) -> dict[str, Any]:
@@ -185,7 +194,7 @@ def first_review_snapshot(target: Path, task: dict[str, Any]) -> dict[str, Any]:
     pass_count = int(validation_counts.get("pass", 0) or 0)
     fail_count = int(validation_counts.get("fail", 0) or 0)
     integration_safety = task.get("integration_safety") if isinstance(task.get("integration_safety"), dict) else {}
-    integration_status = clean_text(integration_safety.get("status") or "not_recorded", limit=40)
+    integration_status = clean_text(integration_safety.get("status") or "pending", limit=40)
     docs = first_review_doc_coverage(target)
 
     if fail_count:
@@ -199,7 +208,7 @@ def first_review_snapshot(target: Path, task: dict[str, Any]) -> dict[str, Any]:
         validation_detail = first_review_validation_detail(target)
 
     safety_status = "pass" if integration_status == "pass" else ("fail" if integration_status == "fail" else "warn")
-    safety_detail = integration_safety.get("summary") or "No integration-safety check result is recorded yet."
+    safety_detail = integration_safety.get("summary") or "Integration-safety check has not run yet."
 
     items = [
         {"label": "Checklist docs", "status": docs["status"], "detail": docs["detail"]},
@@ -312,7 +321,7 @@ def self_review_snapshot(
             {"label": "Current assessment", "body": task.get("current_assessment") or "No current assessment recorded yet."},
             {"label": "First review", "body": first_review.get("summary") or "No first-review readiness state recorded yet."},
             {"label": "Validation", "body": validation.get("summary") or "No validation results recorded yet."},
-            {"label": "Integration safety", "body": integration_safety.get("summary") or "No integration-safety check result recorded yet."},
+            {"label": "Integration safety", "body": integration_safety.get("summary") or "Integration-safety check has not run yet."},
             {"label": "Queue and conveyor", "body": f"{queue_summary} {conveyor_summary}"},
             {"label": "Human bridge", "body": human_summary},
             {"label": "Action plan", "body": f"{action_plan['recommendation']} {action_plan['why']}"},

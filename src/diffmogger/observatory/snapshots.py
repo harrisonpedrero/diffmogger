@@ -6,6 +6,23 @@ from .queue_state import active_run, conveyor_health, decision_queue, progress_s
 from .scoring import action_plan_follow_through, recommendation_history_snapshot, scorecard_snapshot, worker_strategy_snapshot
 from .self_review import first_review_snapshot, integration_safety_snapshot, self_review_snapshot, validation_snapshot
 from .signals import signals_snapshot
+from diffmogger.runtime import ticket_run
+
+STALE_TICKET_SOURCE_ISSUE = "ticket source still needs to be populated or confirmed"
+
+def is_stale_ticket_source_issue(value: Any) -> bool:
+    return STALE_TICKET_SOURCE_ISSUE in str(value or "").lower()
+
+def filtered_known_issues(target: Path, known_issue: str, known_issues: list[str]) -> tuple[str, list[str]]:
+    if not (is_stale_ticket_source_issue(known_issue) or any(is_stale_ticket_source_issue(item) for item in known_issues)):
+        return known_issue, known_issues
+    ticket_state = ticket_run.ticket_source_state(target)
+    if not bool(ticket_state.get("confirmed")):
+        return known_issue, known_issues
+    remaining = [item for item in known_issues if not is_stale_ticket_source_issue(item)]
+    if is_stale_ticket_source_issue(known_issue):
+        known_issue = remaining[0] if remaining else "No active issue summary."
+    return known_issue, remaining
 
 def parse_task_state(target: Path) -> dict[str, Any]:
     text = read_text(dpath(target, "docs/CODEX_AUTOMATION_TASKS.md"))
@@ -18,6 +35,9 @@ def parse_task_state(target: Path) -> dict[str, Any]:
         "Current Project State",
         ["Current assessment", "Current baseline", "Goal"],
     )
+    known_issue = first_nonempty_section_line(text, "Known Issues") or "No active issue summary."
+    known_issues = section_bullets(text, "Known Issues", limit=MAX_REVIEW_ITEMS)
+    known_issue, known_issues = filtered_known_issues(target, known_issue, known_issues)
     worker_agents_allowed = task_bool_value(text, "Worker agents allowed", default=True)
     write_workers_allowed = task_bool_value(text, "Write-capable worker agents allowed", default=False)
     max_write_worker_count = task_int_value(text, "Max write worker count", default=0 if not write_workers_allowed else 1)
@@ -30,8 +50,8 @@ def parse_task_state(target: Path) -> dict[str, Any]:
         "current_assessment": current_assessment or first_nonempty_section_line(text, "Current Project State") or "No current assessment recorded yet.",
         "best_next_milestone": first_nonempty_section_line(text, "Best Next Milestone") or "No milestone recorded yet.",
         "suggested_next_task": first_nonempty_section_line(text, "Suggested Next Sprint-Sized Task") or "No sprint task recorded yet.",
-        "known_issue": first_nonempty_section_line(text, "Known Issues") or "No active issue summary.",
-        "known_issues": section_bullets(text, "Known Issues", limit=MAX_REVIEW_ITEMS),
+        "known_issue": known_issue,
+        "known_issues": known_issues,
         "validation": validation,
         "integration_safety": integration_safety_snapshot(validation, target),
         "worker": {

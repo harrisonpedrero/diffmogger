@@ -175,8 +175,8 @@ def review_load_snapshot(target: Path) -> dict[str, Any]:
             "baseline": baseline,
         },
         "safety": safety or {
-            "status": "not_recorded",
-            "summary": "No integration-safety check result recorded yet.",
+            "status": "pending",
+            "summary": "Integration-safety check has not run yet.",
             "command": "python3 scripts/check_integration_safety.py",
         },
         "limitations": review_environment_limitations(raw, environment_blockers),

@@ -276,6 +276,10 @@ for marker in [
     "--skip-git-repo-check",
     "repair_environment.py",
     "ticket_run.py",
+    "normalize_task_state_headings",
+    "commit_single_lane_changes",
+    "automation_checkpoint_commits",
+    "SINGLE_LANE_COMMIT_CREATED",
     "child_pid",
     "forward_signal",
     "run_process_watchdog.py",
@@ -836,7 +840,7 @@ for marker in [
     "Send note to next run",
     "Open task state",
     "Open diagnostics",
-    "Export debug ZIP",
+    "Export debug",
     "filterPaletteCommands",
 ]:
     if marker not in native_command_palette_model:
@@ -884,13 +888,13 @@ for marker in [
 native_home_model = Path("services/agentic-dashboard/native/src/homeModel.ts").read_text(encoding="utf-8")
 for marker in [
     "buildHomeModel",
-    "Setup incomplete",
+    "Unknown",
     "Open setup",
-    "Run",
-    "Inbox",
+    "Open Run",
+    "Open Inbox",
     "Review",
-    "No runs recorded yet.",
-    "Attention needed before running",
+    "Start automation from Run.",
+    "Gates needing attention",
 ]:
     if marker not in native_home_model:
         print(f"Native Home model missing marker: {marker}", file=sys.stderr)
@@ -1610,11 +1614,9 @@ if find "$tmp_dir/.diffmogger/state" -maxdepth 1 -name 'HUMAN*' | grep . >/tmp/D
 fi
 (
   cd "$tmp_dir"
-  git init >/tmp/Diffmogger-multi-role-git-init.log
   git config user.name "Diffmogger Validation"
   git config user.email "diffmogger-validation@example.invalid"
-  git add .
-  git commit -m "initial smoke target" >/tmp/Diffmogger-multi-role-initial-commit.log
+  git rev-parse --verify HEAD >/tmp/Diffmogger-multi-role-initial-commit.log
   printf 'tracked base\n' > tracked_role_export.txt
   git add tracked_role_export.txt
   git commit -m "add role export smoke base" >/tmp/Diffmogger-role-export-base-commit.log

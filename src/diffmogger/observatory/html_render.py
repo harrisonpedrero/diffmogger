@@ -1318,7 +1318,7 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
       support.appendChild(first);
       const safety = el("div", "support-card");
       safety.appendChild(el("strong", "", "Integration safety"));
-      safety.appendChild(el("div", "", text(data.task?.integration_safety?.summary, "No integration safety result recorded.")));
+      safety.appendChild(el("div", "", text(data.task?.integration_safety?.summary, "Integration safety check has not run yet.")));
       support.appendChild(safety);
       const triage = el("div", "support-card");
       triage.appendChild(el("strong", "", "Deferred triage"));

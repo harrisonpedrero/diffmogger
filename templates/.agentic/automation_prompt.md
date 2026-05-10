@@ -269,9 +269,9 @@ Rewrite `docs/CODEX_AUTOMATION_TASKS.md` with:
 
 - automation status
 - current project state
-- completed work
+- completed work under the existing `## Completed Last Run` heading
 - files changed
-- checks run and results
+- checks run and results under the existing `## Checks From Last Run` heading
 - generated artifacts
 - product horizon state and horizon transition log
 - Codex CLI worker decision: `USE`, `SKIP`, or `UNAVAILABLE`, with reason
@@ -285,6 +285,8 @@ Rewrite `docs/CODEX_AUTOMATION_TASKS.md` with:
 - suggested next sprint-sized task
 - ambitious ideas backlog
 - continue/block/critical-stop rationale
+
+Keep the parser-compatible headings from the scaffolded task file. In particular, do not rename `## Completed Last Run` to `## Completed This Run`, and do not rename `## Checks From Last Run` to alternate wording.
 
 Update `docs/AUTONOMY_EXPERIMENT_LOG.md` when the workflow itself teaches something useful.
 

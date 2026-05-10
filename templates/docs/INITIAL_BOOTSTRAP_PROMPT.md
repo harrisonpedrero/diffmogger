@@ -99,6 +99,6 @@ Run the commands that exist or that you create. Do not claim checks passed unles
 
 ## End
 
-Update `docs/CODEX_AUTOMATION_TASKS.md` with current repo state, product horizon state, {{INITIAL_PROGRESS_EVIDENCE_LABEL}}, completed work, checks, generated artifacts, Codex CLI worker decision, worker activity, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status.
+Update `docs/CODEX_AUTOMATION_TASKS.md` with current repo state, product horizon state, {{INITIAL_PROGRESS_EVIDENCE_LABEL}}, completed work under `## Completed Last Run`, checks under `## Checks From Last Run`, generated artifacts, Codex CLI worker decision, worker activity, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status. Keep the scaffolded parser-compatible section headings.
 
 {{BOOTSTRAP_END_NOTE}}

@@ -14,6 +14,7 @@ from diffmogger.runtime.paths import (
     existing_or_target_path,
     load_manifest,
     manifest_list,
+    normalize_rel,
     sidecar_enabled,
     sidecarize_text,
     target_rel,
@@ -226,6 +227,10 @@ RUNNER_REQUIRED_STRINGS = [
     "--skip-git-repo-check",
     "repair_environment.py",
     "ticket_run.py",
+    "normalize_task_state_headings",
+    "commit_single_lane_changes",
+    "automation_checkpoint_commits",
+    "SINGLE_LANE_COMMIT_CREATED",
     "child_pid",
     "forward_signal",
     "run_process_watchdog.py",
@@ -687,7 +692,7 @@ def main() -> int:
             if not isinstance(manifest.get(key), list):
                 problems.append(f"{MANIFEST_REL}: {key} must be a list")
         aliases = manifest.get("path_aliases") if isinstance(manifest.get("path_aliases"), dict) else {}
-        script_aliases_sidecar = str(aliases.get("scripts") or "").strip().lstrip("./").rstrip("/") == ".diffmogger/scripts"
+        script_aliases_sidecar = normalize_rel(str(aliases.get("scripts") or "")).rstrip("/") == ".diffmogger/scripts"
         owned = set(manifest_list(manifest, "owned_paths"))
         required_owned_paths = [
             ".diffmogger/agentic/automation_prompt.md",

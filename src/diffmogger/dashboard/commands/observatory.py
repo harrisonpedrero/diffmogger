@@ -154,7 +154,7 @@ def observatory_native_snapshot(raw: dict[str, Any], target: Path) -> dict[str, 
         badge("Status", status, status_tone(status)),
         badge("Horizon", task.get("horizon") or "unknown", "info"),
         badge("Branch", git.get("branch") or "unknown", "quiet"),
-        badge("Safety", safety.get("status") or "not_recorded", "good" if safety.get("status") == "pass" else "warn"),
+        badge("Safety", safety.get("status") or "pending", "good" if safety.get("status") == "pass" else "warn"),
         badge("Human", pending_human, "warn" if pending_human else "good"),
     ]
     queue_totals = {name: as_int(totals.get(name)) for name in ["queued", "deferred", "applied", "failed", "skipped"]}

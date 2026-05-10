@@ -198,6 +198,57 @@ class DashboardBackendCliTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
 
+    def write_populated_ticket_campaign_target(self, target: Path) -> None:
+        self.write_ready_automation_target(target)
+        generated_path(target, ".agentic/project_intake.json").write_text(
+            json.dumps(
+                {
+                    "multi_role_automations_allowed": False,
+                    "automation_run_mode": "ticket_campaign",
+                    "ticket_run_file": sidecar_rel("docs/TICKET_RUN.md"),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md").write_text(
+            """AUTOMATION_STATUS: ACTIVE
+
+## Current Project State
+
+- Current baseline: not bootstrapped yet.
+
+## Known Issues
+
+- Ticket source still needs to be populated or confirmed.
+- Verification commands may need adjustment after bootstrap.
+""",
+            encoding="utf-8",
+        )
+        ticket_path = generated_path(target, "docs/TICKET_RUN.md")
+        ticket_path.parent.mkdir(parents=True, exist_ok=True)
+        ticket_path.write_text(
+            """# Ticket Run
+
+```json ticket-run
+{
+  "run_id": "test-ticket-campaign",
+  "halt_when_complete": true,
+  "tickets": [
+    {
+      "id": "TICKET-001",
+      "summary": "Build the first useful slice",
+      "status": "pending",
+      "acceptance_criteria": ["A useful slice exists"],
+      "verification_commands": ["python3 -m unittest"]
+    }
+  ]
+}
+```
+""",
+            encoding="utf-8",
+        )
+
     def fake_dashboard_for_automation(self):
         module = self.load_cli_module()
 
@@ -222,6 +273,23 @@ class DashboardBackendCliTests(unittest.TestCase):
                 return {"PATH": os.environ.get("PATH", ""), "HOME": str(Path.home())}
 
         return module, FakeDashboard()
+
+    def test_populated_ticket_campaign_can_start_initial_bootstrap(self) -> None:
+        from diffmogger.observatory.snapshots import build_snapshot
+
+        module, fake_dashboard = self.fake_dashboard_for_automation()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            self.write_populated_ticket_campaign_target(target)
+
+            ready, reason = module.automation_ready(target, fake_dashboard)
+            snapshot = build_snapshot(target)
+
+            self.assertTrue(ready)
+            self.assertIn("TICKET-001", reason)
+            self.assertNotIn("Ticket source still needs to be populated or confirmed.", snapshot["task"]["known_issues"])
+            self.assertEqual("Verification commands may need adjustment after bootstrap.", snapshot["task"]["known_issue"])
 
     def test_automation_start_stop_and_idempotent_running_state(self) -> None:
         module, fake_dashboard = self.fake_dashboard_for_automation()
@@ -415,6 +483,57 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual("brief_draft_saved", load_payload["data"]["dashboard_state"]["last_action"])
             self.assertEqual("pnpm" if (Path(tmp) / "pnpm-lock.yaml").exists() else "unknown", load_payload["data"]["detected"]["package_manager"])
 
+    def test_brief_generate_intake_uses_low_cortisol_ticket_defaults(self) -> None:
+        from diffmogger.dashboard.commands import brief as brief_commands
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+
+            def fake_run(cmd, **_kwargs):
+                if cmd[:2] == ["codex", "exec"]:
+                    return subprocess.CompletedProcess(
+                        cmd,
+                        0,
+                        stdout=json.dumps(
+                            {
+                                "project_name": "Gentle Intake",
+                                "project_mode": "fresh_project",
+                                "product_goal": "Build a tiny fictional planning app.",
+                                "target_user": "Solo builders",
+                                "desired_first_demo": "A user can create a plan.",
+                                "human_bridge_mode": "local_notifier",
+                                "optional_mcp_servers": ["context7", "playwright"],
+                                "automation_run_mode": "continuous_improvement",
+                                "automation_role_profile": "planner_builder_hardener_integrator",
+                                "ticket_run_seed_tickets": [
+                                    {
+                                        "id": "TICKET-001",
+                                        "summary": "Create the first planning flow",
+                                        "status": "pending",
+                                    }
+                                ],
+                            }
+                        ),
+                        stderr="",
+                    )
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            args = argparse.Namespace(target=str(target), body="Build a tiny fictional planning app.", stream_jsonl=False)
+            with mock.patch.object(brief_commands.subprocess, "run", side_effect=fake_run):
+                payload = brief_commands.command_brief_generate_intake(args)
+
+            intake = payload["intake"]
+            self.assertEqual("ticket_campaign", intake["automation_run_mode"])
+            self.assertEqual(sidecar_rel("docs/TICKET_RUN.md"), intake["ticket_run_file"])
+            self.assertEqual([], intake["optional_mcp_servers"])
+            self.assertEqual("file_only", intake["human_bridge_mode"])
+            self.assertTrue(intake["multi_role_automations_allowed"])
+            self.assertEqual("planner_builder_hardener_integrator", intake["automation_role_profile"])
+            self.assertEqual(1, payload["ticket_count"])
+            dashboard_state = json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
+            self.assertEqual("low_cortisol_intake_generated", dashboard_state["last_action"])
+            self.assertEqual("Gentle Intake", dashboard_state["brief_draft_intake"]["project_name"])
+
     def test_context_import_copies_files_and_updates_project_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as source_tmp:
             source = Path(source_tmp) / "Research Notes.md"
@@ -502,17 +621,62 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual(0, scaffold_result.returncode)
             self.assertTrue(scaffold_payload["ok"])
             self.assertEqual("skipped", scaffold_payload["data"]["codex"]["status"])
+            self.assertEqual("created_initial_commit", scaffold_payload["data"]["git"]["status"])
+            self.assertTrue(scaffold_payload["data"]["git"]["initialized"])
+            self.assertTrue(scaffold_payload["data"]["git"]["committed"])
             self.assertEqual("pass", scaffold_payload["data"]["required_files"]["status"])
             self.assertIn(scaffold_payload["data"]["native_next_state"]["state"], {"FIRST_REVIEW_NEEDED", "READY_TO_RUN"})
             self.assertGreater(len(scaffold_payload["data"]["log"]), 0)
             self.assertTrue(generated_path(Path(tmp), ".agentic/project_intake.json").exists())
             self.assertTrue(generated_path(Path(tmp), "docs/INITIAL_BOOTSTRAP_PROMPT.md").exists())
             self.assertFalse(generated_path(Path(tmp), "scripts/run_role_automation.sh").exists())
+            head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=tmp, capture_output=True, text=True, check=False)
+            self.assertEqual(0, head.returncode, head.stderr)
+            subject = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=tmp, capture_output=True, text=True, check=False)
+            self.assertEqual("chore: initial commit", subject.stdout.strip())
             dashboard_state = json.loads(generated_path(Path(tmp), ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
             self.assertEqual("single_lane", dashboard_state["automation_role_profile"])
             self.assertFalse(dashboard_state["multi_role_automations_allowed"])
             _run_result, run_payload = self.run_cli("run.load", "--target", tmp)
             self.assertNotIn("can_run_now", run_payload["data"]["controls"])
+
+    def test_brief_scaffold_bootstrap_commits_existing_unborn_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+            (target / "README.md").write_text("# Existing target\n", encoding="utf-8")
+            intake = {
+                "project_name": "Unborn Repo",
+                "project_mode": "existing_project",
+                "product_goal": "Prepare an existing local folder.",
+                "target_user": "Maintainers",
+                "desired_first_demo": "Automation can start from a real HEAD.",
+                "human_bridge_enabled": True,
+                "human_bridge_mode": "file_only",
+                "worker_agents_allowed": True,
+                "write_worker_agents_allowed": False,
+                "multi_role_automations_allowed": False,
+                "automation_run_mode": "continuous_improvement",
+                "optional_mcp_servers": [],
+                "additional_context_files": [],
+            }
+
+            scaffold_result, scaffold_payload = self.run_cli(
+                "brief.scaffold_bootstrap",
+                "--target",
+                tmp,
+                "--intake-json",
+                json.dumps(intake),
+            )
+
+            self.assertEqual(0, scaffold_result.returncode)
+            self.assertTrue(scaffold_payload["ok"])
+            self.assertEqual("created_initial_commit", scaffold_payload["data"]["git"]["status"])
+            self.assertFalse(scaffold_payload["data"]["git"]["initialized"])
+            self.assertTrue(scaffold_payload["data"]["git"]["committed"])
+            tracked = subprocess.run(["git", "ls-files"], cwd=target, capture_output=True, text=True, check=False)
+            self.assertIn("README.md", tracked.stdout.splitlines())
+            self.assertNotIn(".diffmogger/manifest.json", tracked.stdout.splitlines())
 
     def test_scaffold_preview_marks_existing_project_managed_sections_and_skips(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

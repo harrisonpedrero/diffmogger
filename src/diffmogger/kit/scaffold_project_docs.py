@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -14,7 +15,14 @@ from typing import Any
 
 
 from diffmogger.kit.wrapper_template import render_wrapper
-from diffmogger.runtime.paths import MANIFEST_REL, PATH_ALIASES, sidecar_manifest, sidecar_rel, sidecarize_text
+from diffmogger.runtime.paths import (
+    MANIFEST_REL,
+    PATH_ALIASES,
+    normalize_rel,
+    sidecar_manifest,
+    sidecar_rel,
+    sidecarize_text,
+)
 
 
 def find_kit_root() -> Path:
@@ -90,6 +98,13 @@ DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS = [
 ]
 
 DEFAULT_TICKET_RUN_FILE = sidecar_rel("docs/TICKET_RUN.md")
+INITIAL_GIT_COMMIT_MESSAGE = "chore: initial commit"
+GIT_SETUP_IDENTITY = {
+    "GIT_AUTHOR_NAME": "Diffmogger Setup",
+    "GIT_AUTHOR_EMAIL": "diffmogger@example.invalid",
+    "GIT_COMMITTER_NAME": "Diffmogger Setup",
+    "GIT_COMMITTER_EMAIL": "diffmogger@example.invalid",
+}
 
 
 HEADING_TO_KEY = {
@@ -1157,12 +1172,12 @@ python3 scripts/list_deferred_patches.py . --decision-template
 
 The Markdown view groups the backlog by reason and recommended local action. The decision template adds per-manifest fields for archive, replace-from-current-HEAD, repair-and-retry, retry-as-is, or keep-deferred choices during integrator cleanup.
 
-The target must be an initialized git repo. Multi-role mode creates local worktrees, local queue artifacts, and local commits only. It never pushes."""
+The target must have a local git repo with an initial commit. Diffmogger scaffold creates both automatically when `HEAD` is missing. Multi-role mode creates local worktrees, local queue artifacts, and local commits only. It never pushes."""
         bootstrap = f"""Multi-role automations allowed: true
 
 Role profile: `{profile}`
 
-After bootstrap, ensure this target is an initialized git repo before starting continuous automation. The role prompts, conveyor, and helpers are generated locally; no remote git operations are allowed."""
+After bootstrap, the scaffold step ensures this target has a local git repo and initial commit before continuous automation starts. The role prompts, conveyor, and helpers are generated locally; no remote git operations are allowed."""
     else:
         automation_section = """Multi-role automations allowed: false
 
@@ -1172,10 +1187,13 @@ Diffmogger uses a single-role continuous conveyor for this target. The dashboard
 
 The solo loop is: read durable state, choose the next valuable deliverable, execute it, verify or review the result, update task state and human-bridge state, then continue, block, or stop according to `AUTOMATION_STATUS`.
 
+When `automation_checkpoint_commits` is true, the single-lane wrapper creates a local checkpoint commit after each successful run that leaves committable product changes. It does not push remotes.
+
 Single-lane mode is for simpler software work, documentation, research synthesis, cleanup, reports, small apps, bounded ticket campaigns, and non-engineering workflows. It does not use planner/builder/hardener/integrator role prompts, isolated role worktrees, queued role patches, or `docs/MULTI_ROLE_PROGRESS.md`."""
         guardrails = """- Single-role continuous automation runs through the conveyor and `scripts/run_codex_automation.sh`.
 - Do not require planner/builder/hardener/integrator role prompts, role worktrees, queued role patches, or integrator-only progress docs in this profile.
 - Treat every run as one integrated solo sprint: read state, choose a deliverable, execute, verify or review, update durable state, and continue/block/stop honestly.
+- When `automation_checkpoint_commits` is true, successful single-lane runs create local-only checkpoint commits for committable changes.
 - Use the same status model as all Diffmogger targets: `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`.
 - Keep generated work target-project agnostic and keep secrets out of docs, prompts, examples, and state."""
         task_notes = """Multi-role automations allowed: false
@@ -1184,6 +1202,7 @@ Single-lane mode is for simpler software work, documentation, research synthesis
 - Continuous conveyor: `scripts/run_conveyor_automation.sh`.
 - Active work runs through `scripts/run_codex_automation.sh`.
 - The solo loop is read state, pick the next valuable deliverable, execute, verify/review, update task and human-bridge state, then continue, block, or stop.
+- Single-lane checkpoint commits: enabled when `automation_checkpoint_commits` is true; commits are local-only and created after successful runs with committable changes.
 - This profile does not generate planner/builder/hardener/integrator role prompts, queued role patches, or `docs/MULTI_ROLE_PROGRESS.md`."""
         development = """Multi-role automations allowed: false
 
@@ -1202,12 +1221,12 @@ Manual single-lane run:
 bash scripts/run_codex_automation.sh
 ```
 
-Single-lane mode is still continuous automation. It keeps the lock wrapper, watchdog, task file, worker-decision logging, human bridge, verification guidance, status model, and observatory state, but omits multi-role role prompts and integrator queues."""
+Single-lane mode is still continuous automation. It keeps the lock wrapper, watchdog, task file, worker-decision logging, human bridge, verification guidance, status model, observatory state, and local checkpoint commits when enabled, but omits multi-role role prompts and integrator queues."""
         bootstrap = """Multi-role automations allowed: false
 
 Role profile: `single_lane`
 
-After bootstrap, use the dashboard Start button or `scripts/run_conveyor_automation.sh` for continuous solo automation. The generated target does not need multi-role worktrees, role prompts, or integration queues."""
+After bootstrap, use the dashboard Start button or `scripts/run_conveyor_automation.sh` for continuous solo automation. The generated target does not need multi-role worktrees, role prompts, or integration queues. Successful runs create local checkpoint commits when `automation_checkpoint_commits` is enabled."""
 
     return {
         "MULTI_ROLE_AUTOMATIONS_ALLOWED": str(enabled).lower(),
@@ -1873,7 +1892,7 @@ def git_path(target: Path, path: str) -> Path | None:
     return resolved
 
 
-def install_diffmogger_local_excludes(target: Path, values: dict[str, str]) -> list[str]:
+def install_git_local_exclude_patterns(target: Path, patterns: list[str]) -> list[str]:
     result = subprocess.run(
         ["git", "rev-parse", "--is-inside-work-tree"],
         cwd=target,
@@ -1886,7 +1905,6 @@ def install_diffmogger_local_excludes(target: Path, values: dict[str, str]) -> l
     exclude = git_path(target, "info/exclude")
     if exclude is None:
         return []
-    patterns = diffmogger_local_exclude_patterns(values)
     try:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
@@ -1909,6 +1927,112 @@ def install_diffmogger_local_excludes(target: Path, values: dict[str, str]) -> l
         except OSError:
             return []
     return patterns
+
+
+def install_diffmogger_local_excludes(target: Path, values: dict[str, str]) -> list[str]:
+    return install_git_local_exclude_patterns(target, diffmogger_local_exclude_patterns(values))
+
+
+def diffmogger_manifest_local_exclude_patterns(target: Path) -> list[str]:
+    patterns: set[str] = set(DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS)
+    patterns.add("/.pnpm-store/")
+    try:
+        manifest = json.loads((target / MANIFEST_REL).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        manifest = {}
+    if isinstance(manifest, dict):
+        for raw in manifest.get("patch_exclude_paths") or []:
+            rel = normalize_rel(str(raw))
+            if rel:
+                patterns.add("/" + rel.rstrip("/") + ("/" if rel.endswith("/") else ""))
+    return sorted(patterns)
+
+
+def install_diffmogger_manifest_local_excludes(target: Path) -> list[str]:
+    return install_git_local_exclude_patterns(target, diffmogger_manifest_local_exclude_patterns(target))
+
+
+def run_git(target: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=target,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("git executable not found on PATH") from exc
+
+
+def git_failure(result: subprocess.CompletedProcess[str]) -> str:
+    detail = (result.stderr or result.stdout or "").strip()
+    return detail or f"git exited with status {result.returncode}"
+
+
+def git_head_commit(target: Path) -> str:
+    result = run_git(target, "rev-parse", "--verify", "HEAD")
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def git_commit_env() -> dict[str, str]:
+    env = dict(os.environ)
+    for key, value in GIT_SETUP_IDENTITY.items():
+        env.setdefault(key, value)
+    return env
+
+
+def ensure_initial_git_commit(target: Path, values: dict[str, str] | None = None) -> dict[str, Any]:
+    """Ensure a scaffolded target has a local git repo and a HEAD commit."""
+    target = target.expanduser().resolve()
+    result = run_git(target, "rev-parse", "--is-inside-work-tree")
+    initialized = False
+    if result.returncode != 0 or result.stdout.strip() != "true":
+        init = run_git(target, "init", "-q")
+        if init.returncode != 0:
+            raise RuntimeError(f"git init failed: {git_failure(init)}")
+        initialized = True
+
+    local_excludes = (
+        install_diffmogger_local_excludes(target, values)
+        if values is not None
+        else install_diffmogger_manifest_local_excludes(target)
+    )
+
+    existing_commit = git_head_commit(target)
+    if existing_commit:
+        return {
+            "status": "already_initialized",
+            "initialized": initialized,
+            "committed": False,
+            "commit": existing_commit,
+            "message": "",
+            "local_excludes": local_excludes,
+        }
+
+    add = run_git(target, "add", "-A", "--", ".")
+    if add.returncode != 0:
+        raise RuntimeError(f"git add failed: {git_failure(add)}")
+    diff = run_git(target, "diff", "--cached", "--quiet", "--exit-code")
+    if diff.returncode not in {0, 1}:
+        raise RuntimeError(f"git diff failed: {git_failure(diff)}")
+    commit_args = ["commit", "--no-verify", "-m", INITIAL_GIT_COMMIT_MESSAGE]
+    if diff.returncode == 0:
+        commit_args.append("--allow-empty")
+    commit = run_git(target, *commit_args, env=git_commit_env())
+    if commit.returncode != 0:
+        raise RuntimeError(f"git commit failed: {git_failure(commit)}")
+    commit_hash = git_head_commit(target)
+    return {
+        "status": "created_initial_commit",
+        "initialized": initialized,
+        "committed": True,
+        "commit": commit_hash,
+        "message": INITIAL_GIT_COMMIT_MESSAGE,
+        "local_excludes": local_excludes,
+    }
 
 
 def managed_section_bounds(kind: str) -> tuple[str, str]:
@@ -2045,10 +2169,14 @@ def main() -> int:
     data = parse_intake(intake_path)
     values = placeholders(data)
     written = scaffold(target, values, args.force)
+    git_bootstrap = ensure_initial_git_commit(target, values)
 
     print(f"Scaffolded {len(written)} files into {target}")
     for path in written:
         print(path.relative_to(target))
+    print(f"Git bootstrap: {git_bootstrap['status']}")
+    if git_bootstrap.get("commit"):
+        print(f"Git commit: {git_bootstrap['commit']}")
     return 0
 
 

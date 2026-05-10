@@ -1159,5 +1159,13 @@ class ConveyorSignalCleanupTests(unittest.TestCase):
                     self.assertIn("CONVEYOR_LOCK_RELEASED", stdout)
 
 
+class ConveyorSourceSafetyTests(unittest.TestCase):
+    def test_cli_uses_runner_termination_flag(self) -> None:
+        cli_text = (ROOT / "src" / "diffmogger" / "conveyor" / "cli.py").read_text(encoding="utf-8")
+
+        self.assertIn("if conveyor_runner.TERMINATE_REQUESTED:", cli_text)
+        self.assertNotIn("if TERMINATE_REQUESTED:", cli_text)
+
+
 if __name__ == "__main__":
     unittest.main()

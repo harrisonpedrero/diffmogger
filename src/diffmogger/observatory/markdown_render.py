@@ -187,9 +187,9 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
         lines.append("- No validation checks recorded yet.")
 
     lines.extend(["", "## Integration Safety", ""])
-    lines.append(f"- status: {clean_text(integration_safety.get('status') or 'not_recorded', limit=80)}")
+    lines.append(f"- status: {clean_text(integration_safety.get('status') or 'pending', limit=80)}")
     lines.append(
-        f"- summary: {clean_text(integration_safety.get('summary') or 'No integration-safety check result recorded yet.', limit=500)}"
+        f"- summary: {clean_text(integration_safety.get('summary') or 'Integration-safety check has not run yet.', limit=500)}"
     )
     lines.append(f"- command: `{clean_text(integration_safety.get('command') or 'python3 scripts/check_integration_safety.py', limit=180)}`")
     recorded_text = clean_text(integration_safety.get("recorded_text") or "", limit=420)

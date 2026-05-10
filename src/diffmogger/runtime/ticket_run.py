@@ -371,6 +371,66 @@ def ticket_run_payload(data: dict[str, Any], target: Path | None = None) -> dict
     }
 
 
+def ticket_source_state(target: Path, ticket_file: Path | None = None) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    path = ticket_file or ticket_file_path(target)
+    try:
+        data, path, _text = load_ticket_run(target, path)
+    except SystemExit as exc:
+        return {
+            "path": str(path),
+            "confirmed": False,
+            "actionable": False,
+            "reason": str(exc),
+            "start_reason": str(exc),
+            "summary": {},
+            "next": {},
+            "validation_issues": [{"level": "error", "detail": str(exc)}],
+        }
+
+    payload = ticket_run_payload(data, target)
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    next_payload = payload.get("next") if isinstance(payload.get("next"), dict) else {}
+    issues = [issue for issue in list(payload.get("validation_issues") or []) if isinstance(issue, dict)]
+    errors = [issue for issue in issues if str(issue.get("level") or "").lower() == "error"]
+    total = int(summary.get("total") or 0)
+    placeholders = list(next_payload.get("placeholder_tickets") or [])
+    placeholder_only = total > 0 and len(placeholders) == total
+
+    if errors:
+        reason = str(errors[0].get("detail") or errors[0].get("type") or "Ticket source has validation errors.")
+    elif total <= 0:
+        reason = "Ticket source has no tickets."
+    elif placeholder_only:
+        reason = "Ticket source still contains placeholder tickets."
+    else:
+        reason = "Ticket source is populated and confirmed."
+
+    confirmed = bool(total > 0 and not placeholder_only and not errors)
+    actionable = confirmed and str(next_payload.get("status") or "") == "selected"
+    selected = next_payload.get("ticket") if isinstance(next_payload.get("ticket"), dict) else {}
+    selected_id = str(selected.get("id") or "").strip()
+    if actionable:
+        start_reason = f"Ready to run ticket campaign starting with {selected_id}." if selected_id else "Ready to run ticket campaign."
+    elif confirmed and summary.get("status") in {"complete", "blocked"}:
+        start_reason = f"Ticket campaign is {summary.get('status')}."
+    elif confirmed:
+        start_reason = f"Ticket campaign has no actionable ticket: {next_payload.get('reason') or reason}."
+    else:
+        start_reason = reason
+
+    return {
+        "path": str(path),
+        "confirmed": confirmed,
+        "actionable": actionable,
+        "reason": reason,
+        "start_reason": start_reason,
+        "summary": summary,
+        "next": next_payload,
+        "validation_issues": issues,
+    }
+
+
 def dependency_cycles(graph: dict[str, list[str]]) -> list[list[str]]:
     cycles: list[list[str]] = []
     visiting: list[str] = []

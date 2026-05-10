@@ -177,7 +177,7 @@ def main() -> int:
                 return exit_code
             if args.max_cycles and cycles >= args.max_cycles:
                 return last_exit
-            if TERMINATE_REQUESTED:
+            if conveyor_runner.TERMINATE_REQUESTED:
                 return 143
             if exit_code != 0:
                 conveyor_runner.sleep_interruptibly(args.error_sleep_seconds)

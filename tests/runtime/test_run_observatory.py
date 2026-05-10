@@ -332,6 +332,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
             ## Checks From Last Run
 
             - PASS: `bash scripts/validate_starter_kit.sh`
+            - Not run yet: integration safety (`python3 scripts/check_integration_safety.py`) is pending until dashboard Run Safety Check records a target-local result.
 
             ## Known Issues
 
@@ -817,6 +818,50 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(first_review_items["Checklist docs"]["status"], "fail")
                     self.assertEqual(first_review_items["Validation"]["status"], "fail")
                     self.assertEqual(first_review_items["Run Safety Check"]["status"], "pass")
+
+    def test_initial_target_reports_pending_integration_safety(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_text(
+                        target,
+                        "docs/CODEX_AUTOMATION_TASKS.md",
+                        """
+                        # Codex Automation Tasks
+
+                        AUTOMATION_STATUS: ACTIVE
+
+                        Last updated: 2026-05-04T05:20:00+00:00
+
+                        ## Current Project State
+
+                        - Current assessment: initial scaffold is ready for bootstrap.
+
+                        ## Product Horizon State
+
+                        - Current horizon: H1 Runnable baseline
+                        - Advancement decision: stay
+
+                        ## Checks From Last Run
+
+                        - Not run yet. Bootstrap run should discover or create verification commands.
+
+                        ## Known Issues
+
+                        - No automation run has completed yet.
+                        """,
+                    )
+
+                    snapshot = module.build_snapshot(target)
+                    safety = snapshot["task"]["integration_safety"]
+                    first_review_items = {item["label"]: item for item in snapshot["first_review"]["items"]}
+
+                    self.assertEqual("pending", safety["status"])
+                    self.assertIn("has not run yet", safety["summary"])
+                    self.assertNotIn("not recorded", safety["summary"].lower())
+                    self.assertEqual("warn", first_review_items["Run Safety Check"]["status"])
+                    self.assertIn("has not run yet", first_review_items["Run Safety Check"]["detail"])
 
     def test_first_review_readiness_appears_in_snapshot_html_and_markdown(self) -> None:
         for path, module in self.modules:

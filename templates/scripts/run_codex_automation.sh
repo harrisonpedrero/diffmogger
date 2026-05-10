@@ -34,20 +34,28 @@ except Exception:
 sidecar = manifest.get("layout") == "sidecar_v1"
 aliases = manifest.get("path_aliases") if isinstance(manifest.get("path_aliases"), dict) else {}
 
+def normalize_rel(value: str) -> str:
+    rel = str(value).strip().replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.lstrip("/")
+
 def rel(path: str) -> str:
     if not sidecar:
         return path
     if path in aliases:
-        return str(aliases[path]).strip().lstrip("./")
+        return normalize_rel(str(aliases[path]))
     for old, new in sorted(aliases.items(), key=lambda item: len(str(item[0])), reverse=True):
-        old = str(old).strip().lstrip("./").rstrip("/")
-        new = str(new).strip().lstrip("./").rstrip("/")
+        old = normalize_rel(str(old)).rstrip("/")
+        new = normalize_rel(str(new)).rstrip("/")
         if old and path.startswith(old + "/"):
             return new + path[len(old):]
-    return path
+    return normalize_rel(path)
 
 values = {
     "automation_prompt_path": target / rel(".agentic/automation_prompt.md"),
+    "project_intake_path": target / rel(".agentic/project_intake.json"),
+    "task_file_path": target / rel("docs/CODEX_AUTOMATION_TASKS.md"),
     "logs_dir": target / rel("target/automation_logs"),
     "lock_path": target / rel("target/codex_automation.lock"),
     "mcp_config_path": target / rel(".codex/config.toml"),
@@ -101,6 +109,201 @@ maybe_finalize_ticket_campaign() {
     return "$?"
   fi
   return 1
+}
+
+normalize_task_state_headings() {
+  if [ ! -f "$task_file_path" ]; then
+    return 0
+  fi
+  python3 - "$task_file_path" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+replacements = {
+    "## Completed This Run": "## Completed Last Run",
+    "## Checks Run And Results": "## Checks From Last Run",
+}
+try:
+    text = path.read_text(encoding="utf-8")
+except OSError:
+    raise SystemExit(0)
+updated = text
+for old, new in replacements.items():
+    updated = updated.replace(old, new)
+if updated != text:
+    path.write_text(updated, encoding="utf-8")
+    print(f"TASK_HEADINGS_NORMALIZED path={path}")
+PY
+}
+
+single_lane_commit_enabled() {
+  if [ "${DIFFMOGGER_SINGLE_LANE_COMMITS:-}" = "0" ] || [ "${DIFFMOGGER_SINGLE_LANE_COMMITS:-}" = "false" ]; then
+    return 1
+  fi
+  python3 - "$project_intake_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+value = data.get("automation_checkpoint_commits", True)
+if isinstance(value, bool):
+    raise SystemExit(0 if value else 1)
+text = str(value).strip().lower()
+raise SystemExit(1 if text in {"0", "false", "no", "off"} else 0)
+PY
+}
+
+single_lane_commit_pathspecs() {
+  python3 - "$TARGET" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+result = subprocess.run(
+    ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    cwd=target,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    check=False,
+)
+if result.returncode != 0:
+    raise SystemExit(0)
+
+blocked_exact = {"AGENTS.md"}
+blocked_dirs = {".git", ".diffmogger"}
+skipped_secret_count = 0
+paths: list[str] = []
+records = result.stdout.split(b"\0")
+index = 0
+while index < len(records):
+    record = records[index]
+    index += 1
+    if not record:
+        continue
+    status = record[:2].decode("utf-8", errors="replace")
+    raw_path = record[3:]
+    path = raw_path.decode("utf-8", errors="surrogateescape")
+    if status[0] in {"R", "C"} and index < len(records):
+        index += 1
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    parts = [part for part in normalized.split("/") if part]
+    name = parts[-1] if parts else ""
+    if not normalized or normalized in blocked_exact or any(part in blocked_dirs for part in parts):
+        continue
+    if normalized.startswith("target/"):
+        continue
+    if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+        skipped_secret_count += 1
+        continue
+    paths.append(normalized)
+
+for path in sorted(set(paths)):
+    sys.stdout.buffer.write(path.encode("utf-8", errors="surrogateescape") + b"\0")
+if skipped_secret_count:
+    print(
+        f"SINGLE_LANE_COMMIT_SKIPPED_SECRET_PATHS count={skipped_secret_count}",
+        file=sys.stderr,
+    )
+PY
+}
+
+staged_single_lane_unsafe_paths() {
+  python3 - <<'PY'
+import subprocess
+import sys
+
+result = subprocess.run(
+    ["git", "diff", "--cached", "--name-only", "-z"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    check=False,
+)
+if result.returncode != 0:
+    raise SystemExit(0)
+
+unsafe: list[str] = []
+for item in result.stdout.split(b"\0"):
+    if not item:
+        continue
+    path = item.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+    parts = [part for part in path.split("/") if part]
+    name = parts[-1] if parts else ""
+    if any(part in {".git", ".diffmogger"} for part in parts):
+        unsafe.append(path)
+    elif path == "AGENTS.md" or path.startswith("target/"):
+        unsafe.append(path)
+    elif name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+        unsafe.append(path)
+for path in unsafe[:20]:
+    print(path)
+if len(unsafe) > 20:
+    print(f"... {len(unsafe) - 20} more")
+PY
+}
+
+commit_single_lane_changes() {
+  if ! single_lane_commit_enabled; then
+    printf 'SINGLE_LANE_COMMIT_DISABLED automation_checkpoint_commits=false\n'
+    return 0
+  fi
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf 'WARN: single-lane checkpoint commit skipped; target is not a git worktree.\n' >&2
+    return 0
+  fi
+  if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+    printf 'WARN: single-lane checkpoint commit skipped; target has no HEAD commit.\n' >&2
+    return 0
+  fi
+
+  mkdir -p "$logs_dir"
+  pathspec_file="$logs_dir/single_lane_commit_paths.${CODEX_RUN_ID}.nul"
+  single_lane_commit_pathspecs >"$pathspec_file"
+  if [ ! -s "$pathspec_file" ]; then
+    rm -f "$pathspec_file"
+    printf 'SINGLE_LANE_COMMIT_SKIPPED reason=no_changes\n'
+    return 0
+  fi
+
+  if ! git add -A --pathspec-from-file="$pathspec_file" --pathspec-file-nul; then
+    rm -f "$pathspec_file"
+    printf 'ERROR: single-lane checkpoint git add failed.\n' >&2
+    return 1
+  fi
+  rm -f "$pathspec_file"
+
+  if git diff --cached --quiet --exit-code; then
+    printf 'SINGLE_LANE_COMMIT_SKIPPED reason=no_committable_changes\n'
+    return 0
+  fi
+  unsafe_paths="$(staged_single_lane_unsafe_paths)"
+  if [ -n "$unsafe_paths" ]; then
+    printf 'ERROR: refusing single-lane checkpoint commit with unsafe staged path(s):\n%s\n' "$unsafe_paths" >&2
+    return 1
+  fi
+
+  commit_env=(
+    "GIT_AUTHOR_NAME=Diffmogger Single Lane"
+    "GIT_AUTHOR_EMAIL=diffmogger-single-lane@example.invalid"
+    "GIT_COMMITTER_NAME=Diffmogger Single Lane"
+    "GIT_COMMITTER_EMAIL=diffmogger-single-lane@example.invalid"
+  )
+  if ! env "${commit_env[@]}" git commit --no-verify \
+    -m "chore(single-lane): checkpoint automation run ${CODEX_RUN_ID}" \
+    -m "Run: ${CODEX_RUN_ID}"; then
+    printf 'ERROR: single-lane checkpoint git commit failed.\n' >&2
+    return 1
+  fi
+  commit_hash="$(git rev-parse --short HEAD 2>/dev/null || true)"
+  printf 'SINGLE_LANE_COMMIT_CREATED hash=%s run_id=%s\n' "$commit_hash" "$CODEX_RUN_ID"
 }
 
 CODEX_PARENT_ARGS=()
@@ -285,8 +488,15 @@ EOF
   fi
 fi
 
-if [ "$exit_code" = "0" ] && maybe_finalize_ticket_campaign; then
-  exit 0
+if [ "$exit_code" = "0" ]; then
+  finalizer_exit=1
+  maybe_finalize_ticket_campaign
+  finalizer_exit="$?"
+  normalize_task_state_headings
+  commit_single_lane_changes || exit "$?"
+  if [ "$finalizer_exit" = "0" ]; then
+    exit 0
+  fi
 fi
 
 exit "$exit_code"

@@ -51,6 +51,6 @@ Run relevant install, lint, test, build, or demo commands that exist or that you
 
 ## End Of Run
 
-Update `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` with current state, product horizon state, horizon advancement evidence, completed work, checks, generated artifacts, Codex CLI worker decision, worker activity, lock ownership, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status.
+Update `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` with current state, product horizon state, horizon advancement evidence, completed work under `## Completed Last Run`, checks under `## Checks From Last Run`, generated artifacts, Codex CLI worker decision, worker activity, lock ownership, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status. Keep the scaffolded parser-compatible section headings.
 
 Do not stop merely because a basic demo exists. This bootstrap is the first horizon, not the finish line.

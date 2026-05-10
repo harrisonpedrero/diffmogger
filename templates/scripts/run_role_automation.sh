@@ -192,8 +192,13 @@ try:
     manifest = json.loads((target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8"))
 except Exception:
     manifest = {}
+def normalize_rel(value: str) -> str:
+    rel = str(value).strip().replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.lstrip("/")
 for rel in manifest.get("patch_exclude_paths") or []:
-    rel = str(rel).strip().lstrip("./")
+    rel = normalize_rel(str(rel))
     if rel:
         print("/" + rel.rstrip("/") + ("/" if rel.endswith("/") else ""))
 PY
@@ -217,17 +222,23 @@ except Exception:
 sidecar = manifest.get("layout") == "sidecar_v1"
 aliases = manifest.get("path_aliases") if isinstance(manifest.get("path_aliases"), dict) else {}
 
+def normalize_rel(value: str) -> str:
+    rel = str(value).strip().replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.lstrip("/")
+
 def rel(path: str) -> str:
     if not sidecar:
         return path
     if path in aliases:
-        return str(aliases[path]).strip().lstrip("./")
+        return normalize_rel(str(aliases[path]))
     for old, new in sorted(aliases.items(), key=lambda item: len(str(item[0])), reverse=True):
-        old = str(old).strip().lstrip("./").rstrip("/")
-        new = str(new).strip().lstrip("./").rstrip("/")
+        old = normalize_rel(str(old)).rstrip("/")
+        new = normalize_rel(str(new)).rstrip("/")
         if old and path.startswith(old + "/"):
             return new + path[len(old):]
-    return path
+    return normalize_rel(path)
 
 values = {
     "prompt_path": target / rel(f".agentic/roles/{role}.md"),
@@ -340,8 +351,13 @@ try:
     manifest = json.loads((target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8"))
 except Exception:
     manifest = {}
+def normalize_rel(value: str) -> str:
+    rel = str(value).strip().replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.lstrip("/")
 for rel in manifest.get("worktree_seed_paths") or []:
-    rel = str(rel).strip().lstrip("./")
+    rel = normalize_rel(str(rel))
     if rel:
         print(rel)
 PY
@@ -369,7 +385,7 @@ except Exception:
     manifest = {}
 if manifest.get("layout") == "sidecar_v1":
     explicit_paths = [
-        str(item).strip().lstrip("./")
+        str(item).strip()
         for item in (manifest.get("worktree_seed_paths") or [])
         if str(item).strip().startswith((".diffmogger/agentic/", ".diffmogger/state/"))
     ]

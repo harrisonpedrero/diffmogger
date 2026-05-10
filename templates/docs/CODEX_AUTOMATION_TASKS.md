@@ -47,6 +47,7 @@ Last updated: {{CREATED_AT}}
 ## Checks From Last Run
 
 - Not run yet. Bootstrap run should discover or create verification commands.
+- Not run yet: integration safety (`python3 scripts/check_integration_safety.py`) is pending until dashboard **Run Safety Check** records a target-local result.
 - Full-suite config: `.agentic/verification_commands.txt`
 - Bootstrap-safe baseline commands: `{{BOOTSTRAP_BASELINE_COMMANDS_INLINE}}`
 - Preferred commands: `{{VERIFICATION_COMMANDS}}`

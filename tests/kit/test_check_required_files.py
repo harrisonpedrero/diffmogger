@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -193,6 +194,7 @@ class RequiredFilesCheckTests(unittest.TestCase):
             manifest = (target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8")
             self.assertIn("Automation role profile: single_lane", agents)
             self.assertIn("Role profile: `single_lane`", task)
+            self.assertIn("integration safety (`python3 scripts/check_integration_safety.py`)", task)
             self.assertIn("Single-role continuous automation", guardrails)
             self.assertIn('"automation_role_profile": "single_lane"', manifest)
 
@@ -378,12 +380,63 @@ class RequiredFilesCheckTests(unittest.TestCase):
 
             self.assertIn("CODEX_LOCK_CONTEXT", runner_text)
             self.assertIn('target_name="$(basename "$TARGET")"', runner_text)
+            self.assertIn("normalize_task_state_headings", runner_text)
+            self.assertIn("commit_single_lane_changes", runner_text)
+            self.assertIn("SINGLE_LANE_COMMIT_CREATED", runner_text)
             self.assertNotIn("Diffmogger Self Improvement scheduled sprint", runner_text)
 
             result = self.run_check(target)
 
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
+
+    def test_single_lane_runner_keeps_sidecar_paths_dotted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+            fake_bin = target / "fake-bin"
+            fake_bin.mkdir()
+            fake_codex = fake_bin / "codex"
+            fake_output = target / "fake-output"
+            fake_codex.write_text(
+                """#!/usr/bin/env bash
+set -u
+mkdir -p "$DIFFMOGGER_FAKE_CODEX_OUT"
+printf '%s\n' "$@" > "$DIFFMOGGER_FAKE_CODEX_OUT/codex-args.txt"
+last_arg=""
+for arg in "$@"; do
+  last_arg="$arg"
+done
+printf '%s' "$last_arg" > "$DIFFMOGGER_FAKE_CODEX_OUT/codex-prompt.txt"
+exit 0
+""",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", str(generated_path(target, "scripts/run_codex_automation.sh"))],
+                cwd=target,
+                env={
+                    **os.environ,
+                    "CODEX_AUTOMATION_PATH": f"{fake_bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                    "CODEX_RUN_ID": "runner-path-test",
+                    "DIFFMOGGER_FAKE_CODEX_OUT": str(fake_output),
+                    "HOME": str(target / "home"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse((target / "diffmogger").exists())
+            self.assertTrue(
+                (target / ".diffmogger/runtime/automation_logs/codex.runner-path-test.watchdog.json").exists()
+            )
+            prompt = (fake_output / "codex-prompt.txt").read_text(encoding="utf-8")
+            self.assertIn("You are running inside", prompt)
+            self.assertIn(".diffmogger/agentic/verification_commands.txt", prompt)
 
     def test_self_run_lock_context_regression_fails_required_files_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -405,6 +458,156 @@ class RequiredFilesCheckTests(unittest.TestCase):
                 ".diffmogger/scripts/run_codex_automation.sh: forbidden self-run marker",
                 result.stderr,
             )
+
+    def test_single_lane_runner_commits_successful_product_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+
+            from diffmogger.kit.scaffold_project_docs import ensure_initial_git_commit, placeholders
+
+            intake = {
+                "project_name": "Commit Smoke",
+                "product_goal": "Check single-lane commits.",
+                "target_user": "Automation tester.",
+                "desired_first_demo": "A committed file.",
+                "human_bridge_enabled": False,
+                "human_bridge_mode": "disabled",
+                "automation_role_profile": "single_lane",
+                "automation_checkpoint_commits": True,
+            }
+            ensure_initial_git_commit(target, placeholders(intake))
+
+            fake_bin = target / "fake-bin"
+            fake_bin.mkdir()
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                """#!/usr/bin/env bash
+set -u
+printf 'single lane committed me\n' > single-lane-product.txt
+cat > .env.local <<'ENV'
+SECRET=do-not-commit
+ENV
+python3 - <<'PY'
+from pathlib import Path
+path = Path(".diffmogger/state/CODEX_AUTOMATION_TASKS.md")
+text = path.read_text(encoding="utf-8")
+text = text.replace("## Completed Last Run", "## Completed This Run")
+text = text.replace("## Checks From Last Run", "## Checks Run And Results")
+path.write_text(text, encoding="utf-8")
+PY
+exit 0
+""",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", str(generated_path(target, "scripts/run_codex_automation.sh"))],
+                cwd=target,
+                env={
+                    **os.environ,
+                    "CODEX_AUTOMATION_PATH": f"{fake_bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                    "CODEX_RUN_ID": "single-lane-commit-test",
+                    "HOME": str(target / "home"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("TASK_HEADINGS_NORMALIZED", result.stdout)
+            self.assertIn("SINGLE_LANE_COMMIT_CREATED", result.stdout)
+
+            subject = subprocess.run(
+                ["git", "log", "-1", "--format=%s"],
+                cwd=target,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            self.assertEqual(
+                "chore(single-lane): checkpoint automation run single-lane-commit-test",
+                subject,
+            )
+            self.assertTrue((target / "single-lane-product.txt").exists())
+            tracked_files = subprocess.run(
+                ["git", "ls-files"],
+                cwd=target,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.splitlines()
+            self.assertIn("single-lane-product.txt", tracked_files)
+            self.assertNotIn(".env.local", tracked_files)
+
+            task_text = generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
+            self.assertIn("## Completed Last Run", task_text)
+            self.assertIn("## Checks From Last Run", task_text)
+            self.assertNotIn("## Completed This Run", task_text)
+            self.assertNotIn("## Checks Run And Results", task_text)
+
+    def test_single_lane_runner_refuses_pre_staged_unsafe_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+
+            from diffmogger.kit.scaffold_project_docs import ensure_initial_git_commit, placeholders
+
+            intake = {
+                "project_name": "Commit Safety Smoke",
+                "product_goal": "Refuse unsafe pre-staged paths.",
+                "target_user": "Automation tester.",
+                "desired_first_demo": "A safe product file.",
+                "human_bridge_enabled": False,
+                "human_bridge_mode": "disabled",
+                "automation_role_profile": "single_lane",
+                "automation_checkpoint_commits": True,
+            }
+            ensure_initial_git_commit(target, placeholders(intake))
+
+            (target / ".env.local").write_text("SECRET=do-not-commit\n", encoding="utf-8")
+            subprocess.run(["git", "add", ".env.local"], cwd=target, check=True)
+
+            fake_bin = target / "fake-bin"
+            fake_bin.mkdir()
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                """#!/usr/bin/env bash
+set -u
+printf 'safe product change\n' > product.txt
+exit 0
+""",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", str(generated_path(target, "scripts/run_codex_automation.sh"))],
+                cwd=target,
+                env={
+                    **os.environ,
+                    "CODEX_AUTOMATION_PATH": f"{fake_bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                    "CODEX_RUN_ID": "single-lane-unsafe-stage-test",
+                    "HOME": str(target / "home"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("unsafe staged path", result.stderr)
+            self.assertIn(".env.local", result.stderr)
+            subject = subprocess.run(
+                ["git", "log", "-1", "--format=%s"],
+                cwd=target,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            self.assertEqual("chore: initial commit", subject)
 
 
 if __name__ == "__main__":
