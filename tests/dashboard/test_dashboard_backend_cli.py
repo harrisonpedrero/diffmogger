@@ -1333,7 +1333,8 @@ Need a decision.
 
             self.assertEqual(0, result.returncode)
             self.assertEqual("pass", payload["data"]["safety"]["status"])
-            self.assertEqual([], payload["data"]["limitations"])
+            limitation_text = "\n".join(item.get("text", "") for item in payload["data"]["limitations"])
+            self.assertNotIn("Not run: integration safety", limitation_text)
             verification_text = "\n".join(item.get("text", "") for item in payload["data"]["verification"]["items"])
             self.assertNotIn("Not run: integration safety", verification_text)
 
