@@ -76,11 +76,6 @@
       "items": { "type": "string" },
       "default": []
     },
-    "desired_cadence": {
-      "type": "string",
-      "description": "Desired automation cadence as an integer number of minutes greater than 30, usually rendered as `every N minutes`.",
-      "default": "every 60 minutes"
-    },
     "human_bridge_enabled": {
       "type": "boolean",
       "default": false
@@ -126,31 +121,19 @@
     },
     "multi_role_automations_allowed": {
       "type": "boolean",
-      "description": "Whether the generated target project may use optional planner/builder/hardener/integrator automations in isolated local git worktrees.",
-      "default": false
+      "description": "Whether the generated target project uses planner/builder/hardener/integrator automations in isolated local git worktrees. Set false for the single-lane continuous profile.",
+      "default": true
     },
     "automation_role_profile": {
       "type": "string",
-      "description": "Role profile for multi-role automation. V1 supports a single explicit multi-role profile.",
+      "description": "Automation profile. Use single_lane for simpler or non-engineering continuous work; use planner_builder_hardener_integrator for larger software engineering work.",
       "enum": ["single_lane", "planner_builder_hardener_integrator"],
-      "default": "single_lane"
+      "default": "planner_builder_hardener_integrator"
     },
     "automation_checkpoint_commits": {
       "type": "boolean",
       "description": "Whether the integrator may create local automation-authored checkpoint commits before applying queued role patches.",
       "default": true
-    },
-    "multi_role_base_cadence_minutes": {
-      "type": "integer",
-      "description": "Base cadence for multi-role schedules. Planner runs hourly; builder, hardener, and integrator run twice hourly on staggered offsets.",
-      "minimum": 30,
-      "default": 30
-    },
-    "automation_schedule_strategy": {
-      "type": "string",
-      "description": "Scheduling strategy for dashboard-managed automation.",
-      "enum": ["single_lane_interval", "fixed_multi_role", "continuous_conveyor"],
-      "default": "single_lane_interval"
     },
     "automation_run_mode": {
       "type": "string",
@@ -161,7 +144,27 @@
     "ticket_run_file": {
       "type": "string",
       "description": "Target-relative Markdown file containing the ticket-campaign JSON block.",
-      "default": "docs/TICKET_RUN.md"
+      "default": ".diffmogger/state/TICKET_RUN.md"
+    },
+    "ticket_run_seed_tickets": {
+      "type": "array",
+      "description": "Optional ticket-campaign seed tickets used only when scaffolding the target ticket source.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "summary": { "type": "string" },
+          "depends_on": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "status": { "type": "string", "enum": ["pending", "in_progress", "candidate_done", "done", "blocked"], "default": "pending" },
+          "acceptance_criteria": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "verification_commands": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "evidence": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "related_commits": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "blocker": { "type": "string", "default": "" }
+        }
+      },
+      "default": []
     },
     "ticket_completion_notify": {
       "type": "boolean",
@@ -171,11 +174,6 @@
     "multi_role_allow_remotes": {
       "type": "boolean",
       "description": "Whether dashboard-managed local-only multi-role or conveyor jobs may set MULTI_ROLE_ALLOW_REMOTES=1 when the repo has configured git remotes. This does not permit pushes, fetches, pulls, or remote configuration.",
-      "default": false
-    },
-    "automation_signals_enabled": {
-      "type": "boolean",
-      "description": "Whether generated projects include optional recurring automation signal definitions for local role-owned nudges.",
       "default": false
     },
     "optional_mcp_servers": {

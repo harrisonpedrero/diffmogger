@@ -24,20 +24,24 @@ Diffmogger supports:
 - `discord_notifier`: Discord progress/messages plus optional native local desktop notifications.
 - `disabled`: no human bridge files required.
 
-In `file_only` mode, if the human writes `send me a summary`, `status update`, or similar in `docs/HUMAN_INBOX.md`, the automation should answer locally in Markdown or an app artifact. It should not call notifier APIs unless the target project is explicitly configured for notifier mode.
+In `file_only` mode, if the human writes `send me a summary`, `status update`, or similar in `.diffmogger/state/HUMAN_INBOX.md`, the automation should answer locally in Markdown or an app artifact. It should not call notifier APIs unless the target project is explicitly configured for notifier mode.
+
+No Discord, webhook, notifier API, or messaging credentials are used in this mode.
 
 ## Markdown Files
 
 Enabled bridge modes use:
 
 ```text
-docs/HUMAN_REQUESTS.md
-docs/HUMAN_INBOX.md
-docs/HUMAN_OUTBOX.md
-docs/HUMAN_RESPONSES_ARCHIVE.md
+.diffmogger/state/HUMAN_REQUESTS.md
+.diffmogger/state/HUMAN_INBOX.md
+.diffmogger/state/HUMAN_OUTBOX.md
+.diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md
 ```
 
 Codex writes requests. The human or notifier writes replies in `HUMAN_INBOX.md`. A later run handles the reply, removes it only after the requested action is complete or intentionally deferred, and appends a concise archive entry.
+
+Generated targets also include `.diffmogger/state/HUMAN_BRIDGE_SETUP.md` when the bridge is enabled. That generated file is target-local state; this source kit keeps the reusable template under `templates/docs/HUMAN_BRIDGE_SETUP.md`.
 
 ## Bundled Notifier Service
 
@@ -66,7 +70,7 @@ Target projects must not import notifier code, inspect notifier internals during
 
 ## Notify API Shape
 
-Progress events use `event_kind: "progress"` and route to the Discord progress channel when `discord_notifier` is configured. In multi-role automation, each local commit created by `scripts/integrate_role_outputs.py` triggers a brief progress notification with the commit subject and work summary.
+Progress events use `event_kind: "progress"` and route to the Discord progress channel when `discord_notifier` is configured. In multi-role automation, each local commit created by `.diffmogger/scripts/integrate_role_outputs.py` triggers a brief progress notification with the commit subject and work summary.
 
 Direct human messages use `event_kind: "message"` and route to the Discord messaging channel when configured. Human-unlock requests, blockers that need user input, and replies to user messages also use `event_kind: "message"`. They default to local desktop notifications when local notifications are enabled.
 
@@ -96,7 +100,7 @@ Ticket completion and terminal blocker notifications should use `event_kind: "pr
 If the notifier is unavailable:
 
 1. Do not claim a message was delivered.
-2. Write the intended message to `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`.
+2. Write the intended message to `.diffmogger/state/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`.
 3. Keep or annotate the inbox entry as unresolved if a response is still required.
 4. Continue useful work where possible.
 
@@ -106,7 +110,7 @@ The notifier records delivery failures with generic statuses such as `DISCORD_SE
 
 In `discord_notifier` mode, the bot reads only the configured messaging channel. It ignores bot messages and captures human messages only when they mention the bot or reply to a bot-authored message.
 
-Captured messages are appended to `docs/HUMAN_INBOX.md` with Discord metadata and deduped by Discord message ID.
+Captured messages are appended to `.diffmogger/state/HUMAN_INBOX.md` with Discord metadata and deduped by Discord message ID.
 
 ## Running The Bundled Service
 

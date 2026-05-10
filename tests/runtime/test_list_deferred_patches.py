@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+HELPER_PATHS = [
+    ROOT / "src" / "diffmogger" / "runtime" / "list_deferred_patches.py",
+]
+HELPER_WRAPPER_PATHS = [
+    ROOT / "scripts" / "runtime" / "list_deferred_patches.py",
+]
+
+
+def load_helper(path: Path):
+    module_name = (
+        "list_deferred_under_test_"
+        + path.relative_to(ROOT).as_posix().replace("/", "_").replace(".", "_")
+    )
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class ListDeferredPatchTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = [(path, load_helper(path)) for path in HELPER_PATHS]
+
+    def write_manifest(
+        self,
+        target: Path,
+        *,
+        role: str,
+        run_id: str,
+        status: str = "deferred",
+        created_at: str = "2026-05-04T00:00:00+00:00",
+        deferral_reason: str | None = "conflict",
+        deferral_detail: str = "docs changed after role start",
+        changed_files: list[str] | None = None,
+    ) -> Path:
+        path = target / "target" / "automation_queue" / role / run_id / "manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, object] = {
+            "role": role,
+            "run_id": run_id,
+            "status": status,
+            "created_at": created_at,
+            "deferral_detail": deferral_detail,
+            "changed_files": changed_files or ["docs/CODEX_AUTOMATION_TASKS.md"],
+        }
+        if deferral_reason is not None:
+            payload["deferral_reason"] = deferral_reason
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        return path
+
+    def test_source_helper_is_runtime_wrapper(self) -> None:
+        for path in HELPER_WRAPPER_PATHS:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("diffmogger.runtime.list_deferred_patches", text)
+            self.assertIn('"lib"', text)
+
+    def test_json_listing_keeps_existing_deferred_manifest_contract(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_manifest(
+                        target,
+                        role="builder",
+                        run_id="run-new",
+                        deferral_reason=None,
+                        created_at="2026-05-04T00:02:00+00:00",
+                    )
+                    self.write_manifest(
+                        target,
+                        role="planner",
+                        run_id="run-queued",
+                        status="queued",
+                        created_at="2026-05-04T00:01:00+00:00",
+                    )
+
+                    records = module.deferred_manifests(target)
+
+                    self.assertEqual(len(records), 1)
+                    self.assertEqual(records[0]["role"], "builder")
+                    self.assertEqual(records[0]["run_id"], "run-new")
+                    self.assertEqual(records[0]["deferral_reason"], "other")
+                    self.assertEqual(
+                        records[0]["manifest_path"],
+                        "target/automation_queue/builder/run-new/manifest.json",
+                    )
+
+    def test_non_object_manifest_is_ignored_without_crashing(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    bad_manifest = target / "target" / "automation_queue" / "planner" / "run-bad" / "manifest.json"
+                    bad_manifest.parent.mkdir(parents=True, exist_ok=True)
+                    bad_manifest.write_text("[]\n", encoding="utf-8")
+                    self.write_manifest(
+                        target,
+                        role="builder",
+                        run_id="run-good",
+                        deferral_reason="staleness",
+                    )
+
+                    records = module.deferred_manifests(target)
+                    report = module.render_markdown(records, target)
+
+                    self.assertEqual([record["run_id"] for record in records], ["run-good"])
+                    self.assertIn("- deferred_count: 1", report)
+                    self.assertIn("builder `run-good`", report)
+                    self.assertNotIn("run-bad", report)
+
+    def test_markdown_report_groups_actions_and_scrubs_local_paths(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_manifest(
+                        target,
+                        role="builder",
+                        run_id="run-conflict",
+                        deferral_reason="conflict",
+                        deferral_detail=(
+                            f"current file hash differs under {target}/docs and "
+                            + "/User"
+                            + "s/example/project"
+                        ),
+                        changed_files=[
+                            "docs/HUMAN_INBOX.md",
+                            "docs/CODEX_AUTOMATION_TASKS.md",
+                            "docs/MULTI_ROLE_PROGRESS.md",
+                            "target/automation_runner.json",
+                            "docs/HUMAN_OUTBOX.md",
+                        ],
+                    )
+                    self.write_manifest(
+                        target,
+                        role="planner",
+                        run_id="run-stale",
+                        deferral_reason="staleness",
+                        deferral_detail="Patch base no longer matches HEAD.",
+                    )
+
+                    report = module.render_markdown(module.deferred_manifests(target), target)
+
+                    self.assertIn("# Deferred Patch Triage", report)
+                    self.assertIn("- deferred_count: 2", report)
+                    self.assertIn("recommended_next_action: Start with `staleness`", report)
+                    self.assertLess(report.index("## staleness"), report.index("## conflict"))
+                    self.assertIn("Refresh or recreate the patch from current HEAD", report)
+                    self.assertIn("- recommended_decision: replace_from_current_head", report)
+                    self.assertIn("triage_decision: pending; recommendation=replace_from_current_head", report)
+                    self.assertIn("builder `run-conflict`", report)
+                    self.assertIn("docs/HUMAN_INBOX.md, docs/CODEX_AUTOMATION_TASKS.md", report)
+                    self.assertIn("+1 more", report)
+                    self.assertIn("<target>/docs", report)
+                    self.assertIn("<local-path>/example/project", report)
+                    self.assertNotIn(str(target), report)
+
+    def test_markdown_cli_reports_empty_backlog(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        exit_code = module.main([tmp, "--markdown"])
+
+                    self.assertEqual(exit_code, 0)
+                    self.assertIn("- deferred_count: 0", output.getvalue())
+                    self.assertIn("No deferred patches found.", output.getvalue())
+
+    def test_decision_template_cli_renders_per_manifest_fields(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    resolved_target = target.resolve()
+                    self.write_manifest(
+                        target,
+                        role="builder",
+                        run_id="run-conflict",
+                        deferral_reason="conflict",
+                        deferral_detail=f"Runtime state conflict under {resolved_target}/docs/MULTI_ROLE_PROGRESS.md",
+                    )
+
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        exit_code = module.main([tmp, "--decision-template"])
+
+                    worksheet = output.getvalue()
+                    self.assertEqual(exit_code, 0)
+                    self.assertIn("# Deferred Patch Decision Worksheet", worksheet)
+                    self.assertIn(
+                        "decision_options: archive, replace_from_current_head, retry_after_fix, "
+                        "retry_after_environment_repair, retry_after_baseline_repair, retry_as_is, keep_deferred",
+                        worksheet,
+                    )
+                    self.assertIn("### builder `run-conflict`", worksheet)
+                    self.assertIn(
+                        "- manifest_path: target/automation_queue/builder/run-conflict/manifest.json",
+                        worksheet,
+                    )
+                    self.assertIn("- recommended_decision: replace_from_current_head", worksheet)
+                    self.assertIn("- decision: pending", worksheet)
+                    self.assertIn("- decision_rationale:", worksheet)
+                    self.assertIn("<target>/docs/MULTI_ROLE_PROGRESS.md", worksheet)
+                    self.assertNotIn(str(target), worksheet)
+
+
+if __name__ == "__main__":
+    unittest.main()

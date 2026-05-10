@@ -8,11 +8,11 @@ You are improving an existing Codex automation workflow.
 
 Read:
 
-1. `.agentic/automation_prompt.md`
-2. `docs/CODEX_AUTOMATION_TASKS.md`
-3. `docs/CODEX_AUTOMATION_GUARDRAILS.md`
-4. `docs/AUTONOMY_EXPERIMENT_LOG.md`
-5. `docs/DAILY_AUTOMATION_REVIEW.md` if present
+1. `.diffmogger/agentic/automation_prompt.md`
+2. `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`
+3. `.diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md`
+4. `.diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md`
+5. `.diffmogger/state/DAILY_AUTOMATION_REVIEW.md` if present
 6. human bridge files if present
 7. recent worker reports if present
 
@@ -38,4 +38,4 @@ Make the smallest useful changes to the automation prompt, guardrails, task file
 
 Do not turn this into pure meta-work. After improving the workflow, perform one concrete product or repo improvement if it is safe and in scope.
 
-End by updating `docs/CODEX_AUTOMATION_TASKS.md` and `docs/AUTONOMY_EXPERIMENT_LOG.md`.
+End by updating `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` and `.diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md`.

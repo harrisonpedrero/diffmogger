@@ -1,0 +1,1 @@
+"""Diffmogger test package."""

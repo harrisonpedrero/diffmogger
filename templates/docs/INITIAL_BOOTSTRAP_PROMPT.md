@@ -60,10 +60,6 @@ Desired first demo: {{DESIRED_FIRST_DEMO}}
 
 {{MULTI_ROLE_BOOTSTRAP_SECTION}}
 
-## Automation Signals
-
-{{AUTOMATION_SIGNALS_BOOTSTRAP_SECTION}}
-
 ## Ticket Campaign Mode
 
 {{TICKET_CAMPAIGN_TASK_NOTES}}
@@ -85,9 +81,15 @@ Create an initial local-first baseline with:
 
 ## Verification
 
-Record full-suite commands in `.agentic/verification_commands.txt`. Keep broad suites there for hardener/finalization, and use `.agentic/smoke_commands.txt` for narrower multi-role patch checks when useful.
+Record full-suite commands in `.agentic/verification_commands.txt`. This file is a clean-HEAD baseline gate, so every command in it must pass against the current checkout. Do not put future project commands there until the backing scripts, packages, services, or Make targets exist. Keep desired future commands in this document, `docs/TICKET_RUN.md`, or `docs/CODEX_AUTOMATION_TASKS.md` until they are real. Use `.agentic/smoke_commands.txt` for narrower patch or sprint checks when useful.
 
-Preferred commands:
+Bootstrap-safe baseline commands currently scaffolded:
+
+```text
+{{BOOTSTRAP_BASELINE_COMMANDS}}
+```
+
+Preferred project commands once the matching project surfaces exist:
 
 ```text
 {{VERIFICATION_COMMANDS}}
@@ -97,6 +99,6 @@ Run the commands that exist or that you create. Do not claim checks passed unles
 
 ## End
 
-Update `docs/CODEX_AUTOMATION_TASKS.md` with current repo state, product horizon state, {{INITIAL_PROGRESS_EVIDENCE_LABEL}}, completed work, checks, generated artifacts, Codex CLI worker decision, worker activity, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status.
+Update `docs/CODEX_AUTOMATION_TASKS.md` with current repo state, product horizon state, {{INITIAL_PROGRESS_EVIDENCE_LABEL}}, completed work under `## Completed Last Run`, checks under `## Checks From Last Run`, generated artifacts, Codex CLI worker decision, worker activity, known issues, pending human requests if enabled, best next milestone, suggested next sprint-sized task, and status. Keep the scaffolded parser-compatible section headings.
 
 {{BOOTSTRAP_END_NOTE}}

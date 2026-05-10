@@ -47,7 +47,9 @@ Last updated: {{CREATED_AT}}
 ## Checks From Last Run
 
 - Not run yet. Bootstrap run should discover or create verification commands.
+- Not run yet: integration safety (`python3 scripts/check_integration_safety.py`) is pending until dashboard **Run Safety Check** records a target-local result.
 - Full-suite config: `.agentic/verification_commands.txt`
+- Bootstrap-safe baseline commands: `{{BOOTSTRAP_BASELINE_COMMANDS_INLINE}}`
 - Preferred commands: `{{VERIFICATION_COMMANDS}}`
 
 ## Worker-Agent Activity
@@ -58,13 +60,11 @@ Last updated: {{CREATED_AT}}
 - Reason: Initial scaffold only; no sprint has run yet.
 - Workers used: none yet.
 - Worker outputs consumed: none yet.
-- Local helpers: `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` can write and consolidate reports under `target/agent_runs/<run_id>/`.
+- Local helpers: `.diffmogger/scripts/spawn_worker_agent.sh` and `.diffmogger/scripts/summarize_worker_outputs.py` can write and consolidate reports under `target/agent_runs/<run_id>/`.
 
 {{WRITE_WORKER_TASK_NOTES}}
 
 {{MULTI_ROLE_TASK_NOTES}}
-
-{{AUTOMATION_SIGNALS_TASK_NOTES}}
 
 {{TICKET_CAMPAIGN_TASK_NOTES}}
 
@@ -76,7 +76,7 @@ Last updated: {{CREATED_AT}}
 
 - Playwright UI artifacts path: `docs/backlog/ui_artifacts/<run_id>/`
 - Current screenshot-backed UI bugs: none yet.
-- When a Hardener or Integrator validation run captures a UI failure, link the screenshot here and in `docs/MULTI_ROLE_PROGRESS.md`.
+- When a validation run captures a UI failure, link the screenshot here. In multi-role mode, also link it in `docs/MULTI_ROLE_PROGRESS.md`.
 
 ## Known Issues
 

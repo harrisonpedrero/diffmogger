@@ -1,77 +1,65 @@
-# Diffmogger Dashboard
+# Diffmogger Dashboard Service
 
-The Diffmogger Dashboard is a standalone local configuration wizard and automation monitor.
+The user-facing dashboard is the native Tauri app in `services/agentic-dashboard/native/`. Backend commands live behind `scripts/dashboard_backend_cli.py` and package modules under `src/diffmogger/dashboard/`.
 
-Launch it from the starter repo:
+## Quickstart
 
 ```bash
-python3 scripts/run_dashboard.py
+bash scripts/build_native_dashboard_app.sh
+open Diffmogger.app
 ```
 
-It opens a native desktop window using Python's standard-library Tkinter runtime. It does not require opening a browser.
+## Development
 
-The launcher loads optional dashboard/runtime environment variables from the Diffmogger starter repo's root `.env` file before importing the dashboard app. Missing `.env` is fine, existing shell variables win, and loaded values are not printed or copied into target projects or role worktrees. This lets advisory checks and dashboard-launched automation inherit optional values such as `CONTEXT7_API_KEY`.
+```bash
+cd services/agentic-dashboard/native
+npm install
+npm test
+npm run build
+npm run tauri dev
+```
 
-## What It Does
+Manual packaged build:
 
-- collects a project intake
-- splits intake into Basics, Product, Rules, Run Config, Progression, and Context steps instead of a long scroll
-- supports fresh-project and existing-project integration modes
-- covers constraints, safety rules, automation prohibitions, human bridge choices, worker settings, optional bounded write-worker acceleration settings, optional automation signals, optional ticket-campaign mode, optional multi-role automation, optional Context7/Playwright MCP integrations, deliverable definition, and long-run direction
-- copies optional context files into `docs/context/`
-- writes `docs/PROJECT_CONTEXT.md`
-- scaffolds Diffmogger target-project files
-- runs the required-file check
-- starts the first `codex exec --full-auto --skip-git-repo-check` bootstrap run through one `Scaffold & Bootstrap` action
-- persists dashboard state in the selected target at `.agentic/dashboard_state.json`
-- reopens Diffmogger-managed targets through `Open Diffmogger Project`
-- enables `Start Scheduled Automation` only after the target appears bootstrapped
-- installs and loads macOS launchd jobs for periodic sprint, fixed multi-role cadence, or continuous conveyor scheduling
-- pauses scheduled automation by unloading and disabling dashboard-managed LaunchAgent jobs
-- removes dashboard-managed schedules by deleting the target LaunchAgent plist(s)
-- renders selected automation Markdown files
-- launches an optional local browser observatory for active signal nudges, conveyor health, active roles, queued/deferred patches, the latest recorded integration-safety result, recent outcomes, and timeline events
-- runs `scripts/check_integration_safety.py` from the Monitor tab with **Run Safety Check** and shows the output in the bounded dashboard log
-- shows **Worker Strategy Controls** from the observatory's next-run recommendation and can launch one bounded read-only worker, one explicitly owned write worker, or one local integrator lane when that strategy recommends it; dashboard-launched workers are summarized into `target/agent_runs/<run_id>/summary.md` and the latest summary can be loaded from the Monitor tab
-- lets a human send file-only messages to the next automation run when notifier delivery is disabled or unavailable
-- displays prerequisites as readiness checks instead of raw command output
+```bash
+npm run tauri build
+open src-tauri/target/release/bundle/macos/Diffmogger.app
+```
 
-In existing-project mode, pre-existing `AGENTS.md` and `docs/DEVELOPMENT.md` files receive a managed Diffmogger automation section instead of being replaced wholesale.
+The root helper creates `Diffmogger.app` at the checkout root as a macOS Finder alias when possible, with a symlink fallback.
+
+The packaged app is source-checkout-backed. Keep the cloned Diffmogger checkout in place, or launch with:
+
+```bash
+DIFFMOGGER_KIT_ROOT=/path/to/Diffmogger npm run tauri dev
+```
+
+## Backend
+
+The native app invokes `scripts/dashboard_backend_cli.py` through an allowlisted Rust subprocess boundary. The backend loads the starter repo `.env` without overriding existing environment variables and never prints loaded values.
+
+Useful smoke:
+
+```bash
+python3 scripts/dashboard_backend_cli.py diagnostics.environment
+```
+
+Backend commands cover setup doctor, project snapshots, intake draft/scaffold, context import, ticket queue load/add/update/delete/import/draft/accept, run controls, launchd schedule controls, safety checks, Observatory snapshots, review bundles, inbox messages, worker controls, managed file editing, and redacted debug bundles.
+
+The app supports **Scaffold & Bootstrap**, **Open Diffmogger Project**, **Ticket Queue**, **Run Safety Check**, **Export Review Bundle**, and **Worker Strategy Controls**. Target-local dashboard state lives at `.diffmogger/agentic/dashboard_state.json`; context imports go to `.diffmogger/context/` and update `.diffmogger/state/PROJECT_CONTEXT.md`. Ticket-campaign targets use `.diffmogger/state/TICKET_RUN.md` as the canonical queue; draft candidates live in `.diffmogger/runtime/ticket_drafts/` until accepted. Setup checks include whether the Codex CLI installed and signed in state is usable.
 
 ## First Review Checklist
 
-Use the dashboard Monitor tab to tie the local review together:
-
-1. Run `bash scripts/validate_starter_kit.sh` from the Diffmogger starter-kit source.
+1. Run `bash scripts/validate_starter_kit.sh` in the Diffmogger source checkout.
 2. Open the target with **Open Diffmogger Project**.
-3. Click **Run Safety Check** and review the dashboard log.
-4. Click **Export Review Bundle** or export `python3 scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
-5. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
+3. Run **Run Safety Check**.
+4. Use **Export Review Bundle** or run `python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
+5. Inspect `/tmp/Diffmogger-review/Diffmogger-observatory.html` and `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
 
-**Run Safety Check** also writes `target/integration_safety_check.json` under the selected target.
-The review bundle reads that runtime marker so the exported HTML and Markdown show the latest
-dashboard safety result.
-6. Check first-review readiness, safety status, validation state, active role or queue, known issues, the next-lane action plan, and the next-run worker strategy in the observatory, Markdown export, or **Worker Strategy Controls** panel.
+## Validation
 
-## Prerequisites
+```bash
+bash scripts/validate_native_app.sh
+```
 
-Before starting automation, the dashboard checks for:
-
-- Python 3.10+
-- Tkinter
-- Codex CLI installed and signed in
-- `bash`
-- `git`
-- writable target parent directory
-- Codex home availability for nested workers
-- macOS Full Disk Access advisory when the target lives under `~/Documents`
-- optional local notifier health when `local_notifier` or `discord_notifier` mode is selected
-- optional macOS desktop notification command when local notifications are enabled
-- initialized git repo with an initial commit before starting multi-role or conveyor scheduling
-- explicit local-only remote opt-in before multi-role or conveyor scheduling in repos with configured git remotes
-- optional Context7 API key visibility when Context7 MCP is selected
-- optional Node/npx, Codex MCP visibility, and managed browser advisories when Context7 or Playwright MCP is selected
-
-The dashboard keeps notifier credentials out of target projects. In notifier modes, use `services/agentic-notifier/` for Discord and local desktop notification configuration.
-Ticket campaign setup lives in Run Config, but tickets themselves are populated in the generated Markdown file, usually `docs/TICKET_RUN.md`. Ticket-campaign bootstrap is readiness-only; scheduled runs use dependency-aware `next --json` selection and act on one ticket per run.
-Optional MCP setup is project-scoped and advisory. The dashboard never runs MCP install/login commands or edits user/global Codex config. When Context7 is selected, the generated config inherits `CONTEXT7_API_KEY` if it is present in the shell or loaded from the starter repo's root `.env`, but never stores the key.
+That script checks the archived command inventory, frontend tests/build, Rust tests, and packaged Tauri build.

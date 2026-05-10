@@ -1,6 +1,6 @@
 # Codex Automation Guardrails
 
-These guardrails apply to every scheduled or manual high-agency Codex run in this repo.
+These guardrails apply to every continuous or manual high-agency Codex run in this repo.
 
 ## Scope Boundaries
 
@@ -37,10 +37,10 @@ Do not build unrelated apps or large unrelated systems.
 - Run relevant checks when possible.
 - Diagnose missing local tooling, dependencies, or repairable project-local services before declaring `BLOCKED_ON_ENVIRONMENT`; missing local databases with project-owned test configuration should become baseline repair work, not a terminal human blocker.
 - Do not install dependencies globally; use ignored local venvs, `node_modules`, or other project-local runtime state.
-- For browser-backed smoke checks, visual QA, or documentation research, prefer `scripts/diffmogger_browser.py` and the exported `DIFFMOGGER_BROWSER_PATH`/`CHROME_PATH` over ambient system Chrome.
+- For browser-backed smoke checks, visual QA, or documentation research, prefer `.diffmogger/scripts/diffmogger_browser.py` and the exported `DIFFMOGGER_BROWSER_PATH`/`CHROME_PATH` over ambient system Chrome.
 - If Playwright MCP is enabled, use it only for local browser validation and save deferred UI failure screenshots under `docs/backlog/ui_artifacts/<run_id>/` with Markdown links in task/progress state.
 - If repeated browser launches fail before DevTools is ready, record `BLOCKED_ON_ENVIRONMENT` with diagnostics and use an equivalent manual or managed-browser QA path instead of looping on the same launch command.
-- In `ticket_campaign` mode, do not implement tickets during bootstrap, use `scripts/ticket_run.py . next --json` for dependency-aware ticket selection, act on at most one selected ticket per normal run, and do not expand scope after the listed tickets are done or blocked; run `scripts/ticket_run.py` finalization and leave push/PR creation to the human.
+- In `ticket_campaign` mode, do not implement tickets during bootstrap, use `.diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket selection, act on at most one selected ticket per normal run, and do not expand scope after the listed tickets are done or blocked; run `.diffmogger/scripts/ticket_run.py` finalization and leave push/PR creation to the human.
 - Do not delete tests just to pass checks.
 - Do not hide broad classes of errors with blanket suppressions.
 - Keep changes scoped to the current sprint.
@@ -55,7 +55,7 @@ Do not build unrelated apps or large unrelated systems.
 - Prefer read-only worker reports.
 - Main agent owns integration.
 - Record worker outputs under `target/agent_runs/<run_id>/`.
-- Use local `scripts/spawn_worker_agent.sh` and `scripts/summarize_worker_outputs.py` helpers when available; otherwise use equivalent bounded nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` commands from inside the scheduled parent run.
+- Use local `.diffmogger/scripts/spawn_worker_agent.sh` and `.diffmogger/scripts/summarize_worker_outputs.py` helpers when available; otherwise use equivalent bounded nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` commands from inside the parent automation run.
 - Do not create unbounded recursive agent loops.
 - Workers must not send Discord, notifier, email, or other external messages, spawn additional workers, or use network unless explicitly approved for that run.
 - {{WORKER_ENV_ACCESS_RULE}}
@@ -67,10 +67,10 @@ Do not build unrelated apps or large unrelated systems.
 
 ## Lock-File Policy
 
-- Acquire `target/codex_automation.lock` before mutating code in scheduled runs.
-- Scheduled runs should use local `scripts/run_codex_automation.sh`, which owns lock acquire/release.
+- Acquire `target/codex_automation.lock` before mutating code in automation runs.
+- Scheduled runs should use local `.diffmogger/scripts/run_codex_automation.sh`, which owns lock acquire/release.
 - If `CODEX_LOCK_ALREADY_ACQUIRED=true`, do not acquire, overwrite, manually create, or release the lock inside the Codex run.
-- Manual runs should use local `scripts/acquire_codex_lock.sh` and `scripts/release_codex_lock.sh`.
+- Manual runs should use local `.diffmogger/scripts/acquire_codex_lock.sh` and `.diffmogger/scripts/release_codex_lock.sh`.
 - Set `CODEX_RUN_ID` before acquire/release so the lock can identify the current run.
 - If an active lock exists, do not mutate code.
 - If a stale lock is removed, record that decision in `docs/CODEX_AUTOMATION_TASKS.md`.
@@ -102,6 +102,6 @@ Use `CRITICAL_STOP` only when continuing autonomously is unsafe.
 - Remove handled messages from `docs/HUMAN_INBOX.md`.
 - Archive concise handled responses in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
 - Prune stale tasks from `docs/CODEX_AUTOMATION_TASKS.md`.
-- Use local `scripts/compact_agent_state.py --dry-run .` before compacting long-running Markdown state.
+- Use local `.diffmogger/scripts/compact_agent_state.py --dry-run .` before compacting long-running Markdown state.
 - Never silently delete active or unresolved human requests.
 - Keep this guardrails file lean.

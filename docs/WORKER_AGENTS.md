@@ -18,7 +18,7 @@ Reason: <one sentence>
 - Use write-capable workers only when the generated project intake explicitly enables them.
 - Use write-capable workers as bounded acceleration when work can split into reviewable write scopes or isolated work areas.
 - The main agent owns integration and verification.
-- Record worker activity in `docs/CODEX_AUTOMATION_TASKS.md`.
+- Record worker activity in `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
 
 Check Codex CLI availability before using CLI workers:
 
@@ -31,7 +31,7 @@ If unavailable, record `Codex CLI worker decision: UNAVAILABLE` and continue the
 ## Output Convention
 
 ```text
-target/agent_runs/<run_id>/worker_<role>.md
+.diffmogger/runtime/agent_runs/<run_id>/worker_<role>.md
 ```
 
 Each worker report should include:
@@ -49,21 +49,21 @@ Each worker report should include:
 Diffmogger includes optional worker helpers. They are wrappers around explicit bounded behavior, not mandatory orchestration:
 
 ```bash
-bash scripts/spawn_worker_agent.sh \
+bash .diffmogger/scripts/spawn_worker_agent.sh \
   --target /absolute/path/to/target-project \
   --run-id "$CODEX_RUN_ID" \
   --role tests \
   --prompt "Inspect the current sprint for test gaps and write a concise report."
 
-python3 scripts/summarize_worker_outputs.py /absolute/path/to/target-project --run-id "$CODEX_RUN_ID"
+python3 .diffmogger/scripts/summarize_worker_outputs.py /absolute/path/to/target-project --run-id "$CODEX_RUN_ID"
 ```
 
-`spawn_worker_agent.sh` creates `target/agent_runs/<run_id>/`, defaults to read-only report mode, tells the worker not to spawn more workers, and writes an unavailable/failure report if the CLI cannot run.
+`spawn_worker_agent.sh` creates `.diffmogger/runtime/agent_runs/<run_id>/`, defaults to read-only report mode, tells the worker not to spawn more workers, and writes an unavailable/failure report if the CLI cannot run.
 
 When a generated target project explicitly enables write-capable workers, the same helper supports an explicit write mode:
 
 ```bash
-bash scripts/spawn_worker_agent.sh \
+bash .diffmogger/scripts/spawn_worker_agent.sh \
   --mode write \
   --target /absolute/path/to/target-project \
   --run-id "$CODEX_RUN_ID" \
@@ -74,11 +74,11 @@ bash scripts/spawn_worker_agent.sh \
 
 Read-only remains the default. Write mode requires an ownership scope because the main agent must keep file/module ownership disjoint.
 
-Generated scheduled wrappers grant the parent Codex run access to `$HOME/.codex` with `--add-dir`. That parent permission matters because nested `codex` processes may touch `state_5.sqlite`, `shell_snapshots`, and `sessions` during startup even when the child worker uses `--ephemeral`.
+Generated automation wrappers grant the parent Codex run access to `$HOME/.codex` with `--add-dir`. That parent permission matters because nested `codex` processes may touch `state_5.sqlite`, `shell_snapshots`, and `sessions` during startup even when the child worker uses `--ephemeral`.
 
-Generated worker helpers run the nested child with `--disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox`. The bypass is only for the nested child process; the scheduled parent remains the outer sandbox boundary. This avoids macOS nested `sandbox-exec` failures while still keeping scheduled automation constrained by the parent run.
+Generated worker helpers run the nested child with `--disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox`. The bypass is only for the nested child process; the parent automation run remains the outer sandbox boundary. This avoids macOS nested `sandbox-exec` failures while still keeping automation constrained by the parent run.
 
-`summarize_worker_outputs.py` writes `target/agent_runs/<run_id>/summary.md` by mechanically consolidating worker report highlights. The main agent still decides which findings to accept, reject, or defer.
+`summarize_worker_outputs.py` writes `.diffmogger/runtime/agent_runs/<run_id>/summary.md` by mechanically consolidating worker report highlights. The main agent still decides which findings to accept, reject, or defer.
 
 ## Good Worker Roles
 
@@ -105,7 +105,7 @@ Prefer 1-3 workers for:
 
 Skip workers for tiny bugs, simple test reruns, or cases where delegation overhead is higher than the work.
 
-If workers are skipped on a broad task, record the reason in `docs/CODEX_AUTOMATION_TASKS.md`.
+If workers are skipped on a broad task, record the reason in `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
 
 ## Optional Write Workers
 
@@ -161,11 +161,11 @@ Multi-role automation is a project-level scheduling mode, not the same thing as 
 }
 ```
 
-In multi-role mode, planner, builder, and hardener run in isolated git worktrees and queue patches. The integrator owns the main checkout, applies patches FIFO, verifies, creates local commits, updates `docs/MULTI_ROLE_PROGRESS.md`, and manages retention.
+In multi-role mode, planner, builder, and hardener run in isolated git worktrees and queue patches. The integrator owns the main checkout, applies patches FIFO, verifies, creates local commits, updates `.diffmogger/state/MULTI_ROLE_PROGRESS.md`, and manages retention.
 
 The worker-agent rules still matter inside each role: read-only worker reports remain the default for exploration, write workers remain optional, and no role may create unbounded recursive agents. Overlapping write ownership still requires an explicit coordination protocol.
 
-Multi-role scripts are local-only. They refuse configured remotes by default, never push, and keep transient role artifacts under `target/automation_queue/`, `target/automation_worktrees/`, and `target/automation_logs/`.
+Multi-role scripts are local-only. They refuse configured remotes by default, never push, and keep transient role artifacts under `.diffmogger/runtime/automation_queue/`, `.diffmogger/runtime/automation_worktrees/`, and `.diffmogger/runtime/automation_logs/`.
 
 ## Codex CLI Pattern
 
@@ -173,16 +173,16 @@ Use read-only reports by default:
 
 ```bash
 export CODEX_RUN_ID="${CODEX_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
-mkdir -p "target/agent_runs/$CODEX_RUN_ID"
+mkdir -p ".diffmogger/runtime/agent_runs/$CODEX_RUN_ID"
 
 codex exec --disable plugins \
   --ephemeral \
   --dangerously-bypass-approvals-and-sandbox \
   -C . \
-  "You are a read-only worker for this project. Read the repo and write a concise test-gap report to target/agent_runs/$CODEX_RUN_ID/worker_tests.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
+  "You are a read-only worker for this project. Read the repo and write a concise test-gap report to .diffmogger/runtime/agent_runs/$CODEX_RUN_ID/worker_tests.md. Do not modify source files except for that output report. Do not use network. Do not spawn workers. Stop after writing the report."
 ```
 
-Use this command shape for nested Codex CLI workers launched from an automation run. The parent scheduled run should also allow `$HOME/.codex` with `--add-dir`; without that parent allowance, a child worker may fail while starting inside the parent run's sandbox.
+Use this command shape for nested Codex CLI workers launched from an automation run. The parent automation run should also allow `$HOME/.codex` with `--add-dir`; without that parent allowance, a child worker may fail while starting inside the parent run's sandbox.
 
 Worker rules:
 

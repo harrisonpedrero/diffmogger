@@ -4,7 +4,8 @@ __pycache__/
 .venv/
 *.pyc
 .env
-target/
+/target/
+Diffmogger.app
 
 # Local Diffmogger automation state for this checkout.
 .agentic/

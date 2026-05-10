@@ -6,9 +6,7 @@ Multi-role automations allowed: {{MULTI_ROLE_AUTOMATIONS_ALLOWED}}
 
 Role profile: `{{AUTOMATION_ROLE_PROFILE}}`
 
-Automation schedule strategy: `{{AUTOMATION_SCHEDULE_STRATEGY}}`
-
-Fixed cadence runs planner hourly at minute `0`, with builder, hardener, and integrator on staggered half-hour offsets. Continuous conveyor mode uses one local dispatcher that prioritizes queued integration first, baseline preflight/repair, safety triage, human inbox handling, fast-follow replanning after planner deferral changes, one focused hardener pass after integrated builder work, catch-up hardening for the oldest unverified `candidate_done` cluster, due planning, and builder momentum by default.
+Continuous conveyor mode uses one local dispatcher that prioritizes queued integration first, baseline preflight/repair, safety triage, human inbox handling, fast-follow replanning after planner deferral changes, one focused hardener pass after integrated builder work, catch-up hardening for the oldest unverified `candidate_done` cluster, planner-needed transitions, and builder momentum by default.
 
 ## Project State At Last Integration
 

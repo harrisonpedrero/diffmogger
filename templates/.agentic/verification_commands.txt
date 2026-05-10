@@ -1,1 +1,3 @@
-{{VERIFICATION_COMMANDS}}
+# Bootstrap-safe baseline commands. These must pass on the current checkout.
+# Replace or extend them only after the project-specific scripts/packages exist.
+{{BOOTSTRAP_BASELINE_COMMANDS}}
