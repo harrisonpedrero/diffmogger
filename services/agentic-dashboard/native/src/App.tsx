@@ -6,11 +6,14 @@ import {
   Clipboard,
   ClipboardCheck,
   Command,
+  Database,
   ExternalLink,
   FileText,
   FolderOpen,
+  GitBranch,
   Home,
   Inbox,
+  type LucideIcon,
   LogOut,
   PlayCircle,
   RefreshCw,
@@ -18,7 +21,7 @@ import {
   Telescope,
   TerminalSquare,
 } from "lucide-react";
-import { memo, type PointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import { memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -46,12 +49,22 @@ import {
   PaletteCommandId,
   buildCommandPaletteModel,
 } from "./commandPaletteModel";
-import { HomeAction, HomeRoute, buildHomeModel } from "./homeModel";
+import {
+  HomeAction,
+  HomeConveyorLane,
+  HomeEventRow,
+  HomeModel,
+  HomeMetric,
+  HomeQueueRow,
+  HomeRoute,
+  HomeSafetyRow,
+  HomeTone,
+  buildHomeModel,
+} from "./homeModel";
 import { InboxPage } from "./InboxPage";
 import { ObservatoryPage } from "./ObservatoryPage";
 import { ReviewPage } from "./ReviewPage";
 import { RunPage } from "./RunPage";
-import diffmoggerIcon from "./assets/diffmogger-icon.png";
 import diffmoggerLogo from "./assets/diffmogger-logo-cropped.png";
 import "./App.css";
 
@@ -66,18 +79,31 @@ export type ViewKey =
 
 type LoadState = "idle" | "loading" | "loaded" | "error";
 type CachedRouteVisits = Record<ViewKey, boolean>;
+type DirtyRouteState = Partial<Record<ViewKey, string>>;
+type BusyRouteState = Partial<Record<ViewKey, boolean>>;
 
-const views: Array<{ key: ViewKey; label: string; icon: typeof Home }> = [
-  { key: "Home", label: "Home", icon: Home },
-  { key: "Brief", label: "Setup", icon: FileText },
-  { key: "Run", label: "Run", icon: PlayCircle },
-  { key: "Observatory", label: "Activity", icon: Telescope },
-  { key: "Inbox", label: "Inbox", icon: Inbox },
-  { key: "Review", label: "Review", icon: ClipboardCheck },
-  { key: "Advanced", label: "Debug", icon: SlidersHorizontal },
+type ViewDefinition = {
+  key: ViewKey;
+  label: string;
+  legacyLabel: string;
+  icon: LucideIcon;
+};
+
+const views: ViewDefinition[] = [
+  { key: "Home", label: "Control Room", legacyLabel: "Home", icon: Home },
+  { key: "Brief", label: "Setup", legacyLabel: "Brief", icon: FileText },
+  { key: "Run", label: "Run", legacyLabel: "Run", icon: PlayCircle },
+  { key: "Observatory", label: "Activity", legacyLabel: "Observatory", icon: Telescope },
+  { key: "Inbox", label: "Inbox", legacyLabel: "Handoffs", icon: Inbox },
+  { key: "Review", label: "Review", legacyLabel: "Review", icon: ClipboardCheck },
+  { key: "Advanced", label: "Sidecar", legacyLabel: "Advanced", icon: SlidersHorizontal },
 ];
 
 const transparentBackground: [number, number, number, number] = [0, 0, 0, 0];
+export const AUTO_REFRESH_ACTIVE_INTERVAL_MS = 30_000;
+export const AUTO_REFRESH_IDLE_INTERVAL_MS = 60_000;
+export const AUTO_REFRESH_FOCUS_STALE_MS = 60_000;
+const ACTIVE_AUTOMATION_STATES = new Set(["running", "starting", "stopping"]);
 
 function createCachedRouteVisits(
   overrides: Partial<CachedRouteVisits> = {},
@@ -111,7 +137,7 @@ const targetRequiredCopy: Record<
     detail: "Choose a project folder to load current target activity.",
   },
   Inbox: {
-    title: "Select a project to open the inbox",
+    title: "Select a project to open Inbox",
     body: "Requests, replies, and next-run notes live in target-local Markdown files.",
     detail: "Choose a target to see pending requests or complete setup for file-based messaging.",
   },
@@ -121,7 +147,7 @@ const targetRequiredCopy: Record<
     detail: "After a project is loaded, you can export review files or send a next-run note.",
   },
   Advanced: {
-    title: "Select a project to inspect debug tools",
+    title: "Select a project to inspect Sidecar",
     body: "Diagnostics, managed files, settings, and debug exports are scoped to a selected target.",
     detail: "Choose a project folder to inspect allowed files and run readiness checks.",
   },
@@ -169,12 +195,91 @@ function recordValue(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
 
+export function hasDirtyRouteState(routes: DirtyRouteState): boolean {
+  return Object.values(routes).some((message) => Boolean(message));
+}
+
+export function hasBusyRouteState(routes: BusyRouteState): boolean {
+  return Object.values(routes).some((busy) => busy === true);
+}
+
+export function snapshotHasActiveRefreshSignals(snapshot: ProjectSnapshot | null): boolean {
+  if (!snapshot) return false;
+  const automation = recordValue(snapshot.run.automation);
+  const controls = recordValue(snapshot.run.controls);
+  const conveyor = recordValue(snapshot.run.conveyor);
+  const activeRoleRun = recordValue(conveyor.active_role_run);
+  const activeRun = recordValue(conveyor.active_run);
+  const human = recordValue(snapshot.run.human);
+  const automationState = textValue(automation.state).toLowerCase();
+  const pendingHuman =
+    numberValue(snapshot.home.pending_human_requests) +
+    numberValue(snapshot.home.unhandled_inbox) +
+    numberValue(human.pending_requests) +
+    numberValue(human.unhandled_inbox);
+
+  return (
+    ACTIVE_AUTOMATION_STATES.has(automationState) ||
+    boolValue(controls.is_running) ||
+    Object.keys(activeRoleRun).length > 0 ||
+    Object.keys(activeRun).length > 0 ||
+    pendingHuman > 0
+  );
+}
+
+export function autoRefreshIntervalMs(snapshot: ProjectSnapshot | null): number {
+  return snapshotHasActiveRefreshSignals(snapshot)
+    ? AUTO_REFRESH_ACTIVE_INTERVAL_MS
+    : AUTO_REFRESH_IDLE_INTERVAL_MS;
+}
+
+export function canAutoRefreshProject(options: {
+  hasSelectedTarget: boolean;
+  loadState: LoadState;
+  refreshInFlight: boolean;
+  hasDirtyRoutes: boolean;
+  hasBusyCommands: boolean;
+}): boolean {
+  return (
+    options.hasSelectedTarget &&
+    options.loadState === "loaded" &&
+    !options.refreshInFlight &&
+    !options.hasDirtyRoutes &&
+    !options.hasBusyCommands
+  );
+}
+
+export function shouldRefreshOnFocus(lastUpdatedAt: number | null, now = Date.now()): boolean {
+  return Boolean(lastUpdatedAt && now - lastUpdatedAt >= AUTO_REFRESH_FOCUS_STALE_MS);
+}
+
 function formatLastUpdated(value: number | null): string {
   if (!value) return "Not loaded yet";
   return `Updated ${new Date(value).toLocaleTimeString(undefined, {
     hour: "numeric",
     minute: "2-digit",
   })}`;
+}
+
+function formatDirtyLabel(count: number, hasSnapshot: boolean): string {
+  if (!hasSnapshot) return "No git state";
+  if (count === 0) return "Worktree clean";
+  return `${count} uncommitted ${count === 1 ? "file" : "files"}`;
+}
+
+function formatTopbarStatusLabel(status: string): string {
+  return status.toLowerCase() === "stale" ? "State needs refresh" : status;
+}
+
+function sidecarState(snapshot: ProjectSnapshot | null): { label: string; tone: "good" | "warn" | "quiet" } {
+  if (!snapshot) return { label: "No target", tone: "quiet" };
+  if (snapshot.target.is_diffmogger_project && snapshot.target.automation_task_exists) {
+    return { label: "Sidecar ready", tone: "good" };
+  }
+  if (snapshot.target.project_intake_exists || snapshot.target.dashboard_state_exists) {
+    return { label: "Sidecar partial", tone: "warn" };
+  }
+  return { label: "No sidecar", tone: "warn" };
 }
 
 type SidebarBadge = {
@@ -239,13 +344,13 @@ function WindowControls(props: { onWindowStateChange?: () => void }) {
 
   return (
     <div className="window-controls" aria-label="Window controls">
-      <button className="traffic-close" aria-label="Close" onClick={() => windowAction("close")}>
+      <button className="traffic-close" aria-label="Close" title="Close" onClick={() => windowAction("close")}>
         <span />
       </button>
-      <button className="traffic-minimize" aria-label="Minimize" onClick={() => windowAction("minimize")}>
+      <button className="traffic-minimize" aria-label="Minimize" title="Minimize" onClick={() => windowAction("minimize")}>
         <span />
       </button>
-      <button className="traffic-maximize" aria-label="Fullscreen" onClick={() => windowAction("fullscreen")}>
+      <button className="traffic-maximize" aria-label="Fullscreen" title="Fullscreen" onClick={() => windowAction("fullscreen")}>
         <span />
       </button>
     </div>
@@ -281,27 +386,270 @@ async function applyTransparentNativeBackground() {
   }
 }
 
-function StatTile(props: { label: string; value: string | number; tone?: string }) {
+function TonePill(props: { tone: HomeTone | string; children: ReactNode }) {
+  return <span className={`home-tone-pill ${props.tone}`}>{props.children}</span>;
+}
+
+function HomeActionButton(props: {
+  action: HomeAction;
+  primary?: boolean;
+  disabled: boolean;
+  onAction: (action: HomeAction) => void;
+}) {
   return (
-    <div className={`stat-tile ${props.tone ?? ""}`}>
-      <span>{props.label}</span>
-      <strong>{props.value}</strong>
+    <button
+      className={props.primary ? "primary-action" : "secondary-action"}
+      disabled={props.disabled || props.action.kind === "disabled"}
+      onClick={() => props.onAction(props.action)}
+    >
+      {props.action.label}
+      {props.primary && <ArrowRight size={16} />}
+    </button>
+  );
+}
+
+function MiniConveyor(props: { lanes: HomeConveyorLane[] }) {
+  return (
+    <div className="mini-conveyor" aria-label="Mini conveyor">
+      {props.lanes.map((lane, index) => (
+        <div className="mini-conveyor-step" key={lane.role}>
+          <span className={`mini-conveyor-node ${lane.tone}`} aria-hidden="true" />
+          <span>{lane.label}</span>
+          {index < props.lanes.length - 1 && <i aria-hidden="true" />}
+        </div>
+      ))}
     </div>
   );
 }
 
-function DataRow(props: { label: string; value: string | number }) {
+function OperationalStatusHero(props: {
+  model: HomeModel;
+  loading: boolean;
+  noTarget: boolean;
+  onAction: (action: HomeAction) => void;
+}) {
+  const showHeadline =
+    props.noTarget || props.model.headline.toLowerCase() !== props.model.statusLabel.toLowerCase();
   return (
-    <div className="data-row">
-      <span>{props.label}</span>
-      <strong>{props.value}</strong>
-    </div>
+    <section
+      aria-label="Control Room operational status"
+      className={`operational-hero ${props.model.statusTone}`}
+      data-testid="operational-status-hero"
+    >
+      <div className={`operational-hero-state ${showHeadline ? "" : "badge-only"}`}>
+        {!props.noTarget && <TonePill tone={props.model.statusTone}>{props.model.statusLabel}</TonePill>}
+        {showHeadline && <h1>{props.model.headline}</h1>}
+        <p>{props.model.subheadline}</p>
+      </div>
+      <MiniConveyor lanes={props.model.conveyor.lanes} />
+      <aside className="operational-next-action" aria-label="Next action">
+        <span>Next</span>
+        <strong>{props.model.recommendation.title}</strong>
+        <p>{props.model.recommendation.reason}</p>
+        <div className="operational-actions">
+          <HomeActionButton
+            action={props.model.primaryAction}
+            disabled={props.loading || (props.model.primaryAction.kind === "refresh" && props.noTarget)}
+            onAction={props.onAction}
+            primary
+          />
+          {props.model.secondaryActions.map((action) => (
+            <HomeActionButton
+              action={action}
+              disabled={props.loading || (action.kind === "refresh" && props.noTarget)}
+              key={`${action.kind}-${action.label}`}
+              onAction={props.onAction}
+            />
+          ))}
+        </div>
+      </aside>
+    </section>
+  );
+}
+
+function MetricSignalStrip(props: { metrics: HomeMetric[] }) {
+  return (
+    <section className="metric-signal-strip" aria-label="Metric signals" data-testid="metric-signal-strip">
+      {props.metrics.map((metric) => (
+        <div className={`metric-signal ${metric.tone}`} key={metric.label}>
+          <span>{metric.label}</span>
+          <strong>{metric.value}</strong>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function ConveyorMap(props: { model: HomeModel["conveyor"] }) {
+  return (
+    <section className="control-panel conveyor-map-panel" aria-label="Conveyor map" data-testid="conveyor-map">
+      <div className="control-panel-heading">
+        <div>
+          <h2>Conveyor</h2>
+          <p>{props.model.summary}</p>
+        </div>
+        <TonePill tone={props.model.activeLane ? "info" : "quiet"}>{props.model.cycles} cycles</TonePill>
+      </div>
+      <div className="conveyor-lanes">
+        {props.model.lanes.map((lane, index) => (
+          <div className="conveyor-lane-step" key={lane.role}>
+            <article className={`conveyor-lane ${lane.tone}`}>
+              <header>
+                <h3>{lane.label}</h3>
+                <TonePill tone={lane.tone}>{lane.badge}</TonePill>
+              </header>
+              <p title={lane.reason}>{lane.reason}</p>
+              <div className="lane-counts">
+                <span>Q {lane.counts.queued}</span>
+                <span>A {lane.counts.applied}</span>
+                <span>D {lane.counts.deferred}</span>
+                <span>F {lane.counts.failed}</span>
+              </div>
+            </article>
+            {index < props.model.lanes.length - 1 && <span className="conveyor-connector" aria-hidden="true" />}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SafetyMatrix(props: { rows: HomeSafetyRow[]; onAction: (action: HomeAction) => void }) {
+  return (
+    <section className="control-panel safety-matrix-panel" aria-label="Safety" data-testid="safety-matrix">
+      <div className="control-panel-heading compact">
+        <h2>Safety</h2>
+      </div>
+      <div className="safety-matrix">
+        {props.rows.map((row) => (
+          <div className={`safety-matrix-row ${row.tone}`} key={row.label}>
+            <div>
+              <strong>{row.label}</strong>
+              <span>{row.source}</span>
+            </div>
+            <TonePill tone={row.tone}>{row.status}</TonePill>
+            <p title={row.summary}>{row.summary}</p>
+            <button
+              className="ledger-action"
+              disabled={row.action.kind === "disabled"}
+              onClick={() => props.onAction(row.action)}
+            >
+              {row.action.label}
+            </button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function QueueLedger(props: {
+  rows: HomeQueueRow[];
+  emptyMessage: string;
+  onAction: (action: HomeAction) => void;
+}) {
+  return (
+    <section className="control-panel queue-ledger-panel" aria-label="Queue ledger" data-testid="queue-ledger">
+      <div className="control-panel-heading compact">
+        <h2>Queue Ledger</h2>
+        <button className="ledger-action" onClick={() => props.onAction({ label: "Run", kind: "navigate", route: "Run" })}>
+          Run
+        </button>
+      </div>
+      <div className="queue-ledger">
+        <div className="ledger-header" aria-hidden="true">
+          <span>Ticket</span>
+          <span>Status</span>
+          <span>Lane</span>
+          <span>Last change</span>
+          <span>Blocker</span>
+        </div>
+        {props.rows.length ? (
+          props.rows.map((row) => (
+            <div className={`queue-ledger-row ${row.tone}`} key={row.id}>
+              <div>
+                <strong title={row.id}>{row.id}</strong>
+                <span title={row.title}>{row.title}</span>
+              </div>
+              <TonePill tone={row.tone}>{row.status}</TonePill>
+              <span className="queue-ledger-lane" title={row.lane}>{row.lane}</span>
+              <span className="queue-ledger-time" title={row.lastChange}>{row.lastChange}</span>
+              <span className="queue-ledger-source" title={row.blocker || row.source}>{row.blocker || row.source}</span>
+            </div>
+          ))
+        ) : (
+          <div className="ledger-empty">{props.emptyMessage}</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function EventLedger(props: { rows: HomeEventRow[]; emptyMessage: string }) {
+  return (
+    <section className="control-panel event-ledger-panel" aria-label="Event ledger" data-testid="event-ledger">
+      <div className="control-panel-heading compact">
+        <h2>Event Ledger</h2>
+      </div>
+      <div className="event-ledger">
+        {props.rows.length ? (
+          props.rows.map((row) => (
+            <div className={`event-ledger-row ${row.tone}`} key={row.id}>
+              <time className="event-ledger-time" title={row.time}>{row.time}</time>
+              <TonePill tone={row.tone}>{row.type}</TonePill>
+              <span className="event-ledger-lane" title={row.lane}>{row.lane}</span>
+              <strong className="event-ledger-message" title={row.message}>{row.message}</strong>
+              <code className="event-ledger-artifact" title={row.artifact}>{row.artifact}</code>
+              <span className="event-ledger-status" title={row.status}>{row.status}</span>
+            </div>
+          ))
+        ) : (
+          <div className="ledger-empty">{props.emptyMessage}</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function HumanBridgeMini(props: {
+  model: HomeModel["humanBridge"];
+  onAction: (action: HomeAction) => void;
+}) {
+  const total = props.model.pending + props.model.unhandled;
+  return (
+    <section className={`control-panel human-bridge-mini ${total ? "warn" : "good"}`} aria-label="Inbox summary" data-testid="human-bridge-mini">
+      <div className="control-panel-heading compact">
+        <h2>Inbox</h2>
+        <TonePill tone={total ? "warn" : "good"}>{props.model.latestStatus}</TonePill>
+      </div>
+      <div className="bridge-mini-grid">
+        <div>
+          <span>Requests</span>
+          <strong>{props.model.pending}</strong>
+        </div>
+        <div>
+          <span>Notes</span>
+          <strong>{props.model.unhandled}</strong>
+        </div>
+        <div>
+          <span>Outbound</span>
+          <strong>{props.model.outbound}</strong>
+        </div>
+      </div>
+      <button
+        className="secondary-action"
+        disabled={props.model.action.kind === "disabled"}
+        onClick={() => props.onAction(props.model.action)}
+      >
+        {props.model.action.label}
+      </button>
+    </section>
   );
 }
 
 function ShellSkeleton() {
   return (
-    <section className="skeleton-page" aria-label="Loading project">
+    <section className="skeleton-page" aria-label="Loading project" role="status" aria-live="polite">
       <div className="skeleton-banner">
         <div className="skeleton-line wide" />
         <div className="skeleton-line" />
@@ -364,47 +712,22 @@ function HomePage(props: {
   }
 
   return (
-    <section className={`home-page ${noTarget ? "no-target" : "with-target"} ${hasRecentTargets ? "has-recents" : "no-recents"}`}>
-      <div className={`home-banner ${model.statusTone}`}>
-        <div>
-          <h1>{model.headline}</h1>
-          <p>{model.subheadline}</p>
-          <div className="home-actions">
-            <button
-              className="primary-action"
-              disabled={props.loading || model.primaryAction.kind === "disabled"}
-              onClick={() => runAction(model.primaryAction)}
-            >
-              {model.primaryAction.label}
-              <ArrowRight size={17} />
-            </button>
-            {model.secondaryActions.map((action) => (
-              <button
-                className="secondary-action"
-                disabled={props.loading || action.kind === "disabled" || (action.kind === "refresh" && noTarget)}
-                key={`${action.kind}-${action.label}`}
-                onClick={() => runAction(action)}
-              >
-                {action.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
+    <section
+      aria-label="Control Room"
+      className={`home-page control-room-page ${noTarget ? "no-target" : "with-target"} ${hasRecentTargets ? "has-recents" : "no-recents"}`}
+      data-testid="control-room-home"
+    >
+      <OperationalStatusHero
+        loading={props.loading}
+        model={model}
+        noTarget={noTarget}
+        onAction={runAction}
+      />
 
-      <div className="home-metrics">
-        {model.metrics.map((metric) => (
-          <StatTile
-            key={metric.label}
-            label={metric.label}
-            value={metric.value}
-            tone={metric.tone}
-          />
-        ))}
-      </div>
+      <MetricSignalStrip metrics={model.metrics} />
 
       {noTarget && props.recents.length > 0 && (
-        <div className="home-recent-targets panel">
+        <div className="home-recent-targets control-panel">
           <h2>Recent Projects</h2>
           <div className="recent-list">
             {props.recents.map((recent) => (
@@ -422,7 +745,7 @@ function HomePage(props: {
       )}
 
       {noTarget && (
-        <div className="panel home-setup-doctor span-3">
+        <div className="control-panel home-setup-doctor span-3">
           <div className="panel-heading-row">
             <div>
               <h2>Backend checks</h2>
@@ -472,75 +795,22 @@ function HomePage(props: {
         </div>
       )}
 
-      <div className="home-grid">
-        <article className="panel home-card next-action-card">
-          <h2>Next action</h2>
-          <strong>{model.recommendation.title}</strong>
-          <p>{model.recommendation.reason}</p>
-          <button
-            className="secondary-action"
-            disabled={model.recommendation.action.kind === "disabled"}
-            onClick={() => runAction(model.recommendation.action)}
-          >
-            {model.recommendation.action.label}
-          </button>
-        </article>
-
-        <article className="panel home-card safety-card">
-          <h2>{model.safety.headline}</h2>
-          {model.safety.items.length ? (
-            <div className="safety-list">
-              {model.safety.items.map((item) => (
-                <div className={`safety-item ${item.tone}`} key={item.label}>
-                  <div>
-                    <span>{item.label}</span>
-                    <strong>{item.value}</strong>
-                  </div>
-                  <p>{item.detail}</p>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="empty-copy">Select a target to load safety and readiness state.</div>
-          )}
-        </article>
-
-        <article className="panel home-card progress-card">
-          <h2>{model.progress.headline}</h2>
-          {model.progress.empty ? (
-            <div className="empty-copy">
-              No commits or role results recorded yet.
-            </div>
-          ) : (
-            <div className="progress-list">
-              {model.progress.items.map((item) => (
-                <div className={`progress-item ${item.tone}`} key={`${item.title}-${item.meta}`}>
-                  <strong>{item.title}</strong>
-                  <p>{item.detail}</p>
-                  <span>{item.meta}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </article>
-
-        <article className="panel home-card human-card">
-          <h2>Inbox</h2>
-          <div className="human-counts">
-            <StatTile label="Pending requests" value={model.humanBridge.pending} tone={model.humanBridge.pending ? "warn" : "good"} />
-            <StatTile label="Unhandled notes" value={model.humanBridge.unhandled} tone={model.humanBridge.unhandled ? "warn" : "good"} />
-          </div>
-          <DataRow label="Latest note status" value={model.humanBridge.latestStatus} />
-          <DataRow label="Outbound records" value={model.humanBridge.outbound} />
-          <button
-            className="secondary-action"
-            disabled={model.humanBridge.action.kind === "disabled"}
-            onClick={() => runAction(model.humanBridge.action)}
-          >
-            {model.humanBridge.action.label}
-          </button>
-        </article>
-      </div>
+      {!noTarget && (
+        <div className="control-room-grid">
+          <QueueLedger
+            emptyMessage={model.queueLedger.emptyMessage}
+            onAction={runAction}
+            rows={model.queueLedger.rows}
+          />
+          <ConveyorMap model={model.conveyor} />
+          <SafetyMatrix onAction={runAction} rows={model.safety.rows} />
+          <EventLedger
+            emptyMessage={model.eventLedger.emptyMessage}
+            rows={model.eventLedger.rows}
+          />
+          <HumanBridgeMini model={model.humanBridge} onAction={runAction} />
+        </div>
+      )}
     </section>
   );
 }
@@ -553,12 +823,12 @@ function TargetRequiredPlaceholder(props: {
   onNavigate: (view: HomeRoute) => void;
 }) {
   const copy = targetRequiredCopy[props.view];
-  const Icon = views.find((view) => view.key === props.view)?.icon ?? FolderOpen;
+  const Icon = views.find((view) => view.key === props.view)?.icon ?? Home;
 
   return (
     <section className="target-placeholder">
       <div className="empty-mark">
-        <Icon size={26} />
+        <Icon className="surface-icon-image" size={42} />
       </div>
       <span className="target-placeholder-eyebrow">{viewLabel(props.view)}</span>
       <h1>{copy.title}</h1>
@@ -599,6 +869,8 @@ function LoadedView(props: {
   onOpenRecent: (target: RecentTarget) => void;
   onNavigate: (view: HomeRoute) => void;
   onRefresh: () => void;
+  onDirtyChange?: (view: ViewKey, message: string | null) => void;
+  onBusyChange?: (view: ViewKey, busy: boolean) => void;
   advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug";
 }) {
   const { snapshot } = props;
@@ -626,6 +898,8 @@ function LoadedView(props: {
         onOpenRecent={props.onOpenRecent}
         onNavigate={props.onNavigate}
         onRefresh={props.onRefresh}
+        onDirtyChange={(message) => props.onDirtyChange?.("Brief", message)}
+        onBusyChange={(busy) => props.onBusyChange?.("Brief", busy)}
       />
     );
   }
@@ -638,6 +912,8 @@ function LoadedView(props: {
         onChoose={props.onChoose}
         onNavigate={props.onNavigate}
         onRefresh={props.onRefresh}
+        onDirtyChange={(message) => props.onDirtyChange?.("Run", message)}
+        onBusyChange={(busy) => props.onBusyChange?.("Run", busy)}
       />
     );
   }
@@ -698,6 +974,8 @@ type CachedRouteSurfaceProps = {
   onOpenRecent: (target: RecentTarget) => void;
   onNavigate: (view: HomeRoute) => void;
   onRefresh: () => void;
+  onDirtyChange?: (view: ViewKey, message: string | null) => void;
+  onBusyChange?: (view: ViewKey, busy: boolean) => void;
   advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug";
 };
 
@@ -717,6 +995,8 @@ const CachedRouteSurface = memo(function CachedRouteSurface(props: CachedRouteSu
         onOpenRecent={props.onOpenRecent}
         onNavigate={props.onNavigate}
         onRefresh={props.onRefresh}
+        onDirtyChange={props.onDirtyChange}
+        onBusyChange={props.onBusyChange}
         advancedInitialTab={props.advancedInitialTab}
       />
     </div>
@@ -740,6 +1020,8 @@ function CachedLoadedView(props: {
   onNavigate: (view: HomeRoute) => void;
   onRefresh: () => void;
   cachedRoutes: CachedRouteVisits;
+  onDirtyChange?: (view: ViewKey, message: string | null) => void;
+  onBusyChange?: (view: ViewKey, busy: boolean) => void;
   advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug";
 }) {
   return (
@@ -756,6 +1038,8 @@ function CachedLoadedView(props: {
             onOpenRecent={props.onOpenRecent}
             onNavigate={props.onNavigate}
             onRefresh={props.onRefresh}
+            onDirtyChange={props.onDirtyChange}
+            onBusyChange={props.onBusyChange}
             recents={props.recents}
             snapshot={props.snapshot}
             view={view.key}
@@ -778,22 +1062,45 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
   const [paletteBusyId, setPaletteBusyId] = useState<PaletteCommandId | "">("");
   const [paletteError, setPaletteError] = useState("");
   const [paletteMessage, setPaletteMessage] = useState("");
+  const [announcement, setAnnouncement] = useState("");
   const [environmentDiagnostics, setEnvironmentDiagnostics] = useState<EnvironmentDiagnosticsSnapshot | null>(null);
   const [environmentDiagnosticsLoading, setEnvironmentDiagnosticsLoading] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(props.initialProjectMenuOpen ?? false);
   const [windowState, setWindowState] = useState<"windowed" | "maximized" | "fullscreen">("windowed");
+  const [nowTick, setNowTick] = useState(Date.now());
   const [cachedRoutes, setCachedRoutes] = useState<CachedRouteVisits>(() => createCachedRouteVisits());
   const [cachedRoutesTargetPath, setCachedRoutesTargetPath] = useState("");
+  const [dirtyRoutes, setDirtyRoutes] = useState<DirtyRouteState>({});
+  const [busyRoutes, setBusyRoutes] = useState<BusyRouteState>({});
   const [advancedInitialTab, setAdvancedInitialTab] = useState<
     "Files" | "Diagnostics" | "Settings" | "Debug" | undefined
   >();
   const projectMenuRef = useRef<HTMLDivElement>(null);
+  const projectChipRef = useRef<HTMLButtonElement>(null);
+  const projectMenuFirstButtonRef = useRef<HTMLButtonElement>(null);
+  const paletteTriggerRef = useRef<HTMLButtonElement>(null);
+  const lastFocusedBeforePaletteRef = useRef<HTMLElement | null>(null);
+  const sidebarNavRef = useRef<HTMLElement>(null);
+  const refreshInFlightRef = useRef(false);
+  const selectedTargetPathRef = useRef<string | null>(null);
 
   const topbarModel = useMemo(() => buildHomeModel(snapshot), [snapshot]);
   const status = topbarModel.statusLabel;
+  const topbarStatusLabel = formatTopbarStatusLabel(status);
   const tone = topbarModel.statusTone;
   const showStatusPill = tone !== "good" || !["active", "ready"].includes(status.toLowerCase());
   const sidebarBadges = useMemo(() => buildSidebarBadges(snapshot), [snapshot]);
+  const sidecar = useMemo(() => sidecarState(snapshot), [snapshot]);
+  const branchLabel = textValue(snapshot?.run.git?.branch, snapshot ? "Unknown branch" : "No branch");
+  const dirtyCount = numberValue(snapshot?.run.git?.dirty_count);
+  const dirtyLabel = formatDirtyLabel(dirtyCount, Boolean(snapshot));
+  const stale = Boolean(lastUpdatedAt && nowTick - lastUpdatedAt > 60_000);
+  const routeBusy = hasBusyRouteState(busyRoutes);
+  const shellBusy = Boolean(paletteBusyId) || routeBusy;
+  const updatedLabel = refreshing ? "Refreshing..." : stale ? "Refresh needed" : formatLastUpdated(lastUpdatedAt);
+  const updatedTitle = lastUpdatedAt
+    ? `${stale ? "Last refreshed" : "Updated"} ${new Date(lastUpdatedAt).toLocaleString()}`
+    : "Not loaded yet";
   const paletteCommands = useMemo(
     () => buildCommandPaletteModel({
       snapshot,
@@ -807,6 +1114,44 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
     if (!snapshot) return "Choose project";
     return topbarModel.projectName;
   }, [snapshot, topbarModel.projectName]);
+
+  function announce(message: string) {
+    setAnnouncement(message);
+  }
+
+  function openPalette() {
+    lastFocusedBeforePaletteRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : paletteTriggerRef.current;
+    setPaletteOpen(true);
+  }
+
+  function closePalette() {
+    setPaletteOpen(false);
+    window.setTimeout(() => {
+      lastFocusedBeforePaletteRef.current?.focus();
+    }, 0);
+  }
+
+  function handleSidebarKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    if (!["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"].includes(event.key)) return;
+    const buttons = Array.from(
+      sidebarNavRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    );
+    if (!buttons.length) return;
+    const currentIndex = Math.max(0, buttons.indexOf(document.activeElement as HTMLButtonElement));
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? buttons.length - 1
+          : event.key === "ArrowDown" || event.key === "ArrowRight"
+            ? (currentIndex + 1) % buttons.length
+            : (currentIndex - 1 + buttons.length) % buttons.length;
+    event.preventDefault();
+    buttons[nextIndex]?.focus();
+  }
 
   async function syncNativeWindowState() {
     try {
@@ -830,10 +1175,12 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
   function applyEnvelope(
     envelope: BackendEnvelope<ProjectSnapshot>,
     target?: RecentTarget,
+    options: { announceLoaded?: boolean } = {},
   ) {
     if (!envelope.ok || !envelope.data) {
       setLoadState("error");
       setError(envelope.message ?? "The backend command failed.");
+      announce(envelope.message ?? "The backend command failed.");
       return;
     }
     setSnapshot(envelope.data);
@@ -847,81 +1194,176 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
     setError(null);
     setLastUpdatedAt(Date.now());
     setLoadState("loaded");
+    if (options.announceLoaded !== false) {
+      announce(`Loaded ${envelope.data.target.name}.`);
+    }
+  }
+
+  function setRouteDirtyState(view: ViewKey, message: string | null) {
+    setDirtyRoutes((current) => {
+      if (!message) {
+        if (!current[view]) return current;
+        const next = { ...current };
+        delete next[view];
+        return next;
+      }
+      if (current[view] === message) return current;
+      return { ...current, [view]: message };
+    });
+  }
+
+  function setRouteBusyState(view: ViewKey, busy: boolean) {
+    setBusyRoutes((current) => {
+      if (!busy) {
+        if (!current[view]) return current;
+        const next = { ...current };
+        delete next[view];
+        return next;
+      }
+      if (current[view] === true) return current;
+      return { ...current, [view]: true };
+    });
+  }
+
+  function blockDirtyRouteExit(action: string): boolean {
+    const message = dirtyRoutes[activeView];
+    if (!message) return false;
+    const detail = `${message} ${action}`;
+    setError(detail);
+    announce(detail);
+    return true;
   }
 
   async function chooseProject() {
+    if (blockDirtyRouteExit(`Save or clear changes before switching projects from ${viewLabel(activeView)}.`)) return;
     setProjectMenuOpen(false);
     setLoadState("loading");
     setRefreshing(false);
     setError(null);
+    announce("Opening project chooser.");
     try {
       const result = await selectProjectFolder();
       if (!result) {
         setLoadState(snapshot ? "loaded" : "idle");
+        announce("Project selection cancelled.");
         return;
       }
       applyEnvelope(result.snapshot, result.target);
       await refreshRecents();
     } catch (err) {
       setLoadState("error");
-      setError(err instanceof Error ? err.message : "Could not open the selected project.");
+      const message = err instanceof Error ? err.message : "Could not open the selected project.";
+      setError(message);
+      announce(message);
     }
   }
 
   async function openRecent(target: RecentTarget) {
+    if (blockDirtyRouteExit(`Save or clear changes before opening another project from ${viewLabel(activeView)}.`)) return;
     setProjectMenuOpen(false);
     setLoadState("loading");
     setRefreshing(false);
     setError(null);
+    announce(`Loading ${target.name}.`);
     try {
       const envelope = await loadProjectSnapshot(target.path);
       applyEnvelope(envelope, target);
       await refreshRecents();
     } catch (err) {
       setLoadState("error");
-      setError(err instanceof Error ? err.message : "Could not load the recent project.");
+      const message = err instanceof Error ? err.message : "Could not load the recent project.";
+      setError(message);
+      announce(message);
     }
   }
 
-  async function refreshProject() {
+  async function refreshProject(options: {
+    silent?: boolean;
+    respectDirtyRoutes?: boolean;
+    updateRecents?: boolean;
+  } = {}) {
     if (!selectedTarget) return;
-    setRefreshing(true);
-    setError(null);
+    const refreshTarget = selectedTarget;
+    const silent = options.silent === true;
+    const shouldRespectRouteState = options.respectDirtyRoutes === true;
+    const updateRecents = options.updateRecents !== false;
+    if (
+      shouldRespectRouteState &&
+      !canAutoRefreshProject({
+        hasSelectedTarget: true,
+        loadState,
+        refreshInFlight: refreshInFlightRef.current,
+        hasDirtyRoutes: hasDirtyRouteState(dirtyRoutes),
+        hasBusyCommands: shellBusy,
+      })
+    ) {
+      return;
+    }
+    if (refreshInFlightRef.current || loadState === "loading") return;
+    refreshInFlightRef.current = true;
+    if (!silent) {
+      setRefreshing(true);
+      setError(null);
+      announce("Refreshing target.");
+    }
     try {
-      const envelope = await loadProjectSnapshot(selectedTarget.path);
+      const envelope = updateRecents
+        ? await loadProjectSnapshot(refreshTarget.path)
+        : await runBackendCommand<ProjectSnapshot>({
+            command: "project.load_snapshot",
+            target: refreshTarget.path,
+          });
+      if (selectedTargetPathRef.current !== refreshTarget.path) return;
       if (!envelope.ok || !envelope.data) {
-        setError(envelope.message ?? "Could not refresh the selected project.");
+        const message = envelope.message ?? "Could not refresh the selected project.";
+        if (!silent) {
+          setError(message);
+          announce(message);
+        }
         return;
       }
-      applyEnvelope(envelope, selectedTarget);
-      await refreshRecents();
+      applyEnvelope(envelope, refreshTarget, { announceLoaded: false });
+      if (updateRecents) await refreshRecents();
+      if (!silent) announce("Target refreshed.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not refresh the selected project.");
+      const message = err instanceof Error ? err.message : "Could not refresh the selected project.";
+      if (!silent) {
+        setError(message);
+        announce(message);
+      }
     } finally {
-      setRefreshing(false);
+      refreshInFlightRef.current = false;
+      if (!silent) setRefreshing(false);
     }
   }
 
   async function runEnvironmentDiagnostics() {
     setEnvironmentDiagnosticsLoading(true);
     setError(null);
+    announce("Running backend environment checks.");
     try {
       const payload = await runBackendCommand<EnvironmentDiagnosticsSnapshot>({
         command: "diagnostics.environment",
       });
       if (!payload.ok || !payload.data) {
-        setError(payload.message ?? "Could not run backend environment checks.");
+        const message = payload.message ?? "Could not run backend environment checks.";
+        setError(message);
+        announce(message);
         return;
       }
       setEnvironmentDiagnostics(payload.data);
+      announce("Backend environment checks completed.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not run backend environment checks.");
+      const message = err instanceof Error ? err.message : "Could not run backend environment checks.";
+      setError(message);
+      announce(message);
     } finally {
       setEnvironmentDiagnosticsLoading(false);
     }
   }
 
   function navigate(view: HomeRoute) {
+    if (view !== activeView && loadState !== "loaded" && blockDirtyRouteExit(`Save or clear changes before leaving ${viewLabel(activeView)}.`)) return;
     if (view !== "Advanced") {
       setAdvancedInitialTab(undefined);
     }
@@ -930,6 +1372,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
   }
 
   function closeProject() {
+    if (blockDirtyRouteExit(`Save or clear changes before closing ${viewLabel(activeView)}.`)) return;
     setProjectMenuOpen(false);
     setSnapshot(null);
     setSelectedTarget(null);
@@ -938,9 +1381,14 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
     setRefreshing(false);
     setLoadState("idle");
     setAdvancedInitialTab(undefined);
+    setDirtyRoutes({});
+    setBusyRoutes({});
     setCachedRoutes(createCachedRouteVisits());
     setCachedRoutesTargetPath("");
+    refreshInFlightRef.current = false;
+    selectedTargetPathRef.current = null;
     setActiveView("Home");
+    announce("Project closed.");
   }
 
   async function revealSelectedProject() {
@@ -963,12 +1411,12 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
     }
   }
 
-  async function runPaletteStreamed(command: PaletteCommand, backendCommand: string, confirmMessage?: string) {
+  async function runPaletteStreamed(command: PaletteCommand, backendCommand: string) {
     if (!snapshot) return;
-    if (confirmMessage && !confirm(confirmMessage)) return;
     setPaletteBusyId(command.id);
     setPaletteError("");
     setPaletteMessage(`${command.title} started.`);
+    announce(`${command.title} started.`);
     try {
       const payload = await runBackendCommandStreamed({
         runId: `palette-${command.id}-${Date.now()}`,
@@ -976,13 +1424,18 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
         target: snapshot.target.path,
       });
       if (!payload.ok) {
-        setPaletteError(payload.message ?? `${command.title} failed.`);
+        const message = payload.message ?? `${command.title} failed.`;
+        setPaletteError(message);
+        announce(message);
         return;
       }
       setPaletteMessage(`${command.title} completed.`);
+      announce(`${command.title} completed.`);
       await refreshProject();
     } catch (caught) {
-      setPaletteError(caught instanceof Error ? caught.message : String(caught));
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setPaletteError(message);
+      announce(message);
     } finally {
       setPaletteBusyId("");
     }
@@ -991,6 +1444,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
   async function executePaletteCommand(command: PaletteCommand) {
     if (command.disabledReason) {
       setPaletteError(command.disabledReason);
+      announce(command.disabledReason);
       return;
     }
     setPaletteError("");
@@ -998,39 +1452,64 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
     const target = snapshot?.target.path ?? "";
 
     if (command.id === "open-project") {
-      setPaletteOpen(false);
+      closePalette();
       await chooseProject();
       return;
     }
     if (command.id === "close-project") {
       closeProject();
-      setPaletteOpen(false);
+      closePalette();
       return;
     }
     if (command.id === "create-new-project") {
       navigate("Brief");
-      setPaletteOpen(false);
+      closePalette();
+      return;
+    }
+    if (command.id === "open-control-room") {
+      navigate("Home");
+      closePalette();
       return;
     }
     if (command.id === "continue-brief" || command.id === "scaffold-bootstrap") {
       navigate("Brief");
-      setPaletteOpen(false);
+      closePalette();
+      return;
+    }
+    if (command.id === "open-run-control") {
+      navigate("Run");
+      closePalette();
       return;
     }
     if (command.id === "open-observatory") {
       navigate("Observatory");
-      setPaletteOpen(false);
+      closePalette();
+      return;
+    }
+    if (command.id === "open-human-bridge") {
+      navigate("Inbox");
+      closePalette();
+      return;
+    }
+    if (command.id === "open-review") {
+      navigate("Review");
+      closePalette();
+      return;
+    }
+    if (command.id === "open-sidecar") {
+      navigate("Advanced");
+      closePalette();
       return;
     }
     if (command.id === "send-note-next-run") {
       navigate("Inbox");
-      setPaletteOpen(false);
+      closePalette();
       return;
     }
     if (command.id === "open-diagnostics") {
       setAdvancedInitialTab("Diagnostics");
       setActiveView("Advanced");
-      setPaletteOpen(false);
+      closePalette();
       return;
     }
     if (command.id === "reveal-project") {
@@ -1038,9 +1517,12 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       try {
         await revealProject(target);
         setPaletteMessage("Project revealed.");
-        setPaletteOpen(false);
+        announce("Project revealed.");
+        closePalette();
       } catch (caught) {
-        setPaletteError(caught instanceof Error ? caught.message : String(caught));
+        const message = caught instanceof Error ? caught.message : String(caught);
+        setPaletteError(message);
+        announce(message);
       } finally {
         setPaletteBusyId("");
       }
@@ -1051,9 +1533,12 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       try {
         await openProjectInEditor(target);
         setPaletteMessage("Project opened in editor.");
-        setPaletteOpen(false);
+        announce("Project opened in editor.");
+        closePalette();
       } catch (caught) {
-        setPaletteError(caught instanceof Error ? caught.message : String(caught));
+        const message = caught instanceof Error ? caught.message : String(caught);
+        setPaletteError(message);
+        announce(message);
       } finally {
         setPaletteBusyId("");
       }
@@ -1065,6 +1550,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
         const picked = await selectContextFiles();
         if (!picked.length) {
           setPaletteMessage("No context files selected.");
+          announce("No context files selected.");
           return;
         }
         const payload = await runBackendCommand({
@@ -1074,24 +1560,29 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
           projectName: snapshot?.brief.project_name || snapshot?.target.name || "New Project",
         });
         if (!payload.ok) {
-          setPaletteError(payload.message ?? "Context import failed.");
+          const message = payload.message ?? "Context import failed.";
+          setPaletteError(message);
+          announce(message);
           return;
         }
         setPaletteMessage("Context files imported.");
+        announce("Context files imported.");
         await refreshProject();
       } catch (caught) {
-        setPaletteError(caught instanceof Error ? caught.message : String(caught));
+        const message = caught instanceof Error ? caught.message : String(caught);
+        setPaletteError(message);
+        announce(message);
       } finally {
         setPaletteBusyId("");
       }
       return;
     }
     if (command.id === "start-automation") {
-      await runPaletteStreamed(command, "automation.start", "Start automation for this project?");
+      await runPaletteStreamed(command, "automation.start");
       return;
     }
     if (command.id === "stop-automation") {
-      await runPaletteStreamed(command, "automation.stop", "Stop automation for this project?");
+      await runPaletteStreamed(command, "automation.stop");
       return;
     }
     if (command.id === "run-safety-check") {
@@ -1107,13 +1598,18 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
           reviewDir: targetSubdir(target, "first-review"),
         });
         if (!payload.ok) {
-          setPaletteError(payload.message ?? "Could not export the review files.");
+          const message = payload.message ?? "Could not export the review files.";
+          setPaletteError(message);
+          announce(message);
           return;
         }
         setPaletteMessage("Review export written.");
+        announce("Review export written.");
         await refreshProject();
       } catch (caught) {
-        setPaletteError(caught instanceof Error ? caught.message : String(caught));
+        const message = caught instanceof Error ? caught.message : String(caught);
+        setPaletteError(message);
+        announce(message);
       } finally {
         setPaletteBusyId("");
       }
@@ -1123,9 +1619,12 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       setPaletteBusyId(command.id);
       try {
         await openManagedFile(target, "monitor.automation_tasks");
-        setPaletteOpen(false);
+        announce("Task state opened.");
+        closePalette();
       } catch (caught) {
-        setPaletteError(caught instanceof Error ? caught.message : String(caught));
+        const message = caught instanceof Error ? caught.message : String(caught);
+        setPaletteError(message);
+        announce(message);
       } finally {
         setPaletteBusyId("");
       }
@@ -1142,12 +1641,17 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
           outputDir,
         });
         if (!payload.ok) {
-          setPaletteError(payload.message ?? "Could not export the debug files.");
+          const message = payload.message ?? "Could not export the debug files.";
+          setPaletteError(message);
+          announce(message);
           return;
         }
         setPaletteMessage("Debug export written.");
+        announce("Debug export written.");
       } catch (caught) {
-        setPaletteError(caught instanceof Error ? caught.message : String(caught));
+        const message = caught instanceof Error ? caught.message : String(caught);
+        setPaletteError(message);
+        announce(message);
       } finally {
         setPaletteBusyId("");
       }
@@ -1159,8 +1663,50 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
   }, []);
 
   useEffect(() => {
+    const id = window.setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    selectedTargetPathRef.current = selectedTarget?.path ?? null;
+  }, [selectedTarget?.path]);
+
+  useEffect(() => {
+    if (!selectedTarget || loadState !== "loaded") return;
+    const id = window.setInterval(() => {
+      void refreshProject({
+        silent: true,
+        respectDirtyRoutes: true,
+        updateRecents: false,
+      });
+    }, autoRefreshIntervalMs(snapshot));
+    return () => window.clearInterval(id);
+  }, [selectedTarget?.path, loadState, snapshot, dirtyRoutes, shellBusy]);
+
+  useEffect(() => {
+    if (!selectedTarget) return;
+    function refreshOnReturn() {
+      if (document.visibilityState === "hidden") return;
+      if (!shouldRefreshOnFocus(lastUpdatedAt)) return;
+      void refreshProject({
+        silent: true,
+        respectDirtyRoutes: true,
+        updateRecents: false,
+      });
+    }
+    window.addEventListener("focus", refreshOnReturn);
+    document.addEventListener("visibilitychange", refreshOnReturn);
+    return () => {
+      window.removeEventListener("focus", refreshOnReturn);
+      document.removeEventListener("visibilitychange", refreshOnReturn);
+    };
+  }, [selectedTarget?.path, lastUpdatedAt, loadState, dirtyRoutes, shellBusy]);
+
+  useEffect(() => {
     setCachedRoutes(createCachedRouteVisits());
     setCachedRoutesTargetPath(snapshot?.target.path ?? "");
+    setDirtyRoutes({});
+    setBusyRoutes({});
   }, [snapshot?.target.path]);
 
   useEffect(() => {
@@ -1200,6 +1746,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
 
   useEffect(() => {
     if (!projectMenuOpen) return;
+    window.setTimeout(() => projectMenuFirstButtonRef.current?.focus(), 0);
     function onPointerDown(event: globalThis.PointerEvent) {
       const menu = projectMenuRef.current;
       if (menu && !menu.contains(event.target as Node)) {
@@ -1207,7 +1754,11 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       }
     }
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setProjectMenuOpen(false);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setProjectMenuOpen(false);
+        projectChipRef.current?.focus();
+      }
     }
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
@@ -1221,12 +1772,43 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
     function onKeyDown(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setPaletteOpen((open) => !open);
+        if (paletteOpen) closePalette();
+        else openPalette();
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, [paletteOpen]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      const target = event.target as HTMLElement | null;
+      const button = target?.closest("button");
+      const tablist = button?.closest('[role="tablist"]');
+      if (!button || !tablist) return;
+      const buttons = Array.from(tablist.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+      if (!buttons.length) return;
+      const currentIndex = Math.max(0, buttons.indexOf(button));
+      const nextIndex =
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? buttons.length - 1
+            : event.key === "ArrowRight"
+              ? (currentIndex + 1) % buttons.length
+              : (currentIndex - 1 + buttons.length) % buttons.length;
+      event.preventDefault();
+      buttons[nextIndex]?.focus();
+      buttons[nextIndex]?.click();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  useEffect(() => {
+    document.title = `${viewLabel(activeView)} - Diffmogger`;
+  }, [activeView]);
 
   return (
     <div className="app-shell" data-window-state={windowState}>
@@ -1241,22 +1823,33 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       </header>
 
       <aside className="sidebar">
-        <nav>
+        <nav
+          aria-label="Primary surfaces"
+          data-testid="primary-icon-rail"
+          onKeyDown={handleSidebarKeyDown}
+          ref={sidebarNavRef}
+        >
           {views.map((view) => {
             const Icon = view.icon;
             const badge = sidebarBadges[view.key];
             const badgeLabel = badge?.label ?? "";
             const visibleBadgeLabel = /^\d+$/.test(badgeLabel) ? badgeLabel : "";
+            const ariaLabel = badgeLabel ? `${view.label}, ${badgeLabel}` : view.label;
             return (
               <button
-                aria-label={view.label}
+                aria-current={activeView === view.key ? "page" : undefined}
+                aria-label={ariaLabel}
                 className={activeView === view.key ? "active" : ""}
+                data-aliases={`${view.label} ${view.legacyLabel}`}
+                data-legacy-label={view.legacyLabel}
                 data-sidebar-view={view.key}
+                data-testid={`sidebar-nav-${view.key}`}
+                data-tooltip={view.label}
                 key={view.key}
                 onClick={() => navigate(view.key)}
                 title={view.label}
               >
-                <Icon size={18} />
+                <Icon className="surface-icon-image" size={28} />
                 <span className="sidebar-label">{view.label}</span>
                 {badge && (
                   <em
@@ -1274,26 +1867,34 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       </aside>
 
       <main className="workspace">
-        <section className="topbar">
+        <section className="topbar target-context-strip" aria-label="Target context strip" data-testid="target-context-strip">
           <div className="project-menu-wrap" ref={projectMenuRef}>
             <button
+              aria-label={snapshot ? `Switch project, current target ${projectChip}` : "Choose project"}
               aria-expanded={projectMenuOpen}
+              aria-haspopup="menu"
               className={`project-chip ${projectMenuOpen ? "open" : ""}`}
+              ref={projectChipRef}
               title={selectedTarget?.path ?? "Choose a project folder"}
               onClick={() => setProjectMenuOpen((open) => !open)}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setProjectMenuOpen(true);
+                }
+              }}
             >
-              <img src={diffmoggerIcon} alt="" aria-hidden="true" />
               <span>{projectChip}</span>
               <ChevronDown size={14} />
             </button>
             {projectMenuOpen && (
               <div className="project-menu" role="menu" data-no-drag>
                 <div className="project-menu-group">
-                  <button onClick={chooseProject}>
+                  <button ref={projectMenuFirstButtonRef} role="menuitem" onClick={chooseProject}>
                     <FolderOpen size={15} />
                     Switch project...
                   </button>
-                  <button onClick={() => navigate("Brief")}>
+                  <button role="menuitem" onClick={() => navigate("Brief")}>
                     <FileText size={15} />
                     New project
                   </button>
@@ -1302,7 +1903,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
                   <div className="project-menu-group">
                     <strong>Recent</strong>
                     {recents.slice(0, 5).map((recent) => (
-                      <button key={recent.path} onClick={() => openRecent(recent)} title={recent.path}>
+                      <button key={recent.path} role="menuitem" onClick={() => openRecent(recent)} title={recent.path}>
                         <span>{recent.name}</span>
                         <small>{formatTimestamp(recent.lastOpenedAt)}</small>
                       </button>
@@ -1310,15 +1911,15 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
                   </div>
                 )}
                 <div className="project-menu-group">
-                  <button disabled={!selectedTarget} onClick={revealSelectedProject}>
+                  <button disabled={!selectedTarget} role="menuitem" onClick={revealSelectedProject}>
                     <FolderOpen size={15} />
                     Reveal in Finder
                   </button>
-                  <button disabled={!selectedTarget} onClick={openSelectedProjectInEditor}>
+                  <button disabled={!selectedTarget} role="menuitem" onClick={openSelectedProjectInEditor}>
                     <ExternalLink size={15} />
                     Open in Editor
                   </button>
-                  <button className="danger" disabled={!selectedTarget} onClick={closeProject}>
+                  <button disabled={!selectedTarget} role="menuitem" onClick={closeProject}>
                     <LogOut size={15} />
                     Close Project
                   </button>
@@ -1326,29 +1927,59 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
               </div>
             )}
           </div>
-          {showStatusPill && (
-            <div className={`status-pill ${tone}`}>
-              {tone === "critical" || tone === "warn" ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} />}
-              {status}
-            </div>
-          )}
-          <div className="topbar-meta">{refreshing ? "Refreshing..." : formatLastUpdated(lastUpdatedAt)}</div>
-          <button
-            className={`icon-button ${refreshing ? "refreshing" : ""}`}
-            disabled={!selectedTarget || loadState === "loading" || refreshing}
-            title="Refresh"
-            onClick={refreshProject}
-          >
-            <RefreshCw className={refreshing ? "spin" : ""} size={17} />
-          </button>
-          <button
-            className="command-button"
-            title="Command Palette (Cmd/Ctrl+K)"
-            onClick={() => setPaletteOpen((open) => !open)}
-          >
-            <Command size={17} />
-            Command
-          </button>
+          <div className="target-context-meta" aria-label="Target metadata">
+            <span className={`context-chip ${snapshot ? "info" : "quiet"}`} data-testid="target-context-branch" title={branchLabel}>
+              <GitBranch size={14} />
+              <span>{branchLabel}</span>
+            </span>
+            <span className={`context-chip ${sidecar.tone}`} data-testid="target-context-sidecar" title={sidecar.label}>
+              <Database size={14} />
+              <span>{sidecar.label}</span>
+            </span>
+            <span className={`context-chip ${dirtyCount ? "warn" : snapshot ? "good" : "quiet"}`} data-testid="target-context-dirty" title={dirtyLabel}>
+              {dirtyCount ? <AlertTriangle size={14} /> : <CheckCircle2 size={14} />}
+              <span>{dirtyLabel}</span>
+            </span>
+            {showStatusPill && (
+              <span className={`status-pill context-chip ${tone}`} data-testid="target-context-status" title={topbarStatusLabel}>
+                {tone === "critical" || tone === "warn" ? <AlertTriangle size={14} /> : <CheckCircle2 size={14} />}
+                <span>{topbarStatusLabel}</span>
+              </span>
+            )}
+            <span
+              className={`context-chip ${stale ? "warn" : "quiet"} updated-chip`}
+              data-testid="target-context-updated"
+              title={updatedTitle}
+            >
+              <span>{updatedLabel}</span>
+            </span>
+          </div>
+          <div className="topbar-actions">
+            <button
+              aria-label="Refresh target"
+              className={`icon-button ${refreshing ? "refreshing" : ""}`}
+              data-tooltip="Refresh target"
+              disabled={!selectedTarget || loadState === "loading" || refreshing}
+              title="Refresh target"
+              onClick={() => void refreshProject()}
+            >
+              <RefreshCw className={refreshing ? "spin" : ""} size={17} />
+            </button>
+            <button
+              aria-label="Open command palette"
+              className="command-button"
+              data-testid="command-palette-trigger"
+              ref={paletteTriggerRef}
+              title="Command Palette (Cmd/Ctrl+K)"
+              onClick={() => {
+                if (paletteOpen) closePalette();
+                else openPalette();
+              }}
+            >
+              <Command size={17} />
+              <span>Command</span>
+            </button>
+          </div>
         </section>
 
         <section className="stage">
@@ -1366,6 +1997,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
                 onOpenRecent={openRecent}
                 onNavigate={navigate}
                 onRefresh={refreshProject}
+                onDirtyChange={(message) => setRouteDirtyState("Brief", message)}
               />
             ) : activeView === "Home" ? (
               <HomePage
@@ -1391,7 +2023,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
             ) : null)}
 
           {loadState === "error" && (
-            <section className="error-state">
+            <section className="error-state" role="alert">
               <h1>Backend Error</h1>
               <p>{error}</p>
               <div className="error-actions">
@@ -1400,7 +2032,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
                   Choose project
                 </button>
                 {selectedTarget && (
-                  <button className="secondary-action" onClick={refreshProject}>
+                  <button className="secondary-action" onClick={() => void refreshProject()}>
                     <RefreshCw size={17} />
                     Retry
                   </button>
@@ -1424,6 +2056,8 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
                   ? cachedRoutes
                   : createCachedRouteVisits()
               }
+              onDirtyChange={setRouteDirtyState}
+              onBusyChange={setRouteBusyState}
               advancedInitialTab={advancedInitialTab}
             />
           )}
@@ -1436,10 +2070,14 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
           busyCommandId={paletteBusyId}
           error={paletteError}
           message={paletteMessage}
-          onClose={() => setPaletteOpen(false)}
+          onClose={closePalette}
           onExecute={(command) => void executePaletteCommand(command)}
         />
       )}
+
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-testid="shell-live-region">
+        {announcement}
+      </div>
 
       {error && loadState !== "error" && (
         <div className="shell-toast error" role="status">

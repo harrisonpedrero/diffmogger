@@ -34,6 +34,7 @@ const READ_ONLY_BACKEND_COMMANDS: &[&str] = &[
 ];
 
 const MUTATING_BACKEND_COMMANDS: &[&str] = &[
+    "brief.generate_intake",
     "brief.save_draft",
     "brief.scaffold_bootstrap",
     "context.import",
@@ -664,7 +665,22 @@ fn build_backend_args(
         args.push(content.to_string());
     }
 
-    if matches!(command, "brief.save_draft" | "brief.scaffold_bootstrap") {
+    if command == "brief.generate_intake" {
+        let message = body.ok_or_else(|| {
+            CommandError::new(
+                "missing_body",
+                "A build description is required for brief.generate_intake.",
+                json!({ "command": command }),
+            )
+        })?;
+        args.push("--body".to_string());
+        args.push(message.to_string());
+    }
+
+    if matches!(
+        command,
+        "brief.save_draft" | "brief.scaffold_preview" | "brief.scaffold_bootstrap"
+    ) {
         let payload = intake_json.ok_or_else(|| {
             CommandError::new(
                 "invalid_intake",
@@ -746,10 +762,16 @@ fn build_backend_args(
         }
     }
 
-    if command == "brief.scaffold_bootstrap" {
+    if matches!(
+        command,
+        "brief.scaffold_preview" | "brief.scaffold_bootstrap"
+    ) {
         if force.unwrap_or(false) {
             args.push("--force".to_string());
         }
+    }
+
+    if command == "brief.scaffold_bootstrap" {
         if run_codex.unwrap_or(false) {
             args.push("--run-codex".to_string());
         }
@@ -1632,5 +1654,45 @@ mod tests {
         assert!(backend_command_allowed("ticket.add"));
         assert!(backend_command_allowed("ticket.import"));
         assert!(backend_command_allowed("ticket.accept_draft"));
+    }
+
+    #[test]
+    fn scaffold_preview_forwards_intake_json_and_force() {
+        let root = kit_root().expect("Diffmogger kit root should resolve during native tests");
+        let root_text = root.display().to_string();
+        let (_cwd, args) = build_backend_args(
+            "brief.scaffold_preview",
+            Some(&root_text),
+            None,
+            None,
+            None,
+            Some(r#"{"project_name":"Preview"}"#),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("preview args should build");
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--intake-json", r#"{"project_name":"Preview"}"#]));
+        assert!(args.iter().any(|arg| arg == "--force"));
     }
 }

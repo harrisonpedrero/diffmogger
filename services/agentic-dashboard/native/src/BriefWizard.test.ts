@@ -3,6 +3,7 @@ import {
   type IntakeDraft,
   applyAutomationScope,
   automationScopeForDraft,
+  lowCortisolDraftFromGeneratedIntake,
 } from "./BriefWizard";
 
 function draft(overrides: Partial<IntakeDraft> = {}): IntakeDraft {
@@ -82,5 +83,36 @@ describe("Brief automation mode mapping", () => {
 
     expect(ticket.ticket_run_seed_tickets).toHaveLength(1);
     expect(ticket.ticket_run_seed_tickets[0].status).toBe("pending");
+  });
+
+  it("normalizes low cortisol generated intake to ticket-file defaults", () => {
+    const next = lowCortisolDraftFromGeneratedIntake(
+      {
+        project_name: "Gentle Builder",
+        product_goal: "Build a small planning app.",
+        target_user: "Solo builders",
+        desired_first_demo: "A user can add a plan.",
+        human_bridge_mode: "local_notifier",
+        optional_mcp_servers: ["context7", "playwright"],
+        automation_run_mode: "continuous_improvement",
+        automation_role_profile: "single_lane",
+        ticket_run_seed_tickets: [
+          {
+            id: "TICKET-001",
+            summary: "Create the first planning screen",
+            status: "pending",
+          },
+        ],
+      },
+      draft({ additional_context_files: [".diffmogger/context/notes.md"] }),
+      "Target",
+    );
+
+    expect(next.automation_run_mode).toBe("ticket_campaign");
+    expect(next.ticket_run_file).toBe(".diffmogger/state/TICKET_RUN.md");
+    expect(next.optional_mcp_servers).toEqual([]);
+    expect(next.human_bridge_mode).toBe("file_only");
+    expect(next.ticket_run_seed_tickets).toHaveLength(1);
+    expect(next.additional_context_files).toEqual([".diffmogger/context/notes.md"]);
   });
 });

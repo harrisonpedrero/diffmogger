@@ -70,6 +70,12 @@ describe("RunPage", () => {
 
     expect(html).toContain("Start");
     expect(html).toContain("Stop");
+    const controlGridStart = html.indexOf('class="run-control-grid"');
+    const nextPanelStart = html.indexOf('class="panel run-process-panel"', controlGridStart);
+    expect(controlGridStart).toBeGreaterThan(-1);
+    expect(nextPanelStart).toBeGreaterThan(controlGridStart);
+    expect(html.slice(controlGridStart, nextPanelStart)).toContain("Review export");
+    expect(html).not.toContain("run-status-actions");
     expect(html).not.toContain(">Run</button>");
     expect(html).toContain("Continuous automation is running.");
   });
@@ -88,5 +94,32 @@ describe("RunPage", () => {
     expect(html).toContain("Ticket Queue");
     expect(html).toContain("Preview Import");
     expect(html).toContain("Apply Import");
+  });
+
+  it("keeps the ready run banner badge-only instead of duplicating the headline", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            controls: {
+              is_scaffolded: true,
+              is_running: false,
+              can_start_automation: true,
+              can_stop_automation: false,
+              can_run_safety_check: true,
+            },
+            automation: { state: "stopped", message: "No automation is running." },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("run-status-main badge-only");
+    expect(html).toContain(">Ready</span>");
+    expect(html).not.toContain("<h1>Ready</h1>");
   });
 });

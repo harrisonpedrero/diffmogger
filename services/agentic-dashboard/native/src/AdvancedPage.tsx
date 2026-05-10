@@ -38,6 +38,12 @@ import { scheduleAfterPaint } from "./performance";
 type AdvancedTab = "Files" | "Diagnostics" | "Settings" | "Debug";
 
 const tabs: AdvancedTab[] = ["Files", "Diagnostics", "Settings", "Debug"];
+const tabLabels: Record<AdvancedTab, string> = {
+  Files: "Files",
+  Diagnostics: "Diagnostics",
+  Settings: "Settings",
+  Debug: "Debug bundle",
+};
 const fileCategories = [
   "Core state",
   "Inbox",
@@ -493,12 +499,18 @@ export function AdvancedPage(props: {
   const validationItems = validation?.items ?? [];
   const debugDir = debugOutputDir || `${target}/target/debug-bundles`;
   const selectedPath = text(loadedFile?.file.path ?? selectedFile?.path ?? selectedFile?.rel_path, "");
+  const editableFileCount = files.filter((file) => file.editable).length;
+  const missingFileCount = files.filter((file) => !file.exists).length;
+  const diagnosticsStatus = text(
+    diagnostics?.required_files.status ?? diagnostics?.integration_safety.status ?? diagnostics?.prerequisites.status,
+    "not run",
+  );
 
   return (
     <section className="advanced-page">
       <div className="advanced-header">
         <div>
-          <h1>Debug</h1>
+          <h1>Sidecar</h1>
           <p>Managed files, diagnostics, settings, and debug exports.</p>
         </div>
         <div className="advanced-header-actions">
@@ -513,22 +525,51 @@ export function AdvancedPage(props: {
         </div>
       </div>
 
-      <div className="advanced-tabs">
+      <section className="sidecar-state-strip" aria-label="Sidecar state">
+        <div>
+          <span>Managed files</span>
+          <strong>{files.length}</strong>
+          <p>{editableFileCount} editable · {missingFileCount} missing</p>
+        </div>
+        <div className={dirty ? "warn" : "good"}>
+          <span>Editor</span>
+          <strong>{editorModel.statusLabel}</strong>
+          <p>{selectedFile?.label ?? "No managed file selected"}</p>
+        </div>
+        <div className={statusTone(diagnosticsStatus)}>
+          <span>Diagnostics</span>
+          <strong>{diagnosticsStatus}</strong>
+          <p>{diagnostics ? "Latest diagnostic snapshot loaded." : "Run checks to load backend evidence."}</p>
+        </div>
+        <div>
+          <span>Debug bundle</span>
+          <strong>{debugBundle ? "Exported" : "Ready"}</strong>
+          <p>Secrets and arbitrary source files are excluded.</p>
+        </div>
+      </section>
+
+      <div className="advanced-tabs" role="tablist" aria-label="Sidecar sections">
         {tabs.map((tab) => (
-          <button className={activeTab === tab ? "active" : ""} key={tab} onClick={() => setActiveTab(tab)}>
-            {tab}
+          <button
+            aria-selected={activeTab === tab}
+            className={activeTab === tab ? "active" : ""}
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            role="tab"
+          >
+            {tabLabels[tab]}
           </button>
         ))}
       </div>
 
       {error && (
-        <div className="brief-error">
+        <div className="brief-error" role="alert">
           <AlertTriangle size={16} />
           {error}
         </div>
       )}
       {notice && (
-        <div className="success-callout quiet">
+        <div className="success-callout quiet" role="status" aria-live="polite">
           <CheckCircle2 size={16} />
           <div>
             <strong>{notice}</strong>
@@ -780,12 +821,12 @@ export function AdvancedPage(props: {
           <article className="panel span-2">
             <div className="panel-heading-row">
               <div>
-                <h2>Debug export</h2>
+                <h2>Debug bundle</h2>
                 <p>Exports app notes, backend command metadata, dashboard state, safety checks, and diagnostics without secrets.</p>
               </div>
               <button className="primary-action" disabled={busy === "debug-bundle"} onClick={() => void exportDebugBundle()}>
                 <FileArchive size={15} />
-                Export debug ZIP
+                Export debug
               </button>
             </div>
             <label className="brief-field">

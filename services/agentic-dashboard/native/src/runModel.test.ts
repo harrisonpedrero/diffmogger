@@ -95,7 +95,7 @@ describe("buildRunModel", () => {
       }),
     );
 
-    expect(model.banner.headline).toBe("Not Ready");
+    expect(model.banner.headline).toBe("Unknown");
     expect(model.banner.primaryAction.label).toBe("Open setup");
     expect(model.controls.startAutomation.enabled).toBe(false);
     expect(model.controls.safetyCheck.enabled).toBe(false);
@@ -108,6 +108,17 @@ describe("buildRunModel", () => {
     expect(model.controls.startAutomation.enabled).toBe(true);
     expect(model.controls.stopAutomation.enabled).toBe(false);
     expect(model.controls.safetyCheck.enabled).toBe(true);
+  });
+
+  it("labels a missing first safety result as pending", () => {
+    const model = buildRunModel(snapshot());
+    const safety = model.safety.find((row) => row.label === "Integration safety");
+
+    expect(safety).toMatchObject({
+      status: "pending",
+      summary: "Integration-safety check has not run yet.",
+      tone: "warn",
+    });
   });
 
   it("disables start controls while automation is active", () => {

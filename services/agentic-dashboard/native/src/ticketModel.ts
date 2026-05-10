@@ -45,6 +45,8 @@ export const TICKET_STATUSES: TicketStatus[] = [
   "blocked",
 ];
 
+export type TicketImportFormat = "markdown" | "csv" | "json";
+
 export const PLACEHOLDER_TICKET_ID = "TICKET-001";
 export const PLACEHOLDER_TICKET_SUMMARY = "Replace this sample with the first startup ticket.";
 
@@ -112,6 +114,50 @@ export function normalizeTickets(input: unknown): Ticket[] {
 
 export function ticketToJson(ticket: Partial<Ticket> | Record<string, unknown>): string {
   return JSON.stringify(normalizeTicket(ticket), null, 2);
+}
+
+export function ticketImportExample(format: TicketImportFormat | string): string {
+  if (format === "csv") {
+    return [
+      "id,summary,status,depends_on,acceptance_criteria,verification_commands,evidence,related_commits,blocker",
+      "TICKET-001,\"Build the first local workflow\",pending,\"\",\"App opens locally; Primary flow works\",\"npm test; npm run build\",\"Manual smoke pass\",\"\",\"\"",
+      "TICKET-002,\"Add setup validation\",pending,\"TICKET-001\",\"Invalid input is shown clearly\",\"npm test\",\"\",\"\",\"\"",
+    ].join("\n");
+  }
+  if (format === "json") {
+    return JSON.stringify(
+      [
+        {
+          id: "TICKET-001",
+          summary: "Build the first local workflow",
+          depends_on: [],
+          status: "pending",
+          acceptance_criteria: ["App opens locally", "Primary flow works"],
+          verification_commands: ["npm test", "npm run build"],
+          evidence: ["Manual smoke pass"],
+          related_commits: [],
+          blocker: "",
+        },
+      ],
+      null,
+      2,
+    );
+  }
+  return [
+    "## TICKET-001: Build the first local workflow",
+    "status: pending",
+    "depends_on: TICKET-000",
+    "acceptance: App opens locally; Primary flow works",
+    "verification: npm test; npm run build",
+    "evidence: Manual smoke pass",
+    "blocker: none",
+    "",
+    "## TICKET-002: Add setup validation",
+    "status: pending",
+    "depends_on: TICKET-001",
+    "acceptance: Invalid input is shown clearly",
+    "verification: npm test",
+  ].join("\n");
 }
 
 export function ticketsToJson(tickets: Array<Partial<Ticket> | Record<string, unknown>>): string {

@@ -6,6 +6,8 @@ import {
   normalizeTicket,
   parseTicketImportText,
   PLACEHOLDER_TICKET_SUMMARY,
+  ticketImportExample,
+  type TicketImportFormat,
 } from "./ticketModel";
 
 describe("ticket model helpers", () => {
@@ -28,6 +30,20 @@ describe("ticket model helpers", () => {
 
     expect(markdown.tickets?.[0].verification_commands).toEqual(["npm test"]);
     expect(csv.tickets?.[0].depends_on).toEqual(["TICKET-001"]);
+  });
+
+  it("keeps displayed import examples parseable", () => {
+    const formats: TicketImportFormat[] = ["markdown", "csv", "json"];
+
+    formats.forEach((format) => {
+      const parsed = parseTicketImportText(ticketImportExample(format), format);
+
+      expect(parsed.error).toBeUndefined();
+      expect(parsed.tickets?.[0]).toMatchObject({
+        id: "TICKET-001",
+        summary: "Build the first local workflow",
+      });
+    });
   });
 
   it("reports duplicate ids and missing dependencies before scaffold", () => {

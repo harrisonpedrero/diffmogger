@@ -7,6 +7,7 @@ import {
   FilePlus2,
   FolderOpen,
   Hammer,
+  Loader2,
   RefreshCw,
   SlidersHorizontal,
   Trash2,
@@ -24,6 +25,8 @@ import {
   runBackendCommandStreamed,
   selectContextFiles,
 } from "./api/backend";
+import { TicketFields } from "./TicketFields";
+import diffmoggerIcon from "./assets/diffmogger-icon.png";
 import {
   defaultImportMode,
   emptyTicket,
@@ -33,8 +36,10 @@ import {
   normalizeTickets,
   parseTicketImportText,
   parseTicketJson,
+  ticketImportExample,
   ticketToJson,
   type Ticket,
+  type TicketImportFormat,
 } from "./ticketModel";
 
 export type BriefRoute =
@@ -160,6 +165,13 @@ type ScaffoldFailure = {
   details?: Record<string, unknown>;
 };
 
+type GeneratedIntakeResponse = {
+  intake?: Record<string, unknown>;
+  ticket_count?: number;
+  automation_role_profile?: IntakeDraft["automation_role_profile"];
+  ticket_run_file?: string;
+};
+
 const steps: Array<{ key: StepKey; label: string }> = [
   { key: "project", label: "Project" },
   { key: "goal", label: "Goal" },
@@ -280,13 +292,7 @@ export function applyAutomationScope(draft: IntakeDraft, scope: AutomationScope)
   };
 }
 
-function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
-  const source = {
-    ...asRecord(snapshot?.brief?.intake),
-    ...asRecord(snapshot?.brief?.draft_intake),
-    ...asRecord(snapshot?.brief?.dashboard_state),
-  };
-  const targetName = snapshot?.target.name || defaultDraft.project_name;
+function draftFromSource(source: Record<string, unknown>, targetName: string): IntakeDraft {
   const optionalMcp = listValue(source.optional_mcp_servers).filter((item) =>
     ["context7", "playwright"].includes(item),
   );
@@ -356,6 +362,36 @@ function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
   };
 }
 
+function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
+  const source = {
+    ...asRecord(snapshot?.brief?.intake),
+    ...asRecord(snapshot?.brief?.draft_intake),
+    ...asRecord(snapshot?.brief?.dashboard_state),
+  };
+  return draftFromSource(source, snapshot?.target.name || defaultDraft.project_name);
+}
+
+export function lowCortisolDraftFromGeneratedIntake(
+  source: Record<string, unknown>,
+  current: IntakeDraft,
+  targetName = defaultDraft.project_name,
+): IntakeDraft {
+  const generated = draftFromSource(source, targetName);
+  const generatedTickets = normalizeTickets(source.ticket_run_seed_tickets ?? source.tickets);
+  const generatedContext = listValue(source.additional_context_files);
+  return {
+    ...generated,
+    human_bridge_enabled: true,
+    human_bridge_mode: "file_only",
+    optional_mcp_servers: [],
+    automation_run_mode: "ticket_campaign",
+    ticket_run_file: defaultDraft.ticket_run_file,
+    ticket_run_seed_tickets: generatedTickets,
+    additional_context_files: generatedContext.length ? generatedContext : current.additional_context_files,
+    overwrite_existing_scaffold_files: false,
+  };
+}
+
 function serializeDraft(draft: IntakeDraft): Record<string, unknown> {
   const scope = automationScopeForDraft(draft);
   const roleProfile = roleProfileValues(draft as unknown as Record<string, unknown>);
@@ -412,7 +448,7 @@ function logEventsFromDetails(value: unknown, runId: string): BackendLogEvent[] 
     const record = asRecord(item);
     return {
       runId,
-      command: "brief.scaffold_bootstrap",
+      command: stringValue(record.command, "brief.scaffold_bootstrap"),
       stage: stringValue(record.stage, `log-${index + 1}`),
       level: stringValue(record.level, "info"),
       message: stringValue(record.message, JSON.stringify(record)),
@@ -457,6 +493,77 @@ function DetailMetric(props: { label: string; value: string | number }) {
   );
 }
 
+function setupStepState(step: StepKey, options: {
+  draft: IntakeDraft;
+  targetPath?: string;
+  ticketIssueCount: number;
+  contextCount: number;
+  previewState: "idle" | "loading" | "ready" | "error";
+}): "complete" | "warn" | "pending" {
+  if (step === "project") return options.targetPath && options.draft.project_name.trim() ? "complete" : "warn";
+  if (step === "goal") return options.draft.product_goal.trim() && options.draft.target_user.trim() ? "complete" : "warn";
+  if (step === "stack") return options.draft.verification_commands.length ? "complete" : "pending";
+  if (step === "mode") return options.ticketIssueCount ? "warn" : "complete";
+  if (step === "guardrails") return options.draft.safety_constraints.length && options.draft.automation_must_never_do.length ? "complete" : "warn";
+  if (step === "context") return options.contextCount ? "complete" : "pending";
+  if (step === "review") return options.previewState === "ready" ? "complete" : options.previewState === "error" ? "warn" : "pending";
+  return "pending";
+}
+
+function SetupPlanSummary(props: {
+  draft: IntakeDraft;
+  targetPath?: string;
+  saveState: "idle" | "saving" | "saved" | "error";
+  previewState: "idle" | "loading" | "ready" | "error";
+  preview?: ScaffoldPreviewResponse | null;
+  contextCount: number;
+  ticketIssueCount: number;
+  scaffoldBusy: boolean;
+}) {
+  const scope = automationScopeForDraft(props.draft);
+  const issueTone = props.ticketIssueCount ? "warn" : "good";
+  return (
+    <aside className="setup-recipe-summary" aria-label="Live setup plan summary">
+      <div className="setup-summary-head">
+        <span>Setup plan</span>
+        <strong>{props.draft.project_name || "Untitled target"}</strong>
+      </div>
+      <div className="setup-summary-ledger">
+        <DetailMetric label="Target" value={props.targetPath ? "Selected" : "No target"} />
+        <DetailMetric label="Mode" value={scope === "ticket_campaign" ? "Ticket campaign" : "Continuous"} />
+        <DetailMetric label="Role profile" value={props.draft.automation_role_profile === "single_lane" ? "Single lane" : "Conveyor"} />
+        <DetailMetric label="Context" value={props.contextCount} />
+        <DetailMetric label="Guardrails" value={props.draft.safety_constraints.length + props.draft.automation_must_never_do.length} />
+        <DetailMetric label="Tickets" value={scope === "ticket_campaign" ? props.draft.ticket_run_seed_tickets.length : "Off"} />
+      </div>
+      <div className="setup-summary-status">
+        <div className={props.saveState}>
+          <span>Draft</span>
+          <strong>{props.saveState === "saving" ? "Saving" : props.saveState === "saved" ? "Saved" : props.saveState === "error" ? "Needs retry" : "Idle"}</strong>
+        </div>
+        <div className={props.previewState}>
+          <span>Preview</span>
+          <strong>{props.scaffoldBusy ? "Working" : props.previewState === "ready" ? "Ready" : props.previewState}</strong>
+        </div>
+        <div className={issueTone}>
+          <span>Validation</span>
+          <strong>{props.ticketIssueCount ? `${props.ticketIssueCount} issue(s)` : "Clear"}</strong>
+        </div>
+      </div>
+      {props.preview && (
+        <div className="setup-preview-counts">
+          {Object.entries(props.preview.summary ?? {}).map(([key, value]) => (
+            <div key={key}>
+              <span>{key.replace(/_/g, " ")}</span>
+              <strong>{value}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+    </aside>
+  );
+}
+
 export function BriefWizard(props: {
   snapshot: ProjectSnapshot | null;
   recents: RecentTarget[];
@@ -465,6 +572,8 @@ export function BriefWizard(props: {
   onOpenRecent: (target: RecentTarget) => void;
   onNavigate: (view: BriefRoute) => void;
   onRefresh: () => void | Promise<void>;
+  onDirtyChange?: (message: string | null) => void;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [activeStep, setActiveStep] = useState(0);
   const [draft, setDraft] = useState<IntakeDraft>(() => mergeDraft(props.snapshot));
@@ -481,16 +590,39 @@ export function BriefWizard(props: {
   const [previewState, setPreviewState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [ticketEditorId, setTicketEditorId] = useState<string | null>(null);
   const [ticketEditorJson, setTicketEditorJson] = useState("");
-  const [ticketImportFormat, setTicketImportFormat] = useState<"markdown" | "csv" | "json">("markdown");
+  const [ticketImportFormat, setTicketImportFormat] = useState<TicketImportFormat>("markdown");
   const [ticketImportText, setTicketImportText] = useState("");
   const [ticketMessage, setTicketMessage] = useState<string | null>(null);
   const [ticketDraftBusy, setTicketDraftBusy] = useState(false);
   const [ticketDraftCandidates, setTicketDraftCandidates] = useState<Ticket[]>([]);
+  const [lowCortisolMode, setLowCortisolMode] = useState(false);
+  const [lowCortisolText, setLowCortisolText] = useState("");
+  const [lowCortisolBusy, setLowCortisolBusy] = useState(false);
   const lastSavedRef = useRef("");
   const targetPath = props.snapshot?.target.path;
   const detected = asRecord(props.snapshot?.brief.detected);
   const currentStep = steps[activeStep];
   const draftPayload = useMemo(() => JSON.stringify(serializeDraft(draft)), [draft]);
+  const ticketIssues = useMemo(() => localTicketIssues(draft.ticket_run_seed_tickets), [draft.ticket_run_seed_tickets]);
+  const selectedTicketJson = useMemo(() => {
+    if (!ticketEditorId) return "";
+    const ticket = draft.ticket_run_seed_tickets.find((item) => item.id === ticketEditorId);
+    return ticket ? ticketToJson(ticket) : "";
+  }, [draft.ticket_run_seed_tickets, ticketEditorId]);
+  const ticketEditorTicket = useMemo(() => {
+    const parsed = parseTicketJson(ticketEditorJson);
+    return parsed.ticket ?? emptyTicket(draft.ticket_run_seed_tickets);
+  }, [draft.ticket_run_seed_tickets, ticketEditorJson]);
+  const draftDirty = draftPayload !== lastSavedRef.current;
+  const ticketEditorDirty = Boolean(ticketEditorJson.trim() && ticketEditorJson !== selectedTicketJson);
+  const lowCortisolDirty = lowCortisolMode && Boolean(lowCortisolText.trim());
+  const routeDirtyMessage = ticketEditorDirty
+    ? "A setup ticket editor has unsaved changes."
+    : lowCortisolDirty
+      ? "Low cortisol setup text has not generated an intake."
+    : draftDirty
+      ? "Setup has unsaved plan changes."
+      : null;
 
   useEffect(() => {
     const nextDraft = mergeDraft(props.snapshot);
@@ -508,6 +640,9 @@ export function BriefWizard(props: {
     setTicketImportText("");
     setTicketMessage(null);
     setTicketDraftCandidates([]);
+    setLowCortisolMode(false);
+    setLowCortisolText("");
+    setLowCortisolBusy(false);
     const imported = nextDraft.additional_context_files.map<ContextUiFile>((relPath) => ({
       path: relPath,
       name: relPath.split("/").pop() || relPath,
@@ -540,6 +675,26 @@ export function BriefWizard(props: {
     }, 700);
     return () => window.clearTimeout(timeout);
   }, [draftPayload, targetPath]);
+
+  useEffect(() => {
+    props.onDirtyChange?.(routeDirtyMessage);
+    return () => props.onDirtyChange?.(null);
+  }, [props.onDirtyChange, routeDirtyMessage]);
+
+  useEffect(() => {
+    props.onBusyChange?.(scaffoldBusy || lowCortisolBusy);
+    return () => props.onBusyChange?.(false);
+  }, [lowCortisolBusy, scaffoldBusy]);
+
+  useEffect(() => {
+    if (!routeDirtyMessage) return;
+    function onBeforeUnload(event: BeforeUnloadEvent) {
+      event.preventDefault();
+      event.returnValue = routeDirtyMessage;
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [routeDirtyMessage]);
 
   useEffect(() => {
     if (!targetPath || currentStep.key !== "review") return;
@@ -593,6 +748,10 @@ export function BriefWizard(props: {
     setTicketMessage("New seed ticket is ready to edit.");
   }
 
+  function updateSeedTicketEditor(ticket: Ticket) {
+    setTicketEditorJson(ticketToJson(ticket));
+  }
+
   function editSeedTicket(ticket: Ticket) {
     setTicketEditorId(ticket.id);
     setTicketEditorJson(ticketToJson(ticket));
@@ -602,7 +761,7 @@ export function BriefWizard(props: {
   function saveSeedTicket() {
     const parsed = parseTicketJson(ticketEditorJson);
     if (!parsed.ticket) {
-      setTicketMessage(parsed.error ?? "Ticket JSON did not parse.");
+      setTicketMessage(parsed.error ?? "Ticket fields did not parse.");
       return;
     }
     setDraft((current) => {
@@ -695,6 +854,94 @@ export function BriefWizard(props: {
     }
   }
 
+  async function saveDraftNow(): Promise<boolean> {
+    if (!targetPath) return false;
+    setSaveState("saving");
+    setCommandError(null);
+    try {
+      const envelope = await runBackendCommand({
+        command: "brief.save_draft",
+        target: targetPath,
+        intakeJson: draftPayload,
+      });
+      if (!envelope.ok) throw new Error(envelope.message ?? "Draft save failed.");
+      lastSavedRef.current = draftPayload;
+      setSaveState("saved");
+      return true;
+    } catch (error) {
+      setSaveState("error");
+      setCommandError(error instanceof Error ? error.message : "Draft save failed.");
+      return false;
+    }
+  }
+
+  async function generateLowCortisolIntake() {
+    const description = lowCortisolText.trim();
+    if (!description) {
+      setCommandError("Describe what you want to build before generating the intake.");
+      return;
+    }
+    if (!targetPath) {
+      setCommandError("Choose a target folder before generating the intake.");
+      return;
+    }
+    setLowCortisolBusy(true);
+    setCommandError(null);
+    setSaveState("saving");
+    setProgressLogs([]);
+    const runId = `brief-intake-${Date.now()}`;
+    let unlisten: (() => void) | null = null;
+    try {
+      unlisten = await listenBackendLogs(runId, (event) => {
+        setProgressLogs((current) => [...current, event].slice(-80));
+      });
+      const envelope: BackendEnvelope<GeneratedIntakeResponse> = await runBackendCommandStreamed<GeneratedIntakeResponse>({
+        runId,
+        command: "brief.generate_intake",
+        target: targetPath,
+        body: description,
+      });
+      if (!envelope.ok || !envelope.data?.intake) {
+        const detailLogs = logEventsFromDetails(envelope.error?.details?.log, runId);
+        if (detailLogs.length) {
+          setProgressLogs((current) => [...current, ...detailLogs].slice(-80));
+        }
+        throw new Error(envelope.message ?? "Intake generation failed.");
+      }
+      const nextDraft = lowCortisolDraftFromGeneratedIntake(
+        envelope.data.intake,
+        draft,
+        props.snapshot?.target.name || defaultDraft.project_name,
+      );
+      const nextPayload = JSON.stringify(serializeDraft(nextDraft));
+      setDraft(nextDraft);
+      lastSavedRef.current = nextPayload;
+      setSaveState("saved");
+      setPreview(null);
+      setPreviewState("idle");
+      setScaffoldResult(null);
+      setScaffoldFailure(null);
+      setTicketDraftCandidates([]);
+      setTicketMessage(`${envelope.data.ticket_count ?? nextDraft.ticket_run_seed_tickets.length} generated ticket${nextDraft.ticket_run_seed_tickets.length === 1 ? "" : "s"} ready.`);
+      setActiveStep(steps.length - 1);
+      setLowCortisolMode(false);
+    } catch (error) {
+      setSaveState("error");
+      setCommandError(error instanceof Error ? error.message : "Intake generation failed.");
+    } finally {
+      unlisten?.();
+      setLowCortisolBusy(false);
+    }
+  }
+
+  function changeStep(index: number) {
+    if (index === activeStep) return;
+    if (ticketEditorDirty) {
+      setTicketMessage("Seed ticket editor changes are still open. Save the ticket before scaffolding if you want to keep them.");
+    }
+    setActiveStep(Math.max(0, Math.min(steps.length - 1, index)));
+  }
+
   async function addContextFiles() {
     if (!targetPath) {
       setCommandError("Choose a target folder before importing context files.");
@@ -758,8 +1005,8 @@ export function BriefWizard(props: {
       setCommandError("Choose a target folder before scaffolding.");
       return;
     }
-    const requiredFailures = preview?.prerequisites.required_failures ?? [];
-    if (requiredFailures.length && !confirm("Required prerequisites are missing. Continue with setup-only and skip Codex?")) {
+    if (draftDirty && !(await saveDraftNow())) {
+      setScaffoldFailure({ message: "Draft save failed. Resolve the save error before scaffolding." });
       return;
     }
     setScaffoldBusy(true);
@@ -768,10 +1015,11 @@ export function BriefWizard(props: {
     setScaffoldFailure(null);
     setProgressLogs([]);
     const runId = `brief-bootstrap-${Date.now()}`;
-    const unlisten = await listenBackendLogs(runId, (event) => {
-      setProgressLogs((current) => [...current, event].slice(-220));
-    });
+    let unlisten: (() => void) | null = null;
     try {
+      unlisten = await listenBackendLogs(runId, (event) => {
+        setProgressLogs((current) => [...current, event].slice(-220));
+      });
       const envelope: BackendEnvelope<ScaffoldResponse> = await runBackendCommandStreamed<ScaffoldResponse>({
         runId,
         command: "brief.scaffold_bootstrap",
@@ -797,7 +1045,7 @@ export function BriefWizard(props: {
     } catch (error) {
       setScaffoldFailure({ message: error instanceof Error ? error.message : "Scaffold failed." });
     } finally {
-      unlisten();
+      unlisten?.();
       setScaffoldBusy(false);
     }
   }
@@ -832,7 +1080,7 @@ export function BriefWizard(props: {
             </button>
             <button className="secondary-action" disabled={!targetPath} onClick={() => props.onNavigate("Advanced")}>
               <SlidersHorizontal size={17} />
-              Open Debug
+              <span title="Open Debug / Sidecar">Open Sidecar</span>
             </button>
           </div>
           <div className="copyable-path-row">
@@ -936,37 +1184,6 @@ export function BriefWizard(props: {
   function renderStackStep() {
     return (
       <div className="brief-step-grid">
-        <section className="brief-section">
-          <h2>Detected state</h2>
-          <div className="brief-data-list">
-            <div>
-              <span>Git</span>
-              <strong>{boolValue(detected.is_git_repo, false) ? "Repository detected" : "No git metadata detected"}</strong>
-            </div>
-            <div>
-              <span>Package manager</span>
-              <strong>{stringValue(detected.package_manager, "unknown")}</strong>
-            </div>
-            <div>
-              <span>Suggested checks</span>
-              <strong>{listValue(detected.suggested_verification_commands).join(", ") || "No commands detected"}</strong>
-            </div>
-          </div>
-        </section>
-        <section className="brief-section span-2">
-          <div className="panel-heading-row">
-            <h2>Detected commands</h2>
-            <button
-              className="icon-text-button"
-              disabled={!commandLabel(detected)}
-              onClick={() => copyText(commandLabel(detected), "commands")}
-            >
-              <Clipboard size={14} />
-              {copiedLabel === "commands" ? "Copied" : "Copy"}
-            </button>
-          </div>
-          <pre className="command-preview">{commandLabel(detected)}</pre>
-        </section>
         <section className="brief-section span-3">
           <h2>Stack</h2>
           <div className="brief-form-grid two">
@@ -999,6 +1216,37 @@ export function BriefWizard(props: {
               />
             </FormField>
           </div>
+        </section>
+        <section className="brief-section">
+          <h2>Detected state</h2>
+          <div className="brief-data-list">
+            <div>
+              <span>Git</span>
+              <strong>{boolValue(detected.is_git_repo, false) ? "Repository detected" : "No git metadata detected"}</strong>
+            </div>
+            <div>
+              <span>Package manager</span>
+              <strong>{stringValue(detected.package_manager, "unknown")}</strong>
+            </div>
+            <div>
+              <span>Suggested checks</span>
+              <strong>{listValue(detected.suggested_verification_commands).join(", ") || "No commands detected"}</strong>
+            </div>
+          </div>
+        </section>
+        <section className="brief-section span-2">
+          <div className="panel-heading-row">
+            <h2>Detected commands</h2>
+            <button
+              className="icon-text-button"
+              disabled={!commandLabel(detected)}
+              onClick={() => copyText(commandLabel(detected), "commands")}
+            >
+              <Clipboard size={14} />
+              {copiedLabel === "commands" ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <pre className="command-preview">{commandLabel(detected)}</pre>
         </section>
       </div>
     );
@@ -1117,7 +1365,12 @@ export function BriefWizard(props: {
                       </div>
                       <em>{ticket.status}</em>
                       <button className="icon-text-button" onClick={() => editSeedTicket(ticket)}>Edit</button>
-                      <button className="icon-button danger" title="Delete ticket" onClick={() => deleteSeedTicket(ticket.id)}>
+                      <button
+                        className="icon-button danger"
+                        aria-label={`Delete ticket ${ticket.id || "Untitled"}`}
+                        title="Delete ticket"
+                        onClick={() => deleteSeedTicket(ticket.id)}
+                      >
                         <Trash2 size={14} />
                       </button>
                     </div>
@@ -1128,26 +1381,24 @@ export function BriefWizard(props: {
               </div>
 
               <div className="ticket-edit-grid">
-                <FormField label="Ticket JSON">
-                  <textarea
-                    rows={10}
-                    value={ticketEditorJson}
-                    onChange={(event) => setTicketEditorJson(event.target.value)}
-                    placeholder={ticketToJson(emptyTicket(draft.ticket_run_seed_tickets))}
-                  />
-                </FormField>
+                <TicketFields
+                  ticket={ticketEditorTicket}
+                  onChange={updateSeedTicketEditor}
+                  title={ticketEditorId ? `Editing ${ticketEditorId}` : "Ticket fields"}
+                />
                 <div className="ticket-import-box">
                   <FormField label="Bulk import">
-                    <select value={ticketImportFormat} onChange={(event) => setTicketImportFormat(event.target.value as "markdown" | "csv" | "json")}>
+                    <select value={ticketImportFormat} onChange={(event) => setTicketImportFormat(event.target.value as TicketImportFormat)}>
                       <option value="markdown">Markdown</option>
                       <option value="csv">CSV</option>
                       <option value="json">JSON</option>
                     </select>
                     <textarea
+                      className="ticket-import-textarea"
                       rows={7}
                       value={ticketImportText}
                       onChange={(event) => setTicketImportText(event.target.value)}
-                      placeholder="TICKET-001: Build the first local workflow"
+                      placeholder={ticketImportExample(ticketImportFormat)}
                     />
                   </FormField>
                   <div className="inline-actions">
@@ -1423,7 +1674,7 @@ export function BriefWizard(props: {
               ))}
             </div>
           ) : (
-            <div className="success-callout quiet">
+            <div className="success-callout quiet" role="status" aria-live="polite">
               <CheckCircle2 size={18} />
               <span>{previewState === "loading" ? "Checking files and prerequisites." : "No blocking warnings in the current preview."}</span>
             </div>
@@ -1435,7 +1686,7 @@ export function BriefWizard(props: {
             onChange={(checked) => updateDraft("overwrite_existing_scaffold_files", checked)}
           />
           {scaffoldResult && (
-            <div className="success-callout">
+            <div className="success-callout" role="status" aria-live="polite">
               <CheckCircle2 size={18} />
               <div>
                 <strong>{scaffoldResult.native_next_state.state}</strong>
@@ -1456,7 +1707,7 @@ export function BriefWizard(props: {
             <div className="brief-failure">
               <strong>{scaffoldFailure.errorType ?? "Scaffold failed"}</strong>
               <p>{scaffoldFailure.message}</p>
-              <button className="secondary-action" onClick={() => props.onNavigate("Advanced")}>Debug</button>
+              <button className="secondary-action" title="Debug / Sidecar" onClick={() => props.onNavigate("Advanced")}>Sidecar</button>
             </div>
           )}
         </section>
@@ -1498,6 +1749,33 @@ export function BriefWizard(props: {
     );
   }
 
+  function renderLowCortisolMode() {
+    return (
+      <main className="low-cortisol-workspace">
+        <label className="low-cortisol-field">
+          <span>What do you want to build?</span>
+          <textarea
+            autoFocus
+            value={lowCortisolText}
+            onChange={(event) => setLowCortisolText(event.target.value)}
+            rows={16}
+          />
+        </label>
+        <footer className="wizard-footer setup-footer low-cortisol-footer">
+          <button
+            aria-busy={lowCortisolBusy}
+            className="primary-action low-cortisol-generate-action"
+            disabled={lowCortisolBusy || !lowCortisolText.trim()}
+            onClick={() => void generateLowCortisolIntake()}
+          >
+            {lowCortisolBusy ? <Loader2 className="spin" size={22} /> : <WandSparkles size={22} />}
+            <span>{lowCortisolBusy ? "Generating Intake" : "Generate Intake"}</span>
+          </button>
+        </footer>
+      </main>
+    );
+  }
+
   const stepContent = {
     project: renderProjectStep,
     goal: renderGoalStep,
@@ -1509,52 +1787,106 @@ export function BriefWizard(props: {
   }[currentStep.key]();
 
   return (
-    <section className="brief-wizard">
-      <div className="brief-header">
-        <div>
-          <h1>Setup</h1>
-          <p>{targetStatus(props.snapshot)}</p>
+    <section className="brief-wizard setup-page" aria-label="Setup">
+      <div className="brief-header setup-header">
+        <div className="setup-header-main">
+          <div className="setup-heading-copy">
+            <h1>Setup</h1>
+            <p>{targetStatus(props.snapshot)}</p>
+          </div>
+          <button
+            aria-checked={lowCortisolMode}
+            className={`low-cortisol-toggle ${lowCortisolMode ? "active" : ""}`}
+            onClick={() => setLowCortisolMode((current) => !current)}
+            role="switch"
+            title="Low cortisol mode"
+            type="button"
+          >
+            <img alt="" src={diffmoggerIcon} />
+            <span className="low-cortisol-label">Low cortisol mode</span>
+            <span className="low-cortisol-switch" aria-hidden="true">
+              <span className="low-cortisol-switch-thumb" />
+            </span>
+          </button>
         </div>
         <div className={`brief-save-pill ${saveState}`}>
           {saveState === "saving" ? "Saving" : saveState === "saved" ? "Draft saved" : saveState === "error" ? "Save failed" : "Draft"}
         </div>
       </div>
 
-      <div className="wizard-tabs">
-        {steps.map((step, index) => (
-          <button className={index === activeStep ? "active" : ""} key={step.key} onClick={() => setActiveStep(index)}>
-            <span>{index + 1}</span>
-            {step.label}
-          </button>
-        ))}
-      </div>
-
       {commandError && (
-        <div className="brief-error">
+        <div className="brief-error" role="alert">
           <AlertTriangle size={17} />
           <span>{commandError}</span>
         </div>
       )}
 
-      {stepContent}
+      {lowCortisolMode ? (
+        renderLowCortisolMode()
+      ) : (
+        <div className="setup-workspace">
+          <nav className="setup-stepper wizard-tabs" role="tablist" aria-label="Setup steps">
+            {steps.map((step, index) => {
+              const state = setupStepState(step.key, {
+                draft,
+                targetPath,
+                ticketIssueCount: ticketIssues.length,
+                contextCount: draft.additional_context_files.length,
+                previewState,
+              });
+              return (
+                <button
+                  aria-current={index === activeStep ? "step" : undefined}
+                  aria-selected={index === activeStep}
+                  className={`${index === activeStep ? "active" : ""} ${state}`}
+                  key={step.key}
+                  onClick={() => changeStep(index)}
+                  role="tab"
+                >
+                  <span>{index + 1}</span>
+                  <strong>{step.label}</strong>
+                  <small>{state}</small>
+                </button>
+              );
+            })}
+          </nav>
 
-      <footer className="wizard-footer">
-        <button className="secondary-action" disabled={activeStep === 0} onClick={() => setActiveStep((step) => Math.max(0, step - 1))}>
-          <ChevronLeft size={17} />
-          Previous
-        </button>
-        {activeStep < steps.length - 1 ? (
-          <button className="secondary-action" onClick={() => setActiveStep((step) => Math.min(steps.length - 1, step + 1))}>
-            Next
-            <ChevronRight size={17} />
-          </button>
-        ) : (
-          <button className="primary-action" disabled={!targetPath || scaffoldBusy || previewState !== "ready"} onClick={scaffoldBootstrap}>
-            <Hammer size={17} />
-            {scaffoldBusy ? "Working" : "Scaffold"}
-          </button>
-        )}
-      </footer>
+          <main className="setup-main-panel">
+            {stepContent}
+            <footer className="wizard-footer setup-footer">
+              <button className="secondary-action" disabled={activeStep === 0} onClick={() => changeStep(activeStep - 1)}>
+                <ChevronLeft size={17} />
+                Previous
+              </button>
+              <button className="secondary-action" disabled={!targetPath || saveState === "saving" || !draftDirty} onClick={() => void saveDraftNow()}>
+                Save draft
+              </button>
+              {activeStep < steps.length - 1 ? (
+                <button className="secondary-action" onClick={() => changeStep(activeStep + 1)}>
+                  Next
+                  <ChevronRight size={17} />
+                </button>
+              ) : (
+                <button className="primary-action" disabled={!targetPath || scaffoldBusy || saveState === "saving" || ticketIssues.length > 0} onClick={scaffoldBootstrap}>
+                  <Hammer size={17} />
+                  {scaffoldBusy ? "Working" : "Scaffold"}
+                </button>
+              )}
+            </footer>
+          </main>
+
+          <SetupPlanSummary
+            contextCount={draft.additional_context_files.length}
+            draft={draft}
+            preview={preview}
+            previewState={previewState}
+            saveState={saveState}
+            scaffoldBusy={scaffoldBusy}
+            targetPath={targetPath}
+            ticketIssueCount={ticketIssues.length}
+          />
+        </div>
+      )}
     </section>
   );
 }

@@ -37,6 +37,52 @@ export type HomeProgressItem = {
   tone: HomeTone;
 };
 
+export type HomeConveyorLane = {
+  role: string;
+  label: string;
+  status: string;
+  badge: string;
+  tone: HomeTone;
+  reason: string;
+  counts: {
+    queued: number;
+    applied: number;
+    deferred: number;
+    failed: number;
+  };
+};
+
+export type HomeSafetyRow = {
+  label: string;
+  status: string;
+  summary: string;
+  source: string;
+  tone: HomeTone;
+  action: HomeAction;
+};
+
+export type HomeQueueRow = {
+  id: string;
+  title: string;
+  status: string;
+  lane: string;
+  lastChange: string;
+  blocker: string;
+  source: string;
+  tone: HomeTone;
+};
+
+export type HomeEventRow = {
+  id: string;
+  time: string;
+  type: string;
+  lane: string;
+  message: string;
+  artifact: string;
+  status: string;
+  tone: HomeTone;
+};
+
 export type HomeModel = {
   projectName: string;
   statusLabel: string;
@@ -54,11 +100,28 @@ export type HomeModel = {
   safety: {
     headline: string;
     items: HomeSafetyItem[];
+    rows: HomeSafetyRow[];
   };
   progress: {
     headline: string;
     empty: boolean;
     items: HomeProgressItem[];
+  };
+  conveyor: {
+    lanes: HomeConveyorLane[];
+    activeLane: string;
+    nextLane: string;
+    summary: string;
+    cycles: number;
+  };
+  queueLedger: {
+    rows: HomeQueueRow[];
+    totals: Record<string, number>;
+    emptyMessage: string;
+  };
+  eventLedger: {
+    rows: HomeEventRow[];
+    emptyMessage: string;
   };
   humanBridge: {
     pending: number;
@@ -71,8 +134,12 @@ export type HomeModel = {
   hasNoRuns: boolean;
 };
 
+const LANE_ORDER = ["planner", "builder", "hardener", "integrator"];
+
 function record(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function list(value: unknown): unknown[] {
@@ -85,6 +152,10 @@ function text(value: unknown, fallback = "Not recorded"): string {
   return fallback;
 }
 
+function displayCopy(value: string): string {
+  return value.replace(/`([^`\n]+)`/g, "$1");
+}
+
 function number(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) {
@@ -93,16 +164,41 @@ function number(value: unknown): number {
   return 0;
 }
 
+function bool(value: unknown): boolean {
+  return value === true;
+}
+
+function titleCase(value: string): string {
+  return value
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1).toLowerCase()}`)
+    .join(" ");
+}
+
+function readableStatus(value: unknown, fallback = "unknown"): string {
+  return text(value, fallback).replace(/_/g, " ").toLowerCase();
+}
+
+function rawStatus(snapshot: ProjectSnapshot): string {
+  return text(snapshot.run.task?.status ?? snapshot.home.automation_status, "UNKNOWN").toUpperCase();
+}
+
 function toneForStatus(status: string): HomeTone {
-  if (status === "ACTIVE") return "good";
-  if (status === "RUNNING" || status.includes("RUNNING")) return "info";
-  if (status.includes("PENDING") || status.includes("BLOCKED")) return "warn";
   if (status.includes("CRITICAL")) return "critical";
+  if (status.includes("PENDING") || status.includes("BLOCKED") || status.includes("STALE")) return "warn";
+  if (status.includes("RUNNING")) return "info";
+  if (status === "ACTIVE" || status === "STOPPED" || status === "READY") return "good";
   return "quiet";
 }
 
-function humanizeStatus(status: string): string {
-  return status.replace(/_/g, " ").toLowerCase();
+function toneForResult(value: unknown): HomeTone {
+  const status = text(value, "").toLowerCase();
+  if (["pass", "passed", "ok", "ready", "reviewed", "clean", "complete", "completed", "none"].includes(status)) return "good";
+  if (["fail", "failed", "error", "critical", "critical_stop"].includes(status)) return "critical";
+  if (["warn", "warning", "blocked", "pending", "missing", "not_run", "unknown", "not_recorded"].includes(status)) return "warn";
+  if (["running", "active", "info", "queued", "deferred", "draft"].includes(status)) return "info";
+  return "quiet";
 }
 
 function itemByLabel(items: unknown[], label: string): Record<string, unknown> {
@@ -121,8 +217,15 @@ function actionPlan(snapshot: ProjectSnapshot): Record<string, unknown> {
   return record(snapshot.run.scorecard?.action_plan);
 }
 
-function queueTotals(snapshot: ProjectSnapshot): Record<string, unknown> {
-  return record(snapshot.run.queue?.totals);
+function queueTotals(snapshot: ProjectSnapshot): Record<string, number> {
+  const raw = record(snapshot.run.queue?.totals);
+  return {
+    queued: number(raw.queued ?? snapshot.home.queued_patches),
+    deferred: number(raw.deferred ?? snapshot.home.deferred_patches),
+    applied: number(raw.applied),
+    failed: number(raw.failed),
+    skipped: number(raw.skipped),
+  };
 }
 
 function activeRoleRun(snapshot: ProjectSnapshot): Record<string, unknown> {
@@ -146,14 +249,19 @@ function acceptedTotal(snapshot: ProjectSnapshot): number {
 
 function deferredTotal(snapshot: ProjectSnapshot): number {
   return Math.max(
-    number(queueTotals(snapshot).deferred),
+    queueTotals(snapshot).deferred,
     number(snapshot.run.progress?.deferred_queue_depth),
     snapshot.home.deferred_patches,
   );
 }
 
 function queuedTotal(snapshot: ProjectSnapshot): number {
-  return number(queueTotals(snapshot).queued ?? snapshot.home.queued_patches);
+  return queueTotals(snapshot).queued;
+}
+
+function roleQueueCounts(snapshot: ProjectSnapshot, role: string): Record<string, unknown> {
+  const countsByRole = record(snapshot.run.queue?.counts_by_role);
+  return record(countsByRole[role]);
 }
 
 function hasRunHistory(snapshot: ProjectSnapshot): boolean {
@@ -176,15 +284,27 @@ function hasValidationFailure(snapshot: ProjectSnapshot): boolean {
 }
 
 function safetyStatus(snapshot: ProjectSnapshot): string {
-  return text(record(snapshot.run.task?.integration_safety).status, "not_recorded");
+  return text(record(snapshot.run.task?.integration_safety).status, "pending");
 }
 
 function isSafetyFailure(snapshot: ProjectSnapshot): boolean {
-  return safetyStatus(snapshot) === "fail";
+  return safetyStatus(snapshot).toLowerCase() === "fail";
 }
 
 function isUnconfigured(snapshot: ProjectSnapshot): boolean {
   return !snapshot.target.is_diffmogger_project || !snapshot.target.automation_task_exists;
+}
+
+function isRunning(snapshot: ProjectSnapshot, status: string): boolean {
+  const controls = record(snapshot.run.controls);
+  const automation = record(snapshot.run.automation);
+  const active = activeRoleRun(snapshot);
+  return (
+    bool(controls.is_running) ||
+    text(automation.state, "").toLowerCase() === "running" ||
+    text(active.status, "").toLowerCase() === "running" ||
+    status.includes("RUNNING")
+  );
 }
 
 function isUserBlocked(snapshot: ProjectSnapshot, status: string): boolean {
@@ -199,155 +319,276 @@ function isUserBlocked(snapshot: ProjectSnapshot, status: string): boolean {
 function isEnvironmentBlocked(snapshot: ProjectSnapshot, status: string): boolean {
   return (
     status === "BLOCKED_ON_ENVIRONMENT" ||
-    status === "CRITICAL_STOP" ||
     hasValidationFailure(snapshot) ||
-    isSafetyFailure(snapshot)
+    isSafetyFailure(snapshot) ||
+    list(snapshot.run.environment_blockers).length > 0
   );
 }
 
-function primaryForSnapshot(snapshot: ProjectSnapshot): HomeAction {
-  const status = text(snapshot.run.task?.status ?? snapshot.home.automation_status, "");
-  const active = activeRoleRun(snapshot);
-
-  if (isUnconfigured(snapshot)) {
-    return { label: "Open setup", kind: "navigate", route: "Brief" };
-  }
-  if (isUserBlocked(snapshot, status)) {
-    return { label: "Inbox", kind: "navigate", route: "Inbox" };
-  }
-  if (isEnvironmentBlocked(snapshot, status)) {
-    return { label: "Review", kind: "navigate", route: "Review" };
-  }
-  if (text(active.status, "") === "running") {
-    return { label: "Run", kind: "navigate", route: "Run" };
-  }
-  if (!hasRunHistory(snapshot)) {
-    return { label: "Run", kind: "navigate", route: "Run" };
-  }
-  return { label: "Run", kind: "navigate", route: "Run" };
+function operationalTitle(snapshot: ProjectSnapshot | null): string {
+  if (!snapshot) return "No target";
+  const status = rawStatus(snapshot);
+  if (status.includes("STALE")) return "Stale";
+  if (status === "CRITICAL_STOP") return "Critical stop";
+  if (isUserBlocked(snapshot, status)) return "User input";
+  if (isEnvironmentBlocked(snapshot, status)) return "Env blocked";
+  if (isRunning(snapshot, status)) return "Running";
+  if (isUnconfigured(snapshot) || status === "UNKNOWN") return "Unknown";
+  return "Ready";
 }
 
-function bannerForSnapshot(snapshot: ProjectSnapshot): Pick<
-  HomeModel,
-  "headline" | "subheadline" | "statusLabel" | "statusTone"
-> {
-  const status = text(snapshot.run.task?.status ?? snapshot.home.automation_status, "");
-  const active = activeRoleRun(snapshot);
+function primaryForTitle(title: string): HomeAction {
+  if (title === "No target") return { label: "Choose project", kind: "choose-project" };
+  if (title === "User input") return { label: "Open Inbox", kind: "navigate", route: "Inbox" };
+  if (title === "Env blocked") return { label: "Open Sidecar", kind: "navigate", route: "Advanced" };
+  if (title === "Critical stop") return { label: "Open Review", kind: "navigate", route: "Review" };
+  if (title === "Running") return { label: "View Activity", kind: "navigate", route: "Observatory" };
+  if (title === "Unknown" || title === "Stale") return { label: title === "Stale" ? "Refresh" : "Open setup", kind: title === "Stale" ? "refresh" : "navigate", route: "Brief" };
+  return { label: "Start automation", kind: "navigate", route: "Run" };
+}
 
-  if (isUnconfigured(snapshot)) {
-    return {
-      headline: "Setup incomplete",
-      subheadline: "Complete setup to write target-local files.",
-      statusLabel: "Setup needed",
-      statusTone: "warn",
-    };
+function subtitleForSnapshot(snapshot: ProjectSnapshot | null, title: string): string {
+  if (!snapshot) return "Choose a target folder or open setup to begin.";
+  const plan = actionPlan(snapshot);
+  const active = activeRoleRun(snapshot);
+  if (title === "Unknown" && isUnconfigured(snapshot)) {
+    return "Setup has not recorded a runnable automation task for this target.";
   }
-  if (isUserBlocked(snapshot, status)) {
-    return {
-      headline: "Input needed",
-      subheadline: "A target-local inbox item is waiting.",
-      statusLabel: "Input needed",
-      statusTone: "warn",
-    };
+  if (title === "User input") {
+    const total = pendingHuman(snapshot) + unhandledInbox(snapshot);
+    return `${total || "A"} human handoff${total === 1 ? "" : "s"} waiting in the target inbox.`;
   }
-  if (status === "CRITICAL_STOP") {
-    return {
-      headline: "Critical stop recorded",
-      subheadline: "Review the recorded stop condition before allowing another run.",
-      statusLabel: "Critical stop",
-      statusTone: "critical",
-    };
+  if (title === "Env blocked") return "Safety, validation, or local environment state needs attention before the next run.";
+  if (title === "Critical stop") return "Review the recorded stop condition before allowing another run.";
+  if (title === "Running") {
+    return text(active.reason ?? snapshot.run.automation?.message, `${titleCase(text(active.role, "automation"))} lane is active.`);
   }
-  if (isEnvironmentBlocked(snapshot, status)) {
-    return {
-      headline: "Blocked",
-      subheadline: "Safety, validation, or environment state needs attention before the next run.",
-      statusLabel: humanizeStatus(status) || "Blocked",
-      statusTone: "warn",
-    };
-  }
-  if (text(active.status, "") === "running") {
-    const role = text(active.role, "run");
-    return {
-      headline: `${role} lane is running`,
-      subheadline: "Watch the current run and avoid overlapping local changes until it finishes.",
-      statusLabel: "Running",
-      statusTone: "info",
-    };
-  }
-  if (!hasRunHistory(snapshot)) {
-    return {
-      headline: "Ready",
-      subheadline: "No runs recorded yet.",
-      statusLabel: "Ready",
-      statusTone: "good",
-    };
-  }
+  if (title === "Stale") return "Refresh the target before taking action.";
+  if (!hasRunHistory(snapshot)) return "Target files are present. Start automation from Run.";
+  return displayCopy(text(plan.recommendation, snapshot.home.next_action || "Review the next action and run the next local lane when ready."));
+}
+
+function bannerForSnapshot(snapshot: ProjectSnapshot | null): Pick<
+  HomeModel,
+  "headline" | "subheadline" | "statusLabel" | "statusTone" | "primaryAction" | "secondaryActions"
+> {
+  const title = operationalTitle(snapshot);
+  const status = snapshot ? rawStatus(snapshot) : "NO_TARGET";
+  const tone =
+    title === "No target" || title === "Unknown"
+      ? "quiet"
+      : title === "Critical stop"
+        ? "critical"
+        : title === "User input" || title === "Env blocked" || title === "Stale"
+          ? "warn"
+          : title === "Running"
+            ? "info"
+            : toneForStatus(status) === "quiet"
+              ? "good"
+              : toneForStatus(status);
+
   return {
-    headline: "Ready",
-    subheadline: text(snapshot.home.next_action, "Review the next action and run the next local lane when ready."),
-    statusLabel: status && status !== "UNKNOWN" ? status.replace(/_/g, " ") : "Ready",
-    statusTone: toneForStatus(status || "ACTIVE"),
+    headline: title,
+    subheadline: subtitleForSnapshot(snapshot, title),
+    statusLabel: title,
+    statusTone: tone,
+    primaryAction: primaryForTitle(title),
+    secondaryActions: snapshot
+      ? [
+          { label: "Refresh", kind: "refresh" },
+          { label: "Run", kind: "navigate", route: "Run" },
+          { label: "Review", kind: "navigate", route: "Review" },
+        ]
+      : [{ label: "Open setup", kind: "navigate", route: "Brief" }],
   };
 }
 
-function metricRow(snapshot: ProjectSnapshot): HomeMetric[] {
-  const cycles = number(snapshot.run.conveyor?.cycles);
-  const nextRun = text(snapshot.brief.dashboard_state?.next_run_at, "Not configured");
+function metricRow(snapshot: ProjectSnapshot | null): HomeMetric[] {
+  if (!snapshot) {
+    return [
+      { label: "Cycles", value: "N/A", tone: "quiet" },
+      { label: "Landed", value: "N/A", tone: "quiet" },
+      { label: "Queued", value: "N/A", tone: "quiet" },
+      { label: "Deferred", value: "N/A", tone: "quiet" },
+      { label: "Human", value: "N/A", tone: "quiet" },
+      { label: "Dirty", value: "N/A", tone: "quiet" },
+    ];
+  }
+  const dirty = number(snapshot.run.git?.dirty_count);
+  const human = pendingHuman(snapshot) + unhandledInbox(snapshot);
   return [
-    { label: "Cycles", value: cycles, tone: cycles ? "info" : "quiet" },
-    { label: "Applied patches", value: acceptedTotal(snapshot), tone: "good" },
-    { label: "Queued patches", value: queuedTotal(snapshot), tone: queuedTotal(snapshot) ? "warn" : "quiet" },
-    { label: "Deferred patches", value: deferredTotal(snapshot), tone: deferredTotal(snapshot) ? "warn" : "quiet" },
-    {
-      label: "Input pending",
-      value: pendingHuman(snapshot) + unhandledInbox(snapshot),
-      tone: pendingHuman(snapshot) + unhandledInbox(snapshot) ? "warn" : "good",
-    },
-    { label: "Next run", value: nextRun, tone: nextRun === "Not configured" ? "quiet" : "info" },
+    { label: "Cycles", value: number(snapshot.run.conveyor?.cycles), tone: number(snapshot.run.conveyor?.cycles) ? "info" : "quiet" },
+    { label: "Landed", value: acceptedTotal(snapshot), tone: acceptedTotal(snapshot) ? "good" : "quiet" },
+    { label: "Queued", value: queuedTotal(snapshot), tone: queuedTotal(snapshot) ? "warn" : "quiet" },
+    { label: "Deferred", value: deferredTotal(snapshot), tone: deferredTotal(snapshot) ? "warn" : "quiet" },
+    { label: "Human", value: human, tone: human ? "warn" : "good" },
+    { label: "Dirty", value: dirty, tone: dirty ? "warn" : "good" },
   ];
 }
 
-function safetyItems(snapshot: ProjectSnapshot): HomeSafetyItem[] {
+function safetyRows(snapshot: ProjectSnapshot | null): HomeSafetyRow[] {
+  if (!snapshot) {
+    return [
+      {
+        label: "Target",
+        status: "not selected",
+        summary: "Choose a project folder to load safety gates.",
+        source: "project picker",
+        tone: "quiet",
+        action: { label: "Choose", kind: "choose-project" },
+      },
+    ];
+  }
+
   const integrationSafety = record(snapshot.run.task?.integration_safety);
   const validation = record(snapshot.run.task?.validation);
   const validationCounts = record(validation.counts);
   const git = snapshot.run.git ?? {};
+  const envBlockers = list(snapshot.run.environment_blockers).map(record);
+  const humanTotal = pendingHuman(snapshot) + unhandledInbox(snapshot);
   const firstReview = firstReviewStatus(snapshot);
-  const blockers: string[] = [];
-  if (hasValidationFailure(snapshot)) blockers.push(`${number(validationCounts.fail)} validation failure(s)`);
-  if (isSafetyFailure(snapshot)) blockers.push("integration safety failed");
-  if (text(snapshot.run.task?.status, "") === "BLOCKED_ON_ENVIRONMENT") blockers.push("environment blocked");
-  if (text(snapshot.run.task?.status, "") === "CRITICAL_STOP") blockers.push("critical stop");
+  const validationStatus = hasValidationFailure(snapshot)
+    ? "fail"
+    : number(validationCounts.pending)
+      ? "pending"
+      : number(validationCounts.pass)
+        ? "pass"
+        : "not recorded";
 
   return [
     {
-      label: "Safety check",
-      value: safetyStatus(snapshot).replace(/_/g, " "),
-      tone: safetyStatus(snapshot) === "pass" ? "good" : safetyStatus(snapshot) === "fail" ? "critical" : "warn",
-      detail: text(integrationSafety.summary, "No safety check result is recorded yet."),
+      label: "Integration safety",
+      status: readableStatus(safetyStatus(snapshot), "pending"),
+      summary: text(integrationSafety.summary, "Integration-safety check has not run yet."),
+      source: "run.task.integration_safety",
+      tone: toneForResult(safetyStatus(snapshot)),
+      action: { label: "Run check", kind: "navigate", route: "Run" },
     },
     {
-      label: "Validation state",
-      value: `${number(validationCounts.pass)} pass / ${number(validationCounts.fail)} fail`,
-      tone: hasValidationFailure(snapshot) ? "critical" : number(validationCounts.pending) ? "warn" : "good",
-      detail: text(validation.summary, "No validation results recorded yet."),
+      label: "Validation",
+      status: `${number(validationCounts.pass)} pass / ${number(validationCounts.fail)} fail`,
+      summary: text(validation.summary, "No validation results recorded yet."),
+      source: "run.task.validation",
+      tone: toneForResult(validationStatus),
+      action: { label: "Review", kind: "navigate", route: "Review" },
     },
     {
       label: "Git state",
-      value: `${number(git.dirty_count)} dirty file(s)`,
+      status: `${number(git.dirty_count)} dirty`,
+      summary: `Branch ${text(git.branch, "unknown")}.`,
+      source: "run.git",
       tone: number(git.dirty_count) ? "warn" : "good",
-      detail: `Branch ${text(git.branch, "unknown")}.`,
+      action: { label: "Activity", kind: "navigate", route: "Observatory" },
     },
     {
-      label: "Blockers",
-      value: blockers.length ? `${blockers.length} blocker(s)` : "None recorded",
-      tone: blockers.length ? "warn" : "good",
-      detail: blockers.length
-        ? blockers.join(", ")
-        : `Review is ${firstReview.replace(/_/g, " ")}; no environment blocker is recorded.`,
+      label: "Environment",
+      status: envBlockers.length ? `${envBlockers.length} blocker(s)` : "clear",
+      summary: envBlockers.length
+        ? envBlockers.map((item) => text(item.name, "Environment blocker")).join(", ")
+        : "No environment blocker is recorded.",
+      source: "run.environment_blockers",
+      tone: envBlockers.length ? "warn" : "good",
+      action: { label: "Sidecar", kind: "navigate", route: "Advanced" },
+    },
+    {
+      label: "Human input",
+      status: humanTotal ? `${humanTotal} waiting` : "clear",
+      summary: humanTotal ? "Manual decisions or next-run notes are waiting." : "No human handoff is pending.",
+      source: "run.human",
+      tone: humanTotal ? "warn" : "good",
+      action: { label: "Bridge", kind: "navigate", route: "Inbox" },
+    },
+    {
+      label: "Review bundle",
+      status: readableStatus(firstReview, "unknown"),
+      summary: `First review status is ${readableStatus(firstReview, "unknown")}.`,
+      source: "run.first_review",
+      tone: toneForResult(firstReview),
+      action: { label: "Review", kind: "navigate", route: "Review" },
     },
   ];
+}
+
+function safetyItems(snapshot: ProjectSnapshot | null): HomeSafetyItem[] {
+  return safetyRows(snapshot).map((row) => ({
+    label: row.label,
+    value: row.status,
+    tone: row.tone,
+    detail: row.summary,
+  }));
+}
+
+function roleStatusTone(status: string): HomeTone {
+  const raw = status.toLowerCase();
+  if (raw.includes("fail") || raw.includes("critical")) return "critical";
+  if (raw.includes("block") || raw.includes("defer")) return "warn";
+  if (raw.includes("running") || raw.includes("next")) return "info";
+  if (raw.includes("accept") || raw.includes("complete") || raw.includes("done")) return "good";
+  return "quiet";
+}
+
+function conveyorModel(snapshot: ProjectSnapshot | null): HomeModel["conveyor"] {
+  if (!snapshot) {
+    return {
+      lanes: LANE_ORDER.map((role) => ({
+        role,
+        label: titleCase(role),
+        status: "unavailable",
+        badge: "no target",
+        tone: "quiet",
+        reason: "Choose a target to load lane state.",
+        counts: { queued: 0, applied: 0, deferred: 0, failed: 0 },
+      })),
+      activeLane: "",
+      nextLane: "",
+      summary: "No target selected.",
+      cycles: 0,
+    };
+  }
+
+  const rawRoles = list(snapshot.run.conveyor?.roles).map(record);
+  const active = activeRoleRun(snapshot);
+  const activeRole = text(active.role, "").toLowerCase();
+  const planLane = text(actionPlan(snapshot).lane, "").toLowerCase();
+  const history = list(snapshot.run.conveyor?.history).map(record);
+
+  const lanes = LANE_ORDER.map((role) => {
+    const fromSnapshot = rawRoles.find((item) => text(item.role, "").toLowerCase() === role) ?? {};
+    const latest = [...history].reverse().find((item) => text(item.role, "").toLowerCase() === role) ?? {};
+    const counts = { ...record(fromSnapshot.counts), ...roleQueueCounts(snapshot, role) };
+    const derivedStatus =
+      text(fromSnapshot.status, "") ||
+      (activeRole === role ? "running" : planLane === role ? "next" : text(latest.status, "standby"));
+    return {
+      role,
+      label: titleCase(role),
+      status: derivedStatus,
+      badge: text(fromSnapshot.badge, derivedStatus),
+      tone: roleStatusTone(derivedStatus),
+      reason: text(fromSnapshot.reason ?? latest.reason, activeRole === role ? text(active.reason, "Lane is active.") : "Awaiting conveyor decision."),
+      counts: {
+        queued: number(counts.queued),
+        applied: number(counts.applied),
+        deferred: number(counts.deferred),
+        failed: number(counts.failed),
+      },
+    };
+  });
+
+  const activeLane = activeRole ? titleCase(activeRole) : "";
+  const nextLane = lanes.find((lane) => lane.status.toLowerCase() === "next")?.label ?? (planLane ? titleCase(planLane) : "");
+
+  return {
+    lanes,
+    activeLane,
+    nextLane,
+    summary: activeLane
+      ? `${activeLane} lane is active.`
+      : nextLane
+        ? `${nextLane} is the next recommended lane.`
+        : "No active lane recorded.",
+    cycles: number(snapshot.run.conveyor?.cycles),
+  };
 }
 
 function progressItems(snapshot: ProjectSnapshot): HomeProgressItem[] {
@@ -390,87 +631,168 @@ function recommendation(snapshot: ProjectSnapshot): HomeModel["recommendation"] 
         ? "Run"
         : "Review";
   return {
-    title: text(plan.recommendation, snapshot.home.next_action || "Choose the next local action."),
-    reason: text(plan.why, "This recommendation is derived from the backend activity snapshot."),
+    title: displayCopy(text(plan.recommendation, snapshot.home.next_action || "Choose the next local action.")),
+    reason: displayCopy(text(plan.why, "This recommendation is derived from the backend activity snapshot.")),
     action: {
-      label: route === "Inbox" ? "Inbox" : route === "Run" ? "Run" : "Review",
+      label: route === "Inbox" ? "Open Inbox" : route === "Run" ? "Open Run" : "Open Review",
       kind: "navigate",
       route,
     },
   };
 }
 
+function queueRowFromRecord(item: Record<string, unknown>, index: number): HomeQueueRow {
+  const id = text(item.ticketId ?? item.ticket_id ?? item.id ?? item.run_id, `QUEUE-${index + 1}`);
+  const status = text(item.status ?? item.state ?? item.result ?? (item.deferral_reason ? "deferred" : "queued"), "queued");
+  const title = text(item.title ?? item.summary ?? item.reason ?? item.subject, id);
+  return {
+    id,
+    title,
+    status: readableStatus(status),
+    lane: titleCase(text(item.lane ?? item.role ?? item.next_lane, "unassigned")),
+    lastChange: text(item.last_updated ?? item.timestamp ?? item.created_at ?? item.finished_at, "not recorded"),
+    blocker: text(item.blocker ?? item.deferral_reason ?? item.known_issue, ""),
+    source: text(item.source ?? item.artifact ?? item.path ?? item.file, "snapshot"),
+    tone: roleStatusTone(status),
+  };
+}
+
+function queueLedger(snapshot: ProjectSnapshot | null): HomeModel["queueLedger"] {
+  if (!snapshot) {
+    return {
+      rows: [],
+      totals: {},
+      emptyMessage: "Choose a target to load the queue ledger.",
+    };
+  }
+
+  const rawRows = [
+    ...list(snapshot.run.queue?.items),
+    ...list(snapshot.run.queue?.tickets),
+    ...list(snapshot.run.queue?.manifests),
+    ...list(snapshot.run.queue?.deferred_backlog),
+    ...list(snapshot.run.queue?.recent_outcomes),
+    ...list(snapshot.run.conveyor?.decision_queue),
+  ].map(record);
+
+  const seedTickets = list(snapshot.brief.dashboard_state?.ticket_run_seed_tickets).map(record);
+  const rows = [...rawRows, ...seedTickets].slice(0, 6).map(queueRowFromRecord);
+  const totals = queueTotals(snapshot);
+
+  if (!rows.length && (totals.queued || totals.deferred)) {
+    rows.push({
+      id: totals.queued ? "queued-patches" : "deferred-patches",
+      title: totals.queued ? `${totals.queued} queued patch${totals.queued === 1 ? "" : "es"}` : `${totals.deferred} deferred patch${totals.deferred === 1 ? "" : "es"}`,
+      status: totals.queued ? "queued" : "deferred",
+      lane: conveyorModel(snapshot).nextLane || "Unassigned",
+      lastChange: text(snapshot.run.snapshot_generated_at, "snapshot"),
+      blocker: "",
+      source: "run.queue.totals",
+      tone: "warn",
+    });
+  }
+
+  return {
+    rows,
+    totals,
+    emptyMessage: "No queued, deferred, or ticket rows are exposed in the current snapshot.",
+  };
+}
+
+function eventFromRecord(item: Record<string, unknown>, index: number, fallbackType: string): HomeEventRow {
+  const status = text(item.status ?? item.state ?? item.result ?? item.level, "info");
+  return {
+    id: text(item.id ?? item.run_id ?? item.hash, `${fallbackType}-${index + 1}`),
+    time: text(item.time ?? item.timestamp ?? item.created_at ?? item.started_at ?? item.finished_at ?? item.completed_at, "not recorded"),
+    type: titleCase(text(item.type ?? item.stage ?? fallbackType, fallbackType)),
+    lane: titleCase(text(item.lane ?? item.role ?? "system", "system")),
+    message: text(item.message ?? item.summary ?? item.reason ?? item.subject ?? item.text, "No message recorded."),
+    artifact: text(item.artifact ?? item.path ?? item.file ?? item.hash, ""),
+    status: readableStatus(status, "info"),
+    tone: toneForResult(status),
+  };
+}
+
+function eventLedger(snapshot: ProjectSnapshot | null): HomeModel["eventLedger"] {
+  if (!snapshot) {
+    return {
+      rows: [],
+      emptyMessage: "Choose a target to load recent events.",
+    };
+  }
+
+  const rows: HomeEventRow[] = [];
+  rows.push(...list(snapshot.run.logs).map(record).map((item, index) => eventFromRecord(item, index, "log")));
+  const runLog = record(snapshot.run.run_log);
+  rows.push(...list(runLog.lines).map(record).map((item, index) => eventFromRecord(item, index, "run log")));
+  rows.push(...list(snapshot.run.conveyor?.history).map(record).map((item, index) => eventFromRecord(item, index, "conveyor")));
+  rows.push(...list(snapshot.run.queue?.recent_outcomes).map(record).map((item, index) => eventFromRecord(item, index, "queue")));
+  rows.push(...list(snapshot.run.git?.commits).map(record).map((item, index) => eventFromRecord(item, index, "commit")));
+
+  return {
+    rows: rows.slice(0, 8),
+    emptyMessage: "No command, queue, conveyor, or commit events are exposed in the current snapshot.",
+  };
+}
+
 export function buildHomeModel(snapshot: ProjectSnapshot | null): HomeModel {
+  const banner = bannerForSnapshot(snapshot);
   if (!snapshot) {
     return {
       projectName: "No project selected",
-      statusLabel: "No target",
-      statusTone: "quiet",
-      headline: "Choose a project",
-      subheadline: "Select a target folder to load state.",
-      primaryAction: { label: "Choose project", kind: "choose-project" },
-      secondaryActions: [],
-      metrics: [
-        { label: "Cycles", value: "N/A", tone: "quiet" },
-        { label: "Applied patches", value: "N/A", tone: "quiet" },
-        { label: "Queued patches", value: "N/A", tone: "quiet" },
-        { label: "Deferred patches", value: "N/A", tone: "quiet" },
-        { label: "Input pending", value: "N/A", tone: "quiet" },
-        { label: "Next run", value: "N/A", tone: "quiet" },
-      ],
+      ...banner,
+      metrics: metricRow(null),
       recommendation: {
         title: "Choose a project folder",
         reason: "A target snapshot is required.",
         action: { label: "Choose project", kind: "choose-project" },
       },
       safety: {
-        headline: "No target selected",
-        items: [],
+        headline: "Safety",
+        items: safetyItems(null),
+        rows: safetyRows(null),
       },
       progress: {
-        headline: "Recent activity",
+        headline: "Event ledger",
         empty: true,
         items: [],
       },
+      conveyor: conveyorModel(null),
+      queueLedger: queueLedger(null),
+      eventLedger: eventLedger(null),
       humanBridge: {
         pending: 0,
         unhandled: 0,
         outbound: 0,
         latestStatus: "No target selected",
-        action: { label: "Inbox", kind: "disabled", route: "Inbox" },
+        action: { label: "Open Inbox", kind: "disabled", route: "Inbox" },
       },
       isUnconfigured: false,
       hasNoRuns: true,
     };
   }
 
-  const banner = bannerForSnapshot(snapshot);
   const progress = progressItems(snapshot);
   const noRuns = !hasRunHistory(snapshot);
-  const primaryAction = primaryForSnapshot(snapshot);
 
   return {
     projectName: snapshot.home.title || snapshot.target.name,
     ...banner,
-    primaryAction,
-    secondaryActions: [
-      { label: "Refresh", kind: "refresh" },
-      { label: "Activity", kind: "navigate", route: "Observatory" },
-      { label: "Review", kind: "navigate", route: "Review" },
-    ],
     metrics: metricRow(snapshot),
     recommendation: recommendation(snapshot),
     safety: {
-      headline: isEnvironmentBlocked(snapshot, text(snapshot.run.task?.status, ""))
-        ? "Attention needed before running"
-        : "Checks",
+      headline: isEnvironmentBlocked(snapshot, rawStatus(snapshot)) ? "Gates needing attention" : "Safety",
       items: safetyItems(snapshot),
+      rows: safetyRows(snapshot),
     },
     progress: {
-      headline: "Recent activity",
+      headline: "Event ledger",
       empty: progress.length === 0,
       items: progress,
     },
+    conveyor: conveyorModel(snapshot),
+    queueLedger: queueLedger(snapshot),
+    eventLedger: eventLedger(snapshot),
     humanBridge: {
       pending: pendingHuman(snapshot),
       unhandled: unhandledInbox(snapshot),
@@ -478,8 +800,8 @@ export function buildHomeModel(snapshot: ProjectSnapshot | null): HomeModel {
       latestStatus:
         pendingHuman(snapshot) || unhandledInbox(snapshot)
           ? "Input pending"
-          : "No input pending",
-      action: { label: "Inbox", kind: "navigate", route: "Inbox" },
+          : "Clear",
+      action: { label: "Open Inbox", kind: "navigate", route: "Inbox" },
     },
     isUnconfigured: isUnconfigured(snapshot),
     hasNoRuns: noRuns,

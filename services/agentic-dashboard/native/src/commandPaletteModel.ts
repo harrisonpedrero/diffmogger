@@ -1,6 +1,11 @@
 import type { ProjectSnapshot } from "./api/backend";
 
 export type PaletteCommandId =
+  | "open-control-room"
+  | "open-run-control"
+  | "open-human-bridge"
+  | "open-review"
+  | "open-sidecar"
   | "open-project"
   | "create-new-project"
   | "close-project"
@@ -22,7 +27,7 @@ export type PaletteCommandId =
 export type PaletteCommand = {
   id: PaletteCommandId;
   title: string;
-  section: "Project" | "Setup" | "Run" | "Activity" | "Review" | "Inbox" | "Debug";
+  section: "Navigation" | "Project" | "Setup" | "Run" | "Activity" | "Review" | "Inbox" | "Debug";
   description: string;
   keywords: string[];
   disabledReason?: string;
@@ -79,6 +84,69 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
 
   return [
     {
+      id: "open-control-room",
+      title: "Open Control Room",
+      section: "Navigation",
+      description: "Open the Home overview.",
+      keywords: ["home", "control room", "overview", "ready"],
+      routesTo: "Home",
+      disabledReason: busyReason,
+    },
+    {
+      id: "continue-brief",
+      title: "Open setup",
+      section: "Navigation",
+      description: "Return to setup.",
+      keywords: ["brief", "setup", "intake", "wizard"],
+      routesTo: "Brief",
+      disabledReason: busyReason,
+    },
+    {
+      id: "open-run-control",
+      title: "Open Run",
+      section: "Navigation",
+      description: "Open the Run page.",
+      keywords: ["run", "run control", "automation", "start", "stop"],
+      routesTo: "Run",
+      disabledReason: busyReason,
+    },
+    {
+      id: "open-observatory",
+      title: "Open activity",
+      section: "Navigation",
+      description: "Open Activity.",
+      keywords: ["observatory", "activity", "log", "build"],
+      routesTo: "Observatory",
+      disabledReason: busyReason,
+    },
+    {
+      id: "open-human-bridge",
+      title: "Open Inbox",
+      section: "Navigation",
+      description: "Open the Inbox handoff surface.",
+      keywords: ["inbox", "human bridge", "bridge", "note", "request"],
+      routesTo: "Inbox",
+      disabledReason: busyReason,
+    },
+    {
+      id: "open-review",
+      title: "Open review",
+      section: "Navigation",
+      description: "Open Review.",
+      keywords: ["review", "evidence", "export"],
+      routesTo: "Review",
+      disabledReason: busyReason,
+    },
+    {
+      id: "open-sidecar",
+      title: "Open Sidecar",
+      section: "Navigation",
+      description: "Open Advanced managed files, diagnostics, settings, and debug tools.",
+      keywords: ["advanced", "debug", "sidecar", "settings", "files", "diagnostics"],
+      routesTo: "Advanced",
+      disabledReason: busyReason,
+    },
+    {
       id: "open-project",
       title: "Open project",
       section: "Project",
@@ -118,15 +186,6 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       description: "Open the selected target folder in a supported local editor.",
       keywords: ["editor", "code", "cursor", "zed", "sublime"],
       disabledReason: busyReason ?? targetReason,
-    },
-    {
-      id: "continue-brief",
-      title: "Open setup",
-      section: "Setup",
-      description: "Return to setup.",
-      keywords: ["intake", "setup", "wizard"],
-      routesTo: "Brief",
-      disabledReason: busyReason,
     },
     {
       id: "import-context-files",
@@ -188,15 +247,6 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
         runControlReason(snapshot, "can_run_safety_check", "Safety check is not available."),
     },
     {
-      id: "open-observatory",
-      title: "Open activity",
-      section: "Activity",
-      description: "Open Activity.",
-      keywords: ["log", "build", "observatory"],
-      routesTo: "Observatory",
-      disabledReason: busyReason ?? targetReason,
-    },
-    {
       id: "export-review-bundle",
       title: "Export review",
       section: "Review",
@@ -209,7 +259,7 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       title: "Send note to next run",
       section: "Inbox",
       description: "Write a file-based note for the next run.",
-      keywords: ["inbox", "note"],
+      keywords: ["inbox", "human bridge", "bridge", "note"],
       routesTo: "Inbox",
       disabledReason: busyReason ?? targetReason,
     },
@@ -226,16 +276,16 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       title: "Open diagnostics",
       section: "Debug",
       description: "Open diagnostics.",
-      keywords: ["doctor", "checks", "diagnostics"],
+      keywords: ["sidecar", "advanced", "doctor", "checks", "diagnostics"],
       routesTo: "Advanced",
       disabledReason: busyReason ?? targetReason,
     },
     {
       id: "export-debug-bundle",
-      title: "Export debug ZIP",
+      title: "Export debug",
       section: "Debug",
-      description: "Export redacted debug files without .env contents.",
-      keywords: ["debug", "support", "zip", "diagnostics"],
+      description: "Export a redacted debug bundle without .env contents.",
+      keywords: ["debug", "bundle", "support", "zip", "diagnostics", "sidecar"],
       disabledReason: busyReason ?? targetReason,
     },
   ];

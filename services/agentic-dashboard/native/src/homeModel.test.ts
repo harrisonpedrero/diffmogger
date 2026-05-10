@@ -101,8 +101,10 @@ describe("buildHomeModel", () => {
       label: "Choose project",
       kind: "choose-project",
     });
+    expect(model.headline).toBe("No target");
     expect(model.headline).not.toContain("UNKNOWN");
     expect(model.metrics.map((metric) => metric.value)).toEqual(["N/A", "N/A", "N/A", "N/A", "N/A", "N/A"]);
+    expect(model.conveyor.lanes).toHaveLength(4);
   });
 
   it("maps unconfigured targets to Brief without a scaffold CTA", () => {
@@ -120,7 +122,7 @@ describe("buildHomeModel", () => {
       }),
     );
 
-    expect(model.headline).toBe("Setup incomplete");
+    expect(model.headline).toBe("Unknown");
     expect(model.primaryAction).toMatchObject({
       label: "Open setup",
       kind: "navigate",
@@ -143,9 +145,56 @@ describe("buildHomeModel", () => {
 
     expect(model.headline).toBe("Ready");
     expect(model.primaryAction).toMatchObject({
-      label: "Run",
+      label: "Start automation",
       route: "Run",
     });
+  });
+
+  it("renders action plan copy without Markdown inline code ticks", () => {
+    const model = buildHomeModel(
+      snapshot({
+        run: {
+          scorecard: {
+            action_plan: {
+              lane: "builder",
+              recommendation: "Continue with the `builder` lane.",
+              why: "The `builder` lane is next.",
+            },
+          },
+        },
+      }),
+    );
+
+    expect(model.subheadline).toBe("Continue with the builder lane.");
+    expect(model.recommendation.title).toBe("Continue with the builder lane.");
+    expect(model.recommendation.reason).toBe("The builder lane is next.");
+  });
+
+  it("shows a fresh target safety check as pending instead of not recorded", () => {
+    const fresh = snapshot({
+      run: {
+        task: {
+          status: "ACTIVE",
+          validation: {
+            counts: { pass: 0, fail: 0, pending: 1 },
+            summary: "Validation is recorded as not run yet.",
+          },
+        },
+        conveyor: { cycles: 0, active_role_run: {}, history: [] },
+        progress: { accepted_total: 0, recent_activity: "No multi-role activity recorded yet." },
+        queue: { totals: { queued: 0, deferred: 0 }, recent_outcomes: [] },
+      },
+    });
+
+    const model = buildHomeModel(fresh);
+    const safety = model.safety.rows.find((row) => row.label === "Integration safety");
+
+    expect(safety).toMatchObject({
+      status: "pending",
+      summary: "Integration-safety check has not run yet.",
+      tone: "warn",
+    });
+    expect(safety?.status).not.toBe("not recorded");
   });
 
   it("maps running targets to the Run page", () => {
@@ -161,11 +210,12 @@ describe("buildHomeModel", () => {
       }),
     );
 
-    expect(model.headline).toBe("builder lane is running");
+    expect(model.headline).toBe("Running");
     expect(model.primaryAction).toMatchObject({
-      label: "Run",
-      route: "Run",
+      label: "View Activity",
+      route: "Observatory",
     });
+    expect(model.conveyor.activeLane).toBe("Builder");
   });
 
   it("maps blocked human input to Inbox", () => {
@@ -179,9 +229,9 @@ describe("buildHomeModel", () => {
       }),
     );
 
-    expect(model.headline).toBe("Input needed");
+    expect(model.headline).toBe("User input");
     expect(model.primaryAction).toMatchObject({
-      label: "Inbox",
+      label: "Open Inbox",
       route: "Inbox",
     });
   });
@@ -205,10 +255,94 @@ describe("buildHomeModel", () => {
       }),
     );
 
-    expect(model.headline).toBe("Blocked");
+    expect(model.headline).toBe("Env blocked");
     expect(model.primaryAction).toMatchObject({
-      label: "Review",
+      label: "Open Sidecar",
+      route: "Advanced",
+    });
+    expect(model.safety.rows.some((row) => row.label === "Validation" && row.tone === "critical")).toBe(true);
+  });
+
+  it("maps critical stops to Review", () => {
+    const model = buildHomeModel(
+      snapshot({
+        run: {
+          task: { status: "CRITICAL_STOP" },
+        },
+      }),
+    );
+
+    expect(model.headline).toBe("Critical stop");
+    expect(model.primaryAction).toMatchObject({
+      label: "Open Review",
       route: "Review",
+    });
+  });
+
+  it("adapts queue and event ledgers from existing snapshot shapes", () => {
+    const model = buildHomeModel(
+      snapshot({
+        run: {
+          queue: {
+            totals: { queued: 1, deferred: 0, applied: 0 },
+            recent_outcomes: [
+              { run_id: "builder-1", role: "builder", status: "queued", summary: "Apply patch", timestamp: "12:00" },
+            ],
+          },
+          conveyor: {
+            cycles: 1,
+            active_role_run: {},
+            history: [{ role: "planner", status: "completed", reason: "Plan accepted", completed_at: "11:00" }],
+          },
+        },
+      }),
+    );
+
+    expect(model.queueLedger.rows[0]).toMatchObject({
+      id: "builder-1",
+      lane: "Builder",
+      status: "queued",
+    });
+    expect(model.eventLedger.rows.some((row) => row.message.includes("Plan accepted"))).toBe(true);
+  });
+
+  it("uses per-role queue counts for home conveyor lanes", () => {
+    const model = buildHomeModel(
+      snapshot({
+        run: {
+          queue: {
+            totals: { queued: 0, deferred: 0, applied: 27, failed: 0, skipped: 0 },
+            counts_by_role: {
+              planner: { queued: 0, deferred: 0, applied: 1, failed: 0, skipped: 0 },
+              builder: { queued: 0, deferred: 0, applied: 4, failed: 0, skipped: 0 },
+              hardener: { queued: 0, deferred: 0, applied: 4, failed: 0, skipped: 0 },
+              integrator: { queued: 0, deferred: 0, applied: 18, failed: 0, skipped: 0 },
+            },
+            recent_outcomes: [],
+          },
+          conveyor: {
+            cycles: 28,
+            active_role_run: {},
+            history: [],
+          },
+          scorecard: {
+            action_plan: {
+              lane: "builder",
+              recommendation: "Builder is next.",
+              why: "Builder-first policy applies.",
+            },
+          },
+        },
+      }),
+    );
+
+    expect(
+      Object.fromEntries(model.conveyor.lanes.map((lane) => [lane.role, lane.counts.applied])),
+    ).toEqual({
+      planner: 1,
+      builder: 4,
+      hardener: 4,
+      integrator: 18,
     });
   });
 });

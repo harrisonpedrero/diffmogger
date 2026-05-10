@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { ProjectSnapshot } from "./api/backend";
 import { buildCommandPaletteModel, filterPaletteCommands } from "./commandPaletteModel";
 
-function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends Array<infer U>
+    ? Array<DeepPartial<U>>
+    : T[K] extends object
+      ? DeepPartial<T[K]>
+      : T[K];
+};
+
+function snapshot(overrides: DeepPartial<ProjectSnapshot> = {}): ProjectSnapshot {
   const base: ProjectSnapshot = {
     target: {
       path: "/tmp/project",
@@ -54,7 +62,7 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
     run: { ...base.run, ...overrides.run },
     home: { ...base.home, ...overrides.home },
     files: overrides.files ?? base.files,
-  };
+  } as ProjectSnapshot;
 }
 
 describe("command palette model", () => {
@@ -62,12 +70,16 @@ describe("command palette model", () => {
     const ids = buildCommandPaletteModel({ snapshot: snapshot() }).map((command) => command.id);
 
     expect(ids).toContain("open-project");
+    expect(ids).toContain("open-control-room");
+    expect(ids).toContain("open-run-control");
+    expect(ids).toContain("open-human-bridge");
+    expect(ids).toContain("open-sidecar");
     expect(ids).toContain("create-new-project");
     expect(ids).toContain("close-project");
     expect(ids).toContain("start-automation");
     expect(ids).toContain("stop-automation");
     expect(ids).toContain("export-debug-bundle");
-    expect(ids).toHaveLength(17);
+    expect(ids).toHaveLength(22);
   });
 
   it("explains disabled target-scoped commands without a selected target", () => {
@@ -124,9 +136,66 @@ describe("command palette model", () => {
     const commands = buildCommandPaletteModel({ snapshot: snapshot() });
 
     expect(filterPaletteCommands(commands, "activity").map((command) => command.id)).toEqual(["open-observatory"]);
+    expect(filterPaletteCommands(commands, "home").map((command) => command.id)).toContain("open-control-room");
+    expect(filterPaletteCommands(commands, "control room").map((command) => command.id)).toContain("open-control-room");
+    expect(filterPaletteCommands(commands, "brief").map((command) => command.id)).toContain("continue-brief");
+    expect(filterPaletteCommands(commands, "setup").map((command) => command.id)).toContain("continue-brief");
+    expect(filterPaletteCommands(commands, "run control").map((command) => command.id)).toContain("open-run-control");
+    expect(filterPaletteCommands(commands, "human bridge").map((command) => command.id)).toContain("open-human-bridge");
+    expect(filterPaletteCommands(commands, "inbox").map((command) => command.id)).toContain("open-human-bridge");
+    expect(filterPaletteCommands(commands, "advanced").map((command) => command.id)).toContain("open-sidecar");
+    expect(filterPaletteCommands(commands, "sidecar").map((command) => command.id)).toContain("open-sidecar");
+    expect(filterPaletteCommands(commands, "debug bundle").map((command) => command.id)).toContain("export-debug-bundle");
     expect(filterPaletteCommands(commands, "inbox note").map((command) => command.id)).toContain("send-note-next-run");
     expect(filterPaletteCommands(commands, "raw tasks").map((command) => command.id)).toEqual([
       "open-raw-automation-tasks",
     ]);
+  });
+
+  it("covers representative start gating states", () => {
+    const states = [
+      {
+        name: "targetless",
+        snapshot: null,
+        reason: "Choose a project folder",
+      },
+      {
+        name: "missing sidecar",
+        snapshot: snapshot({
+          target: {
+            is_diffmogger_project: false,
+            automation_task_exists: false,
+          },
+          run: { controls: { can_start_automation: false, start_automation_reason: "Target sidecar is missing. Complete setup first." } },
+        }),
+        reason: "Target sidecar is missing",
+      },
+      {
+        name: "running",
+        snapshot: snapshot({
+          run: {
+            controls: { can_start_automation: false, start_automation_reason: "Automation is already running." },
+            automation: { state: "running" },
+          },
+        }),
+        reason: "Automation is already running",
+      },
+      {
+        name: "critical stop",
+        snapshot: snapshot({
+          home: { automation_status: "CRITICAL_STOP" },
+          run: { controls: { can_start_automation: false, start_automation_reason: "Critical stop recorded. Review before continuing." } },
+        }),
+        reason: "Critical stop recorded",
+      },
+    ];
+
+    for (const state of states) {
+      const start = buildCommandPaletteModel({ snapshot: state.snapshot }).find((command) => command.id === "start-automation");
+      expect(start?.disabledReason, state.name).toContain(state.reason);
+    }
+
+    const ready = buildCommandPaletteModel({ snapshot: snapshot() }).find((command) => command.id === "start-automation");
+    expect(ready?.disabledReason).toBeUndefined();
   });
 });

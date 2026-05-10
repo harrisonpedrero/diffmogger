@@ -45,6 +45,7 @@ export function CommandPalette(props: {
         className="command-palette"
         role="dialog"
         aria-label="Command palette"
+        aria-modal="true"
         onMouseDown={(event) => event.stopPropagation()}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
@@ -70,29 +71,34 @@ export function CommandPalette(props: {
           <input
             ref={inputRef}
             aria-label="Search commands"
+            aria-controls="command-palette-results"
+            aria-activedescendant={filtered[activeIndex] ? `palette-command-${filtered[activeIndex].id}` : undefined}
             placeholder="Search commands"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
           <kbd>⌘K</kbd>
-          <button aria-label="Close command palette" onClick={props.onClose}>
+          <button aria-label="Close command palette" title="Close command palette" onClick={props.onClose}>
             <X size={16} />
           </button>
         </div>
 
-        {props.error && <div className="palette-status error">{props.error}</div>}
-        {props.message && <div className="palette-status">{props.message}</div>}
+        {props.error && <div className="palette-status error" role="status" aria-live="polite">{props.error}</div>}
+        {props.message && <div className="palette-status" role="status" aria-live="polite">{props.message}</div>}
 
-        <div className="palette-command-list">
+        <div className="palette-command-list" id="command-palette-results" role="listbox" aria-label="Commands">
           {filtered.length ? (
             filtered.map((command, index) => {
               const disabled = Boolean(command.disabledReason || props.busyCommandId);
               const busy = props.busyCommandId === command.id;
               return (
                 <button
+                  aria-selected={index === activeIndex}
                   className={`${index === activeIndex ? "active" : ""} ${disabled ? "disabled" : ""}`}
                   disabled={disabled}
+                  id={`palette-command-${command.id}`}
                   key={command.id}
+                  role="option"
                   title={command.disabledReason}
                   onClick={() => execute(command)}
                   onMouseEnter={() => setActiveIndex(index)}

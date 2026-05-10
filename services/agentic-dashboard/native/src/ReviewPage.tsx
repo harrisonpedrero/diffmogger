@@ -35,6 +35,12 @@ const followupIntents = [
   { value: "unknown", label: "Not sure" },
 ];
 
+type EvidenceSnapshotItem = {
+  label: string;
+  value: string;
+  tone: string;
+};
+
 function text(value: unknown, fallback = "Not recorded"): string {
   if (typeof value === "string" && value.trim()) return value.trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -101,6 +107,48 @@ function countSummary(counts: Record<string, number> | undefined): string {
   return `${number(counts?.pass)} pass · ${number(counts?.fail)} fail · ${number(counts?.warn)} warn · ${number(counts?.pending)} pending`;
 }
 
+function buildEvidenceSnapshot(snapshot: ReviewSnapshot | null, projectSnapshot: ProjectSnapshot): EvidenceSnapshotItem[] {
+  const counts = snapshot?.verification.counts ?? {};
+  const human = number(projectSnapshot.home.pending_human_requests) + number(projectSnapshot.home.unhandled_inbox);
+  return [
+    {
+      label: "Marker",
+      value: snapshot?.reviewed.exists ? "Reviewed" : "Pending",
+      tone: snapshot?.reviewed.exists ? "good" : "warn",
+    },
+    {
+      label: "Safety",
+      value: text(snapshot?.safety.status, "pending"),
+      tone: statusTone(snapshot?.safety.status),
+    },
+    {
+      label: "Verification",
+      value: countSummary(counts),
+      tone: number(counts.fail) > 0 ? "bad" : number(counts.warn) > 0 || number(counts.pending) > 0 ? "warn" : "good",
+    },
+    {
+      label: "Changed files",
+      value: `${snapshot?.changed_files.length ?? 0}`,
+      tone: (snapshot?.changed_files.length ?? 0) > 0 ? "info" : "quiet",
+    },
+    {
+      label: "Limitations",
+      value: `${snapshot?.limitations.length ?? 0}`,
+      tone: (snapshot?.limitations.length ?? 0) > 0 ? "warn" : "good",
+    },
+    {
+      label: "Human input",
+      value: human ? `${human} pending` : "clear",
+      tone: human ? "warn" : "good",
+    },
+    {
+      label: "Commits",
+      value: `${snapshot?.latest_commits.length ?? 0}`,
+      tone: (snapshot?.latest_commits.length ?? 0) > 0 ? "info" : "quiet",
+    },
+  ];
+}
+
 function buildTrustVerdict(snapshot: ReviewSnapshot | null, projectSnapshot: ProjectSnapshot): { label: string; tone: string; summary: string } {
   if (!snapshot) {
     return {
@@ -155,11 +203,11 @@ const TrustSummaryCard = memo(function TrustSummaryCard(props: {
   const counts = props.snapshot?.verification.counts ?? {};
   const human = number(props.projectSnapshot.home.pending_human_requests) + number(props.projectSnapshot.home.unhandled_inbox);
   const items = [
-    { label: "Safety", value: text(props.snapshot?.safety.status, "not recorded"), tone: props.snapshot?.safety.status },
-    { label: "Verification", value: countSummary(counts), tone: number(counts.fail) > 0 ? "bad" : number(counts.warn) > 0 || number(counts.pending) > 0 ? "warn" : "good" },
+    { label: "Safety", value: text(props.snapshot?.safety.status, "pending"), tone: props.snapshot?.safety.status },
+    { label: "Human input", value: human ? `${human} pending` : "none pending", tone: human ? "warn" : "good" },
     { label: "Skipped / limited", value: `${props.snapshot?.limitations.length ?? 0} recorded`, tone: (props.snapshot?.limitations.length ?? 0) > 0 ? "warn" : "good" },
     { label: "Changed files", value: `${props.snapshot?.changed_files.length ?? 0} files`, tone: (props.snapshot?.changed_files.length ?? 0) > 0 ? "info" : "quiet" },
-    { label: "Human input", value: human ? `${human} pending` : "none pending", tone: human ? "warn" : "good" },
+    { label: "Verification", value: countSummary(counts), tone: number(counts.fail) > 0 ? "bad" : number(counts.warn) > 0 || number(counts.pending) > 0 ? "warn" : "good", wide: true },
   ];
 
   return (
@@ -169,7 +217,7 @@ const TrustSummaryCard = memo(function TrustSummaryCard(props: {
       </div>
       <div className="review-trust-grid">
         {items.map((item) => (
-          <div className="review-trust-item" key={item.label}>
+          <div className={`review-trust-item ${item.wide ? "wide" : ""}`} key={item.label}>
             <span>{item.label}</span>
             <strong>{item.value}</strong>
             <ReviewBadge value={text(item.tone, "info")} tone={text(item.tone, "info")} />
@@ -196,15 +244,80 @@ const LatestRunSummaryCard = memo(function LatestRunSummaryCard(props: {
   );
 });
 
+const ReviewMarkerCard = memo(function ReviewMarkerCard(props: {
+  snapshot: ReviewSnapshot | null;
+  reviewNote: string;
+  disabled: boolean;
+  busy: string | null;
+  onNote: (value: string) => void;
+  onMarkReviewed: () => void;
+}) {
+  return (
+    <ReviewSection title="Review marker" className="review-evidence-card review-marker-section">
+      <div className="review-mark-card">
+        <CheckCircle2 size={18} />
+        <div>
+          <strong>{props.snapshot?.reviewed.exists ? "Reviewed" : "Not reviewed yet"}</strong>
+          <span>{formatTimestamp(props.snapshot?.reviewed.reviewed_at)}</span>
+        </div>
+        <ReviewBadge value={props.snapshot?.reviewed.exists ? "reviewed" : "pending"} tone={props.snapshot?.reviewed.exists ? "good" : "warn"} />
+      </div>
+      <label className="review-note-label">
+        Optional note
+        <textarea value={props.reviewNote} onChange={(event) => props.onNote(event.target.value)} />
+      </label>
+      <button className="primary-action" disabled={props.disabled} onClick={props.onMarkReviewed}>
+        {props.busy === "mark" ? <Loader2 className="spin" size={16} /> : <ClipboardCheck size={16} />}
+        Mark reviewed
+      </button>
+    </ReviewSection>
+  );
+});
+
+const HumanInputCard = memo(function HumanInputCard(props: {
+  projectSnapshot: ProjectSnapshot;
+  onNavigate: (view: "Inbox") => void;
+}) {
+  const pendingRequests = number(props.projectSnapshot.home.pending_human_requests);
+  const unhandledInbox = number(props.projectSnapshot.home.unhandled_inbox);
+  const humanState = pendingRequests + unhandledInbox;
+  const runHuman = props.projectSnapshot.run.human ?? {};
+  const requestSummary = text(
+    runHuman.pending_summary ?? runHuman.summary ?? runHuman.latest_request ?? runHuman.last_request,
+    humanState ? "Manual input is pending in Inbox." : "No pending human input is recorded for this snapshot.",
+  );
+  return (
+    <ReviewSection title="Human input" className="review-evidence-card">
+      <div className="review-human-grid">
+        <div className={`review-human-state ${humanState ? "warn" : "good"}`}>
+          <span>Pending requests</span>
+          <strong>{pendingRequests}</strong>
+        </div>
+        <div className={`review-human-state ${unhandledInbox ? "warn" : "good"}`}>
+          <span>Unhandled inbox</span>
+          <strong>{unhandledInbox}</strong>
+        </div>
+        <div className="review-human-summary">
+          <strong>{humanState ? "Needs response" : "No manual blocker"}</strong>
+          <p>{requestSummary}</p>
+        </div>
+      </div>
+      <button className="secondary-action" onClick={() => props.onNavigate("Inbox")}>
+        Open Inbox
+      </button>
+    </ReviewSection>
+  );
+});
+
 const SafetyCheckCard = memo(function SafetyCheckCard(props: { snapshot: ReviewSnapshot | null }) {
   return (
     <ReviewSection title="Safety check">
       <div className={`review-status-card ${statusTone(props.snapshot?.safety.status)}`}>
         <div className="review-card-heading">
           <strong>Integration safety</strong>
-          <ReviewBadge value={text(props.snapshot?.safety.status, "not recorded")} tone={text(props.snapshot?.safety.status, "warn")} />
+          <ReviewBadge value={text(props.snapshot?.safety.status, "pending")} tone={text(props.snapshot?.safety.status, "warn")} />
         </div>
-        <p>{text(props.snapshot?.safety.summary, "No integration-safety check result recorded yet.")}</p>
+        <p>{text(props.snapshot?.safety.summary, "Integration-safety check has not run yet.")}</p>
         <code>{text(props.snapshot?.safety.command, "python3 scripts/check_integration_safety.py")}</code>
       </div>
     </ReviewSection>
@@ -344,6 +457,7 @@ const ArtifactCard = memo(function ArtifactCard(props: {
   copied: boolean;
   disabled: boolean;
   onCopy: () => void;
+  onOpen?: () => void;
   onReveal: () => void;
 }) {
   return (
@@ -355,12 +469,69 @@ const ArtifactCard = memo(function ArtifactCard(props: {
           <Clipboard size={13} />
           {props.copied ? "Copied" : "Copy"}
         </button>
-        <button className="icon-text-button" disabled={props.disabled} onClick={props.onReveal}>
+        {props.onOpen && (
+          <button className="icon-text-button" disabled={props.disabled || !props.path} onClick={props.onOpen}>
+            <ExternalLink size={13} />
+            Open
+          </button>
+        )}
+        <button className="icon-text-button" disabled={props.disabled || !props.path} onClick={props.onReveal}>
           <FolderOpen size={13} />
           Reveal
         </button>
       </div>
     </div>
+  );
+});
+
+const ReviewBundleActions = memo(function ReviewBundleActions(props: {
+  selfReviewPath: string;
+  reviewDir: string;
+  copiedPath: string;
+  disabled: boolean;
+  busy: string | null;
+  onCopyPath: (path: string, label: string) => void;
+  onOpen: () => void;
+  onReveal: () => void;
+  onRevealDirectory: () => void;
+  onExport: () => void;
+}) {
+  return (
+    <ReviewSection title="Export and artifacts" className="review-evidence-card review-artifacts-section">
+      <div className="review-bundle-paths">
+        <ArtifactCard
+          label="Self-review Markdown"
+          path={props.selfReviewPath}
+          copied={props.copiedPath === "self-review"}
+          disabled={props.disabled}
+          onCopy={() => props.onCopyPath(props.selfReviewPath, "self-review")}
+          onOpen={props.onOpen}
+          onReveal={props.onReveal}
+        />
+        <ArtifactCard
+          label="Review directory"
+          path={props.reviewDir}
+          copied={props.copiedPath === "review-dir"}
+          disabled={props.disabled}
+          onCopy={() => props.onCopyPath(props.reviewDir, "review-dir")}
+          onReveal={props.onRevealDirectory}
+        />
+      </div>
+      <div className="review-export-actions">
+        <button className="primary-action" disabled={props.disabled} onClick={props.onExport}>
+          {props.busy === "export" ? <Loader2 className="spin" size={16} /> : <FileDown size={16} />}
+          Export review
+        </button>
+        <button className="secondary-action" disabled={props.disabled} onClick={props.onOpen}>
+          <ExternalLink size={15} />
+          Open Markdown
+        </button>
+        <button className="secondary-action" disabled={props.disabled} onClick={props.onReveal}>
+          <FolderOpen size={15} />
+          Reveal
+        </button>
+      </div>
+    </ReviewSection>
   );
 });
 
@@ -394,6 +565,10 @@ export function ReviewPage(props: {
   const limitations = useMemo(() => snapshot?.limitations ?? [], [snapshot?.limitations]);
   const verdict = useMemo(
     () => buildTrustVerdict(snapshot, props.snapshot),
+    [props.snapshot, snapshot],
+  );
+  const evidenceSnapshot = useMemo(
+    () => buildEvidenceSnapshot(snapshot, props.snapshot),
     [props.snapshot, snapshot],
   );
 
@@ -470,6 +645,20 @@ export function ReviewPage(props: {
       const bundle = await ensureBundle();
       if (!bundle) return;
       await revealReviewArtifact(bundle.markdown_path);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function revealReviewDirectory() {
+    setBusy("reveal");
+    setError("");
+    try {
+      const bundle = await ensureBundle();
+      if (!bundle) return;
+      await revealReviewArtifact(bundle.review_dir);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -598,34 +787,51 @@ export function ReviewPage(props: {
         </div>
       </header>
 
-      {error && <div className="review-alert error">{error}</div>}
-      {notice && <div className="review-alert notice">{notice}</div>}
+      {error && <div className="review-alert error" role="alert">{error}</div>}
+      {notice && <div className="review-alert notice" role="status" aria-live="polite">{notice}</div>}
 
-      <div className="review-layout">
-        <main className="review-main-column">
-          <TrustSummaryCard snapshot={snapshot} projectSnapshot={props.snapshot} verdict={verdict} />
-          <LatestRunSummaryCard snapshot={snapshot} />
+      <section className="review-snapshot-strip" aria-label="Review evidence summary">
+        {evidenceSnapshot.map((item) => (
+          <div className={`review-snapshot-item ${item.tone}`} key={item.label}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+          </div>
+        ))}
+      </section>
+
+      <div className="review-layout review-evidence-layout">
+        <main className="review-main-column review-evidence-stack">
+          <ReviewMarkerCard
+            snapshot={snapshot}
+            reviewNote={reviewNote}
+            disabled={disabled}
+            busy={busy}
+            onNote={setReviewNote}
+            onMarkReviewed={markReviewed}
+          />
           <SafetyCheckCard snapshot={snapshot} />
           {snapshot && deferredStage >= 1 ? (
             <>
-              <ChangedFilesList files={changedFiles} source={snapshot.changed_files_source} />
               <VerificationEvidenceList snapshot={snapshot} />
+              <ChangedFilesList files={changedFiles} source={snapshot.changed_files_source} />
             </>
           ) : (
             <>
-              <DeferredReviewSection title="Changed files" />
               <DeferredReviewSection title="Verification" />
+              <DeferredReviewSection title="Changed files" />
             </>
           )}
           {snapshot && deferredStage >= 2 ? (
             <>
-              <LandedWorkRail commits={latestCommits} />
               <SkippedChecksCard limitations={limitations} />
+              <HumanInputCard projectSnapshot={props.snapshot} onNavigate={props.onNavigate} />
+              <LandedWorkRail commits={latestCommits} />
             </>
           ) : (
             <>
-              <DeferredReviewSection title="Commits" />
               <DeferredReviewSection title="Skipped checks" />
+              <HumanInputCard projectSnapshot={props.snapshot} onNavigate={props.onNavigate} />
+              <DeferredReviewSection title="Commits" />
             </>
           )}
           <ReviewSection title="Markdown preview" className="review-markdown-section">
@@ -653,40 +859,20 @@ export function ReviewPage(props: {
         </main>
 
         <aside className="review-side-rail">
-          <ReviewSection title="Review marker" className="review-rail-card">
-            <div className="review-mark-card">
-              <CheckCircle2 size={18} />
-              <div>
-                <strong>{snapshot?.reviewed.exists ? "Reviewed" : "Not reviewed yet"}</strong>
-                <span>{formatTimestamp(snapshot?.reviewed.reviewed_at)}</span>
-              </div>
-              <ReviewBadge value={snapshot?.reviewed.exists ? "reviewed" : "pending"} tone={snapshot?.reviewed.exists ? "good" : "warn"} />
-            </div>
-            <label className="review-note-label">
-              Optional note
-              <textarea value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} />
-            </label>
-            <button className="primary-action" disabled={disabled} onClick={markReviewed}>
-              Mark reviewed
-            </button>
-          </ReviewSection>
-
-          <ReviewSection title="Review export" className="review-rail-card">
-            <div className="review-bundle-paths">
-              <ArtifactCard
-                label="Self-review"
-                path={selfReviewPath}
-                copied={copiedPath === "self-review"}
-                disabled={disabled}
-                onCopy={() => copyArtifactPath(selfReviewPath, "self-review")}
-                onReveal={() => revealArtifact()}
-              />
-            </div>
-            <button className="primary-action" disabled={disabled} onClick={exportBundle}>
-              <FileDown size={16} />
-              Export review
-            </button>
-          </ReviewSection>
+          <TrustSummaryCard snapshot={snapshot} projectSnapshot={props.snapshot} verdict={verdict} />
+          <LatestRunSummaryCard snapshot={snapshot} />
+          <ReviewBundleActions
+            selfReviewPath={selfReviewPath}
+            reviewDir={reviewDir}
+            copiedPath={copiedPath}
+            disabled={disabled}
+            busy={busy}
+            onCopyPath={copyArtifactPath}
+            onOpen={() => void openArtifact()}
+            onReveal={() => void revealArtifact()}
+            onRevealDirectory={() => void revealReviewDirectory()}
+            onExport={() => void exportBundle()}
+          />
 
           <ReviewSection title="Next-run note" className="review-rail-card">
             <div className="review-followup">

@@ -24,6 +24,21 @@ type ReviewExportData = {
 };
 
 const tabs: ObservatoryTab[] = ["Summary", "Events", "Queue", "Metrics"];
+const roleFilters = ["planner", "builder", "hardener", "integrator"] as const;
+
+type ActivityFilter = "all" | typeof roleFilters[number] | "system";
+
+type ActivityEvent = {
+  id: string;
+  time: string;
+  type: string;
+  lane: string;
+  message: string;
+  artifact: string;
+  status: string;
+  tone: string;
+  detail: string;
+};
 
 function targetSubdir(target: string, leaf: string): string {
   return `${target.replace(/[\\/]+$/, "")}/target/${leaf}`;
@@ -58,6 +73,10 @@ function roleLabel(value: unknown): string {
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
+function compactLabel(value: unknown, fallback: string): string {
+  return roleLabel(text(value, fallback).replace(/_/g, " "));
+}
+
 function laneLabel(snapshot: ObservatorySnapshot | null, activeRun: Record<string, unknown>): string {
   if (text(activeRun.role, "")) {
     return `${text(activeRun.status, "running") === "running" ? "Running" : "Last active"}: ${roleLabel(activeRun.role)}`;
@@ -72,6 +91,84 @@ function laneLabel(snapshot: ObservatorySnapshot | null, activeRun: Record<strin
 function hasKnownIssue(value: unknown): boolean {
   const raw = text(value, "").toLowerCase();
   return Boolean(raw && !["no active issue summary.", "no active issue summary", "no active issue", "none"].includes(raw));
+}
+
+function eventTime(item: Record<string, unknown>): string {
+  return text(item.finished_at ?? item.timestamp ?? item.time ?? item.updated_at ?? item.created_at ?? item.generated_at, "No time");
+}
+
+function eventLane(item: Record<string, unknown>, fallback = "system"): string {
+  return text(item.role ?? item.lane ?? item.source_lane ?? item.owner ?? item.kind, fallback).toLowerCase();
+}
+
+function eventStatus(item: Record<string, unknown>, fallback = "info"): string {
+  return text(item.status ?? item.state ?? item.result ?? item.baseline_status ?? item.kind, fallback);
+}
+
+function eventMessage(item: Record<string, unknown>, fallback: string): string {
+  return text(item.reason ?? item.summary ?? item.message ?? item.title ?? item.subject ?? item.detail ?? item.deferral_reason, fallback);
+}
+
+function eventArtifact(item: Record<string, unknown>): string {
+  return text(item.artifact ?? item.path ?? item.file ?? item.run_id ?? item.hash ?? item.request_id, "");
+}
+
+function buildActivityEvents(snapshot: ObservatorySnapshot | null): ActivityEvent[] {
+  if (!snapshot) return [];
+  const events: ActivityEvent[] = [];
+  const push = (source: string, index: number, item: Record<string, unknown>, type: string, fallback: string) => {
+    const status = eventStatus(item);
+    const lane = eventLane(item);
+    events.push({
+      id: `${source}-${text(item.run_id ?? item.id ?? item.hash ?? item.timestamp ?? index, String(index))}`,
+      time: eventTime(item),
+      type,
+      lane,
+      message: eventMessage(item, fallback),
+      artifact: eventArtifact(item),
+      status,
+      tone: tone(status),
+      detail: text(item.detail ?? item.body ?? item.summary ?? item.reason, "No additional detail recorded."),
+    });
+  };
+
+  snapshot.timeline.forEach((item, index) => push("timeline", index, item, "event", "Run event recorded."));
+  snapshot.progress.recent_outcomes.forEach((item, index) => push("outcome", index, item, "role result", "Role result recorded."));
+  snapshot.patches.manifests.forEach((item, index) => push("patch", index, item, "patch", "Patch queued or deferred."));
+  snapshot.patches.recent_outcomes.forEach((item, index) => push("patch-result", index, item, "patch result", "Patch result recorded."));
+  snapshot.signals.nudges.forEach((item, index) => push("signal", index, item, "signal", "Signal recorded."));
+  snapshot.signals.recent_completed.forEach((item, index) => push("signal-done", index, item, "signal done", "Signal completed."));
+  snapshot.progress.landed_work_feed.forEach((commit, index) => {
+    const status = text(commit.role, "commit");
+    events.push({
+      id: `commit-${text(commit.hash, String(index))}`,
+      time: text(commit.time, "No time"),
+      type: "commit",
+      lane: text(commit.role, "system").toLowerCase(),
+      message: text(commit.subject, "Commit recorded."),
+      artifact: text(commit.hash, ""),
+      status,
+      tone: "good",
+      detail: text(commit.summary, "No commit summary recorded."),
+    });
+  });
+  (snapshot.review?.items ?? []).forEach((item, index) => push("review", index, item, "review", "Review item recorded."));
+  (snapshot.review?.known_issues ?? []).forEach((item, index) => push("review-issue", index, item, "review issue", "Known issue recorded."));
+
+  return events.sort((left, right) => {
+    const leftDate = Date.parse(left.time);
+    const rightDate = Date.parse(right.time);
+    if (Number.isNaN(leftDate) && Number.isNaN(rightDate)) return 0;
+    if (Number.isNaN(leftDate)) return 1;
+    if (Number.isNaN(rightDate)) return -1;
+    return rightDate - leftDate;
+  });
+}
+
+function filteredActivityEvents(events: ActivityEvent[], filter: ActivityFilter): ActivityEvent[] {
+  if (filter === "all") return events;
+  if (filter === "system") return events.filter((event) => !roleFilters.includes(event.lane as typeof roleFilters[number]));
+  return events.filter((event) => event.lane === filter);
 }
 
 function CompactBadge(props: { label?: string; value: unknown; tone?: string }) {
@@ -126,9 +223,9 @@ function MissionStrip(props: {
   ];
 
   return (
-    <section className="obs-mission-strip" aria-label="Target state">
+    <section className={`obs-mission-strip count-${items.length}`} aria-label="Target state">
       {items.map((item) => (
-        <div className={`obs-mission-strip-item ${item.tone}`} key={item.label}>
+        <div className={`obs-mission-strip-item ${item.tone} ${item.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`} key={item.label}>
           <span>{item.label}</span>
           <strong>{item.value}</strong>
         </div>
@@ -137,10 +234,19 @@ function MissionStrip(props: {
   );
 }
 
-function RoleCard(props: { role: ObservatoryRoleCard }) {
+function RoleCard(props: {
+  role: ObservatoryRoleCard;
+  selected?: boolean;
+  onSelect?: (role: ObservatoryRoleCard) => void;
+}) {
   const counts = props.role.counts ?? {};
   return (
-    <div className={`obs-role ${props.role.status}`}>
+    <button
+      aria-pressed={props.selected}
+      className={`obs-role ${props.role.status} ${props.selected ? "selected" : ""}`}
+      onClick={() => props.onSelect?.(props.role)}
+      type="button"
+    >
       <div className="obs-role-head">
         <h3>{props.role.role}</h3>
         <CompactBadge value={props.role.badge} tone={props.role.status} />
@@ -151,7 +257,7 @@ function RoleCard(props: { role: ObservatoryRoleCard }) {
           <span key={key}>{key}: {number(counts[key])}</span>
         ))}
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -160,6 +266,8 @@ function ConveyorSection(props: {
   activeRun: Record<string, unknown>;
   health: Record<string, unknown>;
   className?: string;
+  selectedRole?: string;
+  onSelectRole?: (role: ObservatoryRoleCard) => void;
 }) {
   const roles = props.snapshot?.conveyor.roles ?? [];
   return (
@@ -170,7 +278,11 @@ function ConveyorSection(props: {
             {roles.length ? (
               roles.map((role, index) => (
                 <div className="obs-belt-step" key={role.role}>
-                  <RoleCard role={role} />
+                  <RoleCard
+                    role={role}
+                    selected={props.selectedRole === role.role}
+                    onSelect={props.onSelectRole}
+                  />
                   {index < roles.length - 1 && <span className="obs-belt-arrow" aria-hidden="true">→</span>}
                 </div>
               ))
@@ -417,6 +529,218 @@ function ValidationSafetySection(props: { snapshot: ObservatorySnapshot | null; 
   );
 }
 
+function ActiveRunSection(props: {
+  activeRun: Record<string, unknown>;
+  health: Record<string, unknown>;
+  className?: string;
+}) {
+  const hasActiveRun = Boolean(text(props.activeRun.role, ""));
+  return (
+    <ObsSection title="Active run" className={props.className}>
+      <div className="activity-run-panel">
+        <div className={`activity-run-state ${hasActiveRun ? tone(props.activeRun.status) : "quiet"}`}>
+          <span>{hasActiveRun ? compactLabel(props.activeRun.role, "Role") : "Idle"}</span>
+          <strong>{hasActiveRun ? text(props.activeRun.status, "running") : "No role running now"}</strong>
+          <p>{text(props.activeRun.reason, "Conveyor idle.")}</p>
+        </div>
+        <div className="activity-run-facts">
+          <div><span>Run</span><strong>{text(props.activeRun.run_id, "none")}</strong></div>
+          <div><span>Health</span><strong>{text(props.health.status, "ok")}</strong></div>
+          <div><span>Policy</span><strong>{text(props.health.summary, "Conveyor policy active.")}</strong></div>
+        </div>
+      </div>
+    </ObsSection>
+  );
+}
+
+function SelectedRoleInspector(props: {
+  role: ObservatoryRoleCard | null;
+  events: ActivityEvent[];
+  className?: string;
+}) {
+  if (!props.role) {
+    return (
+      <ObsSection title="Lane inspector" className={props.className}>
+        <p className="obs-muted">Select a conveyor lane to inspect role counts and recent matching events.</p>
+      </ObsSection>
+    );
+  }
+  const counts = props.role.counts ?? {};
+  const roleEvents = props.events.filter((event) => event.lane === props.role?.role).slice(0, 3);
+  return (
+    <ObsSection title={`${compactLabel(props.role.role, "Lane")} lane`} className={props.className}>
+      <div className="activity-role-inspector">
+        <div className="activity-role-reason">
+          <CompactBadge value={props.role.status} tone={props.role.status} />
+          <p>{text(props.role.reason, "Awaiting conveyor decision.")}</p>
+        </div>
+        <div className="obs-compact-table">
+          {["queued", "deferred", "applied", "failed", "skipped"].map((key) => (
+            <div key={key}><span>{key}</span><strong>{number(counts[key])}</strong></div>
+          ))}
+        </div>
+        <div className="activity-mini-list">
+          {roleEvents.length ? roleEvents.map((event) => (
+            <div key={event.id}>
+              <strong>{event.message}</strong>
+              <span>{event.time} · {event.status}</span>
+            </div>
+          )) : <p className="obs-muted">No recent events for this lane.</p>}
+        </div>
+      </div>
+    </ObsSection>
+  );
+}
+
+function ActivityFilterBar(props: {
+  events: ActivityEvent[];
+  filter: ActivityFilter;
+  onFilter: (filter: ActivityFilter) => void;
+}) {
+  const filters: Array<{ key: ActivityFilter; label: string }> = [
+    { key: "all", label: "All" },
+    ...roleFilters.map((key) => ({ key, label: compactLabel(key, key) })),
+    { key: "system", label: "System" },
+  ];
+  const countFor = (filter: ActivityFilter) => filteredActivityEvents(props.events, filter).length;
+  return (
+    <div className="activity-filter-bar" aria-label="Filter event ledger">
+      {filters.map((filter) => (
+        <button
+          className={props.filter === filter.key ? "active" : ""}
+          key={filter.key}
+          onClick={() => props.onFilter(filter.key)}
+          type="button"
+        >
+          <span>{filter.label}</span>
+          <strong>{countFor(filter.key)}</strong>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ActivityEventLedger(props: {
+  events: ActivityEvent[];
+  filter: ActivityFilter;
+  selectedId: string;
+  onFilter: (filter: ActivityFilter) => void;
+  onSelect: (id: string) => void;
+  className?: string;
+}) {
+  const visibleEvents = filteredActivityEvents(props.events, props.filter).slice(0, 18);
+  const selectedEvent = props.events.find((event) => event.id === props.selectedId) ?? visibleEvents[0];
+  return (
+    <ObsSection title="Event ledger" className={`activity-event-section ${props.className ?? ""}`}>
+      <ActivityFilterBar events={props.events} filter={props.filter} onFilter={props.onFilter} />
+      <div className="activity-event-layout">
+        <div className="activity-event-ledger" role="list">
+          {visibleEvents.length ? visibleEvents.map((event) => (
+            <button
+              className={`activity-event-row ${event.tone} ${selectedEvent?.id === event.id ? "selected" : ""}`}
+              key={event.id}
+              onClick={() => props.onSelect(event.id)}
+              type="button"
+            >
+              <code>{event.time}</code>
+              <span>{event.type}</span>
+              <strong>{event.message}</strong>
+              <em>{compactLabel(event.lane, "System")}</em>
+              <CompactBadge value={event.status} tone={event.tone} />
+            </button>
+          )) : (
+            <div className="activity-empty compact">
+              <strong>No events recorded</strong>
+              <p>Refresh after a run to populate the activity ledger.</p>
+            </div>
+          )}
+        </div>
+        <aside className="activity-event-detail" aria-label="Selected event detail">
+          {selectedEvent ? (
+            <>
+              <div className="obs-item-title">
+                <strong>{selectedEvent.message}</strong>
+                <CompactBadge value={selectedEvent.status} tone={selectedEvent.tone} />
+              </div>
+              <p>{selectedEvent.detail}</p>
+              <div className="obs-commit-meta">
+                <span>{selectedEvent.type}</span>
+                <span>{compactLabel(selectedEvent.lane, "System")}</span>
+                {selectedEvent.artifact && <code>{selectedEvent.artifact}</code>}
+              </div>
+            </>
+          ) : (
+            <p className="obs-muted">Select an event to inspect source details.</p>
+          )}
+        </aside>
+      </div>
+    </ObsSection>
+  );
+}
+
+function PatchSignalSection(props: { snapshot: ObservatorySnapshot | null; className?: string }) {
+  const queueEntries = Object.entries(props.snapshot?.patches.queue_totals ?? {});
+  const signals = props.snapshot?.signals ?? { active_count: 0, nudges: [], recent_completed: [] };
+  const nudges = signals.nudges.slice(0, 3);
+  const completed = signals.recent_completed.slice(0, 3);
+  return (
+    <ObsSection title="Patches and signals" className={props.className}>
+      <div className="activity-patch-signal-grid">
+        <div className="obs-compact-table">
+          {queueEntries.length ? queueEntries.map(([key, value]) => (
+            <div key={key}><span>{key}</span><strong>{value}</strong></div>
+          )) : <p className="obs-muted">No patch queue totals recorded.</p>}
+        </div>
+        <div className="activity-signal-list">
+          <div className="obs-item-title">
+            <strong>Signals</strong>
+            <CompactBadge label="active" value={signals.active_count} tone={number(signals.active_count) > 0 ? "warn" : "quiet"} />
+          </div>
+          {[...nudges, ...completed].length ? (
+            [...nudges, ...completed].map((item, index) => (
+              <ManifestRow item={item} key={`${text(item.id ?? item.run_id, "signal")}-${index}`} />
+            ))
+          ) : (
+            <p className="obs-muted">No active or recently completed signals.</p>
+          )}
+        </div>
+      </div>
+    </ObsSection>
+  );
+}
+
+function ReviewSummarySection(props: { snapshot: ObservatorySnapshot | null; className?: string }) {
+  const review = props.snapshot?.review ?? {};
+  const items = review.items ?? [];
+  const issues = review.known_issues ?? [];
+  const firstReview: Record<string, unknown> = props.snapshot?.validation_safety.first_review ?? {};
+  const firstReviewStatus = text(firstReview.status ?? firstReview.state, "not recorded");
+  return (
+    <ObsSection title="Review summary" className={props.className}>
+      <div className="activity-review-grid">
+        <div className="obs-validation-card">
+          <div className="obs-validation-title">
+            <strong>Scorecard</strong>
+            <CompactBadge value={props.snapshot?.scorecard.status ?? "not recorded"} tone={props.snapshot?.scorecard.status ?? "info"} />
+          </div>
+          <p>{text(props.snapshot?.scorecard.summary, "No scorecard summary recorded.")}</p>
+        </div>
+        <div className="obs-validation-card">
+          <div className="obs-validation-title">
+            <strong>First review</strong>
+            <CompactBadge value={firstReviewStatus} tone={firstReviewStatus} />
+          </div>
+          <p>{text(firstReview.summary ?? firstReview.detail ?? firstReview.message, "No review check recorded.")}</p>
+        </div>
+        <div className="obs-compact-table">
+          <div><span>Items</span><strong>{items.length}</strong></div>
+          <div><span>Known issues</span><strong>{issues.length}</strong></div>
+        </div>
+      </div>
+    </ObsSection>
+  );
+}
+
 export function ObservatoryPage(props: {
   snapshot: ProjectSnapshot | null;
   loading: boolean;
@@ -429,6 +753,9 @@ export function ObservatoryPage(props: {
   const exportDir = useMemo(() => (target ? targetSubdir(target, "first-review") : ""), [target]);
   const [snapshot, setSnapshot] = useState<ObservatorySnapshot | null>(props.initialSnapshot ?? null);
   const [activeTab, setActiveTab] = useState<ObservatoryTab>("Summary");
+  const [selectedRoleName, setSelectedRoleName] = useState("");
+  const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
+  const [selectedEventId, setSelectedEventId] = useState("");
   const [busy, setBusy] = useState<"refresh" | "export" | null>(null);
   const [error, setError] = useState("");
 
@@ -485,6 +812,20 @@ export function ObservatoryPage(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target, generatedMarker]);
 
+  const activityEvents = useMemo(() => buildActivityEvents(snapshot), [snapshot]);
+
+  useEffect(() => {
+    const roles = snapshot?.conveyor.roles ?? [];
+    if (!roles.length) {
+      setSelectedRoleName("");
+      return;
+    }
+    if (selectedRoleName && roles.some((role) => role.role === selectedRoleName)) return;
+    const activeRole = text(snapshot?.conveyor.active_run?.role, "");
+    const defaultRole = activeRole || roles.find((role) => role.status === "running")?.role || roles.find((role) => role.status === "next")?.role || roles[0].role;
+    setSelectedRoleName(defaultRole);
+  }, [selectedRoleName, snapshot]);
+
   if (!target || !props.snapshot) {
     return (
       <section className="observatory-page native">
@@ -501,6 +842,7 @@ export function ObservatoryPage(props: {
   const disabled = props.loading || busy !== null;
   const activeRun = snapshot?.conveyor.active_run ?? {};
   const health = snapshot?.conveyor.health ?? {};
+  const selectedRole = snapshot?.conveyor.roles.find((role) => role.role === selectedRoleName) ?? null;
 
   return (
     <section className="observatory-page native">
@@ -525,14 +867,16 @@ export function ObservatoryPage(props: {
 
       <MissionStrip snapshot={snapshot} activeRun={activeRun} />
 
-      {error && <div className="observatory-error">{error}</div>}
+      {error && <div className="observatory-error" role="alert">{error}</div>}
 
       <div className="obs-tabs" role="tablist" aria-label="Activity sections">
         {tabs.map((tab) => (
           <button
+            aria-selected={activeTab === tab}
             key={tab}
             className={activeTab === tab ? "active" : ""}
             onClick={() => setActiveTab(tab)}
+            role="tab"
             type="button"
           >
             {tab}
@@ -541,13 +885,38 @@ export function ObservatoryPage(props: {
       </div>
 
       {activeTab === "Summary" && (
-        <main className="obs-summary-layout">
-          <ConveyorSection snapshot={snapshot} activeRun={activeRun} health={health} className="obs-summary-conveyor" />
-          <LandedWorkSection snapshot={snapshot} className="obs-summary-landed" />
-          <div className="obs-summary-lower">
-            <RecentOutcomesSection snapshot={snapshot} />
-            <RuntimeMetricsSection snapshot={snapshot} />
+        <main className="obs-summary-layout activity-overview">
+          <ConveyorSection
+            snapshot={snapshot}
+            activeRun={activeRun}
+            health={health}
+            className="obs-summary-conveyor"
+            selectedRole={selectedRoleName}
+            onSelectRole={(role) => {
+              setSelectedRoleName(role.role);
+              setActivityFilter(roleFilters.includes(role.role as typeof roleFilters[number]) ? role.role as ActivityFilter : "system");
+            }}
+          />
+          <div className="activity-side-grid">
+            <ActiveRunSection activeRun={activeRun} health={health} />
+            <SelectedRoleInspector role={selectedRole} events={activityEvents} />
           </div>
+          <ActivityEventLedger
+            events={activityEvents}
+            filter={activityFilter}
+            selectedId={selectedEventId}
+            onFilter={setActivityFilter}
+            onSelect={setSelectedEventId}
+            className="activity-main-ledger"
+          />
+          <div className="obs-summary-lower activity-bottom-grid">
+            <PatchSignalSection snapshot={snapshot} />
+            <ValidationSafetySection snapshot={snapshot} />
+            <RuntimeMetricsSection snapshot={snapshot} />
+            <ReviewSummarySection snapshot={snapshot} />
+            <RecentOutcomesSection snapshot={snapshot} className="activity-wide-section" />
+          </div>
+          <LandedWorkSection snapshot={snapshot} className="obs-summary-landed" />
         </main>
       )}
 

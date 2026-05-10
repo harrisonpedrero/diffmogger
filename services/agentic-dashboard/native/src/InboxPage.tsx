@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { BackendEnvelope, InboxMessage, InboxSnapshot, ProjectSnapshot } from "./api/backend";
 import { runBackendCommand } from "./api/backend";
 
-type InboxTab = "Requests" | "Notes to next run" | "Archive";
+type InboxTab = "Requests" | "Notes to next run" | "Outbox" | "Archive";
 
 type SendResult = {
   inbox_id: string;
@@ -11,7 +11,7 @@ type SendResult = {
   snapshot: InboxSnapshot;
 };
 
-const tabs: InboxTab[] = ["Requests", "Notes to next run", "Archive"];
+const tabs: InboxTab[] = ["Requests", "Notes to next run", "Outbox", "Archive"];
 const intentOptions = [
   { value: "info", label: "General note" },
   { value: "done", label: "Done / completed" },
@@ -53,6 +53,46 @@ function relatedChips(message: InboxMessage): string[] {
     message.intent ? `Intent ${message.intent}` : "",
     message.channel ? `Via ${message.channel}` : "",
   ].filter(Boolean);
+}
+
+function messageMatches(message: InboxMessage, query: string): boolean {
+  if (!query) return true;
+  return [
+    message.id,
+    message.title,
+    message.status,
+    message.status_label,
+    message.body,
+    message.summary,
+    message.request_id,
+    message.source_inbox_id,
+    message.intent,
+    message.channel,
+    message.from,
+    message.to,
+  ]
+    .map((value) => text(value, "").toLowerCase())
+    .some((value) => value.includes(query));
+}
+
+function bridgeModeCopy(mode: string): { notifier: string; detail: string } {
+  const normalized = mode.toLowerCase();
+  if (normalized.includes("discord")) {
+    return {
+      notifier: "Discord notifier",
+      detail: "Requests can be mirrored through the optional notifier while file handoffs remain the source of truth.",
+    };
+  }
+  if (normalized.includes("local")) {
+    return {
+      notifier: "Local notifier",
+      detail: "Local notifications can surface pending handoffs; replies and notes are still queued through the sidecar.",
+    };
+  }
+  return {
+    notifier: "File handoff",
+    detail: "Manual bridge files are the active handoff path; optional notifiers can be configured in Sidecar.",
+  };
 }
 
 function MessageCard(props: {
@@ -99,6 +139,38 @@ function ChatBubble(props: { message: InboxMessage }) {
         <em>{formatStatus(props.message.ui_state)}</em>
       </footer>
     </article>
+  );
+}
+
+function BridgeModePanel(props: { snapshot: InboxSnapshot | null }) {
+  const mode = props.snapshot?.bridge_mode ?? "file_only";
+  const modeCopy = bridgeModeCopy(mode);
+  const rawFileKeys = props.snapshot?.raw_file_keys ?? [];
+  return (
+    <section className="bridge-mode-panel" aria-label="Bridge mode and notifier state">
+      <div>
+        <span>Bridge mode</span>
+        <strong>{formatStatus(mode)}</strong>
+        <p>Requests, replies, notes, archive, and outbox records stay tied to the target sidecar.</p>
+      </div>
+      <div>
+        <span>Notifier</span>
+        <strong>{modeCopy.notifier}</strong>
+        <p>{modeCopy.detail}</p>
+      </div>
+      <div>
+        <span>Managed files</span>
+        <strong>{rawFileKeys.length}</strong>
+        <p>
+          {rawFileKeys.length
+            ? rawFileKeys.map((key) => <code key={key}>{key}</code>)
+            : "No bridge files reported yet."}
+        </p>
+      </div>
+      <button className="bridge-readonly-action" disabled type="button">
+        Notifier managed in Sidecar
+      </button>
+    </section>
   );
 }
 
@@ -215,12 +287,12 @@ export function InboxPage(props: {
   const archiveItems = useMemo(() => {
     const query = search.trim().toLowerCase();
     const items = snapshot?.archive ?? [];
-    if (!query) return items;
-    return items.filter((item) =>
-      [item.id, item.title, item.status, item.body, item.summary, item.request_id, item.source_inbox_id]
-        .map((value) => text(value, "").toLowerCase())
-        .some((value) => value.includes(query)),
-    );
+    return items.filter((item) => messageMatches(item, query));
+  }, [search, snapshot]);
+  const outboxItems = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    const items = snapshot?.outbox ?? [];
+    return items.filter((item) => messageMatches(item, query));
   }, [search, snapshot]);
   const noteTimeline = useMemo(() => {
     const notes = snapshot?.notes ?? [];
@@ -238,9 +310,16 @@ export function InboxPage(props: {
   }, [snapshot]);
 
   const disabled = props.loading || busy !== null;
+  const bridgeMode = snapshot?.bridge_mode ?? "file_only";
+  const tabCounts: Record<InboxTab, number> = {
+    Requests: snapshot?.counts.pending_requests ?? props.snapshot.home.pending_human_requests,
+    "Notes to next run": snapshot?.counts.queued_notes ?? props.snapshot.home.unhandled_inbox,
+    Outbox: snapshot?.counts.outbound_records ?? 0,
+    Archive: snapshot?.counts.archived_items ?? 0,
+  };
 
   return (
-    <section className="inbox-page">
+    <section className="inbox-page human-bridge-page">
       <div className="inbox-hero">
         <div>
           <h1>Inbox</h1>
@@ -249,7 +328,7 @@ export function InboxPage(props: {
           </p>
         </div>
         <div className="inbox-hero-actions">
-          <div className="bridge-mode-pill">{formatStatus(snapshot?.bridge_mode ?? "file_only")}</div>
+          <div className="bridge-mode-pill">{formatStatus(bridgeMode)}</div>
           <button className="icon-text-button" disabled={disabled} onClick={() => loadInbox({ refreshProject: true })}>
             {busy === "load" ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />}
             Refresh
@@ -264,18 +343,23 @@ export function InboxPage(props: {
         <div><span>Outbox</span><strong>{snapshot?.counts.outbound_records ?? 0}</strong></div>
       </div>
 
-      {error && <div className="inbox-error">{error}</div>}
-      {sentNotice && <div className="inbox-notice">{sentNotice}</div>}
+      <BridgeModePanel snapshot={snapshot} />
+
+      {error && <div className="inbox-error" role="alert">{error}</div>}
+      {sentNotice && <div className="inbox-notice" role="status" aria-live="polite">{sentNotice}</div>}
 
       <div className="inbox-tabs" role="tablist" aria-label="Inbox sections">
         {tabs.map((tab) => (
           <button
+            aria-selected={activeTab === tab}
             className={activeTab === tab ? "active" : ""}
             key={tab}
             onClick={() => setActiveTab(tab)}
+            role="tab"
             type="button"
           >
-            {tab}
+            <span>{tab}</span>
+            <strong>{tabCounts[tab]}</strong>
           </button>
         ))}
       </div>
@@ -389,6 +473,37 @@ export function InboxPage(props: {
         </div>
       )}
 
+      {activeTab === "Outbox" && (
+        <section className="archive-panel outbox-panel">
+          <div className="archive-toolbar">
+            <div>
+              <Send size={18} />
+              <h2>Outbox</h2>
+            </div>
+            <div className="bridge-toolbar-actions">
+              <label className="archive-search">
+                <Search size={15} />
+                <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search outbox" />
+              </label>
+              <button className="bridge-readonly-action" disabled type="button">
+                Outbox is read-only
+              </button>
+            </div>
+          </div>
+          {outboxItems.length ? (
+            <div className="message-list archive-list">
+              {outboxItems.map((item) => <MessageCard key={`${item.kind}-${item.id}`} message={item} />)}
+            </div>
+          ) : (
+            <div className="inbox-empty">
+              <Send size={22} />
+              <strong>No outbound messages yet</strong>
+              <p>Queued replies and notifier records appear here after they are written.</p>
+            </div>
+          )}
+        </section>
+      )}
+
       {activeTab === "Archive" && (
         <section className="archive-panel">
           <div className="archive-toolbar">
@@ -396,10 +511,15 @@ export function InboxPage(props: {
               <Archive size={18} />
               <h2>Archive</h2>
             </div>
-            <label className="archive-search">
-              <Search size={15} />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search archive" />
-            </label>
+            <div className="bridge-toolbar-actions">
+              <label className="archive-search">
+                <Search size={15} />
+                <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search archive" />
+              </label>
+              <button className="bridge-readonly-action" disabled type="button">
+                Archive mutation unavailable
+              </button>
+            </div>
           </div>
           {archiveItems.length ? (
             <div className="message-list archive-list">

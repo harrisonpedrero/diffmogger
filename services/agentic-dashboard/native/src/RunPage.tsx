@@ -6,7 +6,6 @@ import {
   FileDown,
   FilePlus2,
   Pause,
-  Play,
   RefreshCw,
   ShieldCheck,
   Terminal,
@@ -23,21 +22,24 @@ import {
   runBackendCommandStreamed,
   selectTicketImportFile,
 } from "./api/backend";
-import { buildRunModel, type RunAction, type RunRoute } from "./runModel";
+import { buildRunModel, type RunAction, type RunRoute, type RunSafetyRow } from "./runModel";
+import { TicketFields } from "./TicketFields";
 import {
   defaultImportMode,
   emptyTicket,
   issueLabel,
   normalizeTickets,
   parseTicketJson,
+  ticketImportExample,
   ticketToJson,
   type Ticket,
+  type TicketImportFormat,
   type TicketSnapshot,
 } from "./ticketModel";
 
 type RunLogEvent = BackendLogEvent & { capturedAt: string };
 
-function routeFromRun(route: RunRoute): "Brief" | "Run" | "Review" | "Advanced" {
+function routeFromRun(route: RunRoute): "Brief" | "Run" | "Review" | "Advanced" | "Inbox" {
   return route;
 }
 
@@ -105,12 +107,68 @@ function DetailRow(props: { label: string; value: string | number }) {
   );
 }
 
+function RunTonePill(props: { tone: string; children: ReactNode }) {
+  return <span className={`run-tone-pill ${props.tone}`}>{props.children}</span>;
+}
+
+function RunStatusHero(props: {
+  model: ReturnType<typeof buildRunModel>;
+}) {
+  const showHeadline =
+    props.model.banner.headline.toLowerCase() !== props.model.banner.badge.toLowerCase();
+  return (
+    <header className={`run-status-hero ${props.model.banner.tone}`} aria-label="Run Control status" data-testid="run-status-hero">
+      <div className={`run-status-main ${showHeadline ? "" : "badge-only"}`}>
+        <RunTonePill tone={props.model.banner.tone}>{props.model.banner.badge}</RunTonePill>
+        {showHeadline && <h1>{props.model.banner.headline}</h1>}
+        <p>{props.model.banner.subheadline}</p>
+      </div>
+      <div className="run-status-facts" aria-label="Run state facts">
+        <DetailRow label="Status" value={props.model.latestRun.status} />
+        <DetailRow label="Process" value={props.model.automation.state} />
+        <DetailRow label="PID" value={props.model.automation.pid || "Not running"} />
+      </div>
+    </header>
+  );
+}
+
+function RunSafetyMatrix(props: { rows: RunSafetyRow[]; busy: boolean; onRun: (action: RunAction) => void }) {
+  return (
+    <article className="panel run-safety-panel" aria-label="Run safety">
+      <div className="panel-heading-row">
+        <h2>Safety</h2>
+      </div>
+      <div className="run-safety-list">
+        {props.rows.map((row) => (
+          <div className={`run-safety-row ${row.tone}`} key={row.label}>
+            <div>
+              <strong>{row.label}</strong>
+              <span>{row.source}</span>
+            </div>
+            <RunTonePill tone={row.tone}>{row.status}</RunTonePill>
+            <p>{row.summary}</p>
+            <button
+              className="ledger-action"
+              disabled={props.busy || !row.action.enabled}
+              onClick={() => props.onRun(row.action)}
+            >
+              {row.action.label}
+            </button>
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
 export function RunPage(props: {
   snapshot: ProjectSnapshot | null;
   loading: boolean;
   onChoose: () => void;
-  onNavigate: (route: "Brief" | "Run" | "Review" | "Advanced") => void;
+  onNavigate: (route: "Brief" | "Run" | "Review" | "Advanced" | "Inbox") => void;
   onRefresh: () => void;
+  onDirtyChange?: (message: string | null) => void;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const model = useMemo(() => buildRunModel(props.snapshot), [props.snapshot]);
   const [busyCommand, setBusyCommand] = useState<string | null>(null);
@@ -125,12 +183,17 @@ export function RunPage(props: {
   const [ticketMessage, setTicketMessage] = useState<string | null>(null);
   const [ticketEditorId, setTicketEditorId] = useState<string | null>(null);
   const [ticketEditorJson, setTicketEditorJson] = useState("");
-  const [ticketImportFormat, setTicketImportFormat] = useState<"markdown" | "csv" | "json">("markdown");
+  const [ticketImportFormat, setTicketImportFormat] = useState<TicketImportFormat>("markdown");
   const [ticketImportMode, setTicketImportMode] = useState<"append" | "replace-placeholder" | "replace-all">("append");
   const [ticketImportText, setTicketImportText] = useState("");
   const [ticketImportFile, setTicketImportFile] = useState("");
   const [ticketImportPreview, setTicketImportPreview] = useState<TicketSnapshot | null>(null);
   const [ticketDraft, setTicketDraft] = useState<{ draft_id?: string; candidates: Ticket[] } | null>(null);
+  const [ticketPendingAction, setTicketPendingAction] = useState<
+    | { kind: "delete"; ticketId: string }
+    | { kind: "import"; mode: "append" | "replace-placeholder" | "replace-all" }
+    | null
+  >(null);
   const isBusy = props.loading || busyCommand !== null;
 
   const target = props.snapshot?.target.path;
@@ -138,6 +201,22 @@ export function RunPage(props: {
   const ticketTickets = normalizeTickets(ticketSnapshot?.tickets ?? []);
   const ticketIssues = ticketSnapshot?.validation_issues ?? [];
   const ticketCounts = ticketSnapshot?.summary?.counts ?? {};
+  const selectedTicketJson = useMemo(() => {
+    if (!ticketEditorId) return "";
+    const ticket = ticketTickets.find((item) => item.id === ticketEditorId);
+    return ticket ? ticketToJson(ticket) : "";
+  }, [ticketEditorId, ticketTickets]);
+  const ticketEditorTicket = useMemo(() => {
+    const parsed = parseTicketJson(ticketEditorJson);
+    return parsed.ticket ?? emptyTicket(ticketTickets);
+  }, [ticketEditorJson, ticketTickets]);
+  const ticketEditorDirty = Boolean(ticketEditorJson.trim() && ticketEditorJson !== selectedTicketJson);
+  const ticketImportDirty = Boolean(ticketImportText.trim() || ticketImportFile || ticketImportPreview || ticketDraft);
+  const routeDirtyMessage = ticketEditorDirty
+    ? "Run Control has unsaved ticket editor changes."
+    : ticketImportDirty
+      ? "Run Control has pending ticket import or draft state."
+      : null;
 
   useEffect(() => {
     if (!target || !model.isScaffolded || !ticketCampaign) {
@@ -146,6 +225,27 @@ export function RunPage(props: {
     }
     void loadTickets();
   }, [target, model.isScaffolded, ticketCampaign]);
+
+  useEffect(() => {
+    props.onDirtyChange?.(routeDirtyMessage);
+    return () => props.onDirtyChange?.(null);
+  }, [props.onDirtyChange, routeDirtyMessage]);
+
+  useEffect(() => {
+    props.onBusyChange?.(busyCommand !== null);
+    return () => props.onBusyChange?.(false);
+  }, [busyCommand]);
+
+  useEffect(() => {
+    if (!routeDirtyMessage) return;
+    function onBeforeUnload(event: BeforeUnloadEvent) {
+      event.preventDefault();
+      event.returnValue = routeDirtyMessage;
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [routeDirtyMessage]);
+
   const displayedLog = logOverride
     ? {
         exists: logOverride.exists === true,
@@ -192,6 +292,7 @@ export function RunPage(props: {
     }
     const runId = `${command}-${Date.now()}`;
     setBusyCommand(command);
+    setCommandMessage(`${action.label} requested.`);
     setLogs([]);
     let unlisten: (() => void) | null = null;
     try {
@@ -206,6 +307,8 @@ export function RunPage(props: {
       });
       if (!payload.ok) {
         setCommandError(payload.message ?? "Backend command failed.");
+      } else {
+        setCommandMessage(`${action.label} completed.`);
       }
       props.onRefresh();
     } catch (error) {
@@ -248,18 +351,24 @@ export function RunPage(props: {
     setTicketEditorId(null);
     setTicketEditorJson(ticketToJson(ticket));
     setTicketMessage("New ticket is ready to save.");
+    setTicketPendingAction(null);
+  }
+
+  function updateTicketEditor(ticket: Ticket) {
+    setTicketEditorJson(ticketToJson(ticket));
   }
 
   async function saveTicket() {
     if (!target) return;
     const parsed = parseTicketJson(ticketEditorJson);
     if (!parsed.ticket) {
-      setTicketError(parsed.error ?? "Ticket JSON did not parse.");
+      setTicketError(parsed.error ?? "Ticket fields did not parse.");
       return;
     }
     const command = ticketEditorId ? "ticket.update" : "ticket.add";
     setTicketBusy(command);
     setTicketError(null);
+    setTicketPendingAction(null);
     try {
       const payload = await runBackendCommand<TicketSnapshot>({
         command,
@@ -284,8 +393,15 @@ export function RunPage(props: {
 
   async function deleteTicket(ticketId: string) {
     if (!target) return;
+    if (ticketPendingAction?.kind !== "delete" || ticketPendingAction.ticketId !== ticketId) {
+      setTicketPendingAction({ kind: "delete", ticketId });
+      setTicketError(null);
+      setTicketMessage(`Click delete again to remove ${ticketId}.`);
+      return;
+    }
     setTicketBusy(`delete-${ticketId}`);
     setTicketError(null);
+    setTicketPendingAction(null);
     try {
       const payload = await runBackendCommand<TicketSnapshot>({
         command: "ticket.delete",
@@ -313,7 +429,10 @@ export function RunPage(props: {
   async function pickTicketImportFile() {
     try {
       const file = await selectTicketImportFile();
-      if (file) setTicketImportFile(file);
+      if (file) {
+        setTicketImportFile(file);
+        setTicketPendingAction(null);
+      }
     } catch (error) {
       setTicketError(error instanceof Error ? error.message : String(error));
     }
@@ -321,6 +440,19 @@ export function RunPage(props: {
 
   async function importTickets(preview: boolean) {
     if (!target) return;
+    if (
+      !preview &&
+      (ticketPendingAction?.kind !== "import" || ticketPendingAction.mode !== ticketImportMode)
+    ) {
+      setTicketPendingAction({ kind: "import", mode: ticketImportMode });
+      setTicketError(null);
+      setTicketMessage(
+        ticketImportMode === "replace-all"
+          ? "Click Apply Import again to replace the full ticket queue."
+          : "Click Apply Import again to write these tickets.",
+      );
+      return;
+    }
     setTicketBusy(preview ? "ticket.import.preview" : "ticket.import");
     setTicketError(null);
     try {
@@ -348,6 +480,9 @@ export function RunPage(props: {
       } else {
         setTicketSnapshot(payload.data);
         setTicketImportPreview(null);
+        setTicketImportText("");
+        setTicketImportFile("");
+        setTicketPendingAction(null);
         setTicketMessage("Ticket import applied.");
         await Promise.resolve(props.onRefresh());
       }
@@ -376,6 +511,7 @@ export function RunPage(props: {
         candidates: normalizeTickets(payload.data.candidates ?? []),
       });
       setTicketMessage("Draft candidates are ready to review.");
+      setTicketPendingAction(null);
     } catch (error) {
       setTicketError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -401,6 +537,7 @@ export function RunPage(props: {
       setTicketSnapshot(payload.data);
       setTicketDraft(null);
       setTicketMessage("Draft tickets accepted.");
+      setTicketPendingAction(null);
       await Promise.resolve(props.onRefresh());
     } catch (error) {
       setTicketError(error instanceof Error ? error.message : String(error));
@@ -439,48 +576,22 @@ export function RunPage(props: {
     }
   }
 
-  if (!model.isScaffolded) {
-    return (
-      <section className="run-page">
-        <div className={`run-banner ${model.banner.tone}`}>
-          <div>
-            <h1>{model.banner.headline}</h1>
-            <p>{model.banner.subheadline}</p>
-          </div>
-          <ActionButton action={model.banner.primaryAction} onRun={runAction} primary icon={<Play size={16} />} />
-        </div>
-      </section>
-    );
-  }
-
   const writeDisabled =
     !model.worker.actions.write.enabled || isBusy || !writeOwnership.trim();
 
   return (
-    <section className="run-page">
-      <div className={`run-banner ${model.banner.tone}`}>
-        <div>
-          <h1>{model.banner.headline}</h1>
-          <p>{model.banner.subheadline}</p>
-        </div>
-        <ActionButton
-          action={model.banner.primaryAction}
-          onRun={runAction}
-          primary
-          disabled={isBusy || !model.banner.primaryAction.enabled}
-          icon={<Play size={16} />}
-        />
-      </div>
+    <section className="run-page run-control-page" aria-label="Run Control">
+      <RunStatusHero model={model} />
 
       {commandError && (
-        <div className="brief-error">
+        <div className="brief-error" role="alert">
           <AlertTriangle size={16} />
           {commandError}
         </div>
       )}
 
       {commandMessage && (
-        <div className="success-callout quiet">
+        <div className="success-callout quiet" role="status" aria-live="polite">
           <CheckCircle2 size={16} />
           <div>
             <strong>{commandMessage}</strong>
@@ -488,9 +599,9 @@ export function RunPage(props: {
         </div>
       )}
 
-      <div className="run-layout">
+      <div className="run-control-layout">
         <article className="panel run-readiness">
-          <h2>Readiness</h2>
+          <h2>Readiness Facts</h2>
           <DetailRow label="Current status" value={model.latestRun.status} />
           <DetailRow label="Plan" value={model.latestRun.horizon} />
           <DetailRow label="Last updated" value={model.latestRun.lastUpdated} />
@@ -518,15 +629,28 @@ export function RunPage(props: {
               disabled={isBusy || !model.controls.safetyCheck.enabled}
               icon={<ShieldCheck size={16} />}
             />
+            <ActionButton
+              action={model.controls.exportReview}
+              onRun={runAction}
+              disabled={isBusy || !model.controls.exportReview.enabled}
+              icon={<FileDown size={16} />}
+            />
           </div>
-          <button className="link-action" onClick={() => props.onNavigate("Review")}>
-            <FileDown size={14} />
-            Review export
-          </button>
         </article>
 
+        <article className="panel run-process-panel">
+          <h2>Process</h2>
+          <DetailRow label="State" value={model.automation.state} />
+          <DetailRow label="PID" value={model.automation.pid || "Not running"} />
+          <DetailRow label="Started" value={model.automation.startedAt || "Not running"} />
+          <DetailRow label="Log directory" value={model.automation.logDir || "Not recorded"} />
+          <p className="empty-copy">{model.automation.message}</p>
+        </article>
+
+        <RunSafetyMatrix rows={model.safety} busy={isBusy} onRun={runAction} />
+
         {ticketCampaign && (
-          <article className="panel span-2 ticket-queue-panel">
+          <article className="panel ticket-queue-panel run-ticket-panel">
             <div className="panel-heading-row">
               <div>
                 <h2>Ticket Queue</h2>
@@ -549,13 +673,13 @@ export function RunPage(props: {
             </div>
 
             {ticketError && (
-              <div className="brief-error">
+              <div className="brief-error" role="alert">
                 <AlertTriangle size={16} />
                 {ticketError}
               </div>
             )}
             {ticketMessage && (
-              <div className="success-callout quiet">
+              <div className="success-callout quiet" role="status" aria-live="polite">
                 <CheckCircle2 size={16} />
                 <strong>{ticketMessage}</strong>
               </div>
@@ -598,7 +722,13 @@ export function RunPage(props: {
                     </div>
                     <em>{ticket.status}</em>
                     <button className="icon-text-button" onClick={() => editTicket(ticket)}>Inspect</button>
-                    <button className="icon-button danger" title="Delete ticket" onClick={() => deleteTicket(ticket.id)} disabled={ticketBusy !== null}>
+                    <button
+                      className="icon-button danger"
+                      aria-label={`Delete ticket ${ticket.id || "Untitled"}`}
+                      title="Delete ticket"
+                      onClick={() => deleteTicket(ticket.id)}
+                      disabled={ticketBusy !== null}
+                    >
                       <Trash2 size={14} />
                     </button>
                   </div>
@@ -609,20 +739,22 @@ export function RunPage(props: {
             </div>
 
             <div className="ticket-edit-grid">
-              <label className="brief-field">
-                <span>{ticketEditorId ? `Editing ${ticketEditorId}` : "Ticket JSON"}</span>
-                <textarea
-                  rows={11}
-                  value={ticketEditorJson}
-                  onChange={(event) => setTicketEditorJson(event.target.value)}
-                  placeholder={ticketToJson(emptyTicket(ticketTickets))}
-                />
-              </label>
+              <TicketFields
+                ticket={ticketEditorTicket}
+                onChange={updateTicketEditor}
+                title={ticketEditorId ? `Editing ${ticketEditorId}` : "Ticket fields"}
+              />
               <div className="ticket-import-box">
                 <div className="brief-form-grid two">
                   <label className="brief-field">
                     <span>Import format</span>
-                    <select value={ticketImportFormat} onChange={(event) => setTicketImportFormat(event.target.value as "markdown" | "csv" | "json")}>
+                    <select
+                      value={ticketImportFormat}
+                      onChange={(event) => {
+                        setTicketImportFormat(event.target.value as TicketImportFormat);
+                        setTicketPendingAction(null);
+                      }}
+                    >
                       <option value="markdown">Markdown</option>
                       <option value="csv">CSV</option>
                       <option value="json">JSON</option>
@@ -630,7 +762,13 @@ export function RunPage(props: {
                   </label>
                   <label className="brief-field">
                     <span>Import mode</span>
-                    <select value={ticketImportMode} onChange={(event) => setTicketImportMode(event.target.value as "append" | "replace-placeholder" | "replace-all")}>
+                    <select
+                      value={ticketImportMode}
+                      onChange={(event) => {
+                        setTicketImportMode(event.target.value as "append" | "replace-placeholder" | "replace-all");
+                        setTicketPendingAction(null);
+                      }}
+                    >
                       <option value="replace-placeholder">Replace placeholder</option>
                       <option value="append">Append</option>
                       <option value="replace-all">Replace all</option>
@@ -640,13 +778,15 @@ export function RunPage(props: {
                 <label className="brief-field">
                   <span>Import text</span>
                   <textarea
+                    className="ticket-import-textarea"
                     rows={7}
                     value={ticketImportText}
                     onChange={(event) => {
                       setTicketImportText(event.target.value);
                       if (event.target.value.trim()) setTicketImportFile("");
+                      setTicketPendingAction(null);
                     }}
-                    placeholder="TICKET-002: Add a focused local workflow"
+                    placeholder={ticketImportExample(ticketImportFormat)}
                   />
                 </label>
                 {ticketImportFile && <p className="log-path">{ticketImportFile}</p>}
@@ -686,15 +826,7 @@ export function RunPage(props: {
           </article>
         )}
 
-        <article className="panel">
-          <h2>Automation</h2>
-          <DetailRow label="State" value={model.automation.state} />
-          <DetailRow label="PID" value={model.automation.pid || "Not running"} />
-          <DetailRow label="Started" value={model.automation.startedAt || "Not running"} />
-          <p className="empty-copy">{model.automation.message}</p>
-        </article>
-
-        <article className="panel span-2">
+        <article className="panel run-log-panel">
           <div className="panel-heading-row">
             <h2>Log</h2>
             <div className="inline-actions">
