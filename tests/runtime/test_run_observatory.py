@@ -795,7 +795,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(snapshot["task"]["integration_safety"]["status"], "pass")
                     self.assertIn("check_integration_safety.py", snapshot["task"]["integration_safety"]["summary"])
                     self.assertIn("Latest recorded integration-safety check passed", review_items["Integration safety"])
-                    self.assertIn("First-review path needs attention", review_items["First review"])
+                    self.assertIn("First-review setup needs", review_items["First review"])
                     self.assertIn("1 queued", review_items["Queue and conveyor"])
                     self.assertIn("No-progress circuit breaker active", review_items["Queue and conveyor"])
                     self.assertIn("Process 1 unhandled human inbox", review_items["Action plan"])
@@ -812,12 +812,82 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(scorecard_items["Validation"]["value"], "2/1")
                     self.assertEqual(scorecard_items["Integration safety"]["value"], "pass")
                     self.assertEqual(scorecard_items["Integration safety"]["kind"], "good")
-                    self.assertEqual(scorecard_items["First review"]["value"], "attention")
+                    self.assertEqual(scorecard_items["First review"]["value"], "needs setup")
                     self.assertEqual(scorecard_items["First review"]["kind"], "warn")
                     first_review_items = {item["label"]: item for item in snapshot["first_review"]["items"]}
                     self.assertEqual(first_review_items["Checklist docs"]["status"], "fail")
                     self.assertEqual(first_review_items["Validation"]["status"], "fail")
                     self.assertEqual(first_review_items["Run Safety Check"]["status"], "pass")
+
+    def test_command_passed_bullets_count_as_validation_without_pending_safety(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_text(
+                        target,
+                        "docs/CODEX_AUTOMATION_TASKS.md",
+                        """
+                        # Codex Automation Tasks
+
+                        AUTOMATION_STATUS: ACTIVE
+
+                        Last updated: 2026-05-10T16:53:05+00:00
+
+                        ## Current Project State
+
+                        - Current assessment: Target-local validation ran successfully.
+
+                        ## Product Horizon State
+
+                        - Current horizon: H6 Local validation
+                        - Advancement decision: stay
+
+                        ## Checks From Last Run
+
+                        - `python3 .diffmogger/scripts/ticket_run.py . next --json` passed and selected TICKET-004 for candidate verification.
+                        - `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug` passed.
+                        - `cmake --build build` passed.
+                        - `ctest --test-dir build --output-on-failure -R brute` passed.
+                        - `ctest --test-dir build --output-on-failure` passed all 5 tests.
+                        - `./scripts/smoke_direct_cc.sh` passed.
+                        - `python3 .diffmogger/scripts/ticket_run.py . update --ticket-id TICKET-004 ... --json` passed and selected TICKET-005 for implementation.
+                        - Not run: integration safety (`python3 scripts/check_integration_safety.py`) because no such project script exists in the scaffold yet.
+
+                        ## Known Issues
+
+                        None.
+
+                        ## Suggested Next Sprint-Sized Task
+
+                        Continue local validation.
+                        """,
+                    )
+                    self.write_json(
+                        target,
+                        "target/integration_safety_check.json",
+                        {
+                            "schema_version": 1,
+                            "checked_at": "2026-05-10T20:20:24+00:00",
+                            "source": "dashboard_run_safety_check",
+                            "status": "pass",
+                            "exit_code": 0,
+                            "command": "python3 scripts/check_integration_safety.py .",
+                            "selected_target": str(target),
+                            "checked_target": str(ROOT),
+                            "summary": "Dashboard Run Safety Check passed against the kit source.",
+                        },
+                    )
+
+                    snapshot = module.build_snapshot(target)
+                    validation = snapshot["task"]["validation"]
+
+                    self.assertEqual(7, validation["counts"]["pass"])
+                    self.assertEqual(0, validation["counts"]["fail"])
+                    self.assertEqual(0, validation["counts"]["pending"])
+                    self.assertEqual("7 passing check(s) recorded.", validation["summary"])
+                    self.assertFalse(any("integration safety" in item["text"].lower() for item in validation["items"]))
+                    self.assertEqual("pass", snapshot["task"]["integration_safety"]["status"])
 
     def test_initial_target_reports_pending_integration_safety(self) -> None:
         for path, module in self.modules:

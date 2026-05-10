@@ -385,10 +385,14 @@ def scaffold_file_preview(target: Path, intake: dict[str, Any], *, force: bool) 
     for template_path in sorted(scaffold_module.TEMPLATE_ROOT.rglob("*")):
         if template_path.is_dir():
             continue
+        if template_path.name == ".DS_Store":
+            continue
         if "__pycache__" in template_path.parts or template_path.suffix == ".pyc":
             continue
         rel = template_path.relative_to(scaffold_module.TEMPLATE_ROOT)
         rel_path = rel.as_posix()
+        if rel_path.startswith("scripts/") and template_path.suffix == ".py":
+            continue
         if not scaffold_template_included(scaffold_module, rel_path, values):
             continue
 

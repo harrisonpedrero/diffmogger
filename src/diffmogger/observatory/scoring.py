@@ -616,6 +616,7 @@ def scorecard_snapshot(
     no_progress = conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {}
     no_progress_active = bool(no_progress.get("active"))
     first_review_status = clean_text(first_review.get("status") or "unknown", limit=40)
+    first_review_label = clean_text(first_review.get("short_status") or first_review_status, limit=40)
 
     attention_count = sum(
         1
@@ -654,7 +655,7 @@ def scorecard_snapshot(
         f"{queued} queued / {deferred_pressure} deferred",
         f"{fail_count} validation issue(s)",
         f"integration safety {integration_status.replace('_', ' ')}",
-        f"first review {first_review_status.replace('_', ' ')}",
+        f"first review {first_review_label.replace('_', ' ')}",
     ]
     if pending_human:
         summary_parts.append(f"{pending_human} human bridge item(s)")
@@ -692,7 +693,7 @@ def scorecard_snapshot(
             },
             {
                 "label": "First review",
-                "value": first_review_status.replace("_", " "),
+                "value": first_review_label.replace("_", " "),
                 "detail": first_review.get("summary") or "No first-review readiness state recorded yet.",
                 "kind": first_review_kind,
             },

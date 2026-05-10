@@ -709,6 +709,7 @@ class DashboardBackendCliTests(unittest.TestCase):
 
             self.assertEqual(0, preview_result.returncode)
             files = {item["rel_path"]: item for item in preview_payload["data"]["files"]}
+            self.assertFalse(any(path.endswith(".DS_Store") for path in files))
             self.assertEqual("managed_section_update", files["AGENTS.md"]["action"])
             self.assertTrue(files["AGENTS.md"]["managed_section"])
             self.assertEqual("create", files[sidecar_rel("docs/DEVELOPMENT.md")]["action"])
@@ -915,7 +916,78 @@ class DashboardBackendCliTests(unittest.TestCase):
             file_keys = {item["key"] for item in files["data"]["files"]}
             self.assertIn("monitor.ticket_run", file_keys)
 
-    def test_ticket_draft_from_intake_is_review_only_and_accepts_candidates(self) -> None:
+    def test_ticket_draft_from_intake_is_review_only_append_only_and_accepts_candidates(self) -> None:
+        from diffmogger.dashboard.commands import tickets as ticket_commands
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_ticket_target(target)
+            before_text = generated_path(target, "docs/TICKET_RUN.md").read_text(encoding="utf-8")
+
+            def fake_run(cmd, **_kwargs):
+                if cmd[:2] == ["git", "status"]:
+                    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+                if cmd[:2] == ["codex", "exec"]:
+                    return subprocess.CompletedProcess(
+                        cmd,
+                        0,
+                        stdout=json.dumps([
+                            {
+                                "id": "TICKET-001",
+                                "summary": "Create the local queue",
+                                "status": "pending",
+                            },
+                            {
+                                "id": "TICKET-002",
+                                "summary": "Drafted from intake",
+                                "status": "done",
+                                "depends_on": ["TICKET-001", "MISSING-001"],
+                            },
+                            {
+                                "summary": "Second drafted ticket",
+                                "status": "blocked",
+                                "depends_on": ["TICKET-002", "MISSING-002"],
+                            }
+                        ]),
+                        stderr="",
+                    )
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            args = argparse.Namespace(target=str(target), stream_jsonl=False, ticket_file="")
+            with mock.patch.object(ticket_commands.subprocess, "run", side_effect=fake_run):
+                draft = ticket_commands.command_ticket_draft_from_intake(args)
+
+            self.assertEqual("append", draft["generation_mode"])
+            self.assertEqual(2, draft["candidate_count"])
+            self.assertEqual(1, draft["dropped_existing_count"])
+            self.assertEqual(2, draft["renumbered_count"])
+            self.assertEqual(2, draft["dropped_dependency_count"])
+            self.assertEqual(["TICKET-003", "TICKET-004"], [ticket["id"] for ticket in draft["candidates"]])
+            self.assertEqual(["pending", "pending"], [ticket["status"] for ticket in draft["candidates"]])
+            self.assertEqual(["TICKET-001"], draft["candidates"][0]["depends_on"])
+            self.assertEqual(["TICKET-002"], draft["candidates"][1]["depends_on"])
+            self.assertEqual(before_text, generated_path(target, "docs/TICKET_RUN.md").read_text(encoding="utf-8"))
+            before_accept = self.run_cli("ticket.load", "--target", tmp)[1]["data"]["tickets"]
+            self.assertFalse(any(ticket["id"] == "TICKET-003" for ticket in before_accept))
+
+            accept_result, accept_payload = self.run_cli(
+                "ticket.accept_draft",
+                "--target",
+                tmp,
+                "--draft-id",
+                draft["draft_id"],
+                "--mode",
+                "append",
+            )
+            self.assertEqual(0, accept_result.returncode)
+            tickets_by_id = {ticket["id"]: ticket for ticket in accept_payload["data"]["tickets"]}
+            self.assertEqual(4, len(tickets_by_id))
+            self.assertIn("TICKET-003", tickets_by_id)
+            self.assertIn("TICKET-004", tickets_by_id)
+            self.assertEqual("pending", tickets_by_id["TICKET-001"]["status"])
+            self.assertEqual("pending", tickets_by_id["TICKET-002"]["status"])
+
+    def test_ticket_draft_from_intake_returns_empty_append_draft_when_nothing_new(self) -> None:
         from diffmogger.dashboard.commands import tickets as ticket_commands
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -931,10 +1003,15 @@ class DashboardBackendCliTests(unittest.TestCase):
                         0,
                         stdout=json.dumps([
                             {
-                                "id": "TICKET-009",
-                                "summary": "Drafted from intake",
+                                "id": "TICKET-001",
+                                "summary": "Create the local queue",
                                 "status": "pending",
-                            }
+                            },
+                            {
+                                "id": "TICKET-002",
+                                "summary": "Document the queue",
+                                "status": "pending",
+                            },
                         ]),
                         stderr="",
                     )
@@ -944,21 +1021,10 @@ class DashboardBackendCliTests(unittest.TestCase):
             with mock.patch.object(ticket_commands.subprocess, "run", side_effect=fake_run):
                 draft = ticket_commands.command_ticket_draft_from_intake(args)
 
-            self.assertEqual(1, draft["candidate_count"])
-            before_accept = self.run_cli("ticket.load", "--target", tmp)[1]["data"]["tickets"]
-            self.assertFalse(any(ticket["id"] == "TICKET-009" for ticket in before_accept))
-
-            accept_result, accept_payload = self.run_cli(
-                "ticket.accept_draft",
-                "--target",
-                tmp,
-                "--draft-id",
-                draft["draft_id"],
-                "--mode",
-                "append",
-            )
-            self.assertEqual(0, accept_result.returncode)
-            self.assertTrue(any(ticket["id"] == "TICKET-009" for ticket in accept_payload["data"]["tickets"]))
+            self.assertEqual("append", draft["generation_mode"])
+            self.assertEqual(0, draft["candidate_count"])
+            self.assertEqual(2, draft["dropped_existing_count"])
+            self.assertEqual("No new draft tickets were found.", draft["message"])
 
     def test_safety_run_check_records_target_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1194,6 +1260,7 @@ Need a decision.
             self.assertGreater(len(data["changed_files"]), 0)
             self.assertIn("verification", data)
             self.assertIn("safety", data)
+            self.assertIn("review_fingerprint", data)
             self.assertIn("# Diffmogger Self-Review Snapshot", data["self_review"]["markdown_preview"])
             self.assertFalse(data["reviewed"]["exists"])
 
@@ -1212,6 +1279,63 @@ Need a decision.
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
             self.assertEqual("native_review_page", marker["source"])
             self.assertIn("trustworthy", marker["note"])
+            self.assertEqual(data["review_fingerprint"], marker["review_fingerprint"])
+
+            reload_result, reload_payload = self.run_cli("review.load", "--target", tmp)
+            self.assertEqual(0, reload_result.returncode)
+            self.assertTrue(reload_payload["ok"])
+            self.assertTrue(reload_payload["data"]["reviewed"]["is_current_snapshot"])
+
+    def test_review_load_suppresses_stale_pending_integration_safety_when_safety_passed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+            task_path = generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md")
+            task_path.write_text(
+                """
+                # Codex Automation Tasks
+
+                AUTOMATION_STATUS: ACTIVE
+
+                ## Current Project State
+
+                - Current assessment: Local checks passed.
+
+                ## Product Horizon State
+
+                - Current horizon: H1
+
+                ## Checks From Last Run
+
+                - `python3 -m pytest` passed.
+                - Not run: integration safety (`python3 scripts/check_integration_safety.py`) because no such project script exists yet.
+                """,
+                encoding="utf-8",
+            )
+            safety_path = generated_path(target, "target/integration_safety_check.json")
+            safety_path.parent.mkdir(parents=True, exist_ok=True)
+            safety_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "checked_at": "2026-05-10T22:12:32+00:00",
+                        "source": "dashboard_run_safety_check",
+                        "status": "pass",
+                        "exit_code": 0,
+                        "command": "python3 scripts/check_integration_safety.py .",
+                        "summary": "Dashboard Run Safety Check passed.",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result, payload = self.run_cli("review.load", "--target", tmp)
+
+            self.assertEqual(0, result.returncode)
+            self.assertEqual("pass", payload["data"]["safety"]["status"])
+            self.assertEqual([], payload["data"]["limitations"])
+            verification_text = "\n".join(item.get("text", "") for item in payload["data"]["verification"]["items"])
+            self.assertNotIn("Not run: integration safety", verification_text)
 
     def test_advanced_save_validate_and_debug_bundle_are_allowlisted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as bundle_tmp:

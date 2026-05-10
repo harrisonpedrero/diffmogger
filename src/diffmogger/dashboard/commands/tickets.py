@@ -205,6 +205,81 @@ def _draft_path(target: Path, draft_id: str) -> Path:
     return _draft_dir(target) / f"{safe}.json"
 
 
+def _summary_key(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _next_available_ticket_id(used_ids: set[str]) -> str:
+    highest = 0
+    for ticket_id in used_ids:
+        match = re.search(r"(\d+)$", ticket_id)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    while True:
+        highest += 1
+        candidate = f"TICKET-{highest:03d}"
+        if candidate not in used_ids:
+            return candidate
+
+
+def _append_only_draft_candidates(
+    data: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    current = ticket_run.tickets(data)
+    existing_ids = {str(item.get("id") or "").strip() for item in current if str(item.get("id") or "").strip()}
+    existing_summaries = {
+        key for key in (_summary_key(item.get("summary")) for item in current) if key
+    }
+    used_ids = set(existing_ids)
+    filtered: list[dict[str, Any]] = []
+    dropped_existing_count = 0
+    renumbered_count = 0
+
+    for candidate in candidates:
+        ticket = ticket_run.normalize_ticket(candidate)
+        summary_key = _summary_key(ticket.get("summary"))
+        if summary_key and summary_key in existing_summaries:
+            dropped_existing_count += 1
+            continue
+
+        original_id = str(ticket.get("id") or "").strip()
+        next_id = original_id
+        if not next_id or next_id in used_ids:
+            next_id = _next_available_ticket_id(used_ids)
+            renumbered_count += 1
+
+        used_ids.add(next_id)
+        ticket["id"] = next_id
+        ticket["status"] = "pending"
+        filtered.append(ticket)
+
+    known_ids = existing_ids | {
+        str(item.get("id") or "").strip()
+        for item in filtered
+        if str(item.get("id") or "").strip()
+    }
+    dropped_dependency_count = 0
+    for ticket in filtered:
+        next_dependencies: list[str] = []
+        for dependency_id in ticket_run.ticket_dependency_ids(ticket):
+            if (
+                dependency_id in known_ids
+                and dependency_id != str(ticket.get("id") or "")
+                and dependency_id not in next_dependencies
+            ):
+                next_dependencies.append(dependency_id)
+            else:
+                dropped_dependency_count += 1
+        ticket["depends_on"] = next_dependencies
+
+    return filtered, {
+        "dropped_existing_count": dropped_existing_count,
+        "renumbered_count": renumbered_count,
+        "dropped_dependency_count": dropped_dependency_count,
+    }
+
+
 def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     try:
@@ -214,12 +289,20 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
         data = {"run_id": "ticket-run", "tickets": []}
         text = ""
     intake = load_intake(target) or load_dashboard_state(target).get("brief_draft_intake") or {}
+    current_tickets = ticket_run.tickets(data)
+    current_ids = {str(item.get("id") or "").strip() for item in current_tickets if str(item.get("id") or "").strip()}
+    next_ticket_id = _next_available_ticket_id(set(current_ids))
     prompt = "\n".join(
         [
-            "Draft Diffmogger ticket-campaign tickets from this project intake.",
+            "Draft additional Diffmogger ticket-campaign tickets from this project intake.",
             "Return JSON only: an array of ticket objects.",
             "Each ticket must include id, summary, depends_on, status, acceptance_criteria, verification_commands, evidence, related_commits, and blocker.",
             "Use status pending. Do not modify files.",
+            "Append-only rules:",
+            "- Propose only genuinely new follow-up tickets.",
+            "- Do not repeat, rewrite, replace, or reset any current ticket.",
+            f"- Use fresh ticket IDs starting at {next_ticket_id} or later.",
+            "- Dependencies may point to current tickets or to newly proposed tickets.",
             "",
             "Project intake JSON:",
             json.dumps(intake, indent=2, sort_keys=True, default=json_default),
@@ -255,13 +338,23 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
         )
     raw_candidates = _extract_json_payload(result.stdout)
     candidate_text = json.dumps(raw_candidates)
-    candidates = ticket_run.parse_import_tickets(candidate_text, "json")
+    raw_imported = ticket_run.parse_import_tickets(candidate_text, "json")
+    candidates, draft_meta = _append_only_draft_candidates(data, raw_imported)
+    stream_event(args, "ticket-draft", f"Prepared {len(candidates)} append-only draft ticket candidate(s).")
     draft_id = datetime.now(timezone.utc).strftime("ticket-draft-%Y%m%d-%H%M%S")
+    message = (
+        f"{len(candidates)} new draft ticket candidate{' is' if len(candidates) == 1 else 's are'} ready to add."
+        if candidates
+        else "No new draft tickets were found."
+    )
     payload = {
         "schema_version": 1,
         "draft_id": draft_id,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "ticket_file": str(path),
+        "generation_mode": "append",
+        "message": message,
+        **draft_meta,
         "candidates": candidates,
     }
     draft_path = _draft_path(target, draft_id)
@@ -272,6 +365,9 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
         "draft_id": draft_id,
         "draft_path": str(draft_path),
         "candidate_count": len(candidates),
+        "generation_mode": "append",
+        "message": message,
+        **draft_meta,
         "candidates": candidates,
     }
 

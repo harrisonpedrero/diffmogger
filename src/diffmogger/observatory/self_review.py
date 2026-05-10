@@ -9,25 +9,48 @@ from .scoring import (
     scorecard_action_plan,
 )
 
+def validation_check_status(text: str) -> str:
+    lower = text.lower().strip()
+    if lower.startswith("pass"):
+        return "pass"
+    if lower.startswith("fail"):
+        return "fail"
+    if lower.startswith("warn"):
+        return "warn"
+    if lower.startswith("pending") or lower.startswith("not run") or "not run yet" in lower:
+        return "pending"
+    if re.search(r"\bpassed\b", lower):
+        return "pass"
+    if re.search(r"\bfailed\b|\bfailure\b", lower):
+        return "fail"
+    if re.search(r"\bwarning\b|\bwarned\b", lower):
+        return "warn"
+    if re.search(r"\bnot run\b", lower):
+        return "pending"
+    return "info"
+
+def is_integration_safety_check(text: str) -> bool:
+    lower = text.lower()
+    return (
+        "scripts/check_integration_safety.py" in lower
+        or "integration safety" in lower
+        or "integration-safety" in lower
+    )
+
 def validation_snapshot(text: str) -> dict[str, Any]:
     checks: list[dict[str, str]] = []
     counts = {"pass": 0, "fail": 0, "warn": 0, "pending": 0, "info": 0}
+    counted_checks = 0
     for bullet in section_bullets(text, "Checks From Last Run", limit=MAX_CHECK_ITEMS):
-        lower = bullet.lower()
-        if lower.startswith("preferred commands"):
+        if bullet.lower().startswith("preferred commands"):
             continue
         if bullet.startswith("`") and any(item["status"] == "pending" for item in checks):
             continue
-        status = "info"
-        if lower.startswith("pass"):
-            status = "pass"
-        elif lower.startswith("fail"):
-            status = "fail"
-        elif lower.startswith("warn"):
-            status = "warn"
-        elif lower.startswith("pending") or "not run" in lower:
-            status = "pending"
+        status = validation_check_status(bullet)
+        if status == "pending" and is_integration_safety_check(bullet):
+            continue
         counts[status] += 1
+        counted_checks += 1
         checks.append({"status": status, "text": bullet})
 
     if not checks:
@@ -36,6 +59,8 @@ def validation_snapshot(text: str) -> dict[str, Any]:
             "counts": counts,
             "items": [],
         }
+    if not counted_checks:
+        return {"summary": "No validation results recorded yet.", "counts": counts, "items": checks}
 
     if counts["fail"]:
         summary = f"{counts['pass']} pass, {counts['fail']} fail or environment note."
@@ -80,7 +105,7 @@ def integration_safety_snapshot(validation: dict[str, Any], target: Path | None 
     for item in items:
         text = clean_text(item.get("text") or "", limit=420)
         lower = text.lower()
-        if "scripts/check_integration_safety.py" not in lower and "integration safety" not in lower and "integration-safety" not in lower:
+        if not is_integration_safety_check(text):
             continue
         status = clean_text(item.get("status") or "info", limit=40)
         command_match = re.search(r"`([^`]*(?:scripts/check_integration_safety\.py|integration[- ]safety)[^`]*)`", text, re.I)
@@ -216,24 +241,35 @@ def first_review_snapshot(target: Path, task: dict[str, Any]) -> dict[str, Any]:
         {"label": "Run Safety Check", "status": safety_status, "detail": safety_detail},
     ]
     missing_actions: list[str] = []
+    missing_labels: list[str] = []
     if docs["status"] != "pass":
+        missing_labels.append("checklist doc")
         missing_actions.append("Update a first-review checklist doc with the validation, safety, observatory, and Markdown export steps.")
     if validation_status != "pass":
+        missing_labels.append("validation")
         missing_actions.append(first_review_validation_missing_action(target))
     if safety_status != "pass":
+        missing_labels.append("run safety check")
         missing_actions.append("Run dashboard **Run Safety Check** or `python3 scripts/check_integration_safety.py` and record the result.")
 
     status = "ready" if not missing_actions else "attention"
     if status == "ready":
         summary = "First-review path is ready: checklist docs, validation, and integration safety are all recorded."
+        short_status = "ready"
+    elif missing_labels == ["checklist doc"]:
+        summary = "First-review checklist doc is missing; validation and run safety are recorded."
+        short_status = "checklist"
     else:
-        summary = f"First-review path needs attention on {len(missing_actions)} item(s)."
+        summary = f"First-review setup needs {', '.join(missing_labels)}."
+        short_status = "needs setup"
 
     return {
         "status": status,
+        "short_status": short_status,
         "summary": summary,
         "items": items,
         "missing_actions": missing_actions,
+        "missing_labels": missing_labels,
         "docs": docs.get("docs", []),
     }
 

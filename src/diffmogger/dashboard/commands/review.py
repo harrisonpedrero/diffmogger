@@ -1,10 +1,37 @@
 from __future__ import annotations
 
+import hashlib
+
 from ..errors import *
 from ..jsonio import *
 from ..target import *
 
 from .run_schedule import automation_prerequisites, latest_run_log, prereq_rows
+
+def is_integration_safety_check(text: str) -> bool:
+    lower = text.lower()
+    return (
+        "scripts/check_integration_safety.py" in lower
+        or "integration safety" in lower
+        or "integration-safety" in lower
+    )
+
+def authoritative_safety_recorded(safety: dict[str, Any]) -> bool:
+    status = str(safety.get("status") or "").lower()
+    return status in {"pass", "fail", "warn"}
+
+def review_validation_items(validation: dict[str, Any], safety: dict[str, Any]) -> list[dict[str, Any]]:
+    items = validation.get("items") if isinstance(validation.get("items"), list) else []
+    filtered: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").lower()
+        body = str(item.get("text") or "")
+        if status == "pending" and authoritative_safety_recorded(safety) and is_integration_safety_check(body):
+            continue
+        filtered.append(item)
+    return filtered
 
 def git_changed_files(target: Path) -> list[dict[str, Any]]:
     try:
@@ -63,10 +90,14 @@ def generated_target_files(target: Path, dashboard_app: Any, *, limit: int = 18)
             )
     return files[:limit]
 
-def review_environment_limitations(snapshot: dict[str, Any], environment_blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def review_environment_limitations(
+    snapshot: dict[str, Any],
+    environment_blockers: list[dict[str, Any]],
+    safety: dict[str, Any],
+) -> list[dict[str, Any]]:
     task = snapshot.get("task") if isinstance(snapshot.get("task"), dict) else {}
     validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
-    items = validation.get("items") if isinstance(validation.get("items"), list) else []
+    items = review_validation_items(validation, safety)
     limitations: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -95,7 +126,33 @@ def review_environment_limitations(snapshot: dict[str, Any], environment_blocker
 def review_marker_path(target: Path) -> Path:
     return preferred_target_path(target, ".agentic/reviewed.json")
 
-def review_marker_snapshot(target: Path) -> dict[str, Any]:
+def review_snapshot_fingerprint(
+    raw: dict[str, Any],
+    changed_files: list[dict[str, Any]],
+    changed_source: str,
+    limitations: list[dict[str, Any]],
+) -> str:
+    task = raw.get("task") if isinstance(raw.get("task"), dict) else {}
+    git = raw.get("git") if isinstance(raw.get("git"), dict) else {}
+    scorecard = raw.get("scorecard") if isinstance(raw.get("scorecard"), dict) else {}
+    payload = {
+        "task_status": task.get("status"),
+        "task_horizon": task.get("horizon"),
+        "validation": task.get("validation") if isinstance(task.get("validation"), dict) else {},
+        "integration_safety": task.get("integration_safety") if isinstance(task.get("integration_safety"), dict) else {},
+        "changed_files": changed_files,
+        "changed_files_source": changed_source,
+        "latest_commits": git.get("commits")[:8] if isinstance(git.get("commits"), list) else [],
+        "human": raw.get("human") if isinstance(raw.get("human"), dict) else {},
+        "queue_totals": (raw.get("queue") or {}).get("totals") if isinstance(raw.get("queue"), dict) else {},
+        "action_plan": scorecard.get("action_plan") if isinstance(scorecard.get("action_plan"), dict) else {},
+        "limitations": limitations,
+        "progress_recent": raw.get("progress_recent"),
+    }
+    encoded = json.dumps(payload, sort_keys=True, default=json_default).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+def review_marker_snapshot(target: Path, *, current_fingerprint: str = "") -> dict[str, Any]:
     path = review_marker_path(target)
     data = read_json_file(path)
     if not data:
@@ -104,13 +161,19 @@ def review_marker_snapshot(target: Path) -> dict[str, Any]:
             "path": str(path),
             "reviewed_at": "",
             "note": "",
+            "snapshot_generated_at": "",
+            "review_fingerprint": "",
+            "is_current_snapshot": False,
         }
+    marker_fingerprint = data.get("review_fingerprint") or ""
     return {
         "exists": True,
         "path": str(path),
         "reviewed_at": data.get("reviewed_at") or "",
         "note": data.get("note") or "",
         "snapshot_generated_at": data.get("snapshot_generated_at") or "",
+        "review_fingerprint": marker_fingerprint,
+        "is_current_snapshot": bool(current_fingerprint and marker_fingerprint == current_fingerprint),
     }
 
 def review_load_snapshot(target: Path) -> dict[str, Any]:
@@ -155,9 +218,13 @@ def review_load_snapshot(target: Path) -> dict[str, Any]:
     validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
     safety = task.get("integration_safety") if isinstance(task.get("integration_safety"), dict) else {}
     commits = git.get("commits") if isinstance(git.get("commits"), list) else []
+    validation_items = review_validation_items(validation, safety)
+    limitations = review_environment_limitations(raw, environment_blockers, safety)
+    review_fingerprint = review_snapshot_fingerprint(raw, changed_files[:24], changed_source, limitations)
     return {
         "target": target_metadata(target),
         "generated_at": raw.get("generated_at"),
+        "review_fingerprint": review_fingerprint,
         "latest_run": {
             "status": task.get("status") or "UNKNOWN",
             "horizon": task.get("horizon") or "unknown",
@@ -171,7 +238,7 @@ def review_load_snapshot(target: Path) -> dict[str, Any]:
         "verification": {
             "summary": validation.get("summary") or "No validation results recorded yet.",
             "counts": validation.get("counts") if isinstance(validation.get("counts"), dict) else {},
-            "items": validation.get("items") if isinstance(validation.get("items"), list) else [],
+            "items": validation_items,
             "baseline": baseline,
         },
         "safety": safety or {
@@ -179,7 +246,7 @@ def review_load_snapshot(target: Path) -> dict[str, Any]:
             "summary": "Integration-safety check has not run yet.",
             "command": "python3 scripts/check_integration_safety.py",
         },
-        "limitations": review_environment_limitations(raw, environment_blockers),
+        "limitations": limitations,
         "self_review": {
             "markdown_preview": markdown[:20_000],
             "truncated": len(markdown) > 20_000,
@@ -191,7 +258,7 @@ def review_load_snapshot(target: Path) -> dict[str, Any]:
             "markdown_path": str(review_dir / DEFAULT_REVIEW_MARKDOWN),
         },
         "review": review,
-        "reviewed": review_marker_snapshot(target),
+        "reviewed": review_marker_snapshot(target, current_fingerprint=review_fingerprint),
         "empty_states": raw.get("empty_states") if isinstance(raw.get("empty_states"), dict) else {},
     }
 
@@ -236,13 +303,14 @@ def command_review_mark_reviewed(args: argparse.Namespace) -> dict[str, Any]:
             error_type="invalid_target",
             details={"target": str(target)},
         )
-    raw = build_observatory_snapshot(target)
+    snapshot = review_load_snapshot(target)
     path = review_marker_path(target)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "reviewed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "snapshot_generated_at": raw.get("generated_at"),
-        "automation_status": (raw.get("task") or {}).get("status") if isinstance(raw.get("task"), dict) else "UNKNOWN",
+        "snapshot_generated_at": snapshot.get("generated_at"),
+        "review_fingerprint": snapshot.get("review_fingerprint") or "",
+        "automation_status": (snapshot.get("latest_run") or {}).get("status") if isinstance(snapshot.get("latest_run"), dict) else "UNKNOWN",
         "note": str(getattr(args, "note", "") or "").strip(),
         "source": "native_review_page",
     }
@@ -254,6 +322,6 @@ def command_review_mark_reviewed(args: argparse.Namespace) -> dict[str, Any]:
     )
     return {
         "target": target_metadata(target),
-        "reviewed": review_marker_snapshot(target),
+        "reviewed": review_marker_snapshot(target, current_fingerprint=str(payload.get("review_fingerprint") or "")),
         "marker_path": str(path),
     }
