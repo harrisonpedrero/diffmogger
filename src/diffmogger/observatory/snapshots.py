@@ -1,14 +1,51 @@
 from __future__ import annotations
 
+import copy
+
 from .common import *
 from .git_state import baseline_verification_snapshot, git_snapshot, log_snapshot
 from .queue_state import active_run, conveyor_health, decision_queue, progress_snapshot, queue_snapshot
 from .scoring import action_plan_follow_through, recommendation_history_snapshot, scorecard_snapshot, worker_strategy_snapshot
 from .self_review import first_review_snapshot, integration_safety_snapshot, self_review_snapshot, validation_snapshot
-from .signals import signals_snapshot
 from diffmogger.runtime import ticket_run
+from diffmogger.runtime.state_store import load_runner_state, runner_projection_path_for_target, state_snapshot
 
-STALE_TICKET_SOURCE_ISSUE = "ticket source still needs to be populated or confirmed"
+
+def observatory_safe_state(target: Path, canonical_state: dict[str, Any]) -> dict[str, Any]:
+    state = copy.deepcopy(canonical_state)
+    database = state.get("database") if isinstance(state.get("database"), dict) else {}
+    database["path"] = target_rel(target, "target/orchestration.sqlite3")
+    state["database"] = database
+    projection = state.get("projection") if isinstance(state.get("projection"), dict) else {}
+    projection["path"] = target_rel(target, "target/automation_conveyor_state.json")
+    state["projection"] = projection
+    projections = state.get("projections") if isinstance(state.get("projections"), dict) else {}
+    projection_paths = {
+        "conveyor": "target/automation_conveyor_state.json",
+        "runner": "target/automation_runner.json",
+    }
+    for name, rel_path in projection_paths.items():
+        item = projections.get(name) if isinstance(projections.get(name), dict) else {}
+        if item:
+            item["path"] = target_rel(target, rel_path)
+            projections[name] = item
+    if projections:
+        state["projections"] = projections
+    conveyor = state.get("conveyor_state") if isinstance(state.get("conveyor_state"), dict) else {}
+    canonical = conveyor.get("canonical_state") if isinstance(conveyor.get("canonical_state"), dict) else {}
+    if canonical:
+        canonical["database_path"] = target_rel(target, "target/orchestration.sqlite3")
+        conveyor["canonical_state"] = canonical
+        state["conveyor_state"] = conveyor
+    runner = state.get("runner_state") if isinstance(state.get("runner_state"), dict) else {}
+    runner_canonical = runner.get("canonical_state") if isinstance(runner.get("canonical_state"), dict) else {}
+    if runner_canonical:
+        runner_canonical["database_path"] = target_rel(target, "target/orchestration.sqlite3")
+        runner["canonical_state"] = runner_canonical
+        state["runner_state"] = runner
+    return state
+
+STALE_TICKET_SOURCE_ISSUE = "ticket queue still needs to be populated or confirmed"
 
 def is_stale_ticket_source_issue(value: Any) -> bool:
     return STALE_TICKET_SOURCE_ISSUE in str(value or "").lower()
@@ -64,27 +101,22 @@ def parse_task_state(target: Path) -> dict[str, Any]:
 def build_snapshot(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     generated_at = utc_now()
-    conveyor = read_json(runtime_path(target, "target/automation_conveyor_state.json"))
-    runner = read_json(runtime_path(target, "target/automation_runner.json"))
+    canonical_state = state_snapshot(target)
+    public_state = observatory_safe_state(target, canonical_state)
+    conveyor = canonical_state.get("conveyor_state") if isinstance(canonical_state.get("conveyor_state"), dict) else {}
+    runner = load_runner_state(runner_projection_path_for_target(target))
     queue = queue_snapshot(target)
     baseline_verification = baseline_verification_snapshot(target)
     task = parse_task_state(target)
     progress_text = read_text(dpath(target, "docs/MULTI_ROLE_PROGRESS.md"), limit=40_000)
     progress = progress_snapshot(progress_text)
+    human_messages = canonical_state.get("human_messages") if isinstance(canonical_state.get("human_messages"), dict) else {}
+    human_counts = human_messages.get("counts") if isinstance(human_messages.get("counts"), dict) else {}
     human = {
-        "pending_requests": count_concrete_records_with_status(
-            dpath(target, "docs/HUMAN_REQUESTS.md"),
-            "HR",
-            {"active", "awaiting_user"},
-        ),
-        "unhandled_inbox": count_concrete_records_with_status(
-            dpath(target, "docs/HUMAN_INBOX.md"),
-            "INBOX",
-            {"unhandled"},
-        ),
-        "outbound_records": count_concrete_records(dpath(target, "docs/HUMAN_OUTBOX.md"), "OUTBOX"),
+        "pending_requests": int(human_counts.get("pending_requests") or 0),
+        "unhandled_inbox": int(human_counts.get("queued_notes") or 0) + int(human_counts.get("failed_notes") or 0),
+        "outbound_records": int(human_counts.get("outbound_records") or 0),
     }
-    signals = signals_snapshot(target)
     conveyor_state = {
         "cycles": int(conveyor.get("cycles", 0) or 0),
         "updated_at": clean_text(conveyor.get("updated_at") or "never", limit=80),
@@ -97,7 +129,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "history": list(conveyor.get("history") or [])[-MAX_HISTORY:] if isinstance(conveyor.get("history"), list) else [],
     }
     first_review = first_review_snapshot(target, task)
-    scorecard = scorecard_snapshot(task, queue, signals, conveyor_state, human, progress, first_review)
+    scorecard = scorecard_snapshot(task, queue, conveyor_state, human, progress, first_review)
     follow_through = action_plan_follow_through(
         task,
         queue,
@@ -117,7 +149,6 @@ def build_snapshot(target: Path) -> dict[str, Any]:
     review = self_review_snapshot(
         task,
         queue,
-        signals,
         conveyor_state,
         human,
         progress,
@@ -146,9 +177,9 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "git": git_snapshot(target),
         "queue": queue,
         "baseline_verification": baseline_verification,
-        "signals": signals,
         "runner": runner,
         "conveyor": conveyor_state,
+        "state": public_state,
         "progress": progress,
         "scorecard": scorecard,
         "first_review": first_review,

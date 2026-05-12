@@ -787,7 +787,6 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     snapshot = module.build_snapshot(target)
                     review_items = {item["label"]: item["body"] for item in snapshot["review"]["items"]}
 
-                    self.assertEqual(snapshot["signals"]["active_count"], 0)
                     self.assertEqual(snapshot["runner"]["state"], "running")
                     self.assertEqual(snapshot["task"]["validation"]["counts"]["pass"], 2)
                     self.assertEqual(snapshot["task"]["validation"]["counts"]["fail"], 1)
@@ -798,11 +797,11 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("First-review setup needs", review_items["First review"])
                     self.assertIn("1 queued", review_items["Queue and conveyor"])
                     self.assertIn("No-progress circuit breaker active", review_items["Queue and conveyor"])
-                    self.assertIn("Process 1 unhandled human inbox", review_items["Action plan"])
+                    self.assertIn("Process 1 queued dashboard human message", review_items["Action plan"])
                     self.assertIn("3 deferred backlog item", review_items["Deferred triage"])
                     self.assertIn("Start with `staleness`", review_items["Deferred triage"])
                     self.assertEqual(snapshot["scorecard"]["status"], "attention")
-                    self.assertEqual(snapshot["scorecard"]["action_plan"]["label"], "Process human inbox")
+                    self.assertEqual(snapshot["scorecard"]["action_plan"]["label"], "Process human messages")
                     self.assertEqual(snapshot["scorecard"]["action_plan"]["lane"], "planner")
                     scorecard_items = {item["label"]: item for item in snapshot["scorecard"]["items"]}
                     self.assertEqual(scorecard_items["Accepted patches"]["value"], 13)
@@ -1111,7 +1110,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("# Diffmogger Self-Review Snapshot", report)
                     self.assertIn("automation_status: `ACTIVE`", report)
                     self.assertIn("## Action Plan", report)
-                    self.assertIn("recommendation: Process 1 unhandled human inbox message(s) before role work.", report)
+                    self.assertIn("recommendation: Process 1 queued dashboard human message(s) before role work.", report)
                     self.assertIn("lane: `planner`", report)
                     self.assertIn("## Action Follow-Through", report)
                     self.assertIn("status: superseded", report)

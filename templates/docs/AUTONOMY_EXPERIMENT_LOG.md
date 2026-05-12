@@ -1,5 +1,7 @@
 # Autonomy Experiment Log
 
+Optional human-readable review/export surface. Do not use it as runtime authority; current orchestration state comes from SQLite and the generated canonical state brief.
+
 This project uses recurring Codex automation as a high-agency software-development workflow.
 
 Periodically record:

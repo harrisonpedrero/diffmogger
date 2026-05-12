@@ -127,7 +127,7 @@ def commit_summary_from_files(subject: str, files: list[dict[str, Any]]) -> str:
     if "run_observatory.py" in joined and "test_run_observatory.py" in joined:
         return "Observatory reporting changed, with matching regression tests."
     if "run_conveyor_automation.py" in joined and "test_run_conveyor_automation.py" in joined:
-        return "Conveyor scheduling changed, with policy coverage."
+        return "Conveyor routing changed, with policy coverage."
     if paths and all(path.startswith("docs/") or path.endswith(".md") for path in paths):
         return "Operator documentation and durable planning state changed."
     return subject

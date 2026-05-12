@@ -25,6 +25,8 @@ const READ_ONLY_BACKEND_COMMANDS: &[&str] = &[
     "inbox.load",
     "run.load",
     "run.load_log",
+    "state.snapshot",
+    "state.validate",
     "observatory.snapshot",
     "review.load",
     "diagnostics.run_checks",
@@ -1077,7 +1079,7 @@ fn run_backend_command(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn run_backend_command_streamed(
+async fn run_backend_command_streamed(
     app: AppHandle,
     run_id: String,
     command: String,
@@ -1106,121 +1108,131 @@ fn run_backend_command_streamed(
     draft_id: Option<String>,
     ticket_ids: Option<String>,
 ) -> Result<Value, CommandError> {
-    let (root, args) = build_backend_args(
-        &command,
-        target.as_deref(),
-        review_dir.as_deref(),
-        output_dir.as_deref(),
-        file_key.as_deref(),
-        intake_json.as_deref(),
-        files_json.as_deref(),
-        project_name.as_deref(),
-        ownership.as_deref(),
-        request_id.as_deref(),
-        body.as_deref(),
-        intent.as_deref(),
-        related.as_deref(),
-        force,
-        run_codex,
-        ticket_json.as_deref(),
-        ticket_id.as_deref(),
-        import_format.as_deref(),
-        import_mode.as_deref(),
-        input_file.as_deref(),
-        input_json.as_deref(),
-        input_text.as_deref(),
-        preview,
-        draft_id.as_deref(),
-        ticket_ids.as_deref(),
-        true,
-    )?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (root, args) = build_backend_args(
+            &command,
+            target.as_deref(),
+            review_dir.as_deref(),
+            output_dir.as_deref(),
+            file_key.as_deref(),
+            intake_json.as_deref(),
+            files_json.as_deref(),
+            project_name.as_deref(),
+            ownership.as_deref(),
+            request_id.as_deref(),
+            body.as_deref(),
+            intent.as_deref(),
+            related.as_deref(),
+            force,
+            run_codex,
+            ticket_json.as_deref(),
+            ticket_id.as_deref(),
+            import_format.as_deref(),
+            import_mode.as_deref(),
+            input_file.as_deref(),
+            input_json.as_deref(),
+            input_text.as_deref(),
+            preview,
+            draft_id.as_deref(),
+            ticket_ids.as_deref(),
+            true,
+        )?;
 
-    let mut child = prepare_backend_process(&args)
-        .current_dir(&root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            CommandError::new(
-                "backend_process_failed",
-                "Could not start the Diffmogger backend CLI.",
-                json!({ "exception": error.to_string() }),
-            )
-        })?;
-
-    let stdout = child.stdout.take().ok_or_else(|| {
-        CommandError::new(
-            "backend_process_failed",
-            "Could not capture backend stdout.",
-            json!({ "command": command }),
-        )
-    })?;
-    let mut final_payload: Option<Value> = None;
-    for line in BufReader::new(stdout).lines() {
-        let line =
-            line.map_err(|error| CommandError::io("Could not read backend stdout.", error))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let payload: Value = serde_json::from_str(line.trim()).map_err(|error| {
-            CommandError::new(
-                "backend_json_error",
-                "Backend CLI stream emitted invalid JSON.",
-                json!({ "command": command, "line": line, "exception": error.to_string() }),
-            )
-        })?;
-        if payload.get("event").and_then(Value::as_str) == Some("log") {
-            app.emit(
-                "backend-log",
-                json!({
-                    "runId": run_id,
-                    "command": command,
-                    "stage": payload.get("stage").and_then(Value::as_str).unwrap_or("backend"),
-                    "level": payload.get("level").and_then(Value::as_str).unwrap_or("info"),
-                    "message": payload.get("message").and_then(Value::as_str).unwrap_or(""),
-                    "data": payload.get("data").cloned().unwrap_or_else(|| json!({}))
-                }),
-            )
+        let mut child = prepare_backend_process(&args)
+            .current_dir(&root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|error| {
                 CommandError::new(
-                    "event_emit_failed",
-                    "Could not emit backend progress event.",
+                    "backend_process_failed",
+                    "Could not start the Diffmogger backend CLI.",
                     json!({ "exception": error.to_string() }),
                 )
             })?;
-        } else {
-            final_payload = Some(payload);
-        }
-    }
 
-    let status = child.wait().map_err(|error| {
+        let stdout = child.stdout.take().ok_or_else(|| {
+            CommandError::new(
+                "backend_process_failed",
+                "Could not capture backend stdout.",
+                json!({ "command": command }),
+            )
+        })?;
+        let mut final_payload: Option<Value> = None;
+        for line in BufReader::new(stdout).lines() {
+            let line =
+                line.map_err(|error| CommandError::io("Could not read backend stdout.", error))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let payload: Value = serde_json::from_str(line.trim()).map_err(|error| {
+                CommandError::new(
+                    "backend_json_error",
+                    "Backend CLI stream emitted invalid JSON.",
+                    json!({ "command": command, "line": line, "exception": error.to_string() }),
+                )
+            })?;
+            if payload.get("event").and_then(Value::as_str) == Some("log") {
+                app.emit(
+                    "backend-log",
+                    json!({
+                        "runId": run_id,
+                        "command": command,
+                        "stage": payload.get("stage").and_then(Value::as_str).unwrap_or("backend"),
+                        "level": payload.get("level").and_then(Value::as_str).unwrap_or("info"),
+                        "message": payload.get("message").and_then(Value::as_str).unwrap_or(""),
+                        "data": payload.get("data").cloned().unwrap_or_else(|| json!({}))
+                    }),
+                )
+                .map_err(|error| {
+                    CommandError::new(
+                        "event_emit_failed",
+                        "Could not emit backend progress event.",
+                        json!({ "exception": error.to_string() }),
+                    )
+                })?;
+            } else {
+                final_payload = Some(payload);
+            }
+        }
+
+        let status = child.wait().map_err(|error| {
+            CommandError::new(
+                "backend_process_failed",
+                "Backend process wait failed.",
+                json!({ "exception": error.to_string() }),
+            )
+        })?;
+        let mut stderr = String::new();
+        if let Some(mut stderr_pipe) = child.stderr.take() {
+            stderr_pipe
+                .read_to_string(&mut stderr)
+                .map_err(|error| CommandError::io("Could not read backend stderr.", error))?;
+        }
+        let payload = final_payload.ok_or_else(|| {
+            CommandError::new(
+                "backend_json_error",
+                "Backend CLI stream did not return a final JSON envelope.",
+                json!({ "command": command, "exitCode": status.code(), "stderr": stderr.trim() }),
+            )
+        })?;
+        if payload.get("schema_version").is_none() || payload.get("ok").is_none() {
+            return Err(CommandError::new(
+                "backend_contract_error",
+                "Backend CLI JSON did not include the expected envelope.",
+                json!({ "command": command, "payload": payload, "exitCode": status.code() }),
+            ));
+        }
+        Ok(payload)
+    })
+    .await
+    .map_err(|error| {
         CommandError::new(
-            "backend_process_failed",
-            "Backend process wait failed.",
+            "backend_task_failed",
+            "Backend command task failed before returning a result.",
             json!({ "exception": error.to_string() }),
         )
-    })?;
-    let mut stderr = String::new();
-    if let Some(mut stderr_pipe) = child.stderr.take() {
-        stderr_pipe
-            .read_to_string(&mut stderr)
-            .map_err(|error| CommandError::io("Could not read backend stderr.", error))?;
-    }
-    let payload = final_payload.ok_or_else(|| {
-        CommandError::new(
-            "backend_json_error",
-            "Backend CLI stream did not return a final JSON envelope.",
-            json!({ "command": command, "exitCode": status.code(), "stderr": stderr.trim() }),
-        )
-    })?;
-    if payload.get("schema_version").is_none() || payload.get("ok").is_none() {
-        return Err(CommandError::new(
-            "backend_contract_error",
-            "Backend CLI JSON did not include the expected envelope.",
-            json!({ "command": command, "payload": payload, "exitCode": status.code() }),
-        ));
-    }
-    Ok(payload)
+    })?
 }
 
 #[tauri::command]

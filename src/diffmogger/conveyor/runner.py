@@ -94,7 +94,14 @@ def run_role(
         }
         if watchdog_status_path:
             state["active_role_run"]["watchdog_status_path"] = watchdog_status_path
-        write_state(state_path, state)
+        write_state(
+            state_path,
+            state,
+            event_type="role_run.started",
+            actor_role=role,
+            phase="role_execution",
+            payload={"role": role, "run_id": run_id_value, "reason": reason, "command": command},
+        )
     try:
         while True:
             if TERMINATE_REQUESTED:

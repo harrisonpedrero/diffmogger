@@ -57,6 +57,7 @@ values = {
     "task_file_path": target / rel("docs/CODEX_AUTOMATION_TASKS.md"),
     "logs_dir": target / rel("target/automation_logs"),
     "lock_path": target / rel("target/codex_automation.lock"),
+    "state_brief_path": target / rel("target/canonical_state_brief.md"),
     "mcp_config_path": target / rel(".codex/config.toml"),
     "playwright_mcp_rel": rel("scripts/run_playwright_mcp.sh"),
     "playwright_artifact_rel": rel(f"docs/backlog/ui_artifacts/{run_id}"),
@@ -101,6 +102,14 @@ configure_diffmogger_browser() {
 }
 
 configure_diffmogger_browser
+
+regenerate_state_brief() {
+  if [ -f "$runtime_script_dir/state_brief.py" ]; then
+    python3 "$runtime_script_dir/state_brief.py" --target "$TARGET" --quiet || {
+      printf 'WARN: failed to regenerate canonical state brief at %s\n' "$state_brief_path" >&2
+    }
+  fi
+}
 
 maybe_finalize_ticket_campaign() {
   if [ -f "$runtime_script_dir/ticket_run.py" ]; then
@@ -418,6 +427,7 @@ append_watchdog_status() {
   fi
 }
 
+regenerate_state_brief
 run_with_watchdog "$run_stdout" "$run_stderr" "$watchdog_status_path" \
   codex exec --full-auto --skip-git-repo-check "${CODEX_PARENT_ARGS[@]}" "$(cat "$automation_prompt_path")" &
 child_pid="$!"
@@ -466,6 +476,7 @@ PY
 EOF
     printf 'Environment repair attempted; repair_status=%s\n' "$repair_status"
     cat "$env_repair_path"
+    regenerate_state_brief
     run_with_watchdog "$rerun_stdout" "$rerun_stderr" "$rerun_watchdog_status_path" \
       codex exec --full-auto --skip-git-repo-check "${CODEX_PARENT_ARGS[@]}" "$(cat "$automation_prompt_path")" &
     child_pid="$!"

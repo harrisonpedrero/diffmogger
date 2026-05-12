@@ -8,6 +8,7 @@ Create or update `.diffmogger/state/DAILY_AUTOMATION_REVIEW.md`.
 
 Read:
 
+- `.diffmogger/runtime/canonical_state_brief.md`
 - `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`
 - `.diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md`
 - recent generated artifacts

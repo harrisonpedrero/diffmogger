@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
+from diffmogger.runtime.state_store import write_ticket_run_state
 CONVEYOR_PATHS = [
     ROOT / "src" / "diffmogger" / "runtime" / "run_conveyor_automation.py",
 ]
@@ -383,16 +384,11 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertIn("planner deferred patch resolved", queue[0]["reason"])
 
     def write_ticket_run(self, root: Path, payload: str) -> None:
-        self.write_text(
+        write_ticket_run_state(
             root,
-            "docs/TICKET_RUN.md",
-            f"""
-            # Ticket Run
-
-            ```json ticket-run
-            {payload}
-            ```
-            """,
+            json.loads(textwrap.dedent(payload)),
+            actor_role="test",
+            event_type="ticket.run_seeded",
         )
 
     def test_ticket_campaign_complete_stops_conveyor(self) -> None:
@@ -1118,7 +1114,7 @@ class ConveyorSignalCleanupTests(unittest.TestCase):
         subprocess.run(["git", "add", "."], cwd=target, check=True)
         subprocess.run(["git", "commit", "-m", "init", "-q"], cwd=target, check=True)
 
-    def test_sigterm_during_idle_sleep_releases_scheduler_lock(self) -> None:
+    def test_sigterm_during_idle_sleep_releases_conveyor_lock(self) -> None:
         for path in CONVEYOR_PATHS:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:

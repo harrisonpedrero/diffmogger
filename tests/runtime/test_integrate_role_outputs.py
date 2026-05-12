@@ -130,17 +130,17 @@ class RuntimeStateActionTests(unittest.TestCase):
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
                     target = Path(tmp)
-                    inbox = target / "docs" / "HUMAN_INBOX.md"
-                    inbox.parent.mkdir(parents=True)
-                    inbox.write_text("old inbox\n", encoding="utf-8")
+                    task_doc = target / "docs" / "CODEX_AUTOMATION_TASKS.md"
+                    task_doc.parent.mkdir(parents=True)
+                    task_doc.write_text("old task state\n", encoding="utf-8")
                     manifest = self.write_actions(
                         target,
-                        [self.replace_action("docs/HUMAN_INBOX.md", "old inbox\n", "new inbox\n")],
+                        [self.replace_action("docs/CODEX_AUTOMATION_TASKS.md", "old task state\n", "new task state\n")],
                     )
 
                     results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
 
-                    self.assertEqual(inbox.read_text(encoding="utf-8"), "new inbox\n")
+                    self.assertEqual(task_doc.read_text(encoding="utf-8"), "new task state\n")
                     self.assertEqual(manifest["runtime_state_status"], "applied")
                     self.assertEqual(results[0]["status"], "applied")
 
@@ -216,17 +216,17 @@ class RuntimeStateActionTests(unittest.TestCase):
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
                     target = Path(tmp)
-                    inbox = target / "docs" / "HUMAN_INBOX.md"
-                    inbox.parent.mkdir(parents=True)
-                    inbox.write_text("changed after role start\n", encoding="utf-8")
+                    task_doc = target / "docs" / "CODEX_AUTOMATION_TASKS.md"
+                    task_doc.parent.mkdir(parents=True)
+                    task_doc.write_text("changed after role start\n", encoding="utf-8")
                     manifest = self.write_actions(
                         target,
-                        [self.replace_action("docs/HUMAN_INBOX.md", "old inbox\n", "new inbox\n")],
+                        [self.replace_action("docs/CODEX_AUTOMATION_TASKS.md", "old task state\n", "new task state\n")],
                     )
 
                     results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
 
-                    self.assertEqual(inbox.read_text(encoding="utf-8"), "changed after role start\n")
+                    self.assertEqual(task_doc.read_text(encoding="utf-8"), "changed after role start\n")
                     self.assertEqual(manifest["runtime_state_status"], "deferred")
                     self.assertEqual(results[0]["status"], "conflict")
 
@@ -235,16 +235,16 @@ class RuntimeStateActionTests(unittest.TestCase):
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
                     target = Path(tmp)
-                    inbox = target / "docs" / "HUMAN_INBOX.md"
+                    task_doc = target / "docs" / "CODEX_AUTOMATION_TASKS.md"
                     runner = target / "target" / "automation_runner.json"
-                    inbox.parent.mkdir(parents=True)
+                    task_doc.parent.mkdir(parents=True)
                     runner.parent.mkdir(parents=True)
-                    inbox.write_text("old inbox\n", encoding="utf-8")
+                    task_doc.write_text("old task state\n", encoding="utf-8")
                     runner.write_text("changed by integrator\n", encoding="utf-8")
                     manifest = self.write_actions(
                         target,
                         [
-                            self.replace_action("docs/HUMAN_INBOX.md", "old inbox\n", "new inbox\n"),
+                            self.replace_action("docs/CODEX_AUTOMATION_TASKS.md", "old task state\n", "new task state\n"),
                             self.replace_action(
                                 "target/automation_runner.json",
                                 "role-start runner\n",
@@ -255,8 +255,58 @@ class RuntimeStateActionTests(unittest.TestCase):
 
                     results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
 
-                    self.assertEqual(inbox.read_text(encoding="utf-8"), "new inbox\n")
+                    self.assertEqual(task_doc.read_text(encoding="utf-8"), "new task state\n")
                     self.assertEqual(runner.read_text(encoding="utf-8"), "changed by integrator\n")
+                    self.assertEqual(manifest["runtime_state_status"], "applied")
+                    self.assertEqual(results[0]["status"], "applied")
+                    self.assertEqual(results[1]["status"], "skipped_volatile")
+
+    def test_runtime_state_sidecar_conveyor_conflict_does_not_block_state(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    manifest_doc = target / ".diffmogger" / "manifest.json"
+                    task_doc = target / ".diffmogger" / "state" / "CODEX_AUTOMATION_TASKS.md"
+                    conveyor = target / ".diffmogger" / "runtime" / "automation_conveyor_state.json"
+                    manifest_doc.parent.mkdir(parents=True)
+                    task_doc.parent.mkdir(parents=True)
+                    conveyor.parent.mkdir(parents=True)
+                    manifest_doc.write_text(
+                        json.dumps(
+                            {
+                                "layout": "sidecar_v1",
+                                "worktree_seed_paths": [
+                                    ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+                                    ".diffmogger/runtime/automation_conveyor_state.json",
+                                ],
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    task_doc.write_text("old task state\n", encoding="utf-8")
+                    conveyor.write_text("changed by live conveyor\n", encoding="utf-8")
+                    manifest = self.write_actions(
+                        target,
+                        [
+                            self.replace_action(
+                                ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+                                "old task state\n",
+                                "new task state\n",
+                            ),
+                            self.replace_action(
+                                ".diffmogger/runtime/automation_conveyor_state.json",
+                                "role-start conveyor\n",
+                                "role-end conveyor\n",
+                            ),
+                        ],
+                    )
+
+                    results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
+
+                    self.assertEqual(task_doc.read_text(encoding="utf-8"), "new task state\n")
+                    self.assertEqual(conveyor.read_text(encoding="utf-8"), "changed by live conveyor\n")
                     self.assertEqual(manifest["runtime_state_status"], "applied")
                     self.assertEqual(results[0]["status"], "applied")
                     self.assertEqual(results[1]["status"], "skipped_volatile")
@@ -282,17 +332,17 @@ class RuntimeStateActionTests(unittest.TestCase):
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
                     target = Path(tmp)
-                    inbox = target / "docs" / "HUMAN_INBOX.md"
-                    inbox.parent.mkdir(parents=True)
-                    inbox.write_text("new inbox\n", encoding="utf-8")
+                    task_doc = target / "docs" / "CODEX_AUTOMATION_TASKS.md"
+                    task_doc.parent.mkdir(parents=True)
+                    task_doc.write_text("new task state\n", encoding="utf-8")
                     manifest = self.write_actions(
                         target,
-                        [self.replace_action("docs/HUMAN_INBOX.md", "old inbox\n", "new inbox\n")],
+                        [self.replace_action("docs/CODEX_AUTOMATION_TASKS.md", "old task state\n", "new task state\n")],
                     )
 
                     results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
 
-                    self.assertEqual(inbox.read_text(encoding="utf-8"), "new inbox\n")
+                    self.assertEqual(task_doc.read_text(encoding="utf-8"), "new task state\n")
                     self.assertEqual(manifest["runtime_state_status"], "already_applied")
                     self.assertEqual(results[0]["status"], "already_applied")
 

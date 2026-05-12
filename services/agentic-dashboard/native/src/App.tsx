@@ -41,7 +41,7 @@ import {
   selectContextFiles,
   selectProjectFolder,
 } from "./api/backend";
-import { AdvancedPage } from "./AdvancedPage";
+import { AdvancedPage, type AdvancedTab } from "./AdvancedPage";
 import { BriefWizard } from "./BriefWizard";
 import { CommandPalette } from "./CommandPalette";
 import {
@@ -571,11 +571,11 @@ function OperationalStatusHero(props: {
   );
 }
 
-function MetricSignalStrip(props: { metrics: HomeMetric[] }) {
+function MetricStatusStrip(props: { metrics: HomeMetric[] }) {
   return (
-    <section className="metric-signal-strip" aria-label="Metric signals" data-testid="metric-signal-strip">
+    <section className="metric-status-strip" aria-label="Metric status" data-testid="metric-status-strip">
       {props.metrics.map((metric) => (
-        <div className={`metric-signal ${metric.tone}`} key={metric.label}>
+        <div className={`metric-status ${metric.tone}`} key={metric.label}>
           <span>{metric.label}</span>
           <strong>{metric.value}</strong>
         </div>
@@ -760,7 +760,7 @@ function HomePage(props: {
   onNavigate: (view: HomeRoute) => void;
   onRefresh: () => void;
   onRunEnvironmentDiagnostics?: () => void;
-  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug";
+  advancedInitialTab?: AdvancedTab;
 }) {
   const model = buildHomeModel(props.snapshot);
 
@@ -794,7 +794,7 @@ function HomePage(props: {
         onAction={runAction}
       />
 
-      <MetricSignalStrip metrics={model.metrics} />
+      <MetricStatusStrip metrics={model.metrics} />
 
       {noTarget && props.recents.length > 0 && (
         <div className="home-recent-targets control-panel">
@@ -940,7 +940,7 @@ function LoadedView(props: {
   onRefresh: () => void;
   onDirtyChange?: (view: ViewKey, message: string | null) => void;
   onBusyChange?: (view: ViewKey, busy: boolean) => void;
-  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug";
+  advancedInitialTab?: AdvancedTab;
 }) {
   const { snapshot } = props;
   if (props.activeView === "Home") {
@@ -1045,7 +1045,7 @@ type CachedRouteSurfaceProps = {
   onRefresh: () => void;
   onDirtyChange?: (view: ViewKey, message: string | null) => void;
   onBusyChange?: (view: ViewKey, busy: boolean) => void;
-  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug";
+  advancedInitialTab?: AdvancedTab;
 };
 
 const CachedRouteSurface = memo(function CachedRouteSurface(props: CachedRouteSurfaceProps) {
@@ -1091,7 +1091,7 @@ function CachedLoadedView(props: {
   cachedRoutes: CachedRouteVisits;
   onDirtyChange?: (view: ViewKey, message: string | null) => void;
   onBusyChange?: (view: ViewKey, busy: boolean) => void;
-  advancedInitialTab?: "Files" | "Diagnostics" | "Settings" | "Debug";
+  advancedInitialTab?: AdvancedTab;
 }) {
   return (
     <>
@@ -1142,9 +1142,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
   const [cachedRoutesTargetPath, setCachedRoutesTargetPath] = useState("");
   const [dirtyRoutes, setDirtyRoutes] = useState<DirtyRouteState>({});
   const [busyRoutes, setBusyRoutes] = useState<BusyRouteState>({});
-  const [advancedInitialTab, setAdvancedInitialTab] = useState<
-    "Files" | "Diagnostics" | "Settings" | "Debug" | undefined
-  >();
+  const [advancedInitialTab, setAdvancedInitialTab] = useState<AdvancedTab | undefined>();
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const projectChipRef = useRef<HTMLButtonElement>(null);
   const projectMenuFirstButtonRef = useRef<HTMLButtonElement>(null);
@@ -1597,6 +1595,12 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
     }
     if (command.id === "open-diagnostics") {
       setAdvancedInitialTab("Diagnostics");
+      setActiveView("Advanced");
+      closePalette();
+      return;
+    }
+    if (command.id === "open-canonical-state") {
+      setAdvancedInitialTab("State");
       setActiveView("Advanced");
       closePalette();
       return;

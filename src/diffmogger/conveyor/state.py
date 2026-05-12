@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from diffmogger.runtime.state_store import load_conveyor_state, write_conveyor_state
 from diffmogger.runtime.paths import existing_or_target_path, target_path
 
 ROLES = ("planner", "builder", "hardener", "integrator")
@@ -134,24 +135,27 @@ def parse_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 def load_state(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {"schema_version": 1, "cycles": 0, "role_counts": {}, "history": []}
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"schema_version": 1, "cycles": 0, "role_counts": {}, "history": []}
-    if not isinstance(state, dict):
-        return {"schema_version": 1, "cycles": 0, "role_counts": {}, "history": []}
-    state.setdefault("schema_version", 1)
-    state.setdefault("cycles", 0)
-    state.setdefault("role_counts", {})
-    state.setdefault("history", [])
-    return state
+    return load_conveyor_state(path)
 
-def write_state(path: Path, state: dict[str, Any]) -> None:
-    state["updated_at"] = utc_now()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+def write_state(
+    path: Path,
+    state: dict[str, Any],
+    *,
+    event_type: str = "conveyor.state_projection_updated",
+    actor_role: str = "conveyor",
+    phase: str = "",
+    status: str = "ACTIVE",
+    payload: dict[str, Any] | None = None,
+) -> None:
+    write_conveyor_state(
+        path,
+        state,
+        event_type=event_type,
+        actor_role=actor_role,
+        phase=phase,
+        status=status,
+        payload=payload,
+    )
 
 def command_display(command: list[str]) -> str:
     return " ".join(command)

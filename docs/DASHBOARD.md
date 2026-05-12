@@ -33,6 +33,7 @@ Backend smoke:
 
 ```bash
 python3 scripts/dashboard_backend_cli.py diagnostics.environment
+python3 scripts/dashboard_backend_cli.py state.snapshot --target /path/to/target
 ```
 
 The packaged app is source-checkout-backed. Set `DIFFMOGGER_KIT_ROOT=/path/to/Diffmogger` to test another checkout.
@@ -45,6 +46,7 @@ The dashboard frontend should call backend commands instead of reading arbitrary
 - Brief: `brief.load`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`.
 - Context: `context.import`.
 - Run and automation: `run.load`, `run.load_log`, `automation.start`, `automation.stop`.
+- State: `state.snapshot`, `state.validate`.
 - Tickets: `ticket.load`, `ticket.add`, `ticket.update`, `ticket.delete`, `ticket.import`, `ticket.draft_from_intake`, `ticket.accept_draft`.
 - Safety: `safety.run_check`.
 - Workers: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`.
@@ -72,7 +74,7 @@ The dashboard wizard collects the same intake fields supported by `schemas/proje
 
 For existing repos, Diffmogger writes sidecar state under `.diffmogger/` and only manages its marked block in root `AGENTS.md`.
 
-When Ticket Campaign is selected, the wizard shows a **Ticket Queue** panel before review. Seed tickets are saved in the intake as `ticket_run_seed_tickets`; scaffold renders them into `.diffmogger/state/TICKET_RUN.md`. If no seed tickets are provided, scaffold keeps the placeholder ticket.
+When Ticket Campaign is selected, the wizard shows a **Ticket Queue** panel before review. Seed tickets are saved in the intake as `ticket_run_seed_tickets`; scaffold seeds them into the target-local SQLite ticket queue. If no seed tickets are provided, scaffold keeps a placeholder ticket in SQLite.
 
 ## Scaffold And Bootstrap
 
@@ -80,7 +82,7 @@ When Ticket Campaign is selected, the wizard shows a **Ticket Queue** panel befo
 
 1. write `.diffmogger/agentic/project_intake.json`
 2. copy context files into `.diffmogger/context/`
-3. scaffold target docs, shell scripts, Python wrappers, and `.diffmogger/lib/diffmogger/`
+3. scaffold target docs, shell scripts, Python wrappers, `.diffmogger/lib/diffmogger/`, and the exported state schema
 4. update the target `.git/info/exclude`
 5. run `scripts/check_required_files.py`
 6. optionally start the first Codex bootstrap run
@@ -109,9 +111,9 @@ After scaffold/bootstrap and required-file validation, the Run page can start or
 - **Start** launches `.diffmogger/scripts/run_conveyor_automation.sh` in a detached local process.
 - **Stop** terminates the recorded runner process group.
 
-Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Runner state lives in `.diffmogger/runtime/automation_runner.json`; conveyor state lives in `.diffmogger/runtime/automation_conveyor_state.json`.
+Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Runner and conveyor state are canonical in `.diffmogger/runtime/orchestration.sqlite3`; `.diffmogger/runtime/canonical_state_brief.md` is the generated agent-facing view, and `.diffmogger/runtime/automation_runner.json` plus `.diffmogger/runtime/automation_conveyor_state.json` are generated compatibility projections.
 
-For scaffolded ticket-campaign targets, the Run page exposes the canonical ticket file through a structured **Ticket Queue** panel. It shows status counts, the next selected ticket, placeholder/dependency validation, and lets users inspect, edit, delete, add, preview/apply Markdown/CSV/JSON imports, draft from intake with Codex, and accept candidates. Draft candidates are stored under `.diffmogger/runtime/ticket_drafts/` and are not applied until accepted.
+For scaffolded ticket-campaign targets, the Run page exposes the ticket authoring file through a structured **Ticket Queue** panel. It shows status counts, the next selected ticket, placeholder/dependency validation, and lets users inspect, edit, delete, add, preview/apply Markdown/CSV/JSON imports, draft from intake with Codex, and accept candidates. Draft candidates are stored under `.diffmogger/runtime/ticket_drafts/` and are not applied until accepted.
 
 ## Review And Safety
 
@@ -124,7 +126,7 @@ For scaffolded ticket-campaign targets, the Run page exposes the canonical ticke
 /tmp/Diffmogger-review/Diffmogger-self-review.md
 ```
 
-The native Observatory view and exported HTML show run state, queue/deferred patches, conveyor state, validation, safety, recent outcomes, and next-run worker strategy.
+The native Observatory view and exported HTML show run state, queue/deferred patches, canonical state health, conveyor state, validation, safety, recent outcomes, and next-run worker strategy.
 
 ## First Review Checklist
 
@@ -142,10 +144,10 @@ The Run page reads the Observatory worker recommendation and can launch:
 - one write worker with explicit ownership scope when the target enables write workers
 - one local integrator lane
 
-Worker artifacts live under `.diffmogger/runtime/agent_runs/<run_id>/`. The main agent remains responsible for reviewing, integrating, verifying, and updating durable state.
+Worker artifacts live under `.diffmogger/runtime/agent_runs/<run_id>/`. The main agent remains responsible for reviewing, integrating, verifying, and updating canonical state plus generated handoff projections.
 
 ## Inbox And Advanced Files
 
-The Inbox page writes structured notes and replies into generated human bridge Markdown files under `.diffmogger/state/`. Notifier credentials stay in `services/agentic-notifier/.env`; target projects only use file handoff or the loopback notifier API.
+The Inbox page writes structured notes and replies into typed human-message state in SQLite. Notifier credentials stay in `services/agentic-notifier/.env`; target projects only use the dashboard-backed queue or the loopback notifier API.
 
-The Advanced page can read, write, validate, open, or reveal only allowlisted managed files, including raw `.diffmogger/state/TICKET_RUN.md` inspection. It is for inspection and careful repair, not broad filesystem access.
+The Advanced page can read, write, validate, open, or reveal only allowlisted managed files. Ticket and human-message state are edited through structured dashboard commands, while the **Canonical state** tab reads SQLite health, event counts, checkpoints, next actions, and recent event hashes through the backend API. It is for inspection and careful repair, not broad filesystem access.

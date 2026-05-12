@@ -42,7 +42,7 @@ OBSERVATORY_SCRIPT = RUNTIME_SCRIPTS_DIR / "run_observatory.py"
 INTEGRATION_SAFETY_SCRIPT = SCRIPTS_DIR / "check_integration_safety.py"
 DEFAULT_REVIEW_BUNDLE_DIR = Path("/tmp/Diffmogger-review")
 INTEGRATION_SAFETY_RECORD_RELATIVE = Path("target/integration_safety_check.json")
-SCHEDULABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
+STARTABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
 MAX_WRITE_WORKER_COUNT = 10
 DEFAULT_WRITE_WORKER_COUNT = 3
 DEFAULT_AUTOMATION_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -64,24 +64,15 @@ WORKER_REPORT_STRATEGIES = {"READ_ONLY_REPORTS", "WRITE_WORKERS"}
 
 DOC_CHOICES = {
     "Automation Tasks": sidecar_rel("docs/CODEX_AUTOMATION_TASKS.md"),
-    "Ticket Run": sidecar_rel("docs/TICKET_RUN.md"),
     "Multi-Role Progress": sidecar_rel("docs/MULTI_ROLE_PROGRESS.md"),
     "Project Context": sidecar_rel("docs/PROJECT_CONTEXT.md"),
-    "Human Requests": sidecar_rel("docs/HUMAN_REQUESTS.md"),
-    "Human Inbox": sidecar_rel("docs/HUMAN_INBOX.md"),
-    "Human Outbox": sidecar_rel("docs/HUMAN_OUTBOX.md"),
     "Daily Review": sidecar_rel("docs/DAILY_AUTOMATION_REVIEW.md"),
     "Experiment Log": sidecar_rel("docs/AUTONOMY_EXPERIMENT_LOG.md"),
     "Initial Bootstrap Prompt": sidecar_rel("docs/INITIAL_BOOTSTRAP_PROMPT.md"),
     "Automation Prompt": sidecar_rel(".agentic/automation_prompt.md"),
 }
 
-HUMAN_DOC_CHOICES = {
-    "Requests From Automation": sidecar_rel("docs/HUMAN_REQUESTS.md"),
-    "Messages Waiting For Next Run": sidecar_rel("docs/HUMAN_INBOX.md"),
-    "Sent Updates & Delivery Log": sidecar_rel("docs/HUMAN_OUTBOX.md"),
-    "Resolved Conversation History": sidecar_rel("docs/HUMAN_RESPONSES_ARCHIVE.md"),
-}
+HUMAN_DOC_CHOICES: dict[str, str] = {}
 
 INTENT_CHOICES = {
     "General note": "info",
@@ -1004,38 +995,18 @@ def append_manual_inbox_entry(
     request_id: str,
     parsed_intent: str,
 ) -> str:
-    inbox_path = target_path(target, "docs/HUMAN_INBOX.md")
-    inbox_path.parent.mkdir(parents=True, exist_ok=True)
-    if not inbox_path.exists():
-        inbox_path.write_text(
-            "# Human Inbox\n\nActive inbox for replies from the human owner.\n\n",
-            encoding="utf-8",
-        )
-    now = datetime.now().astimezone()
-    inbox_id = next_inbox_id(inbox_path, now)
-    safe_request_id = request_id.strip() or "unknown"
-    entry = f"""## {inbox_id}
+    from diffmogger.runtime.state_store import record_human_message
 
-- received_at: {now.isoformat(timespec="seconds")}
-- channel: manual-dashboard
-- from: dashboard
-- to: automation
-- request_id: {safe_request_id}
-- parsed_intent: {parsed_intent.strip() or "info"}
-    - message_id: manual-dashboard-{now.strftime("%Y%m%d%H%M%S")}
-- status: unhandled
-
-### Body
-
-{body.strip()}
-
-### Expected automation behavior
-
-The next target project automation run should handle this message, update any related request state, then remove this entry from `{sidecar_rel("docs/HUMAN_INBOX.md")}` and archive a concise resolution note in `{sidecar_rel("docs/HUMAN_RESPONSES_ARCHIVE.md")}`.
-"""
-    text = inbox_path.read_text(encoding="utf-8").rstrip()
-    inbox_path.write_text(text + "\n\n" + entry + "\n", encoding="utf-8")
-    return inbox_id
+    record = record_human_message(
+        target,
+        kind="note",
+        body=body,
+        request_id=request_id.strip() or "unknown",
+        intent=parsed_intent.strip() or "info",
+        status="unhandled",
+        channel="manual-dashboard",
+    )
+    return str(record.get("id") or "")
 
 
 def smoke_check() -> int:

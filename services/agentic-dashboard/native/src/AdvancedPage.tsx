@@ -23,6 +23,7 @@ import type {
   ProjectSnapshot,
   RegisteredFile,
   RuntimeEnvironmentSnapshot,
+  StateSnapshotResult,
 } from "./api/backend";
 import {
   getAdvancedSettings,
@@ -35,11 +36,12 @@ import {
 import { buildAdvancedEditorModel } from "./advancedModel";
 import { scheduleAfterPaint } from "./performance";
 
-type AdvancedTab = "Files" | "Diagnostics" | "Settings" | "Debug";
+export type AdvancedTab = "Files" | "State" | "Diagnostics" | "Settings" | "Debug";
 
-const tabs: AdvancedTab[] = ["Files", "Diagnostics", "Settings", "Debug"];
+const tabs: AdvancedTab[] = ["Files", "State", "Diagnostics", "Settings", "Debug"];
 const tabLabels: Record<AdvancedTab, string> = {
   Files: "Files",
+  State: "Canonical state",
   Diagnostics: "Diagnostics",
   Settings: "Settings",
   Debug: "Debug bundle",
@@ -214,6 +216,7 @@ export function AdvancedPage(props: {
   const [editorContent, setEditorContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
   const [validation, setValidation] = useState<AdvancedValidationResult | null>(null);
+  const [stateSnapshot, setStateSnapshot] = useState<StateSnapshotResult | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsSnapshot | null>(null);
   const [settings, setSettings] = useState<AdvancedSettings>(defaultSettings);
   const [debugOutputDir, setDebugOutputDir] = useState("");
@@ -376,6 +379,26 @@ export function AdvancedPage(props: {
     }
   }
 
+  async function loadCanonicalState() {
+    setBusy("state");
+    setError("");
+    try {
+      const payload: BackendEnvelope<StateSnapshotResult> = await runBackendCommand({
+        command: "state.snapshot",
+        target,
+      });
+      if (!payload.ok || !payload.data) {
+        setError(payload.message ?? "Could not load canonical state.");
+        return;
+      }
+      setStateSnapshot(payload.data);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function loadSettings() {
     try {
       const loaded = await getAdvancedSettings();
@@ -474,6 +497,7 @@ export function AdvancedPage(props: {
     setEditorContent("");
     setSavedContent("");
     setValidation(null);
+    setStateSnapshot(null);
     setDiagnostics(null);
     const cancel = scheduleAfterPaint(() => {
       void loadFiles(initialKey);
@@ -504,6 +528,14 @@ export function AdvancedPage(props: {
   }, [activeTab, selectedKey, target]);
 
   useEffect(() => {
+    if (activeTab !== "State" || stateSnapshot) return undefined;
+    return scheduleAfterPaint(() => {
+      void loadCanonicalState();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, stateSnapshot, target]);
+
+  useEffect(() => {
     if (activeTab !== "Diagnostics" || diagnostics) return undefined;
     return scheduleAfterPaint(() => {
       void runDiagnostics();
@@ -528,6 +560,11 @@ export function AdvancedPage(props: {
     diagnostics?.required_files.status ?? diagnostics?.integration_safety.status ?? diagnostics?.prerequisites.status,
     "not run",
   );
+  const canonicalState = stateSnapshot?.state ?? (props.snapshot.run.state as StateSnapshotResult["state"] | undefined);
+  const stateStatus = text(canonicalState?.status, "not loaded");
+  const stateCounts = canonicalState?.counts ?? {};
+  const recentStateEvents = canonicalState?.recent_events ?? [];
+  const nextActions = canonicalState?.next_actions ?? [];
 
   return (
     <section className="advanced-page">
@@ -568,6 +605,11 @@ export function AdvancedPage(props: {
           <span>Debug bundle</span>
           <strong>{debugBundle ? "Exported" : "Ready"}</strong>
           <p>Secrets and arbitrary source files are excluded.</p>
+        </div>
+        <div className={statusTone(stateStatus)}>
+          <span>Canonical state</span>
+          <strong>{stateStatus}</strong>
+          <p>{text(stateCounts.events, "0")} events · {text(stateCounts.checkpoints, "0")} checkpoints</p>
         </div>
       </section>
 
@@ -695,6 +737,85 @@ export function AdvancedPage(props: {
                 ))}
               </div>
             )}
+          </article>
+        </div>
+      )}
+
+      {activeTab === "State" && (
+        <div className="advanced-diagnostics-grid">
+          <article className="panel span-2">
+            <div className="panel-heading-row">
+              <div>
+                <h2>SQLite control plane</h2>
+                <p>Authoritative orchestration state, event ledger, checkpoints, and generated projections.</p>
+              </div>
+              <button className="secondary-action" disabled={busy === "state"} onClick={() => void loadCanonicalState()}>
+                <RefreshCw size={15} />
+                Refresh state
+              </button>
+            </div>
+            <div className="advanced-runtime-grid">
+              <DetailRow label="Authority" value={canonicalState?.authority ?? "sqlite"} />
+              <DetailRow label="Status" value={stateStatus} />
+              <DetailRow label="Events" value={stateCounts.events ?? 0} />
+              <DetailRow label="Checkpoints" value={stateCounts.checkpoints ?? 0} />
+              <DetailRow label="Next actions" value={stateCounts.next_actions ?? 0} />
+              <DetailRow label="Validations" value={stateCounts.validations ?? 0} />
+            </div>
+            <div className="advanced-path-row">
+              <code>{text(canonicalState?.database?.path, "Canonical database will be initialized after scaffold or first run.")}</code>
+              <button
+                className="secondary-action"
+                disabled={!canonicalState?.database?.path}
+                onClick={() => void copyText(text(canonicalState?.database?.path, ""), "State database path copied.")}
+              >
+                <Clipboard size={15} />
+                Copy
+              </button>
+            </div>
+          </article>
+
+          <article className="panel">
+            <h2>Database health</h2>
+            <DetailRow label="SQLite" value={canonicalState?.database?.sqlite_version ?? "unknown"} />
+            <DetailRow label="Journal" value={canonicalState?.database?.journal_mode ?? "unknown"} />
+            <DetailRow label="Integrity" value={canonicalState?.database?.integrity_check ?? "unknown"} />
+            <DetailRow label="Projection" value={canonicalState?.projection?.name ?? "conveyor.state"} />
+          </article>
+
+          <article className="panel">
+            <h2>Last event</h2>
+            <DetailRow label="Type" value={canonicalState?.last_event?.event_type ?? "none"} />
+            <DetailRow label="Role" value={canonicalState?.last_event?.actor_role ?? "none"} />
+            <DetailRow label="Phase" value={canonicalState?.last_event?.phase ?? "none"} />
+            <DetailRow label="Hash" value={canonicalState?.last_event?.event_hash ?? "none"} />
+          </article>
+
+          <article className="panel span-2">
+            <h2>Next actions</h2>
+            <div className="advanced-check-list compact">
+              {nextActions.length ? nextActions.map((row) => (
+                <div className="advanced-check-row" key={rowValue(row, "action_id")}>
+                  <span>{rowValue(row, "owner_role", "idle")}</span>
+                  <strong>{rowValue(row, "status", "planned")}</strong>
+                  <p>{rowValue(row, "reason", "")}</p>
+                </div>
+              )) : <div className="empty-copy">No materialized next actions yet.</div>}
+            </div>
+          </article>
+
+          <article className="panel span-2">
+            <h2>Recent event ledger</h2>
+            <div className="advanced-check-list compact">
+              {recentStateEvents.length ? recentStateEvents.slice(0, 8).map((row) => (
+                <div className="advanced-check-row" key={rowValue(row, "event_id")}>
+                  <span>{rowValue(row, "event_type", "event")}</span>
+                  <strong>#{rowValue(row, "sequence", "0")}</strong>
+                  <p>{rowValue(row, "occurred_at", "")} · {rowValue(row, "actor_role", "runtime")} · {rowValue(row, "phase", "")}</p>
+                  <code>{rowValue(row, "event_hash", "")}</code>
+                </div>
+              )) : <div className="empty-copy">No events recorded yet.</div>}
+            </div>
           </article>
         </div>
       )}

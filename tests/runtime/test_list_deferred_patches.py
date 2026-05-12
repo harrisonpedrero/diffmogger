@@ -143,11 +143,11 @@ class ListDeferredPatchTests(unittest.TestCase):
                             + "s/example/project"
                         ),
                         changed_files=[
-                            "docs/HUMAN_INBOX.md",
                             "docs/CODEX_AUTOMATION_TASKS.md",
                             "docs/MULTI_ROLE_PROGRESS.md",
                             "target/automation_runner.json",
-                            "docs/HUMAN_OUTBOX.md",
+                            "docs/DAILY_AUTOMATION_REVIEW.md",
+                            "docs/DEVELOPMENT.md",
                         ],
                     )
                     self.write_manifest(
@@ -168,7 +168,7 @@ class ListDeferredPatchTests(unittest.TestCase):
                     self.assertIn("- recommended_decision: replace_from_current_head", report)
                     self.assertIn("triage_decision: pending; recommendation=replace_from_current_head", report)
                     self.assertIn("builder `run-conflict`", report)
-                    self.assertIn("docs/HUMAN_INBOX.md, docs/CODEX_AUTOMATION_TASKS.md", report)
+                    self.assertIn("docs/CODEX_AUTOMATION_TASKS.md, docs/MULTI_ROLE_PROGRESS.md", report)
                     self.assertIn("+1 more", report)
                     self.assertIn("<target>/docs", report)
                     self.assertIn("<local-path>/example/project", report)

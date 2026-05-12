@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
+from diffmogger.runtime.state_store import human_messages_snapshot
 TICKET_RUN_PATHS = [
     ROOT / "src" / "diffmogger" / "runtime" / "ticket_run.py",
 ]
@@ -132,12 +133,13 @@ class TicketRunTests(unittest.TestCase):
                     self.assertEqual(result["notification"]["status"], "fallback_outbox")
                     self.assertTrue((target / "target" / "ticket_run_reports" / "run-3.md").exists())
                     self.assertTrue((target / "target" / "ticket_run_completion.json").exists())
-                    outbox = (target / "docs" / "HUMAN_OUTBOX.md").read_text(encoding="utf-8")
-                    self.assertIn("NOTIFIER_UNREACHABLE", outbox)
-                    self.assertIn("**Ticket campaign run-3: COMPLETE**", outbox)
-                    self.assertIn("**Tickets**", outbox)
-                    self.assertIn("T-1 [DONE] Finish ticket", outbox)
-                    self.assertIn("Evidence: pytest passed", outbox)
+                    outbox = human_messages_snapshot(target)["outbox"]
+                    self.assertEqual(1, len(outbox))
+                    self.assertEqual("NOTIFIER_UNREACHABLE", outbox[0]["status"])
+                    self.assertIn("**Ticket campaign run-3: COMPLETE**", outbox[0]["body"])
+                    self.assertIn("**Tickets**", outbox[0]["body"])
+                    self.assertIn("T-1 [DONE] Finish ticket", outbox[0]["body"])
+                    self.assertIn("Evidence: pytest passed", outbox[0]["body"])
 
     def test_malformed_ticket_block_fails_loudly(self) -> None:
         for path, module in self.modules:
@@ -299,7 +301,7 @@ class TicketRunTests(unittest.TestCase):
                     result = self.run_next_json(path, target)
 
                     self.assertEqual("blocked", result["status"])
-                    self.assertEqual("ticket source has no tickets", result["reason"])
+                    self.assertEqual("ticket queue has no tickets", result["reason"])
                     self.assertIsNone(result["ticket"])
 
     def test_next_reports_placeholder_only_ticket_source(self) -> None:
@@ -324,7 +326,7 @@ class TicketRunTests(unittest.TestCase):
                     result = self.run_next_json(path, target)
 
                     self.assertEqual("blocked", result["status"])
-                    self.assertEqual("ticket source still contains placeholder tickets", result["reason"])
+                    self.assertEqual("ticket queue still contains placeholder tickets", result["reason"])
                     self.assertEqual("TICKET-001", result["placeholder_tickets"][0]["id"])
                     self.assertIsNone(result["ticket"])
 

@@ -1,5 +1,7 @@
 # Codex Automation Tasks
 
+Generated prompt/handoff projection. SQLite in `target/orchestration.sqlite3` is live runtime authority; `target/canonical_state_brief.md` is the current bounded agent-readable view.
+
 AUTOMATION_STATUS: ACTIVE
 
 Last updated: {{CREATED_AT}}
@@ -14,6 +16,7 @@ Last updated: {{CREATED_AT}}
 - Tech preferences: {{TECH_PREFERENCES}}
 - Project-mode guidance: {{PROJECT_MODE_GUIDANCE}}
 - Current baseline: not bootstrapped yet.
+- State authority: canonical runtime state is `target/orchestration.sqlite3`; this Markdown file is a generated prompt/handoff projection and compatibility status surface.
 
 ## Automation Must Never Do
 

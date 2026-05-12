@@ -41,7 +41,6 @@ AGENTS.md
 .diffmogger/lib/diffmogger/observatory/scoring.py
 .diffmogger/lib/diffmogger/observatory/self_review.py
 .diffmogger/lib/diffmogger/observatory/server.py
-.diffmogger/lib/diffmogger/observatory/signals.py
 .diffmogger/lib/diffmogger/observatory/snapshots.py
 .diffmogger/lib/diffmogger/runtime/__init__.py
 .diffmogger/lib/diffmogger/runtime/build_replay.py
@@ -55,8 +54,11 @@ AGENTS.md
 .diffmogger/lib/diffmogger/runtime/run_conveyor_automation.py
 .diffmogger/lib/diffmogger/runtime/run_observatory.py
 .diffmogger/lib/diffmogger/runtime/run_process_watchdog.py
+.diffmogger/lib/diffmogger/runtime/state_brief.py
+.diffmogger/lib/diffmogger/runtime/state_store.py
 .diffmogger/lib/diffmogger/runtime/summarize_worker_outputs.py
 .diffmogger/lib/diffmogger/runtime/ticket_run.py
+.diffmogger/schemas/orchestration_state.schema.json
 .diffmogger/agentic/automation_prompt.md
 .diffmogger/agentic/smoke_commands.txt
 .diffmogger/agentic/verification_commands.txt
@@ -67,7 +69,6 @@ AGENTS.md
 .diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md
 .diffmogger/state/DAILY_AUTOMATION_REVIEW.md
 .diffmogger/state/DEVELOPMENT.md
-.diffmogger/state/TICKET_RUN.md
 .diffmogger/scripts/acquire_codex_lock.sh
 .diffmogger/scripts/release_codex_lock.sh
 .diffmogger/scripts/run_codex_automation.sh
@@ -81,6 +82,7 @@ AGENTS.md
 .diffmogger/scripts/integrate_role_outputs.py
 .diffmogger/scripts/list_deferred_patches.py
 .diffmogger/scripts/load_automation_env.py
+.diffmogger/scripts/state_brief.py
 .diffmogger/scripts/ticket_run.py
 .diffmogger/scripts/repair_environment.py
 .diffmogger/scripts/spawn_worker_agent.sh
@@ -98,4 +100,4 @@ The generated recurring prompt should use bounded ticket-run phases: ticket-run 
 
 The generated task file should keep `## Product Horizon State` for compatibility, but its current horizon should be a ticket-run phase and its backlog section should be `## Deferred / Follow-Up Tickets`.
 
-The generated prompt and task file should not use product-roadmap language such as `MVP`, `Beyond MVP`, or `Ambitious extensions`. `.diffmogger/state/TICKET_RUN.md` is the source of truth for scope, optional `depends_on` arrays order dependent tickets, and automation should stop launching new work after all tickets are done or blocked.
+The generated prompt and task file should not use product-roadmap language such as `MVP`, `Beyond MVP`, or `Ambitious extensions`. The dashboard-backed SQLite ticket queue is the source of truth for scope, optional `depends_on` arrays order dependent tickets, and automation should stop launching new work after all tickets are done or blocked.

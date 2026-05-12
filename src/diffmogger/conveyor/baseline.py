@@ -3,6 +3,8 @@ from __future__ import annotations
 from .state import *
 
 def automation_status(target: Path) -> str:
+    # Compatibility boundary: older targets still expose the operator status in
+    # the task Markdown. Typed task status should replace this shim.
     task_text = read_text(dpath(target, "docs/CODEX_AUTOMATION_TASKS.md"))
     match = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", task_text, re.MULTILINE)
     return match.group(1).strip().upper() if match else "UNKNOWN"

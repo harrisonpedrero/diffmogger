@@ -1767,7 +1767,7 @@ textarea:focus-visible {
 
 .sidecar-state-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
   min-width: 0;
   padding: 10px;
@@ -2459,7 +2459,7 @@ textarea:focus-visible {
   align-content: stretch;
 }
 
-.home-page.no-target .metric-signal-strip,
+.home-page.no-target .metric-status-strip,
 .home-page.no-target .home-setup-doctor {
   grid-column: 1 / -1;
 }
@@ -2520,7 +2520,7 @@ textarea:focus-visible {
 
 .control-panel,
 .operational-hero,
-.metric-signal-strip {
+.metric-status-strip {
   min-width: 0;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
@@ -2780,14 +2780,14 @@ textarea:focus-visible {
   }
 }
 
-.metric-signal-strip {
+.metric-status-strip {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
   min-height: 72px;
   overflow: hidden;
 }
 
-.metric-signal {
+.metric-status {
   display: grid;
   align-content: center;
   gap: 5px;
@@ -2796,18 +2796,18 @@ textarea:focus-visible {
   border-left: 1px solid var(--border-subtle);
 }
 
-.metric-signal:first-child {
+.metric-status:first-child {
   border-left: 0;
 }
 
-.metric-signal span {
+.metric-status span {
   color: var(--text-muted);
   font-size: 10px;
   font-weight: 900;
   text-transform: uppercase;
 }
 
-.metric-signal strong {
+.metric-status strong {
   overflow: hidden;
   color: var(--text-primary);
   font-size: 19px;
@@ -2816,23 +2816,23 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.metric-signal.good strong {
+.metric-status.good strong {
   color: var(--status-pass);
 }
 
-.metric-signal.warn strong {
+.metric-status.warn strong {
   color: var(--status-warn);
 }
 
-.metric-signal.critical strong {
+.metric-status.critical strong {
   color: var(--status-critical);
 }
 
-.metric-signal.info strong {
+.metric-status.info strong {
   color: var(--status-info);
 }
 
-.metric-signal.quiet strong {
+.metric-status.quiet strong {
   color: var(--text-secondary);
 }
 
@@ -6507,14 +6507,14 @@ textarea:focus-visible {
   margin: 0;
 }
 
-.activity-patch-signal-grid {
+.activity-patch-grid {
   display: grid;
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
   gap: 12px;
   min-width: 0;
 }
 
-.activity-signal-list {
+.activity-patch-outcome-list {
   display: grid;
   gap: 8px;
   min-width: 0;
@@ -8307,7 +8307,7 @@ select option {
   .advanced-tabs,
   .control-panel,
   .operational-hero,
-  .metric-signal-strip,
+  .metric-status-strip,
   .brief-header,
   .setup-stepper.wizard-tabs,
   .setup-recipe-summary,
@@ -8663,7 +8663,7 @@ select option {
     white-space: normal;
   }
 
-  .metric-signal-strip {
+  .metric-status-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -8767,7 +8767,7 @@ select option {
   .activity-bottom-grid,
   .activity-event-layout,
   .activity-event-row,
-  .activity-patch-signal-grid,
+  .activity-patch-grid,
   .activity-run-facts,
   .bridge-mode-panel,
   .run-layout,

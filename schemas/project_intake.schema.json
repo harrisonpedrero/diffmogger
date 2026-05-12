@@ -143,12 +143,12 @@
     },
     "ticket_run_file": {
       "type": "string",
-      "description": "Target-relative Markdown file containing the ticket-campaign JSON block.",
-      "default": ".diffmogger/state/TICKET_RUN.md"
+      "description": "Legacy target-relative Markdown ticket import path. Leave empty for dashboard-backed SQLite ticket campaigns.",
+      "default": ""
     },
     "ticket_run_seed_tickets": {
       "type": "array",
-      "description": "Optional ticket-campaign seed tickets used only when scaffolding the target ticket source.",
+      "description": "Optional ticket-campaign seed tickets used only when initializing the dashboard-backed SQLite ticket queue.",
       "items": {
         "type": "object",
         "additionalProperties": false,

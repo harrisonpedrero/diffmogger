@@ -36,6 +36,7 @@ BASE_REQUIRED = [
     "scripts/build_replay.py",
     "scripts/diffmogger_browser.py",
     "scripts/load_automation_env.py",
+    "scripts/state_brief.py",
     "scripts/ticket_run.py",
     "scripts/repair_environment.py",
     "scripts/spawn_worker_agent.sh",
@@ -50,17 +51,9 @@ BASE_REQUIRED = [
     "docs/DAILY_AUTOMATION_REVIEW.md",
 ]
 
-TICKET_CAMPAIGN_REQUIRED = [
-    "docs/TICKET_RUN.md",
-]
+TICKET_CAMPAIGN_REQUIRED = []
 
-HUMAN_REQUIRED = [
-    "docs/HUMAN_REQUESTS.md",
-    "docs/HUMAN_INBOX.md",
-    "docs/HUMAN_OUTBOX.md",
-    "docs/HUMAN_RESPONSES_ARCHIVE.md",
-    "docs/HUMAN_BRIDGE_SETUP.md",
-]
+HUMAN_REQUIRED = []
 
 MULTI_ROLE_REQUIRED = [
     ".agentic/roles/planner.md",
@@ -120,7 +113,6 @@ RUNTIME_LIBRARY_REQUIRED = [
     ".diffmogger/lib/diffmogger/observatory/scoring.py",
     ".diffmogger/lib/diffmogger/observatory/self_review.py",
     ".diffmogger/lib/diffmogger/observatory/server.py",
-    ".diffmogger/lib/diffmogger/observatory/signals.py",
     ".diffmogger/lib/diffmogger/observatory/snapshots.py",
     ".diffmogger/lib/diffmogger/runtime/__init__.py",
     ".diffmogger/lib/diffmogger/runtime/paths.py",
@@ -134,6 +126,8 @@ RUNTIME_LIBRARY_REQUIRED = [
     ".diffmogger/lib/diffmogger/runtime/run_conveyor_automation.py",
     ".diffmogger/lib/diffmogger/runtime/run_observatory.py",
     ".diffmogger/lib/diffmogger/runtime/run_process_watchdog.py",
+    ".diffmogger/lib/diffmogger/runtime/state_brief.py",
+    ".diffmogger/lib/diffmogger/runtime/state_store.py",
     ".diffmogger/lib/diffmogger/runtime/summarize_worker_outputs.py",
     ".diffmogger/lib/diffmogger/runtime/ticket_run.py",
 ]
@@ -149,6 +143,7 @@ RUNTIME_MARKER_SOURCES = {
     "scripts/run_conveyor_automation.py": ".diffmogger/lib/diffmogger/runtime/run_conveyor_automation.py",
     "scripts/run_observatory.py": ".diffmogger/lib/diffmogger/runtime/run_observatory.py",
     "scripts/run_process_watchdog.py": ".diffmogger/lib/diffmogger/runtime/run_process_watchdog.py",
+    "scripts/state_brief.py": ".diffmogger/lib/diffmogger/runtime/state_brief.py",
     "scripts/summarize_worker_outputs.py": ".diffmogger/lib/diffmogger/runtime/summarize_worker_outputs.py",
     "scripts/ticket_run.py": ".diffmogger/lib/diffmogger/runtime/ticket_run.py",
 }
@@ -198,6 +193,7 @@ AUTOMATION_REQUIRED_STRINGS = [
     ".diffmogger/scripts/release_codex_lock.sh",
     ".diffmogger/scripts/spawn_worker_agent.sh",
     ".diffmogger/scripts/summarize_worker_outputs.py",
+    ".diffmogger/runtime/canonical_state_brief.md",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
     "command -v codex",
     "--dangerously-bypass-approvals-and-sandbox",
@@ -226,6 +222,8 @@ RUNNER_REQUIRED_STRINGS = [
     "codex exec --full-auto",
     "--skip-git-repo-check",
     "repair_environment.py",
+    "state_brief.py",
+    "canonical_state_brief.md",
     "ticket_run.py",
     "normalize_task_state_headings",
     "commit_single_lane_changes",
@@ -243,6 +241,8 @@ RUNNER_FORBIDDEN_STRINGS = [
 CONVEYOR_REQUIRED_STRINGS = [
     "automation_conveyor.lock",
     "automation_conveyor_state.json",
+    "orchestration.sqlite3",
+    "conveyor.state",
     "queued role patch",
     "run_role_automation.sh",
     "run_codex_automation.sh",
@@ -258,8 +258,8 @@ CONVEYOR_REQUIRED_STRINGS = [
 
 OBSERVATORY_REQUIRED_STRINGS = [
     "Diffmogger Observatory",
-    "automation_conveyor_state.json",
-    "automation_runner.json",
+    "state_snapshot",
+    "runner_projection_path_for_target",
     "automation_queue",
     "ThreadingHTTPServer",
     "--open",
@@ -304,16 +304,6 @@ TICKET_HELPER_REQUIRED_STRINGS = [
     "NOTIFIER_UNREACHABLE",
 ]
 
-TICKET_RUN_REQUIRED_STRINGS = [
-    "json ticket-run",
-    "depends_on",
-    "next --json",
-    "halt_when_complete",
-    "notify_on_complete",
-    "candidate_done",
-    "target/ticket_run_reports",
-]
-
 WRITE_WORKER_AUTOMATION_REQUIRED_STRINGS = [
     "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS",
     "Parallelism budget:",
@@ -334,20 +324,16 @@ WRITE_WORKER_HELPER_REQUIRED_STRINGS = [
 
 FILE_ONLY_AUTOMATION_REQUIRED_STRINGS = [
     "Human bridge mode: `file_only`",
-    "docs/HUMAN_INBOX.md",
-    "Remove handled",
-    "docs/HUMAN_RESPONSES_ARCHIVE.md",
-    "docs/HUMAN_REQUESTS.md",
+    "target/canonical_state_brief.md",
+    "dashboard/typed",
     "Do not use Discord or notifier APIs",
 ]
 
 LOCAL_NOTIFIER_AUTOMATION_REQUIRED_STRINGS = [
     "Human bridge mode: `local_notifier`",
     "POST http://127.0.0.1:8765/api/notify",
-    "docs/HUMAN_INBOX.md",
-    "Remove handled",
-    "docs/HUMAN_RESPONSES_ARCHIVE.md",
-    "docs/HUMAN_OUTBOX.md",
+    "target/canonical_state_brief.md",
+    "typed human-message state",
     "NOTIFIER_UNREACHABLE",
     "message_body",
     "event_kind",
@@ -361,8 +347,8 @@ DISCORD_NOTIFIER_AUTOMATION_REQUIRED_STRINGS = [
     "progress",
     "message",
     "Local automation commits trigger",
-    "docs/HUMAN_INBOX.md",
-    "docs/HUMAN_OUTBOX.md",
+    "target/canonical_state_brief.md",
+    "typed human-message state",
     "NOTIFIER_UNREACHABLE",
 ]
 
@@ -399,6 +385,7 @@ ROLE_PROMPT_REQUIRED_STRINGS = [
     "NEVER configure a remote",
     "NEVER set up upstream tracking",
     "CRITICAL_STOP",
+    "target/canonical_state_brief.md",
     "docs/MULTI_ROLE_PROGRESS.md",
 ]
 
@@ -430,6 +417,8 @@ RUN_ROLE_REQUIRED_STRINGS = [
     "Runtime Summary Contract",
     "Commit subject:",
     "run_process_watchdog.py",
+    "state_brief.py",
+    "canonical_state_brief.md",
 ]
 
 WATCHDOG_REQUIRED_STRINGS = [
@@ -619,7 +608,7 @@ def main() -> int:
     parser.add_argument(
         "--no-human-bridge",
         action="store_true",
-        help="Do not require HUMAN_* bridge files",
+        help="Validate as a target with the human bridge disabled.",
     )
     parser.add_argument(
         "--human-bridge-mode",
@@ -640,7 +629,7 @@ def main() -> int:
     parser.add_argument(
         "--ticket-campaign-enabled",
         action="store_true",
-        help="Validate optional ticket-campaign source file and markers.",
+        help="Validate optional ticket-campaign markers.",
     )
     parser.add_argument(
         "--optional-mcp-enabled",
@@ -658,6 +647,7 @@ def main() -> int:
         required.extend(
             [
                 MANIFEST_REL,
+                ".diffmogger/schemas/orchestration_state.schema.json",
                 "scripts/diffmogger_paths.py",
                 *RUNTIME_LIBRARY_REQUIRED,
             ]
@@ -692,6 +682,16 @@ def main() -> int:
             if not isinstance(manifest.get(key), list):
                 problems.append(f"{MANIFEST_REL}: {key} must be a list")
         aliases = manifest.get("path_aliases") if isinstance(manifest.get("path_aliases"), dict) else {}
+        legacy_queue_aliases = {
+            "docs/HUMAN_INBOX.md",
+            "docs/HUMAN_OUTBOX.md",
+            "docs/HUMAN_REQUESTS.md",
+            "docs/HUMAN_RESPONSES_ARCHIVE.md",
+            "docs/TICKET_RUN.md",
+        }
+        stale_aliases = sorted(legacy_queue_aliases & set(aliases))
+        if stale_aliases:
+            problems.append(f"{MANIFEST_REL}: removed Markdown queue aliases must not be generated: {', '.join(stale_aliases)}")
         script_aliases_sidecar = normalize_rel(str(aliases.get("scripts") or "")).rstrip("/") == ".diffmogger/scripts"
         owned = set(manifest_list(manifest, "owned_paths"))
         required_owned_paths = [
@@ -766,7 +766,7 @@ def main() -> int:
             mode_markers = DISCORD_NOTIFIER_AUTOMATION_REQUIRED_STRINGS
         write_worker_markers = WRITE_WORKER_AUTOMATION_REQUIRED_STRINGS if args.write_workers_enabled else []
         multi_role_markers = MULTI_ROLE_AUTOMATION_REQUIRED_STRINGS if multi_role_enabled else []
-        ticket_markers = ["Automation run mode: `ticket_campaign`", "docs/TICKET_RUN.md"] if args.ticket_campaign_enabled else []
+        ticket_markers = ["Automation run mode: `ticket_campaign`", "SQLite ticket queue"] if args.ticket_campaign_enabled else []
         for marker in AUTOMATION_REQUIRED_STRINGS + mode_markers + write_worker_markers + multi_role_markers + ticket_markers:
             if not has_marker(automation_text, marker):
                 problems.append(f"{automation_label}: missing marker {marker!r}")
@@ -774,16 +774,6 @@ def main() -> int:
             for marker in ["## Optional MCP Integrations", "expired auth", "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png"]:
                 if not has_marker(automation_text, marker):
                     problems.append(f"{automation_label}: missing marker {marker!r}")
-
-    if args.ticket_campaign_enabled:
-        ticket_rel = "docs/TICKET_RUN.md"
-        ticket_label = rel_label(root, ticket_rel)
-        ticket_run_path = rel_path(root, ticket_rel)
-        if ticket_run_path.exists() and ticket_run_path.is_file():
-            ticket_text = ticket_run_path.read_text(encoding="utf-8")
-            for marker in TICKET_RUN_REQUIRED_STRINGS:
-                if not has_marker(ticket_text, marker):
-                    problems.append(f"{ticket_label}: missing marker {marker!r}")
 
     if multi_role_enabled:
         guardrails_rel = "docs/CODEX_AUTOMATION_GUARDRAILS.md"
@@ -903,6 +893,9 @@ def main() -> int:
         if conveyor_package.exists():
             for package_file in sorted(conveyor_package.glob("*.py")):
                 conveyor_text += "\n" + package_file.read_text(encoding="utf-8")
+        state_store_path = root / ".diffmogger" / "lib" / "diffmogger" / "runtime" / "state_store.py"
+        if state_store_path.exists():
+            conveyor_text += "\n" + state_store_path.read_text(encoding="utf-8")
         for marker in CONVEYOR_REQUIRED_STRINGS:
             if not has_marker(conveyor_text, marker):
                 problems.append(f"{conveyor_label}: missing marker {marker!r}")

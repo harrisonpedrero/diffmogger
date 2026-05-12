@@ -37,7 +37,7 @@ def lock_is_active(path: Path) -> tuple[bool, str]:
         return True, f"lock {run} is fresh but owner pid is not visible"
     return False, f"stale lock age_seconds={age}"
 
-def acquire_scheduler_lock(path: Path, stale_seconds: int) -> bool:
+def acquire_conveyor_lock(path: Path, stale_seconds: int) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     now_epoch = int(time.time())
     if path.exists():
@@ -73,7 +73,7 @@ def acquire_scheduler_lock(path: Path, stale_seconds: int) -> bool:
     print(f"CONVEYOR_LOCK_ACQUIRED path={path} pid={os.getpid()}", flush=True)
     return True
 
-def release_scheduler_lock(path: Path) -> None:
+def release_conveyor_lock(path: Path) -> None:
     if not path.exists():
         return
     fields = read_lock_fields(path)

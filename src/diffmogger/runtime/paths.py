@@ -50,9 +50,13 @@ PATH_ALIASES: dict[str, str] = {
     "target/automation_venvs": ".diffmogger/runtime/automation_venvs",
     "target/automation_worktrees": ".diffmogger/runtime/automation_worktrees",
     "target/baseline_verification.json": ".diffmogger/runtime/baseline_verification.json",
+    "target/canonical_state_brief.md": ".diffmogger/runtime/canonical_state_brief.md",
     "target/codex_automation.lock": ".diffmogger/runtime/codex_automation.lock",
     "target/first-review": ".diffmogger/runtime/first-review",
     "target/integration_safety_check.json": ".diffmogger/runtime/integration_safety_check.json",
+    "target/orchestration.sqlite3": ".diffmogger/runtime/orchestration.sqlite3",
+    "target/orchestration.sqlite3-shm": ".diffmogger/runtime/orchestration.sqlite3-shm",
+    "target/orchestration.sqlite3-wal": ".diffmogger/runtime/orchestration.sqlite3-wal",
     "target/prisma-cache": ".diffmogger/runtime/prisma-cache",
     "target/ticket_run_completion.json": ".diffmogger/runtime/ticket_run_completion.json",
     "target/ticket_drafts": ".diffmogger/runtime/ticket_drafts",
@@ -121,6 +125,7 @@ def target_rel(target: Path, legacy_rel: str | Path) -> str:
             aliased = alias_target_rel(aliases, rel)
             if aliased is not None:
                 return aliased
+            return rel
         return sidecar_rel(rel)
     return rel
 

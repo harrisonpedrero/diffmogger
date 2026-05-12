@@ -29,7 +29,8 @@ from .commands.inbox import command_inbox_load, command_inbox_reply_request, com
 from .commands.observatory import command_observatory_generate_html, command_observatory_load_html, command_observatory_snapshot
 from .commands.project import command_project_list_recent, command_project_load_snapshot
 from .commands.review import command_review_export_bundle, command_review_load, command_review_mark_reviewed
-from .commands.run_schedule import command_automation_start, command_automation_stop, command_run_load, command_run_load_log, command_run_once
+from .commands.run_control import command_automation_start, command_automation_stop, command_run_load, command_run_load_log, command_run_once
+from .commands.state import command_state_brief, command_state_snapshot, command_state_validate
 from .commands.tickets import (
     command_ticket_accept_draft,
     command_ticket_add,
@@ -85,6 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
         "review.load": command_review_load,
         "review.export_bundle": command_review_export_bundle,
         "review.mark_reviewed": command_review_mark_reviewed,
+        "state.snapshot": command_state_snapshot,
+        "state.brief": command_state_brief,
+        "state.validate": command_state_validate,
         "diagnostics.environment": command_diagnostics_environment,
         "diagnostics.run_checks": command_diagnostics_run_checks,
         "advanced.list_files": command_advanced_list_files,

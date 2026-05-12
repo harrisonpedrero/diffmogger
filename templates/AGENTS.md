@@ -15,6 +15,7 @@ Target user: {{TARGET_USER}}
 ## Read Before Meaningful Work
 
 ```text
+target/canonical_state_brief.md
 docs/CODEX_AUTOMATION_TASKS.md
 docs/CODEX_AUTOMATION_GUARDRAILS.md
 .agentic/automation_prompt.md
@@ -34,6 +35,7 @@ docs/CODEX_AUTOMATION_GUARDRAILS.md
 - Use read-only worker reports for exploration. When write-capable workers are enabled, use the most parallelism the task can safely absorb while keeping ownership reviewable and main-agent integration explicit.
 - Automation role profile: {{AUTOMATION_ROLE_PROFILE}}; multi-role automations allowed: {{MULTI_ROLE_AUTOMATIONS_ALLOWED}}.
 {{HUMAN_AGENTS_RULES}}
+- Treat `.diffmogger/runtime/orchestration.sqlite3` as canonical automation state. Read `.diffmogger/runtime/canonical_state_brief.md` for current state instead of inspecting SQLite manually. Markdown and JSON files under `.diffmogger/state/` and `.diffmogger/runtime/` are prompt inputs, handoffs, authored surfaces, compatibility shims, or generated projections.
 - Record `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` every automation run.
 - Update `docs/CODEX_AUTOMATION_TASKS.md` at the end of every automation run.
 

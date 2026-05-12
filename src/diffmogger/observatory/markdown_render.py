@@ -15,7 +15,6 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     task = snapshot.get("task") if isinstance(snapshot.get("task"), dict) else {}
     scorecard = snapshot.get("scorecard") if isinstance(snapshot.get("scorecard"), dict) else {}
     review = snapshot.get("review") if isinstance(snapshot.get("review"), dict) else {}
-    signals = snapshot.get("signals") if isinstance(snapshot.get("signals"), dict) else {}
     queue = snapshot.get("queue") if isinstance(snapshot.get("queue"), dict) else {}
     conveyor = snapshot.get("conveyor") if isinstance(snapshot.get("conveyor"), dict) else {}
     human = snapshot.get("human") if isinstance(snapshot.get("human"), dict) else {}

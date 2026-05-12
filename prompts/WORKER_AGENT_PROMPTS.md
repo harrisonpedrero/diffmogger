@@ -57,7 +57,7 @@ codex exec --disable plugins \
   "<worker prompt>"
 ```
 
-Use this bypass shape only for nested Codex CLI workers launched from inside a scheduled parent automation run. The parent scheduled wrapper should run the main automation with `--add-dir "$HOME/.codex"` so the nested `codex` process can authenticate and start inside the parent sandbox.
+Use this bypass shape only for nested Codex CLI workers launched from inside a wrapper-owned parent automation run. The parent run wrapper should invoke the main automation with `--add-dir "$HOME/.codex"` so the nested `codex` process can authenticate and start inside the parent sandbox.
 
 Worker prompts should say: do not use network, do not spawn workers, do not send Discord, notifier, email, or other external messages, do not touch `.env` or credentials, and stop after writing the assigned output.
 

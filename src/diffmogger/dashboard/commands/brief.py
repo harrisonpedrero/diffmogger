@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import signal
 import tempfile
 
 from ..errors import *
@@ -9,6 +10,8 @@ from ..target import *
 from .context import merge_context_files
 from .diagnostics import run_subprocess
 from diffmogger.runtime import ticket_run
+
+DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS = 120
 
 LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "project_name": "New Project",
@@ -38,12 +41,12 @@ LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "multi_role_allow_remotes": False,
     "optional_mcp_servers": [],
     "automation_run_mode": "ticket_campaign",
-    "ticket_run_file": sidecar_rel("docs/TICKET_RUN.md"),
+    "ticket_run_file": "",
     "ticket_run_seed_tickets": [],
     "ticket_completion_notify": True,
     "meaningful_deliverable": "A runnable, verified increment toward the described project.",
-    "beyond_mvp": "Continue through the remaining ticket file in small, reviewable increments.",
-    "assumptions": ["Generated from a short low-cortisol build description; ask through the file inbox when a decision is ambiguous."],
+    "beyond_mvp": "Continue through the remaining dashboard ticket queue in small, reviewable increments.",
+    "assumptions": ["Generated from a short low-cortisol build description; ask through the dashboard when a decision is ambiguous."],
     "additional_context_files": [],
     "overwrite_existing_scaffold_files": False,
 }
@@ -197,7 +200,7 @@ def _normalize_low_cortisol_intake(target: Path, generated: Any, description: st
     payload["multi_role_allow_remotes"] = False
     payload["optional_mcp_servers"] = []
     payload["automation_run_mode"] = "ticket_campaign"
-    payload["ticket_run_file"] = sidecar_rel("docs/TICKET_RUN.md")
+    payload["ticket_run_file"] = ""
     payload["ticket_completion_notify"] = _bool_value(payload.get("ticket_completion_notify"), True)
     payload["overwrite_existing_scaffold_files"] = False
 
@@ -229,7 +232,7 @@ def _low_cortisol_prompt(target: Path, description: str) -> str:
             "",
             "Hard requirements:",
             "- Set automation_run_mode to ticket_campaign.",
-            f"- Set ticket_run_file to {sidecar_rel('docs/TICKET_RUN.md')!r}.",
+            "- Leave ticket_run_file empty; ticket scope is stored in the dashboard-backed SQLite ticket queue.",
             "- Include ticket_run_seed_tickets with incremental tickets that build the project in dependency-safe steps.",
             "- Use pending status for every ticket. Ticket ids must be TICKET-001, TICKET-002, and so on.",
             "- Each ticket must include id, summary, status, depends_on, acceptance_criteria, verification_commands, evidence, related_commits, and blocker.",
@@ -258,6 +261,78 @@ def _low_cortisol_prompt(target: Path, description: str) -> str:
     )
 
 
+def _intake_codex_timeout_seconds() -> int:
+    raw = os.environ.get("DIFFMOGGER_INTAKE_CODEX_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS
+    return max(15, parsed)
+
+
+def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        proc.kill()
+    proc.wait()
+
+
+def _run_codex_intake_generation(prompt: str, *, cwd: Path, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+    command = [
+        "codex",
+        "exec",
+        "--full-auto",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--disable",
+        "plugins",
+        prompt,
+    ]
+    proc = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_group(proc)
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        raise BackendError(
+            "Codex intake generation timed out.",
+            error_type="intake_generation_timeout",
+            details={
+                "timeout_seconds": timeout_seconds,
+                "stdout": str(stdout)[-2000:],
+                "stderr": str(stderr)[-2000:],
+            },
+        ) from exc
+    return subprocess.CompletedProcess(command, proc.returncode, stdout=stdout, stderr=stderr)
+
+
 def command_brief_generate_intake(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     description = str(getattr(args, "body", "") or "").strip()
@@ -271,13 +346,10 @@ def command_brief_generate_intake(args: argparse.Namespace) -> dict[str, Any]:
     prompt = _low_cortisol_prompt(target, description)
     stream_event(args, "intake-generate", "Starting Codex intake generation.")
     with tempfile.TemporaryDirectory(prefix="diffmogger-intake-") as tmp:
-        result = subprocess.run(
-            ["codex", "exec", "--full-auto", "--skip-git-repo-check", prompt],
-            cwd=tmp,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            check=False,
+        result = _run_codex_intake_generation(
+            prompt,
+            cwd=Path(tmp),
+            timeout_seconds=_intake_codex_timeout_seconds(),
         )
     if result.returncode != 0:
         raise BackendError(
@@ -366,10 +438,6 @@ def run_required_file_check_for_intake(target: Path, intake: dict[str, Any]) -> 
 def scaffold_template_included(scaffold_module: Any, rel_path: str, values: dict[str, str]) -> bool:
     if hasattr(scaffold_module, "template_included"):
         return bool(scaffold_module.template_included(rel_path, values))
-    if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel_path in scaffold_module.HUMAN_BRIDGE_FILES:
-        return False
-    if values.get("AUTOMATION_RUN_MODE") != "ticket_campaign" and rel_path in scaffold_module.TICKET_RUN_FILES:
-        return False
     if values.get("MCP_ENABLED") != "true" and rel_path in scaffold_module.MCP_FILES:
         return False
     if values.get("PLAYWRIGHT_MCP_ENABLED") != "true" and rel_path in scaffold_module.PLAYWRIGHT_MCP_FILES:

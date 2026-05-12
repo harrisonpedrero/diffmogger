@@ -79,7 +79,6 @@ function observatorySnapshot(overrides: DeepPartial<ObservatorySnapshot> = {}): 
       deferred_backlog: [],
       recent_outcomes: [],
     },
-    signals: { active_count: 0, nudges: [], recent_completed: [] },
     timeline: [],
     metrics: { pending_human: 0, queued_patches: 0 },
   };
@@ -90,7 +89,6 @@ function observatorySnapshot(overrides: DeepPartial<ObservatorySnapshot> = {}): 
     conveyor: { ...base.conveyor, ...overrides.conveyor },
     progress: { ...base.progress, ...overrides.progress },
     patches: { ...base.patches, ...overrides.patches },
-    signals: { ...base.signals, ...overrides.signals },
     metrics: { ...base.metrics, ...overrides.metrics },
   } as ObservatorySnapshot;
 }

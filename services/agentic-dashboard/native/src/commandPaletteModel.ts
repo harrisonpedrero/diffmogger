@@ -21,6 +21,7 @@ export type PaletteCommandId =
   | "export-review-bundle"
   | "send-note-next-run"
   | "open-raw-automation-tasks"
+  | "open-canonical-state"
   | "open-diagnostics"
   | "export-debug-bundle";
 
@@ -268,8 +269,17 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       title: "Open task state",
       section: "Debug",
       description: "Open .diffmogger/state/CODEX_AUTOMATION_TASKS.md through the managed file allowlist.",
-      keywords: ["raw", "tasks", "markdown"],
+      keywords: ["raw", "tasks", "markdown", "projection"],
       disabledReason: busyReason ?? rawAutomationTasksReason(snapshot),
+    },
+    {
+      id: "open-canonical-state",
+      title: "Open canonical state",
+      section: "Debug",
+      description: "Open the SQLite orchestration state dashboard.",
+      keywords: ["state", "sqlite", "canonical", "ledger", "database", "control plane"],
+      routesTo: "Advanced",
+      disabledReason: busyReason ?? targetReason,
     },
     {
       id: "open-diagnostics",

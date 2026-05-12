@@ -312,7 +312,9 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
         ]
     )
     before_status = _git_status(target)
-    before_ticket = text
+    before_ticket = json.dumps(data, sort_keys=True, default=json_default)
+    if path != ticket_run.ticket_state_path(target) and text:
+        before_ticket = text
     stream_event(args, "ticket-draft", "Starting Codex ticket draft.")
     result = subprocess.run(
         ["codex", "exec", "--full-auto", "--skip-git-repo-check", prompt],
@@ -323,7 +325,10 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
         check=False,
     )
     after_status = _git_status(target)
-    after_ticket = path.read_text(encoding="utf-8") if path.exists() else ""
+    after_data = ticket_run.load_ticket_run(target)[0] if path == ticket_run.ticket_state_path(target) else data
+    after_ticket = json.dumps(after_data, sort_keys=True, default=json_default)
+    if path != ticket_run.ticket_state_path(target) and path.exists():
+        after_ticket = path.read_text(encoding="utf-8")
     if after_status != before_status or after_ticket != before_ticket:
         raise BackendError(
             "Codex ticket drafting unexpectedly modified the target.",

@@ -1,5 +1,7 @@
 # Daily Automation Review
 
+Optional human-readable review/export surface. It is not runtime authority; current orchestration state comes from SQLite and the generated canonical state brief.
+
 Use this file for short daily capsules when automation has been running for many cycles.
 
 Each review should be readable in five minutes.

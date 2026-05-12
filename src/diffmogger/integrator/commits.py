@@ -386,7 +386,7 @@ def semantic_commit_action(changed_files: list[str], role: str, patch_text: str 
     if "run_observatory.py" in joined:
         return "surface automation progress details"
     if "run_conveyor_automation.py" in joined:
-        return "improve conveyor scheduling"
+        return "improve conveyor routing"
     if "agentic-dashboard" in joined:
         return "improve dashboard automation controls"
     if "validate_starter_kit.sh" in joined:

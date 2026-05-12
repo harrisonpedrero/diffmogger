@@ -469,7 +469,6 @@ def worker_strategy_snapshot(
 def scorecard_action_plan(
     task: dict[str, Any],
     queue: dict[str, Any],
-    signals: dict[str, Any],
     conveyor: dict[str, Any],
     human: dict[str, int],
     progress: dict[str, Any],
@@ -489,15 +488,15 @@ def scorecard_action_plan(
 
     if unhandled_inbox:
         return {
-            "label": "Process human inbox",
+            "label": "Process human messages",
             "lane": "planner",
             "priority": "high",
-            "recommendation": f"Process {unhandled_inbox} unhandled human inbox message(s) before role work.",
+            "recommendation": f"Process {unhandled_inbox} queued dashboard human message(s) before role work.",
             "why": "Human-provided instructions can change scope or unblock existing requests.",
             "next_steps": [
-                "Read `docs/HUMAN_INBOX.md` and classify each unhandled entry.",
+                "Read the canonical state brief and classify each queued human message.",
                 "Complete or intentionally defer the requested action locally.",
-                "Archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md` before removing handled inbox entries.",
+                "Record resolution notes through typed human-message state.",
             ],
         }
     if pending_requests:
@@ -591,7 +590,6 @@ def scorecard_action_plan(
 def scorecard_snapshot(
     task: dict[str, Any],
     queue: dict[str, Any],
-    signals: dict[str, Any],
     conveyor: dict[str, Any],
     human: dict[str, int],
     progress: dict[str, Any],
@@ -665,7 +663,7 @@ def scorecard_snapshot(
     return {
         "status": status,
         "summary": "; ".join(summary_parts) + ".",
-        "action_plan": scorecard_action_plan(task, queue, signals, conveyor, human, progress),
+        "action_plan": scorecard_action_plan(task, queue, conveyor, human, progress),
         "items": [
             {
                 "label": "Accepted patches",

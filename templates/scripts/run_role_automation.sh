@@ -131,14 +131,9 @@ for pattern in \
   "/docs/DAILY_AUTOMATION_REVIEW.md" \
   "/docs/DEVELOPMENT.md" \
   "/docs/HUMAN_BRIDGE_SETUP.md" \
-  "/docs/HUMAN_INBOX.md" \
-  "/docs/HUMAN_OUTBOX.md" \
-  "/docs/HUMAN_REQUESTS.md" \
-  "/docs/HUMAN_RESPONSES_ARCHIVE.md" \
   "/docs/INITIAL_BOOTSTRAP_PROMPT.md" \
   "/docs/MULTI_ROLE_PROGRESS.md" \
   "/docs/PROJECT_CONTEXT.md" \
-  "/docs/TICKET_RUN.md" \
   "/scripts/acquire_codex_lock.sh" \
   "/scripts/__pycache__/" \
   "/scripts/build_replay.py" \
@@ -156,6 +151,7 @@ for pattern in \
   "/scripts/run_role_automation.sh" \
   "/scripts/run_process_watchdog.py" \
   "/scripts/spawn_worker_agent.sh" \
+  "/scripts/state_brief.py" \
   "/scripts/summarize_worker_outputs.py" \
   "/scripts/ticket_run.py" \
   "/target/agent_runs/" \
@@ -163,6 +159,10 @@ for pattern in \
   "/target/automation_conveyor.lock" \
   "/target/automation_conveyor_state.json" \
   "/target/baseline_verification.json" \
+  "/target/canonical_state_brief.md" \
+  "/target/orchestration.sqlite3" \
+  "/target/orchestration.sqlite3-shm" \
+  "/target/orchestration.sqlite3-wal" \
   "/target/automation_logs/" \
   "/target/automation_queue/" \
   "/target/automation_venvs/" \
@@ -246,6 +246,8 @@ values = {
     "worktree_dir": target / rel(f"target/automation_worktrees/{role}/{run_id}"),
     "log_dir": target / rel("target/automation_logs"),
     "worktree_summary_rel": rel(f"target/automation_queue/{role}/{run_id}/summary.md"),
+    "state_brief_path": target / rel("target/canonical_state_brief.md"),
+    "state_brief_rel": rel("target/canonical_state_brief.md"),
     "mcp_config_rel": rel(".codex/config.toml"),
     "playwright_mcp_rel": rel("scripts/run_playwright_mcp.sh"),
     "playwright_artifact_rel": rel(f"docs/backlog/ui_artifacts/{run_id}"),
@@ -259,6 +261,16 @@ if [[ ! -f "$prompt_path" ]]; then
   echo "Missing role prompt: $prompt_path" >&2
   exit 2
 fi
+
+regenerate_state_brief() {
+  if [[ -f "$runner_script_dir/state_brief.py" ]]; then
+    python3 "$runner_script_dir/state_brief.py" --target "$target_abs" --quiet || {
+      printf 'WARN: failed to regenerate canonical state brief at %s\n' "$state_brief_path" >&2
+    }
+  fi
+}
+
+regenerate_state_brief
 
 if [[ "$role" == "integrator" ]]; then
   python3 "$runner_script_dir/integrate_role_outputs.py" "$target_abs" --run-id "$run_id"
@@ -307,10 +319,6 @@ context_paths=(
   "docs/AUTONOMY_EXPERIMENT_LOG.md"
   "docs/DAILY_AUTOMATION_REVIEW.md"
   "docs/HUMAN_BRIDGE_SETUP.md"
-  "docs/HUMAN_INBOX.md"
-  "docs/HUMAN_OUTBOX.md"
-  "docs/HUMAN_REQUESTS.md"
-  "docs/HUMAN_RESPONSES_ARCHIVE.md"
   "docs/backlog/README.md"
   "scripts/acquire_codex_lock.sh"
   "scripts/build_replay.py"
@@ -329,9 +337,11 @@ context_paths=(
   "scripts/run_process_watchdog.py"
   "scripts/run_role_automation.sh"
   "scripts/spawn_worker_agent.sh"
+  "scripts/state_brief.py"
   "scripts/summarize_worker_outputs.py"
   "scripts/ticket_run.py"
   "target/automation_runner.json"
+  "target/canonical_state_brief.md"
   "target/baseline_verification.json"
 )
 
@@ -389,8 +399,8 @@ if manifest.get("layout") == "sidecar_v1":
         for item in (manifest.get("worktree_seed_paths") or [])
         if str(item).strip().startswith((".diffmogger/agentic/", ".diffmogger/state/"))
     ]
-    scan_roots = [".diffmogger"]
-    allowed_prefixes = (".diffmogger/",)
+    scan_roots = [".diffmogger/agentic", ".diffmogger/state"]
+    allowed_prefixes = (".diffmogger/agentic/", ".diffmogger/state/")
 else:
     explicit_paths = [
         ".agentic/automation_prompt.md",
@@ -401,10 +411,6 @@ else:
       ".agentic/roles/hardener.md",
       ".agentic/roles/integrator.md",
       ".codex/config.toml",
-      "docs/HUMAN_INBOX.md",
-        "docs/HUMAN_RESPONSES_ARCHIVE.md",
-        "docs/HUMAN_REQUESTS.md",
-        "docs/HUMAN_OUTBOX.md",
         "docs/CODEX_AUTOMATION_TASKS.md",
         "docs/MULTI_ROLE_PROGRESS.md",
         "target/automation_runner.json",
@@ -819,6 +825,16 @@ fi
   fi
   cat <<EOF
 
+## Canonical State Brief
+
+Before changing files, read this generated SQLite-derived brief:
+
+\`\`\`text
+$state_brief_rel
+\`\`\`
+
+Treat it as a bounded generated view, not editable authority. If it conflicts with Markdown or JSON projections, reconcile through the target-local Diffmogger typed state APIs.
+
 ## Runtime Summary Contract
 
 Before your final response, write a concise Markdown summary to this exact file:
@@ -879,6 +895,8 @@ append_watchdog_status() {
 }
 
 set +e
+regenerate_state_brief
+seed_context_path "$state_brief_rel"
 run_with_watchdog "$run_stdout" "$run_stderr" "$watchdog_status_path" \
   codex exec --full-auto --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")"
 codex_status=$?
@@ -956,6 +974,8 @@ for item in data.get("path_prepend") or []:
 PY
 )
     set +e
+    regenerate_state_brief
+    seed_context_path "$state_brief_rel"
     run_with_watchdog "$rerun_stdout" "$rerun_stderr" "$rerun_watchdog_status_path" \
       codex exec --full-auto --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")"
     rerun_status=$?

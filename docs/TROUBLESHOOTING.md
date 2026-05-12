@@ -111,15 +111,15 @@ Check the Discord bot token, channel ids, server invite, and bot permissions. Us
 
 Check that `python -m agentic_notifier.run_service` is running, `GET http://127.0.0.1:8765/health` succeeds, and the API is bound to loopback. If `LOCAL_NOTIFY_API_TOKEN` is set, include the bearer token.
 
-The target automation should not claim a message was sent if the API is unreachable. It should write the intended message to `.diffmogger/state/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`.
+The target automation should not claim a message was sent if the API is unreachable. It should record the intended message in typed human-message state with status `NOTIFIER_UNREACHABLE`.
 
-## Inbound Replies Are Written But Codex Keeps Re-reading Them
+## Dashboard Replies Keep Reappearing
 
-The target automation owns inbox cleanup. It must remove handled entries from `.diffmogger/state/HUMAN_INBOX.md` only after the requested action is complete or intentionally deferred, then append concise notes to `.diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md`.
+The target automation owns message resolution. It must mark handled dashboard messages resolved only after the requested action is complete or intentionally deferred, then record concise notes in typed human-message state.
 
 ## Human Asked For A Message But Got Only A File
 
-In file-only mode, this is expected: the automation should answer locally. In notifier modes, treat it as an automation-process bug. Update `.diffmogger/agentic/automation_prompt.md` so freeform inbox requests such as `send me a summary`, `message me the blocker`, `status update`, or `what have you done so far?` are handled through the notifier. If still relevant, send the concise outbound response and archive the handled inbox entry.
+In file-only mode, this is expected: the automation should answer locally through the dashboard or requested artifact. In notifier modes, treat it as an automation-process bug. Update `.diffmogger/agentic/automation_prompt.md` so freeform dashboard requests such as `send me a summary`, `message me the blocker`, `status update`, or `what have you done so far?` are handled through the notifier. If still relevant, send the concise outbound response and mark the message handled in typed state.
 
 ## Codex Cannot Read Or Write Expected Files
 

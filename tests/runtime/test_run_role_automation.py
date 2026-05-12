@@ -121,6 +121,8 @@ class RunRoleAutomationTests(unittest.TestCase):
             self.assertIn(marker, source)
             self.assertIn(marker, template)
         self.assertIn('runtime_script_dir="$script_parent/runtime"', source)
+        self.assertIn('scan_roots = [".diffmogger/agentic", ".diffmogger/state"]', source)
+        self.assertIn('scan_roots = [".diffmogger/agentic", ".diffmogger/state"]', template)
 
     def test_source_and_template_playwright_mcp_helpers_stay_synchronized(self) -> None:
         source = PLAYWRIGHT_MCP_HELPER_PATHS[0].read_text(encoding="utf-8")

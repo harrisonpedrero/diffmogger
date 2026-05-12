@@ -233,9 +233,9 @@ def update_progress(
             *[f"  - {role}: {deferred_counts[role]}" for role in QUEUE_ROLES],
             f"- Current deferred queue depth: {len(deferred_items)}",
             "- Mean time from role-run completion to integration: not computed",
-            "- Human inbox messages handled: see `docs/HUMAN_RESPONSES_ARCHIVE.md`",
-            "- Human requests created: see `docs/HUMAN_REQUESTS.md`",
-            "- Human requests resolved: see `docs/HUMAN_RESPONSES_ARCHIVE.md`",
+            "- Human messages handled: recorded in typed human-message state",
+            "- Human requests created: recorded in typed human-message state",
+            "- Human requests resolved: recorded in typed human-message state",
         ]
     )
     sections["Recent Activity Log"] = recent_body

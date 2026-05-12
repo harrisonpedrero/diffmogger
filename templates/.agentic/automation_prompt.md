@@ -8,6 +8,7 @@ At the start of every run, explicitly read and follow:
 
 ```text
 AGENTS.md
+target/canonical_state_brief.md
 .agentic/verification_commands.txt
 .agentic/smoke_commands.txt
 docs/CODEX_AUTOMATION_TASKS.md
@@ -19,7 +20,7 @@ docs/AUTONOMY_EXPERIMENT_LOG.md
 
 Also inspect relevant source files, tests, scripts, and recent worker reports under `target/agent_runs/` as needed.
 
-The task file is dynamic and must be rewritten at the end of every run. The guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
+The task file is dynamic and must be rewritten at the end of every run, but it is a human/prompt projection. Canonical runtime state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated, bounded agent-readable view. Read the brief instead of inspecting SQLite manually. `target/automation_conveyor_state.json` is generated from SQLite for compatibility and dashboard inspection. Do not hand-edit generated runtime JSON as authoritative state. The guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
 
 ## Mission
 
@@ -46,9 +47,10 @@ Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. 
 ## Run Structure
 
 1. Check lock context before mutating code. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, treat `.diffmogger/scripts/run_codex_automation.sh` as the lock owner and do not acquire, overwrite, manually create, or release `target/codex_automation.lock` inside the Codex run. If no wrapper-owned lock is present, acquire the lock before mutating code using the target repo's local `.diffmogger/scripts/acquire_codex_lock.sh`.
-1. Read required files.
+1. Read `target/canonical_state_brief.md` and the required files above. If Markdown or JSON projections contradict the brief, regenerate or reconcile through the target-local Diffmogger typed state APIs.
 {{HUMAN_RUN_STEPS}}
 1. Inspect the repo enough to understand current state.
+1. Treat the dashboard/conveyor SQLite state as canonical for run, event, checkpoint, blocker, validation, and next-action state.
 1. Read the current product horizon state from `docs/CODEX_AUTOMATION_TASKS.md`.
 1. Identify the highest-leverage milestone for this run within the current product horizon.
 1. Decide whether Codex CLI worker agents would materially improve speed, coverage, or quality.

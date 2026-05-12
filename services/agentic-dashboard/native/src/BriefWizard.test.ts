@@ -36,7 +36,7 @@ function draft(overrides: Partial<IntakeDraft> = {}): IntakeDraft {
     multi_role_allow_remotes: false,
     optional_mcp_servers: [],
     automation_run_mode: "continuous_improvement",
-    ticket_run_file: ".diffmogger/state/TICKET_RUN.md",
+    ticket_run_file: "",
     ticket_run_seed_tickets: [],
     ticket_completion_notify: true,
     meaningful_deliverable: "A useful change.",
@@ -86,7 +86,7 @@ describe("Brief automation mode mapping", () => {
     expect(ticket.ticket_run_seed_tickets[0].status).toBe("pending");
   });
 
-  it("normalizes low cortisol generated intake to ticket-file defaults", () => {
+  it("normalizes low cortisol generated intake to SQLite ticket queue defaults", () => {
     const next = lowCortisolDraftFromGeneratedIntake(
       {
         project_name: "Gentle Builder",
@@ -110,7 +110,7 @@ describe("Brief automation mode mapping", () => {
     );
 
     expect(next.automation_run_mode).toBe("ticket_campaign");
-    expect(next.ticket_run_file).toBe(".diffmogger/state/TICKET_RUN.md");
+    expect(next.ticket_run_file).toBe("");
     expect(next.optional_mcp_servers).toEqual([]);
     expect(next.human_bridge_mode).toBe("file_only");
     expect(next.ticket_run_seed_tickets).toHaveLength(1);

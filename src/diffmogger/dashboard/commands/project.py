@@ -5,7 +5,7 @@ from ..jsonio import *
 from ..target import *
 
 from .brief import command_brief_load
-from .run_schedule import command_run_load
+from .run_control import command_run_load
 
 def command_project_load_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)

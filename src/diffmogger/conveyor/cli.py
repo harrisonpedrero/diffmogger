@@ -6,7 +6,7 @@ from . import runner as conveyor_runner
 from .active_role import active_role_run_blocker, recover_stale_active_role_run
 from .baseline import automation_status, baseline_record
 from .decisions import choose_next, conveyor_decision_queue
-from .locks import acquire_scheduler_lock, release_scheduler_lock
+from .locks import acquire_conveyor_lock, release_conveyor_lock
 from .progress import (
     apply_timeout_circuit_breaker,
     no_progress_info,
@@ -29,7 +29,7 @@ def main() -> int:
     parser.add_argument("--idle-sleep-seconds", type=positive_int, default=DEFAULT_IDLE_SLEEP_SECONDS)
     parser.add_argument("--error-sleep-seconds", type=positive_int, default=DEFAULT_ERROR_SLEEP_SECONDS)
     parser.add_argument("--cycle-cooldown-seconds", type=positive_int, default=DEFAULT_CYCLE_COOLDOWN_SECONDS)
-    parser.add_argument("--scheduler-lock-stale-seconds", type=positive_int, default=DEFAULT_LOCK_STALE_SECONDS)
+    parser.add_argument("--conveyor-lock-stale-seconds", type=positive_int, default=DEFAULT_LOCK_STALE_SECONDS)
     parser.add_argument("--no-progress-threshold", type=positive_int, default=DEFAULT_NO_PROGRESS_THRESHOLD)
     args = parser.parse_args()
 
@@ -82,7 +82,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, conveyor_runner.handle_signal)
     signal.signal(signal.SIGINT, conveyor_runner.handle_signal)
 
-    if not acquire_scheduler_lock(lock_path, args.scheduler_lock_stale_seconds):
+    if not acquire_conveyor_lock(lock_path, args.conveyor_lock_stale_seconds):
         return 0
 
     cycles = 0
@@ -98,7 +98,14 @@ def main() -> int:
                 grace_seconds=role_termination_grace_seconds(),
             )
             if recovery:
-                write_state(state_path, state)
+                write_state(
+                    state_path,
+                    state,
+                    event_type="role_run.recovered",
+                    actor_role="conveyor",
+                    phase="recovery",
+                    payload=recovery,
+                )
                 print(
                     f"CONVEYOR_ACTIVE_ROLE_RECOVERED status={recovery['status']} reason={recovery['reason']}",
                     flush=True,
@@ -117,7 +124,14 @@ def main() -> int:
                 reason,
                 args.no_progress_threshold,
             )
-            write_state(state_path, state)
+            write_state(
+                state_path,
+                state,
+                event_type="conveyor.decision_recorded",
+                actor_role="conveyor",
+                phase="decision",
+                payload={"role": role, "reason": reason, "stop": stop},
+            )
             print(f"CONVEYOR_DECISION role={role or 'idle'} reason={reason}", flush=True)
 
             if stop:
@@ -165,7 +179,20 @@ def main() -> int:
                 finished_at=finished_at,
                 metadata=metadata,
             )
-            write_state(state_path, state)
+            write_state(
+                state_path,
+                state,
+                event_type="role_run.finished",
+                actor_role=role,
+                phase="role_execution",
+                status="ACTIVE" if exit_code == 0 else "ACTIVE_WITH_PENDING_USER_INPUT",
+                payload={
+                    "role": role,
+                    "reason": reason,
+                    "exit_code": exit_code,
+                    "metadata": metadata,
+                },
+            )
             print(
                 f"CONVEYOR_RESULT role={role} exit={exit_code} progress={state.get('last_progress_success')}",
                 flush=True,
@@ -186,7 +213,7 @@ def main() -> int:
         return 143
     finally:
         conveyor_runner.terminate_child()
-        release_scheduler_lock(lock_path)
+        release_conveyor_lock(lock_path)
 
 if __name__ == "__main__":
     raise SystemExit(main())

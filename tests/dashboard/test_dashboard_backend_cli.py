@@ -18,6 +18,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 from diffmogger.dashboard.shared import PrerequisiteItem as SharedPrerequisiteItem
 from diffmogger.runtime.paths import sidecar_rel
+from diffmogger.runtime.state_store import database_path_for_target, load_ticket_run_state, write_ticket_run_state
 
 CLI = ROOT / "scripts" / "dashboard_backend_cli.py"
 CLI_MODULE = ROOT / "src" / "diffmogger" / "dashboard" / "backend_cli.py"
@@ -68,6 +69,42 @@ class DashboardBackendCliTests(unittest.TestCase):
             text=True,
             capture_output=True,
         )
+
+    def test_state_snapshot_initializes_canonical_sqlite_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+
+            result, payload = self.run_cli("state.snapshot", "--target", str(target))
+
+            self.assertEqual(0, result.returncode)
+            self.assertTrue(payload["ok"])
+            data = payload["data"]
+            assert isinstance(data, dict)
+            state = data["state"]
+            assert isinstance(state, dict)
+            self.assertEqual("sqlite", state["authority"])
+            self.assertEqual("ok", state["status"])
+            self.assertGreaterEqual(state["counts"]["events"], 1)
+            self.assertTrue(Path(state["database"]["path"]).exists())
+
+    def test_state_brief_command_writes_agent_readable_view(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+
+            result, payload = self.run_cli("state.brief", "--target", str(target))
+
+            self.assertEqual(0, result.returncode)
+            self.assertTrue(payload["ok"])
+            data = payload["data"]
+            assert isinstance(data, dict)
+            brief = data["brief"]
+            assert isinstance(brief, dict)
+            self.assertTrue(Path(str(brief["path"])).exists())
+            self.assertEqual(sidecar_rel("target/canonical_state_brief.md"), brief["relative_path"])
+            self.assertIn("# Canonical State Brief", brief["markdown"])
+            self.assertIn("agent_rule: read this brief", brief["markdown"])
 
     def scaffold_ticket_target(self, target: Path) -> None:
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as intake:
@@ -205,7 +242,7 @@ class DashboardBackendCliTests(unittest.TestCase):
                 {
                     "multi_role_automations_allowed": False,
                     "automation_run_mode": "ticket_campaign",
-                    "ticket_run_file": sidecar_rel("docs/TICKET_RUN.md"),
+                    "ticket_run_file": "",
                 }
             )
             + "\n",
@@ -220,40 +257,35 @@ class DashboardBackendCliTests(unittest.TestCase):
 
 ## Known Issues
 
-- Ticket source still needs to be populated or confirmed.
+- Ticket queue still needs to be populated or confirmed.
 - Verification commands may need adjustment after bootstrap.
 """,
             encoding="utf-8",
         )
-        ticket_path = generated_path(target, "docs/TICKET_RUN.md")
-        ticket_path.parent.mkdir(parents=True, exist_ok=True)
-        ticket_path.write_text(
-            """# Ticket Run
-
-```json ticket-run
-{
-  "run_id": "test-ticket-campaign",
-  "halt_when_complete": true,
-  "tickets": [
-    {
-      "id": "TICKET-001",
-      "summary": "Build the first useful slice",
-      "status": "pending",
-      "acceptance_criteria": ["A useful slice exists"],
-      "verification_commands": ["python3 -m unittest"]
-    }
-  ]
-}
-```
-""",
-            encoding="utf-8",
+        write_ticket_run_state(
+            target,
+            {
+                "run_id": "test-ticket-campaign",
+                "halt_when_complete": True,
+                "tickets": [
+                    {
+                        "id": "TICKET-001",
+                        "summary": "Build the first useful slice",
+                        "status": "pending",
+                        "acceptance_criteria": ["A useful slice exists"],
+                        "verification_commands": ["python3 -m unittest"],
+                    }
+                ],
+            },
+            actor_role="test",
+            event_type="ticket.run_seeded",
         )
 
     def fake_dashboard_for_automation(self):
         module = self.load_cli_module()
 
         class FakeDashboard:
-            SCHEDULABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
+            STARTABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
 
             PrerequisiteItem = SharedPrerequisiteItem
 
@@ -288,7 +320,7 @@ class DashboardBackendCliTests(unittest.TestCase):
 
             self.assertTrue(ready)
             self.assertIn("TICKET-001", reason)
-            self.assertNotIn("Ticket source still needs to be populated or confirmed.", snapshot["task"]["known_issues"])
+            self.assertNotIn("Ticket queue still needs to be populated or confirmed.", snapshot["task"]["known_issues"])
             self.assertEqual("Verification commands may need adjustment after bootstrap.", snapshot["task"]["known_issue"])
 
     def test_automation_start_stop_and_idempotent_running_state(self) -> None:
@@ -489,42 +521,40 @@ class DashboardBackendCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
 
-            def fake_run(cmd, **_kwargs):
-                if cmd[:2] == ["codex", "exec"]:
-                    return subprocess.CompletedProcess(
-                        cmd,
-                        0,
-                        stdout=json.dumps(
-                            {
-                                "project_name": "Gentle Intake",
-                                "project_mode": "fresh_project",
-                                "product_goal": "Build a tiny fictional planning app.",
-                                "target_user": "Solo builders",
-                                "desired_first_demo": "A user can create a plan.",
-                                "human_bridge_mode": "local_notifier",
-                                "optional_mcp_servers": ["context7", "playwright"],
-                                "automation_run_mode": "continuous_improvement",
-                                "automation_role_profile": "planner_builder_hardener_integrator",
-                                "ticket_run_seed_tickets": [
-                                    {
-                                        "id": "TICKET-001",
-                                        "summary": "Create the first planning flow",
-                                        "status": "pending",
-                                    }
-                                ],
-                            }
-                        ),
-                        stderr="",
-                    )
-                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            def fake_intake_generation(prompt, **_kwargs):
+                return subprocess.CompletedProcess(
+                    ["codex", "exec", prompt],
+                    0,
+                    stdout=json.dumps(
+                        {
+                            "project_name": "Gentle Intake",
+                            "project_mode": "fresh_project",
+                            "product_goal": "Build a tiny fictional planning app.",
+                            "target_user": "Solo builders",
+                            "desired_first_demo": "A user can create a plan.",
+                            "human_bridge_mode": "local_notifier",
+                            "optional_mcp_servers": ["context7", "playwright"],
+                            "automation_run_mode": "continuous_improvement",
+                            "automation_role_profile": "planner_builder_hardener_integrator",
+                            "ticket_run_seed_tickets": [
+                                {
+                                    "id": "TICKET-001",
+                                    "summary": "Create the first planning flow",
+                                    "status": "pending",
+                                }
+                            ],
+                        }
+                    ),
+                    stderr="",
+                )
 
             args = argparse.Namespace(target=str(target), body="Build a tiny fictional planning app.", stream_jsonl=False)
-            with mock.patch.object(brief_commands.subprocess, "run", side_effect=fake_run):
+            with mock.patch.object(brief_commands, "_run_codex_intake_generation", side_effect=fake_intake_generation):
                 payload = brief_commands.command_brief_generate_intake(args)
 
             intake = payload["intake"]
             self.assertEqual("ticket_campaign", intake["automation_run_mode"])
-            self.assertEqual(sidecar_rel("docs/TICKET_RUN.md"), intake["ticket_run_file"])
+            self.assertEqual("", intake["ticket_run_file"])
             self.assertEqual([], intake["optional_mcp_servers"])
             self.assertEqual("file_only", intake["human_bridge_mode"])
             self.assertTrue(intake["multi_role_automations_allowed"])
@@ -533,6 +563,37 @@ class DashboardBackendCliTests(unittest.TestCase):
             dashboard_state = json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
             self.assertEqual("low_cortisol_intake_generated", dashboard_state["last_action"])
             self.assertEqual("Gentle Intake", dashboard_state["brief_draft_intake"]["project_name"])
+
+    def test_brief_generate_intake_runs_codex_without_plugins(self) -> None:
+        from diffmogger.dashboard.commands import brief as brief_commands
+
+        seen: dict[str, object] = {}
+
+        class FakePopen:
+            pid = 12345
+            returncode = 0
+
+            def __init__(self, command, **kwargs):
+                seen["command"] = command
+                seen["kwargs"] = kwargs
+
+            def communicate(self, *, timeout=None):
+                seen["timeout"] = timeout
+                return ("{}", "")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(brief_commands.subprocess, "Popen", FakePopen):
+            result = brief_commands._run_codex_intake_generation("prompt", cwd=Path(tmp), timeout_seconds=42)
+
+        command = seen["command"]
+        kwargs = seen["kwargs"]
+        self.assertEqual(0, result.returncode)
+        self.assertIn("--ephemeral", command)
+        self.assertIn("--ignore-user-config", command)
+        self.assertIn("--ignore-rules", command)
+        self.assertIn("--disable", command)
+        self.assertIn("plugins", command)
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertEqual(42, seen["timeout"])
 
     def test_context_import_copies_files_and_updates_project_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as source_tmp:
@@ -845,7 +906,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual(0, load_result.returncode)
             self.assertTrue(load_payload["ok"])
             self.assertEqual(2, len(load_payload["data"]["tickets"]))
-            self.assertTrue(load_payload["data"]["ticket_file"].endswith(".diffmogger/state/TICKET_RUN.md"))
+            self.assertEqual(str(database_path_for_target(target)), load_payload["data"]["ticket_file"])
 
             add_result, add_payload = self.run_cli(
                 "ticket.add",
@@ -914,7 +975,7 @@ class DashboardBackendCliTests(unittest.TestCase):
 
             _list_result, files = self.run_cli("advanced.list_files", "--target", tmp)
             file_keys = {item["key"] for item in files["data"]["files"]}
-            self.assertIn("monitor.ticket_run", file_keys)
+            self.assertNotIn("monitor.ticket_run", file_keys)
 
     def test_ticket_draft_from_intake_is_review_only_append_only_and_accepts_candidates(self) -> None:
         from diffmogger.dashboard.commands import tickets as ticket_commands
@@ -922,7 +983,7 @@ class DashboardBackendCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self.scaffold_ticket_target(target)
-            before_text = generated_path(target, "docs/TICKET_RUN.md").read_text(encoding="utf-8")
+            before_state = load_ticket_run_state(target)
 
             def fake_run(cmd, **_kwargs):
                 if cmd[:2] == ["git", "status"]:
@@ -966,7 +1027,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual(["pending", "pending"], [ticket["status"] for ticket in draft["candidates"]])
             self.assertEqual(["TICKET-001"], draft["candidates"][0]["depends_on"])
             self.assertEqual(["TICKET-002"], draft["candidates"][1]["depends_on"])
-            self.assertEqual(before_text, generated_path(target, "docs/TICKET_RUN.md").read_text(encoding="utf-8"))
+            self.assertEqual(before_state, load_ticket_run_state(target))
             before_accept = self.run_cli("ticket.load", "--target", tmp)[1]["data"]["tickets"]
             self.assertFalse(any(ticket["id"] == "TICKET-003" for ticket in before_accept))
 
@@ -1062,7 +1123,6 @@ class DashboardBackendCliTests(unittest.TestCase):
 - requested_at: 2026-05-03T12:00:00+00:00
 - run_id: builder-17
 - ticket_id: T-7
-- file: docs/TICKET_RUN.md
 
 ### Body
 
@@ -1179,15 +1239,11 @@ Need a decision.
             self.assertEqual(0, reply_result.returncode)
             self.assertTrue(reply_payload["ok"])
 
-            inbox_text = (docs / "HUMAN_INBOX.md").read_text(encoding="utf-8")
-            self.assertIn("channel: manual-dashboard", inbox_text)
-            self.assertIn("request_id: demo-polish", inbox_text)
-            self.assertIn("request_id: HR-2026-05-03-001", inbox_text)
-            self.assertIn("parsed_intent: approve", inbox_text)
-            self.assertIn("Expected automation behavior", inbox_text)
-
             _load_result, load_payload = self.run_cli("inbox.load", "--target", tmp)
             self.assertEqual(2, load_payload["data"]["counts"]["queued_notes"])
+            note_bodies = "\n".join(item["body"] for item in load_payload["data"]["active_notes"])
+            self.assertIn("Please focus on the local demo next.", note_bodies)
+            self.assertIn("Approved. Use mock data for the next run.", note_bodies)
 
     def test_observatory_html_and_review_bundle_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as review_tmp:
@@ -1230,7 +1286,7 @@ Need a decision.
             self.assertEqual(4, len(snapshot["conveyor"]["roles"]))
             self.assertIn("queued", snapshot["patches"]["queue_totals"])
             self.assertIn("validation", snapshot["validation_safety"])
-            self.assertIn("nudges", snapshot["signals"])
+            self.assertNotIn("signals", snapshot)
 
             bundle_result, bundle_payload = self.run_cli(
                 "review.export_bundle",

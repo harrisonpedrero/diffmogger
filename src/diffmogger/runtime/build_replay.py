@@ -10,10 +10,14 @@ import re
 import shutil
 import subprocess
 import textwrap
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from diffmogger.runtime.paths import existing_or_target_path
+from diffmogger.runtime.state_store import CONVEYOR_PROJECTION_NAME, connect, database_path_for_target, load_projection
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -275,11 +279,27 @@ def parse_current_task_state(repo: Path) -> dict[str, str]:
     return fields
 
 
+def load_conveyor_projection(repo: Path) -> dict[str, Any]:
+    db_path = database_path_for_target(repo)
+    if db_path.exists():
+        with closing(connect(db_path)) as conn:
+            projected = load_projection(conn, CONVEYOR_PROJECTION_NAME)
+            if projected:
+                return projected
+    path = existing_or_target_path(repo, "target/automation_conveyor_state.json")
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def load_conveyor_events(repo: Path) -> list[ReplayEvent]:
-    state_path = repo / "target" / "automation_conveyor_state.json"
-    if not state_path.exists():
+    state = load_conveyor_projection(repo)
+    if not state:
         return []
-    state = json.loads(state_path.read_text(encoding="utf-8"))
     events: list[ReplayEvent] = []
     for item in state.get("history", []):
         role = item.get("role", "unknown")
@@ -425,7 +445,7 @@ def infer_commit_summary(subject: str, files: list[dict[str, Any]], symbols: lis
     if "run_observatory.py" in joined and "test_run_observatory.py" in joined:
         return "Expanded observatory self-review/reporting with matching tests."
     if "run_conveyor_automation.py" in joined and "test_run_conveyor_automation.py" in joined:
-        return "Improved conveyor scheduling behavior and covered it with tests."
+        return "Improved conveyor routing behavior and covered it with tests."
     if paths and all(path.startswith("docs/") or path.endswith(".md") for path in paths):
         return "Updated durable operator documentation and planning state."
     if symbols:
@@ -537,8 +557,7 @@ def build_data(repo: Path) -> dict[str, Any]:
     commits = load_commits(repo)
     horizons = extract_horizon_transitions(repo)
     task_state = parse_current_task_state(repo)
-    state_path = repo / "target" / "automation_conveyor_state.json"
-    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+    state = load_conveyor_projection(repo)
     return {
         "repo": str(repo),
         "generated_at": datetime.now(timezone.utc).isoformat(),

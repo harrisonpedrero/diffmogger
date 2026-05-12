@@ -218,7 +218,7 @@ def dashboard_state_from_intake(
         "automation_checkpoint_commits": bool(intake.get("automation_checkpoint_commits", True)),
         "multi_role_allow_remotes": bool(intake.get("multi_role_allow_remotes", False)),
         "automation_run_mode": str(intake.get("automation_run_mode") or "continuous_improvement"),
-        "ticket_run_file": str(intake.get("ticket_run_file") or sidecar_rel("docs/TICKET_RUN.md")),
+        "ticket_run_file": str(intake.get("ticket_run_file") or ""),
         "ticket_completion_notify": bool(intake.get("ticket_completion_notify", True)),
         "overwrite_existing_scaffold_files": bool(intake.get("overwrite_existing_scaffold_files", False)),
         "brief_draft_intake": intake,
@@ -359,7 +359,7 @@ def file_category(rel_path: str, group: str, label: str) -> str:
         return "Review"
     if "context" in lower:
         return "Context"
-    if any(term in lower for term in ("multi-role", "multi_role", "conveyor", "automation_queue", "signals", "role")):
+    if any(term in lower for term in ("multi-role", "multi_role", "conveyor", "automation_queue", "role")):
         return "Multi-role / conveyor"
     return "Core state"
 
@@ -368,10 +368,10 @@ def validation_kind_for_file(rel_path: str) -> str:
         return "json"
     if rel_path in {"docs/CODEX_AUTOMATION_TASKS.md", sidecar_rel("docs/CODEX_AUTOMATION_TASKS.md")}:
         return "required_files"
-    if rel_path in {"docs/TICKET_RUN.md", sidecar_rel("docs/TICKET_RUN.md")}:
-        return "ticket_run"
     if rel_path in {"target/integration_safety_check.json", sidecar_rel("target/integration_safety_check.json")}:
         return "integration_safety_record"
+    if rel_path in {"target/automation_conveyor_state.json", sidecar_rel("target/automation_conveyor_state.json")}:
+        return "conveyor_projection"
     return ""
 
 def file_registry(dashboard_app: Any) -> dict[str, dict[str, Any]]:
@@ -441,12 +441,21 @@ def file_registry(dashboard_app: Any) -> dict[str, dict[str, Any]]:
     }
     registry["state.conveyor"] = {
         "key": "state.conveyor",
-        "label": "Conveyor State JSON",
+        "label": "Conveyor State Projection JSON",
         "rel_path": sidecar_rel("target/automation_conveyor_state.json"),
         "group": "state",
         "category": "Multi-role / conveyor",
-        "editable": True,
-        "validation": "json",
+        "editable": False,
+        "validation": "conveyor_projection",
+    }
+    registry["state.canonical_brief"] = {
+        "key": "state.canonical_brief",
+        "label": "Canonical State Brief",
+        "rel_path": sidecar_rel("target/canonical_state_brief.md"),
+        "group": "state",
+        "category": "Multi-role / conveyor",
+        "editable": False,
+        "validation": "",
     }
     registry["state.action_plan_history"] = {
         "key": "state.action_plan_history",

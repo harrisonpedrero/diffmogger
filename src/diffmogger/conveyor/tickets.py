@@ -8,6 +8,7 @@ from .queue_state import (
     role_manifest_records,
 )
 from .state import *
+from diffmogger.runtime import ticket_run as ticket_runtime
 
 def project_intake(target: Path) -> dict[str, Any]:
     path = dpath(target, ".agentic/project_intake.json")
@@ -21,19 +22,15 @@ def ticket_run_file(target: Path) -> Path:
     configured = str(project_intake(target).get("ticket_run_file") or "").strip()
     if configured:
         return target / configured
-    return dpath(target, "docs/TICKET_RUN.md")
+    legacy = dpath(target, "docs/TICKET_RUN.md")
+    if legacy.exists():
+        return legacy
+    return ticket_runtime.ticket_state_path(target)
 
 def load_ticket_run(target: Path) -> dict[str, Any] | None:
-    path = ticket_run_file(target)
-    if not path.exists():
-        return None
-    text = read_text(path)
-    match = TICKET_FENCE_RE.search(text)
-    if not match:
-        return None
     try:
-        data = json.loads(match.group(1))
-    except json.JSONDecodeError:
+        data, _path, _text = ticket_runtime.load_ticket_run(target)
+    except SystemExit:
         return None
     return data if isinstance(data, dict) else None
 

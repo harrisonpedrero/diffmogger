@@ -1,22 +1,14 @@
 #!/usr/bin/env python3
-"""Compact long-running Markdown state files in a target project.
+"""Compact long-running generated Markdown projections in a target project.
 
 What this script compacts:
-- docs/HUMAN_INBOX.md: preserves unhandled/unresolved entries and moves handled
-  entries into docs/HUMAN_RESPONSES_ARCHIVE.md as concise rollups.
-- docs/HUMAN_REQUESTS.md: preserves active/awaiting/unresolved requests and moves
-  resolved/skipped/cancelled requests into the archive as concise rollups.
-- docs/HUMAN_OUTBOX.md: preserves recent entries and all notifier delivery
-  failures; older successful entries become archive rollups.
-- docs/HUMAN_RESPONSES_ARCHIVE.md: keeps recent archive entries and replaces
-  older entries with a concise compaction rollup.
 - docs/CODEX_AUTOMATION_TASKS.md: preserves required headings and trims only
   oversized section bodies, keeping the latest lines.
 - docs/AUTONOMY_EXPERIMENT_LOG.md and docs/DAILY_AUTOMATION_REVIEW.md: keep
   recent H2 entries and replace older entries with concise rollups.
 
-The script does not silently delete active human requests. Use --dry-run first
-on a new project and review the diff after compaction.
+Human messages and ticket campaigns live in typed SQLite state and are not
+compacted through Markdown files for new targets.
 """
 
 from __future__ import annotations
@@ -66,10 +58,6 @@ RESOLVED_STATUS_WORDS = {
 }
 
 STATE_FILES = [
-    "docs/HUMAN_INBOX.md",
-    "docs/HUMAN_REQUESTS.md",
-    "docs/HUMAN_OUTBOX.md",
-    "docs/HUMAN_RESPONSES_ARCHIVE.md",
     "docs/CODEX_AUTOMATION_TASKS.md",
     "docs/MULTI_ROLE_PROGRESS.md",
     "docs/AUTONOMY_EXPERIMENT_LOG.md",
@@ -537,32 +525,7 @@ def main() -> int:
         raise SystemExit("--keep-latest must be at least 1")
 
     target = Path(args.target).resolve()
-    archive = existing_or_target_path(target, "docs/HUMAN_RESPONSES_ARCHIVE.md")
     changes: list[str] = []
-
-    queue_specs = [
-        (existing_or_target_path(target, "docs/HUMAN_INBOX.md"), False),
-        (existing_or_target_path(target, "docs/HUMAN_REQUESTS.md"), False),
-        (existing_or_target_path(target, "docs/HUMAN_OUTBOX.md"), True),
-    ]
-    for path, preserve_failures in queue_specs:
-        new_text, summaries = compact_active_queue(
-            path,
-            archive,
-            keep_latest=args.keep_latest,
-            preserve_failures=preserve_failures,
-        )
-        if maybe_write(path, new_text, dry_run=args.dry_run):
-            if summaries and not args.dry_run:
-                append_archive_rollup(archive, f"{path.name} Rollup", summaries)
-            changes.append(f"compacted {path.relative_to(target)} ({len(summaries)} entries summarized)")
-
-    if maybe_write(
-        archive,
-        compact_archive(archive, keep_latest=max(args.keep_latest * 2, args.keep_latest)),
-        dry_run=args.dry_run,
-    ):
-        changes.append(f"compacted {archive.relative_to(target)}")
 
     for rel in ["AUTONOMY_EXPERIMENT_LOG.md", "DAILY_AUTOMATION_REVIEW.md"]:
         path = existing_or_target_path(target, f"docs/{rel}")

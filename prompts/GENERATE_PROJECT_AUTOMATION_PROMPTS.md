@@ -8,7 +8,7 @@ You are generating project-specific Codex automation files from a project intake
 
 Read the intake brief first. If values are missing, make reasonable defaults and document assumptions. Do not ask questions unless a missing value would make the workflow unsafe.
 
-Respect the intake's project mode. For `fresh_project`, generate files for a new target repo. For `existing_project`, preserve existing architecture, commands, docs, and project-specific instructions; add Diffmogger guidance as a clearly marked managed section when updating existing `AGENTS.md` or existing project-owned development docs. Generated Diffmogger-owned state should live under `.diffmogger/`.
+Respect the intake's project mode. For `fresh_project`, generate files for a new target repo. For `existing_project`, preserve existing architecture, commands, docs, and project-specific instructions; add Diffmogger guidance as a clearly marked managed section when updating existing `AGENTS.md` or existing project-owned development docs. Generated Diffmogger-owned runtime state should live under `.diffmogger/`; canonical live orchestration state is `.diffmogger/runtime/orchestration.sqlite3`, with `.diffmogger/runtime/canonical_state_brief.md` regenerated as the bounded state view for agents.
 
 Create these files as complete Markdown drafts:
 
@@ -19,10 +19,6 @@ Create these files as complete Markdown drafts:
 AGENTS.md
 .diffmogger/state/CODEX_AUTOMATION_TASKS.md
 .diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md
-.diffmogger/state/HUMAN_REQUESTS.md
-.diffmogger/state/HUMAN_INBOX.md
-.diffmogger/state/HUMAN_OUTBOX.md
-.diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md
 .diffmogger/state/HUMAN_BRIDGE_SETUP.md
 .diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md
 .diffmogger/state/DAILY_AUTOMATION_REVIEW.md
@@ -31,9 +27,11 @@ AGENTS.md
 .diffmogger/scripts/run_codex_automation.sh
 .diffmogger/scripts/run_observatory.py
 .diffmogger/scripts/repair_environment.py
+.diffmogger/scripts/state_brief.py
 .diffmogger/scripts/spawn_worker_agent.sh
 .diffmogger/scripts/summarize_worker_outputs.py
 .diffmogger/scripts/compact_agent_state.py
+.diffmogger/schemas/orchestration_state.schema.json
 ```
 
 ## Requirements
@@ -44,7 +42,7 @@ For existing-project integration, the first runnable demo means a meaningful int
 
 The generated `.diffmogger/state/PROJECT_CONTEXT.md` should index supplemental project context when provided, such as PDFs, research notes, design docs, CSVs, or Markdown notes. It must warn not to include secrets, credentials, paid-account exports, or private production data.
 
-The generated `.diffmogger/agentic/automation_prompt.md` is used for recurring automation. It should be durable and behavioral. It must tell Codex to read the dynamic task file and guardrails every run, follow the mode-aware progression plan, support worker agents, support the human bridge, use lock files, compact state when needed, verify work, and update state.
+The generated `.diffmogger/agentic/automation_prompt.md` is used for recurring automation. It should be durable and behavioral. It must tell Codex to read the dynamic task file and guardrails every run, follow the mode-aware progression plan, support worker agents, support the human bridge, use lock files, compact generated Markdown projections when needed, verify work, and update canonical SQLite state plus generated handoff projections.
 
 It must explicitly read and follow:
 
@@ -52,14 +50,11 @@ It must explicitly read and follow:
 .diffmogger/state/CODEX_AUTOMATION_TASKS.md
 .diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md
 .diffmogger/state/PROJECT_CONTEXT.md
-.diffmogger/state/HUMAN_REQUESTS.md if present
-.diffmogger/state/HUMAN_INBOX.md if present
-.diffmogger/state/HUMAN_OUTBOX.md if present
-.diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md if present
+.diffmogger/runtime/canonical_state_brief.md
 .diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md if present
 ```
 
-It must say that the task file is dynamic and rewritten at the end of every run. It must say the guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
+It must say that the task file is dynamic and rewritten at the end of every run, but is not the runtime authority. It must say canonical runtime state lives in `.diffmogger/runtime/orchestration.sqlite3`; `.diffmogger/runtime/canonical_state_brief.md` is the generated view agents read instead of inspecting SQLite manually; `.diffmogger/runtime/automation_conveyor_state.json` is generated for compatibility. It must say the guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
 
 The automation prompt must include this exact language:
 
@@ -103,17 +98,17 @@ The guardrails file must stay lean and include:
 The human bridge docs and automation prompt must support four modes:
 
 1. disabled
-2. local-file-only mode
+2. dashboard-backed file-only mode
 3. local desktop notifier mode: `POST http://127.0.0.1:8765/api/notify`
 4. Discord notifier mode: `POST http://127.0.0.1:8765/api/notify`
 
-For `file_only`, the generated docs must say the human manually reads `.diffmogger/state/HUMAN_REQUESTS.md`, replies in `.diffmogger/state/HUMAN_INBOX.md`, and summary/status requests are satisfied locally in Markdown or app artifacts. It must not tell Codex to call Discord or notifier APIs in file-only mode.
+For `file_only`, the generated docs must say the human reviews requests and replies through the Diffmogger dashboard, and summary/status requests are satisfied through the dashboard or requested local artifacts. It must not tell Codex to call Discord or notifier APIs in file-only mode.
 
-For `local_notifier`, the generated automation prompt must say the notifier is for local desktop notifications only. For `discord_notifier`, it must say progress uses `event_kind: "progress"`, direct human messages use `event_kind: "message"`, local automation commits trigger brief progress-channel notifications with the commit subject and work summary, and Discord credentials stay only in `services/agentic-notifier/.env`. If the notifier is unavailable in either notifier mode, Codex should fall back to `.diffmogger/state/HUMAN_REQUESTS.md`, continue useful work, and use `ACTIVE_WITH_PENDING_USER_INPUT` unless no useful work remains.
+For `local_notifier`, the generated automation prompt must say the notifier is for local desktop notifications only. For `discord_notifier`, it must say progress uses `event_kind: "progress"`, direct human messages use `event_kind: "message"`, local automation commits trigger brief progress-channel notifications with the commit subject and work summary, and Discord credentials stay only in `services/agentic-notifier/.env`. If the notifier is unavailable in either notifier mode, Codex should record the pending outbound message in typed human-message state, continue useful work, and use `ACTIVE_WITH_PENDING_USER_INPUT` unless no useful work remains.
 
-The generated automation prompt must read `.diffmogger/state/HUMAN_INBOX.md` at the start of each run, remove handled inbox messages, and archive concise notes in `.diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md`.
+The generated automation prompt must read `.diffmogger/runtime/canonical_state_brief.md` at the start of each run, handle queued human messages from typed state, and record concise resolution notes through typed human-message APIs.
 
-The generated automation prompt must classify freeform human inbox commands. In notifier modes, if the human asks to `send me`, `message me`, `reply with`, provide a `status update`, explain `what have you done so far?`, or `summarize progress`, the automation must send a concise `event_kind: "message"` notification through the local notifier when available. Human-unlock requests, blockers requiring user input, and replies to user messages also use `event_kind: "message"`. It must not satisfy that request only by writing Markdown. If the notifier is unavailable, it must record the intended outbound message in `.diffmogger/state/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and continue useful work.
+The generated automation prompt must classify freeform dashboard human-message commands. In notifier modes, if the human asks to `send me`, `message me`, `reply with`, provide a `status update`, explain `what have you done so far?`, or `summarize progress`, the automation must send a concise `event_kind: "message"` notification through the local notifier when available. Human-unlock requests, blockers requiring user input, and replies to user messages also use `event_kind: "message"`. It must not satisfy that request only by writing Markdown. If the notifier is unavailable, it must record the intended outbound message in typed human-message state with status `NOTIFIER_UNREACHABLE` and continue useful work.
 
 For direct human-requested outbound responses, include this payload option if the notifier supports it:
 
@@ -151,7 +146,7 @@ Parallelism budget: <0-N workers>
 Reason: <one sentence>
 ```
 
-It must check availability with `command -v codex` before using Codex CLI workers, record `UNAVAILABLE` if the command is missing, and continue the sprint. For broad or multi-module runs, Codex CLI worker usage should be expected unless skipped with a clear reason. Include the target repo's local `.diffmogger/scripts/spawn_worker_agent.sh` and `.diffmogger/scripts/summarize_worker_outputs.py` helper pattern and a read-only nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox -C .` fallback pattern. Also ensure the scheduled wrapper runs the parent automation with `--add-dir "$HOME/.codex"` so nested Codex CLI workers can authenticate and start inside the parent sandbox.
+It must check availability with `command -v codex` before using Codex CLI workers, record `UNAVAILABLE` if the command is missing, and continue the sprint. For broad or multi-module runs, Codex CLI worker usage should be expected unless skipped with a clear reason. Include the target repo's local `.diffmogger/scripts/spawn_worker_agent.sh` and `.diffmogger/scripts/summarize_worker_outputs.py` helper pattern and a read-only nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox -C .` fallback pattern. Also ensure the parent run wrapper invokes automation with `--add-dir "$HOME/.codex"` so nested Codex CLI workers can authenticate and start inside the parent sandbox.
 
 Preserve read-only worker-report behavior. Read-only workers are the default for exploration, review, risk checks, product polish, and test-gap analysis.
 
@@ -168,7 +163,7 @@ When write workers are enabled, the generated automation prompt must teach the m
 - tell workers they are not alone in the codebase and must not revert unrelated edits or changes made by others
 - require each worker to list changed files, checks run, integration notes, and risks
 - review worker diffs rather than blindly accepting them
-- integrate slices, resolve conflicts, run verification, and update task state itself
+- integrate slices, resolve conflicts, run verification, and update canonical state plus generated task/handoff projections itself
 - allow integration-only runs where no workers are spawned
 
 Generated guardrails must prohibit unbounded recursive agents, overlapping write ownership without an explicit coordination protocol, blind acceptance of worker changes, and destructive cleanup.
@@ -177,22 +172,21 @@ If the target helper script supports write workers, keep read-only as the defaul
 
 Support two continuous automation profiles. `single_lane` is the solo continuous profile for docs, research, cleanup, reports, small apps, bounded/simple work, and non-engineering workflows. `planner_builder_hardener_integrator` is the multi-role software-engineering profile for larger work where separate planning, implementation, verification, and integration lanes add value. If `automation_role_profile` is `single_lane` or `multi_role_automations_allowed` is false, generate the single-lane profile.
 
-Generated targets must include `.diffmogger/scripts/run_conveyor_automation.sh`, `.diffmogger/scripts/run_conveyor_automation.py`, `.diffmogger/scripts/run_observatory.py`, `.diffmogger/scripts/repair_environment.py`, and `.diffmogger/scripts/update_automation_signals.py` as optional local automation helpers. When `automation_signals_enabled` is true, generate `.diffmogger/state/AUTOMATION_SIGNALS.md`. When multi-role mode is enabled, also generate `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, `.diffmogger/agentic/roles/integrator.md`, `.diffmogger/state/MULTI_ROLE_PROGRESS.md`, `.diffmogger/scripts/run_role_automation.sh`, `.diffmogger/scripts/integrate_role_outputs.py`, and `.diffmogger/scripts/list_deferred_patches.py`.
+Generated targets must include `.diffmogger/scripts/run_conveyor_automation.sh`, `.diffmogger/scripts/run_conveyor_automation.py`, `.diffmogger/scripts/run_observatory.py`, `.diffmogger/scripts/repair_environment.py`, and `.diffmogger/schemas/orchestration_state.schema.json` as local automation helpers/contracts. When multi-role mode is enabled, also generate `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, `.diffmogger/agentic/roles/integrator.md`, `.diffmogger/state/MULTI_ROLE_PROGRESS.md`, `.diffmogger/scripts/run_role_automation.sh`, `.diffmogger/scripts/integrate_role_outputs.py`, and `.diffmogger/scripts/list_deferred_patches.py`.
 
 Generated multi-role prompts must state that:
 
 - every role is local-only and must never push, fetch, pull, configure remotes, set upstream tracking, or run remote-affecting git commands
 - no-remote violations are `CRITICAL_STOP`
-- fixed cadence mode runs planner hourly at minute `0`; continuous conveyor mode may run planner when planning is due
-- continuous conveyor mode prioritizes queued integration first, due planning second, builder momentum by default, and one hardener pass after integrated builder work
+- continuous conveyor mode prioritizes queued integration first, baseline repair and blocked-state triage when needed, builder momentum by default, and one hardener pass after integrated builder work
 - builder and hardener start from latest main `HEAD` in isolated worktrees and may see partially integrated state from earlier patches in the cycle
-- integrator owns the main checkout, dirty-checkpoint commits, FIFO patch application, batched verification with individual fallback, local commits, task-state updates, progress updates, and retention
+- integrator owns the main checkout, dirty-checkpoint commits, FIFO patch application, batched verification with individual fallback, local commits, canonical state/projection updates, progress updates, and retention
 - successful empty role patches are recorded as `skipped` instead of queued for integration
 - deferred patches must use machine-readable `deferral_reason` values
 
 Generated guardrails must prohibit recursive role spawning, unbounded write ownership, blind acceptance of role patches, destructive cleanup, remote git operations, and hook-based pushes.
 
-Lock-file instructions should reference the target repo's local `.diffmogger/scripts/run_codex_automation.sh`, `.diffmogger/scripts/acquire_codex_lock.sh`, and `.diffmogger/scripts/release_codex_lock.sh` helpers, the default `.diffmogger/runtime/codex_automation.lock` path, `CODEX_LOCK_PATH` overrides, stale-lock detection, `CODEX_RUN_ID` identity for safe release, and `CODEX_LOCK_ALREADY_ACQUIRED=true` for wrapper-owned scheduled runs.
+Lock-file instructions should reference the target repo's local `.diffmogger/scripts/run_codex_automation.sh`, `.diffmogger/scripts/acquire_codex_lock.sh`, and `.diffmogger/scripts/release_codex_lock.sh` helpers, the default `.diffmogger/runtime/codex_automation.lock` path, `CODEX_LOCK_PATH` overrides, stale-lock detection, `CODEX_RUN_ID` identity for safe release, and `CODEX_LOCK_ALREADY_ACQUIRED=true` for wrapper-owned runs.
 
 State-compaction instructions should reference `.diffmogger/scripts/compact_agent_state.py --dry-run <target-project>`, preserve unresolved human requests and deferred multi-role manifests, summarize transient multi-role artifacts, and archive concise rollups rather than silently deleting active state.
 

@@ -6,8 +6,12 @@ from ..errors import *
 from ..jsonio import *
 from ..target import *
 
-from .inbox import inbox_snapshot
 from diffmogger.runtime import ticket_run
+from diffmogger.runtime.state_store import (
+    load_runner_state as load_canonical_runner_state,
+    runner_projection_path_for_target,
+    write_runner_state as write_canonical_runner_state,
+)
 
 RUNNER_STOP_GRACE_SECONDS = 8
 
@@ -213,6 +217,22 @@ def target_git_remotes(target: Path) -> str:
     )
     return (result.stdout or result.stderr).strip() if result.returncode == 0 else ""
 
+def task_file_control_state(target: Path) -> tuple[Path, str, str]:
+    """Read the generated task projection for the remaining start-gate boundary.
+
+    Canonical runner and conveyor state live in SQLite. The task Markdown still
+    carries operator-authored status for existing targets until a typed task
+    status writer owns that field end to end.
+    """
+    task_path = existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md")
+    task_text = task_path.read_text(encoding="utf-8", errors="replace")
+    status_match = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", task_text, re.MULTILINE)
+    return task_path, task_text, status_match.group(1).strip().upper() if status_match else ""
+
+def startable_statuses(dashboard_app: Any) -> set[str]:
+    statuses = getattr(dashboard_app, "STARTABLE_STATUSES", {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"})
+    return {str(item).upper() for item in statuses}
+
 def automation_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
     target = target.expanduser().resolve()
     ticket_campaign_enabled = target_ticket_campaign_enabled(target)
@@ -238,24 +258,16 @@ def automation_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
                 target_script_path(target, "scripts/list_deferred_patches.py"),
             ]
         )
-    if ticket_campaign_enabled:
-        required.append(ticket_run.ticket_file_path(target))
     missing = [target_relative_display(target, path) for path in required if not path.exists()]
     if missing:
         return False, "Missing " + ", ".join(missing)
     if not dashboard_app.target_has_initial_commit(target):
         return False, "Continuous automation requires an initialized git repo with an initial commit."
-    task_path = existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md")
-    task_text = task_path.read_text(
-        encoding="utf-8",
-        errors="replace",
-    )
-    status_match = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", task_text, re.MULTILINE)
-    if not status_match:
+    task_path, task_text, status = task_file_control_state(target)
+    if not status:
         return False, f"Missing AUTOMATION_STATUS in {target_relative_display(target, task_path)}."
-    status = status_match.group(1).strip().upper()
-    if status not in dashboard_app.SCHEDULABLE_STATUSES:
-        return False, f"Automation status is {status}; scheduling requires ACTIVE or ACTIVE_WITH_PENDING_USER_INPUT."
+    if status not in startable_statuses(dashboard_app):
+        return False, f"Automation status is {status}; start requires ACTIVE or ACTIVE_WITH_PENDING_USER_INPUT."
     if ticket_campaign_enabled:
         ticket_state = ticket_run.ticket_source_state(target)
         if not bool(ticket_state.get("actionable")):
@@ -276,16 +288,10 @@ def run_once_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
     missing = [path.relative_to(target).as_posix() for path in required if not path.exists()]
     if missing:
         return False, "Missing " + ", ".join(missing)
-    task_path = existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md")
-    task_text = task_path.read_text(
-        encoding="utf-8",
-        errors="replace",
-    )
-    status_match = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", task_text, re.MULTILINE)
-    if not status_match:
+    task_path, _task_text, status = task_file_control_state(target)
+    if not status:
         return False, f"Missing AUTOMATION_STATUS in {task_path.relative_to(target)}."
-    status = status_match.group(1).strip().upper()
-    if status not in dashboard_app.SCHEDULABLE_STATUSES:
+    if status not in startable_statuses(dashboard_app):
         return False, f"Automation status is {status}; run-once requires ACTIVE or ACTIVE_WITH_PENDING_USER_INPUT."
     return True, "Ready."
 
@@ -293,10 +299,10 @@ def automation_log_dir(target: Path) -> Path:
     return target_path(target.expanduser().resolve(), "target/automation_logs")
 
 def automation_runner_path(target: Path) -> Path:
-    return target_path(target.expanduser().resolve(), "target/automation_runner.json")
+    return runner_projection_path_for_target(target)
 
 def load_runner_state(target: Path) -> dict[str, Any]:
-    state = read_json_file(automation_runner_path(target))
+    state = load_canonical_runner_state(automation_runner_path(target))
     return state if isinstance(state, dict) else {}
 
 def write_runner_state(target: Path, state: dict[str, Any]) -> Path:
@@ -304,7 +310,7 @@ def write_runner_state(target: Path, state: dict[str, Any]) -> Path:
     state["schema_version"] = int(state.get("schema_version") or 1)
     state["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     path = automation_runner_path(target)
-    write_json_file(path, state)
+    write_canonical_runner_state(path, state)
     return path
 
 def process_is_alive(pid: Any) -> bool:
@@ -372,7 +378,7 @@ def automation_prerequisites(target: Path, dashboard_app: Any) -> list[Any]:
                 bool(osascript_path),
                 False,
                 osascript_path
-                or f"osascript unavailable; notifier delivery will record LOCAL_NOTIFICATION_FAILED in {sidecar_rel('docs/HUMAN_OUTBOX.md')}.",
+                or "osascript unavailable; notifier delivery will record LOCAL_NOTIFICATION_FAILED in typed human-message state.",
             )
         )
     return items
@@ -540,8 +546,8 @@ def command_run_load(args: argparse.Namespace) -> dict[str, Any]:
         "git": snapshot.get("git") or {},
         "queue": snapshot.get("queue") or {},
         "conveyor": snapshot.get("conveyor") or {},
+        "state": snapshot.get("state") or {},
         "progress": snapshot.get("progress") or {},
-        "signals": snapshot.get("signals") or {},
         "scorecard": snapshot.get("scorecard") or {},
         "first_review": snapshot.get("first_review") or {},
         "follow_through": snapshot.get("follow_through") or {},

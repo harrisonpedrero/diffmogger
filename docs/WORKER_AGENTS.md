@@ -152,7 +152,7 @@ Integration-only runs with no workers are valid when the main agent can finish f
 
 ## Multi-Role Automation Is Separate
 
-Multi-role automation is a project-level scheduling mode, not the same thing as write-capable worker agents. It is enabled with:
+Multi-role automation is a project-level role mode, not the same thing as write-capable worker agents. It is enabled with:
 
 ```json
 {

@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://diffmogger.local/schemas/orchestration_state.schema.json",
+  "title": "Diffmogger Canonical Orchestration State Snapshot",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "authority",
+    "status",
+    "database",
+    "projection",
+    "contract",
+    "counts",
+    "recent_events"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "authority": {
+      "const": "sqlite"
+    },
+    "status": {
+      "type": "string"
+    },
+    "database": {
+      "type": "object",
+      "required": ["path", "exists", "sqlite_version", "journal_mode", "integrity_check"],
+      "properties": {
+        "path": {"type": "string"},
+        "exists": {"type": "boolean"},
+        "sqlite_version": {"type": "string"},
+        "journal_mode": {"type": "string"},
+        "integrity_check": {"type": "string"},
+        "application_id": {"type": "integer"}
+      },
+      "additionalProperties": true
+    },
+    "projection": {
+      "type": "object",
+      "required": ["name", "path", "exists"],
+      "properties": {
+        "name": {"type": "string"},
+        "path": {"type": "string"},
+        "exists": {"type": "boolean"},
+        "updated_at": {"type": "string"},
+        "payload_sha256": {"type": "string"},
+        "event_id": {"type": ["integer", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "projections": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "contract": {
+      "type": "object",
+      "required": ["tables", "status_model", "canonical_runtime_state", "compatibility_surfaces"],
+      "properties": {
+        "tables": {
+          "type": "array",
+          "items": {"type": "string"},
+          "contains": {"const": "events"}
+        },
+        "status_model": {
+          "type": "array",
+          "items": {"type": "string"},
+          "contains": {"const": "ACTIVE"}
+        },
+        "canonical_runtime_state": {"type": "string"},
+        "compatibility_surfaces": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer"}
+    },
+    "last_event": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "last_checkpoint": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "recent_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["event_id", "stream_id", "sequence", "event_type", "event_hash"],
+        "properties": {
+          "event_id": {"type": "integer"},
+          "stream_id": {"type": "string"},
+          "sequence": {"type": "integer"},
+          "occurred_at": {"type": "string"},
+          "event_type": {"type": "string"},
+          "actor_role": {"type": "string"},
+          "phase": {"type": "string"},
+          "status": {"type": "string"},
+          "task_id": {"type": "string"},
+          "run_id": {"type": "string"},
+          "event_hash": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "open_blockers": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "next_actions": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "validations": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "conveyor_state": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "runner_state": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "human_messages": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "ticket_run": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

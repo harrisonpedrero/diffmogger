@@ -1,12 +1,12 @@
 # Multi-Role Progress
 
-Durable progress record for optional multi-role automation.
+Generated dashboard/export projection for optional multi-role automation. SQLite in `target/orchestration.sqlite3` is the live state authority; `target/canonical_state_brief.md` is the bounded state view agents should read at run start.
 
 Multi-role automations allowed: {{MULTI_ROLE_AUTOMATIONS_ALLOWED}}
 
 Role profile: `{{AUTOMATION_ROLE_PROFILE}}`
 
-Continuous conveyor mode uses one local dispatcher that prioritizes queued integration first, baseline preflight/repair, safety triage, human inbox handling, fast-follow replanning after planner deferral changes, one focused hardener pass after integrated builder work, catch-up hardening for the oldest unverified `candidate_done` cluster, planner-needed transitions, and builder momentum by default.
+Continuous conveyor mode uses one local dispatcher that prioritizes queued integration first, baseline preflight/repair, safety triage, typed human-message handling, fast-follow replanning after planner deferral changes, one focused hardener pass after integrated builder work, catch-up hardening for the oldest unverified `candidate_done` cluster, planner-needed transitions, and builder momentum by default.
 
 ## Project State At Last Integration
 
@@ -28,7 +28,7 @@ Continuous conveyor mode uses one local dispatcher that prioritizes queued integ
   - hardener: 0
 - Current deferred queue depth: 0
 - Mean time from role-run completion to integration: unknown
-- Human inbox messages handled: 0
+- Human messages handled: 0
 - Human requests created: 0
 - Human requests resolved: 0
 

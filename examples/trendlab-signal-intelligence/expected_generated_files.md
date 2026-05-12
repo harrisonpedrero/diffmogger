@@ -41,7 +41,6 @@ AGENTS.md
 .diffmogger/lib/diffmogger/observatory/scoring.py
 .diffmogger/lib/diffmogger/observatory/self_review.py
 .diffmogger/lib/diffmogger/observatory/server.py
-.diffmogger/lib/diffmogger/observatory/signals.py
 .diffmogger/lib/diffmogger/observatory/snapshots.py
 .diffmogger/lib/diffmogger/runtime/__init__.py
 .diffmogger/lib/diffmogger/runtime/build_replay.py
@@ -55,8 +54,11 @@ AGENTS.md
 .diffmogger/lib/diffmogger/runtime/run_conveyor_automation.py
 .diffmogger/lib/diffmogger/runtime/run_observatory.py
 .diffmogger/lib/diffmogger/runtime/run_process_watchdog.py
+.diffmogger/lib/diffmogger/runtime/state_brief.py
+.diffmogger/lib/diffmogger/runtime/state_store.py
 .diffmogger/lib/diffmogger/runtime/summarize_worker_outputs.py
 .diffmogger/lib/diffmogger/runtime/ticket_run.py
+.diffmogger/schemas/orchestration_state.schema.json
 .diffmogger/agentic/automation_prompt.md
 .diffmogger/agentic/smoke_commands.txt
 .diffmogger/agentic/verification_commands.txt
@@ -64,10 +66,6 @@ AGENTS.md
 .diffmogger/state/PROJECT_CONTEXT.md
 .diffmogger/state/CODEX_AUTOMATION_TASKS.md
 .diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md
-.diffmogger/state/HUMAN_REQUESTS.md
-.diffmogger/state/HUMAN_INBOX.md
-.diffmogger/state/HUMAN_OUTBOX.md
-.diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md
 .diffmogger/state/HUMAN_BRIDGE_SETUP.md
 .diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md
 .diffmogger/state/DAILY_AUTOMATION_REVIEW.md
@@ -85,6 +83,7 @@ AGENTS.md
 .diffmogger/scripts/integrate_role_outputs.py
 .diffmogger/scripts/list_deferred_patches.py
 .diffmogger/scripts/load_automation_env.py
+.diffmogger/scripts/state_brief.py
 .diffmogger/scripts/ticket_run.py
 .diffmogger/scripts/repair_environment.py
 .diffmogger/scripts/spawn_worker_agent.sh
@@ -100,6 +99,6 @@ The generated `.diffmogger/agentic/verification_commands.txt` should start with 
 
 The recurring automation prompt should continue through explicit intake-derived product horizon state: local scored-signal demo, scoring depth, evidence-backed reports, safe adapters, showcase quality, long-run research capsules, and automation process improvement. Each run should record whether it stayed in the current horizon or advanced with evidence.
 
-It should also make explicit Codex CLI worker decisions, use target-local runtime scripts, and distinguish file-only Markdown responses from notifier-mode outbound status texts.
+It should also make explicit Codex CLI worker decisions, use target-local runtime scripts, and distinguish dashboard-backed file-only responses from notifier-mode outbound status texts.
 
 This example exercises a more involved automation workflow without copying assumptions from a real product.

@@ -116,4 +116,4 @@ None. Stop when the bounded ticket run is complete or fully blocked.
 ## Assumptions
 
 - Tickets are local and do not require network access.
-- If a ticket depends on another ticket, it uses `depends_on` in `.diffmogger/state/TICKET_RUN.md`.
+- If a ticket depends on another ticket, it uses `depends_on` in the dashboard-backed SQLite ticket queue.

@@ -5,9 +5,10 @@ from ..jsonio import *
 from ..target import *
 
 from diffmogger.runtime import ticket_run
+from diffmogger.runtime.state_store import validate_state_database
 
 from .diagnostics import command_diagnostics_run_checks, required_file_flags, run_subprocess
-from .run_schedule import latest_run_log
+from .run_control import latest_run_log
 
 def command_advanced_list_files(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
@@ -86,6 +87,19 @@ def command_advanced_validate_file(args: argparse.Namespace) -> dict[str, Any]:
         except (OSError, json.JSONDecodeError) as exc:
             return {"target": target_metadata(target), "file": description, "status": "fail", "items": [{"ok": False, "detail": str(exc)}]}
         return {"target": target_metadata(target), "file": description, "status": "pass", "items": [{"ok": True, "detail": "JSON parses successfully."}]}
+    if validation == "conveyor_projection":
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"target": target_metadata(target), "file": description, "status": "fail", "items": [{"ok": False, "detail": str(exc)}]}
+        result = validate_state_database(target)
+        return {
+            "target": target_metadata(target),
+            "file": description,
+            "status": result["status"],
+            "items": result["items"],
+            "result": result["snapshot"],
+        }
     if validation == "required_files":
         flags = required_file_flags(target)
         result = run_subprocess([sys.executable, str(CHECK_REQUIRED_SCRIPT), *flags, str(target)])

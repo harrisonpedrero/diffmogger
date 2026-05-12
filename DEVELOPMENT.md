@@ -55,8 +55,8 @@ python -m pytest
 Canonical Python source lives under `src/diffmogger/`.
 
 - `src/diffmogger/kit/`: source-kit tools such as scaffold, required-file check, starter-kit manifest validation, integration-safety check, and native dashboard command guardrails.
-- `src/diffmogger/runtime/`: target runtime entrypoints and helpers bundled under `.diffmogger/lib/diffmogger/`.
-- `src/diffmogger/conveyor/`: continuous conveyor state, decisions, active-role recovery, ticket stop/finalization, and role runner logic.
+- `src/diffmogger/runtime/`: target runtime entrypoints, helpers, and canonical SQLite state store bundled under `.diffmogger/lib/diffmogger/`.
+- `src/diffmogger/conveyor/`: continuous conveyor decisions, active-role recovery, ticket stop/finalization, and role runner logic.
 - `src/diffmogger/integrator/`: multi-role integration, git safety, verification, baseline, commit, progress, notifier, and cleanup logic.
 - `src/diffmogger/observatory/`: observatory snapshot, scoring, render, and server logic bundled with the runtime entrypoint.
 - `src/diffmogger/dashboard/`: backend CLI and shared helpers used by the native dashboard.
@@ -78,12 +78,15 @@ The generated sidecar layout is the supported target architecture:
 .diffmogger/scripts/
 .diffmogger/lib/diffmogger/
 .diffmogger/runtime/
+.diffmogger/schemas/
 .diffmogger/manifest.json
 ```
 
 Generated target Python wrappers are rendered from `src/diffmogger/kit/wrapper_template.py` and the runtime entrypoint manifest. They import from `.diffmogger/lib`; they are not tracked as templates under `templates/scripts/`.
 
 Shell entrypoints remain physical templates because locks, detached runner launch, role runners, and worker helpers need local executable files in each target.
+
+Canonical live orchestration state is `.diffmogger/runtime/orchestration.sqlite3`. `.diffmogger/runtime/canonical_state_brief.md` is the generated bounded state view agents read at run start. Markdown files under `.diffmogger/state/` and JSON files such as `.diffmogger/runtime/automation_conveyor_state.json` and `.diffmogger/runtime/automation_runner.json` are generated views, prompt inputs, exports, authored surfaces, or compatibility projections.
 
 ## Adding Or Moving Source Files
 
@@ -102,7 +105,7 @@ The manifest is the source inventory. It also enforces ignored artifacts, source
 
 The native dashboard is the only user-facing dashboard. The React/Tauri app lives under `services/agentic-dashboard/native/` and calls `scripts/dashboard_backend_cli.py`.
 
-Backend behavior belongs in `src/diffmogger/dashboard/cli.py`, `src/diffmogger/dashboard/commands/`, `src/diffmogger/dashboard/target.py`, `src/diffmogger/dashboard/jsonio.py`, and `src/diffmogger/dashboard/shared/`. `src/diffmogger/dashboard/backend_cli.py` is a compatibility facade. The frontend should call backend commands instead of scraping Markdown or reimplementing scaffold/automation logic in TypeScript.
+Backend behavior belongs in `src/diffmogger/dashboard/cli.py`, `src/diffmogger/dashboard/commands/`, `src/diffmogger/dashboard/target.py`, `src/diffmogger/dashboard/jsonio.py`, and `src/diffmogger/dashboard/shared/`. `src/diffmogger/dashboard/backend_cli.py` is a compatibility facade. The frontend should call backend commands, including `state.snapshot` for canonical state, instead of scraping Markdown or reimplementing scaffold/automation logic in TypeScript.
 
 The packaged app is source-checkout-backed. `DIFFMOGGER_KIT_ROOT=/path/to/Diffmogger` can point the backend at another checkout for debugging.
 

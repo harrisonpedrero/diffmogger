@@ -7,7 +7,7 @@ This repository is Diffmogger: a starter kit for high-agency Codex automations. 
 - Keep this kit generic and target-project agnostic. Do not introduce product-specific assumptions into core docs, prompts, scripts, schemas, or services.
 - Keep examples self-contained, fictional, and clearly reusable.
 - Prefer concise docs, concrete templates, and runnable validation.
-- Keep prompt behavior durable and project-agnostic. Put changing project state in task-file templates, not in the automation prompt.
+- Keep prompt behavior durable and project-agnostic. Put changing project state in typed SQLite runtime state; task-file Markdown is a generated prompt/handoff projection, not the authority.
 - Preserve the status model: `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, `CRITICAL_STOP`.
 - Keep secrets out of examples and docs. Use placeholders only.
 

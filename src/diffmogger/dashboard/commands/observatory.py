@@ -93,7 +93,6 @@ def observatory_native_snapshot(raw: dict[str, Any], target: Path) -> dict[str, 
     progress = raw.get("progress") if isinstance(raw.get("progress"), dict) else {}
     scorecard = raw.get("scorecard") if isinstance(raw.get("scorecard"), dict) else {}
     conveyor = raw.get("conveyor") if isinstance(raw.get("conveyor"), dict) else {}
-    signals = raw.get("signals") if isinstance(raw.get("signals"), dict) else {}
     human = raw.get("human") if isinstance(raw.get("human"), dict) else {}
     baseline = raw.get("baseline_verification") if isinstance(raw.get("baseline_verification"), dict) else {}
     first_review = raw.get("first_review") if isinstance(raw.get("first_review"), dict) else {}
@@ -158,17 +157,6 @@ def observatory_native_snapshot(raw: dict[str, Any], target: Path) -> dict[str, 
         badge("Human", pending_human, "warn" if pending_human else "good"),
     ]
     queue_totals = {name: as_int(totals.get(name)) for name in ["queued", "deferred", "applied", "failed", "skipped"]}
-    signal_nudges = [
-        {
-            "id": compact_text(item.get("id") or "signal", limit=80),
-            "owner_role": compact_text(item.get("owner_role") or "unknown", limit=40),
-            "priority": compact_text(item.get("priority") or "medium", limit=40),
-            "instructions": compact_text(item.get("instructions") or "No instructions recorded.", limit=240),
-            "next_due_at": compact_text(item.get("next_due_at") or "", limit=80),
-        }
-        for item in list(signals.get("active") or [])
-        if isinstance(item, dict)
-    ]
     history = [
         {
             "role": compact_text(item.get("role") or "role", limit=40),
@@ -227,12 +215,6 @@ def observatory_native_snapshot(raw: dict[str, Any], target: Path) -> dict[str, 
             "deferred_backlog": list(progress.get("deferred_backlog") or [])[:12],
             "deferred_triage": progress.get("deferred_triage") if isinstance(progress.get("deferred_triage"), dict) else {},
             "recent_outcomes": list(queue.get("recent_outcomes") or [])[:12],
-        },
-        "signals": {
-            "active_count": as_int(signals.get("active_count")),
-            "updated_at": signals.get("updated_at") or "never",
-            "nudges": signal_nudges,
-            "recent_completed": list(signals.get("recent_completed") or [])[:8],
         },
         "timeline": history,
         "metrics": {

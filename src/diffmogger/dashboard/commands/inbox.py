@@ -4,6 +4,8 @@ from ..errors import *
 from ..jsonio import *
 from ..target import *
 
+from diffmogger.runtime.state_store import human_messages_snapshot, record_human_message
+
 HUMAN_INTENTS = {"info", "done", "skip", "approve", "reject", "unknown"}
 
 HUMAN_REQUEST_STATUSES = {"active", "awaiting_user", "awaiting_human", "pending", "open", "unresolved"}
@@ -122,59 +124,11 @@ def classify_note(record: dict[str, Any], archived_inbox_ids: set[str]) -> str:
     return "queued"
 
 def inbox_snapshot(target: Path) -> dict[str, Any]:
-    requests = parse_markdown_records(human_file(target, "HUMAN_REQUESTS.md"), ("HR",))
-    notes = parse_markdown_records(human_file(target, "HUMAN_INBOX.md"), ("INBOX",))
-    archive_records = parse_markdown_records(human_file(target, "HUMAN_RESPONSES_ARCHIVE.md"), ("HR", "INBOX", "ARCHIVE"))
-    outbox = parse_markdown_records(human_file(target, "HUMAN_OUTBOX.md"), ("OUTBOX",))
-
-    archived_inbox_ids = {
-        str(record.get("source_inbox_id") or "")
-        for record in archive_records
-        if str(record.get("source_inbox_id") or "").strip()
-    }
-    for record in requests:
-        record["kind"] = "request"
-        record["ui_state"] = classify_request(record)
-        record["source_file_key"] = "human.requests_from_automation"
-    for record in notes:
-        record["kind"] = "note"
-        record["ui_state"] = classify_note(record, archived_inbox_ids)
-        record["source_file_key"] = "human.messages_waiting_for_next_run"
-    for record in archive_records:
-        record["kind"] = "archive"
-        record["ui_state"] = "archived"
-        record["source_file_key"] = "human.resolved_conversation_history"
-    for record in outbox:
-        record["kind"] = "outbound"
-        record["ui_state"] = "sent"
-        record["source_file_key"] = "human.sent_updates_delivery_log"
-
-    handled_requests = [record for record in requests if record.get("ui_state") == "handled"]
-    active_requests = [record for record in requests if record.get("ui_state") == "pending"]
-    active_notes = [record for record in notes if record.get("ui_state") in {"queued", "failed"}]
-    archive_items = [*archive_records, *handled_requests, *[record for record in notes if record.get("ui_state") in {"archived", "consumed"}]]
+    snapshot = human_messages_snapshot(target)
     return {
         "target": target_metadata(target),
         "bridge_mode": human_bridge_mode_from_state(target),
-        "requests": requests,
-        "active_requests": active_requests,
-        "notes": notes,
-        "active_notes": active_notes,
-        "archive": archive_items,
-        "outbox": outbox,
-        "counts": {
-            "pending_requests": len(active_requests),
-            "queued_notes": len([record for record in notes if record.get("ui_state") == "queued"]),
-            "failed_notes": len([record for record in notes if record.get("ui_state") == "failed"]),
-            "archived_items": len(archive_items),
-            "outbound_records": len(outbox),
-        },
-        "raw_file_keys": [
-            "human.requests_from_automation",
-            "human.messages_waiting_for_next_run",
-            "human.sent_updates_delivery_log",
-            "human.resolved_conversation_history",
-        ],
+        **snapshot,
     }
 
 def command_inbox_load(args: argparse.Namespace) -> dict[str, Any]:
@@ -201,22 +155,25 @@ def command_inbox_send_note(args: argparse.Namespace) -> dict[str, Any]:
             exit_code=2,
             error_type="missing_body",
         )
-    dashboard_app = load_dashboard_module()
     request_id = str(args.related or "").strip() or "general"
-    inbox_id = dashboard_app.append_manual_inbox_entry(
+    note = record_human_message(
         target,
-        body,
+        kind="note",
         request_id=request_id,
-        parsed_intent=normalize_human_intent(args.intent),
+        body=body,
+        intent=normalize_human_intent(args.intent),
+        status="unhandled",
+        channel="manual-dashboard",
     )
+    inbox_id = str(note.get("id") or "")
     snapshot = inbox_snapshot(target)
-    note = next((record for record in snapshot["notes"] if record.get("id") == inbox_id), None)
+    note = next((record for record in snapshot["notes"] if record.get("id") == inbox_id), note)
     return {
         "target": target_metadata(target),
         "inbox_id": inbox_id,
         "status": "queued",
         "note": note,
-        "inbox_path": str(human_file(target, "HUMAN_INBOX.md")),
+        "state": "sqlite",
         "snapshot": snapshot,
     }
 
@@ -236,21 +193,24 @@ def command_inbox_reply_request(args: argparse.Namespace) -> dict[str, Any]:
             exit_code=2,
             error_type="missing_body",
         )
-    dashboard_app = load_dashboard_module()
-    inbox_id = dashboard_app.append_manual_inbox_entry(
+    note = record_human_message(
         target,
-        body,
+        kind="note",
         request_id=request_id,
-        parsed_intent=normalize_human_intent(args.intent),
+        body=body,
+        intent=normalize_human_intent(args.intent),
+        status="unhandled",
+        channel="manual-dashboard",
     )
+    inbox_id = str(note.get("id") or "")
     snapshot = inbox_snapshot(target)
-    note = next((record for record in snapshot["notes"] if record.get("id") == inbox_id), None)
+    note = next((record for record in snapshot["notes"] if record.get("id") == inbox_id), note)
     return {
         "target": target_metadata(target),
         "request_id": request_id,
         "inbox_id": inbox_id,
         "status": "queued",
         "note": note,
-        "inbox_path": str(human_file(target, "HUMAN_INBOX.md")),
+        "state": "sqlite",
         "snapshot": snapshot,
     }

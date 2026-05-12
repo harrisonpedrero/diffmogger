@@ -213,7 +213,7 @@ const defaultDraft: IntakeDraft = {
   multi_role_allow_remotes: false,
   optional_mcp_servers: [],
   automation_run_mode: "continuous_improvement",
-  ticket_run_file: ".diffmogger/state/TICKET_RUN.md",
+  ticket_run_file: "",
   ticket_run_seed_tickets: [],
   ticket_completion_notify: true,
   meaningful_deliverable: "A runnable, verified change that improves the product or developer workflow.",
@@ -1308,27 +1308,18 @@ export function BriefWizard(props: {
               className={ticketCampaign ? "selected" : ""}
               onClick={() => setDraft((current) => applyAutomationScope(current, "ticket_campaign"))}
             >
-              <strong>Ticket file</strong>
-              <span>Use the configured ticket file and completion signal.</span>
+              <strong>Ticket queue</strong>
+              <span>Use the dashboard queue and completion signal.</span>
             </button>
           </div>
         </section>
         <section className="brief-section span-3">
-          <div className="brief-form-grid two">
-            <FormField label="Ticket run file" help="Used when Ticket campaign is selected.">
-              <input
-                disabled={!ticketCampaign}
-                value={draft.ticket_run_file}
-                onChange={(event) => updateDraft("ticket_run_file", event.target.value)}
-              />
-            </FormField>
-          </div>
           {ticketCampaign && (
             <div className="ticket-queue-panel seed">
               <div className="panel-heading-row">
                 <div>
                   <h2>Ticket Queue</h2>
-                  <p>{draft.ticket_run_seed_tickets.length} seed ticket{draft.ticket_run_seed_tickets.length === 1 ? "" : "s"} will be written into the scaffolded ticket file.</p>
+                  <p>{draft.ticket_run_seed_tickets.length} seed ticket{draft.ticket_run_seed_tickets.length === 1 ? "" : "s"} will be written into the scaffolded SQLite queue.</p>
                 </div>
                 <div className="inline-actions">
                   <button className="icon-text-button" onClick={draftSeedTicketsFromIntake} disabled={ticketDraftBusy || !targetPath}>
@@ -1617,7 +1608,7 @@ export function BriefWizard(props: {
 
   function renderReviewStep() {
     const modeLabel = `Continuous role conveyor · ${
-      automationScopeForDraft(draft) === "ticket_campaign" ? "ticket file" : "continuous improvement"
+      automationScopeForDraft(draft) === "ticket_campaign" ? "ticket queue" : "continuous improvement"
     }`;
     const reviewTicketIssues = localTicketIssues(draft.ticket_run_seed_tickets);
     const previewFiles = preview ? visibleScaffoldPreviewFiles(preview.files) : null;

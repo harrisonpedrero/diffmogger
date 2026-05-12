@@ -17,16 +17,14 @@ Create a concise retrofit plan, then implement the automation docs:
 - `.diffmogger/agentic/automation_prompt.md`
 - `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`
 - `.diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md`
-- `.diffmogger/state/HUMAN_REQUESTS.md`
-- `.diffmogger/state/HUMAN_INBOX.md`
-- `.diffmogger/state/HUMAN_OUTBOX.md`
-- `.diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md`
 - `.diffmogger/state/HUMAN_BRIDGE_SETUP.md`
 - `.diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md`
 - `.diffmogger/state/DAILY_AUTOMATION_REVIEW.md`
-- local helper scripts under `.diffmogger/scripts/` for lock, scheduled run, worker reports, worker summaries, and state compaction
+- local helper scripts under `.diffmogger/scripts/` for locks, run control, worker reports, worker summaries, state compaction, and the canonical state brief
 
 Respect the existing stack and conventions. Do not rewrite the product just to fit the kit.
+
+Canonical live orchestration state should remain `.diffmogger/runtime/orchestration.sqlite3`; `.diffmogger/runtime/canonical_state_brief.md` is the generated state view agents read instead of inspecting SQLite manually.
 
 The first task file should honestly describe:
 
@@ -42,6 +40,6 @@ The first task file should honestly describe:
 
 If the repo has unclear setup, create a human request only when the owner must act. Otherwise infer and document safe assumptions.
 
-The recurring automation prompt must distinguish structured human replies from freeform commands. In `file_only` mode, summary/status requests should be satisfied locally in Markdown or app artifacts. In `local_notifier` or `discord_notifier` mode, if the human asks to be messaged, replied to, or sent a status update, the automation should use `POST http://127.0.0.1:8765/api/notify` with `event_kind: "message"` when available and should record `NOTIFIER_UNREACHABLE` in `.diffmogger/state/HUMAN_OUTBOX.md` when unavailable.
+The recurring automation prompt must distinguish structured human replies from freeform commands. In `file_only` mode, summary/status requests should be satisfied through the dashboard or requested local artifacts. In `local_notifier` or `discord_notifier` mode, if the human asks to be messaged, replied to, or sent a status update, the automation should use `POST http://127.0.0.1:8765/api/notify` with `event_kind: "message"` when available and should record `NOTIFIER_UNREACHABLE` in typed human-message state when unavailable.
 
 Run available validation commands if safe. Update the task file with results.

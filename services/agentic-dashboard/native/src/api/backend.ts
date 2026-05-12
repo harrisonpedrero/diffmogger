@@ -53,6 +53,25 @@ export type RegisteredFile = {
   modified_at: string | null;
 };
 
+export type CanonicalStateSnapshot = {
+  schema_version: number;
+  authority: string;
+  status: string;
+  database: Record<string, unknown>;
+  projection: Record<string, unknown>;
+  projections?: Record<string, Record<string, unknown>>;
+  contract: Record<string, unknown>;
+  counts: Record<string, number>;
+  last_event?: Record<string, unknown>;
+  last_checkpoint?: Record<string, unknown>;
+  recent_events: Array<Record<string, unknown>>;
+  open_blockers: Array<Record<string, unknown>>;
+  next_actions: Array<Record<string, unknown>>;
+  validations: Record<string, unknown>;
+  conveyor_state?: Record<string, unknown>;
+  runner_state?: Record<string, unknown>;
+};
+
 export type ProjectSnapshot = {
   target: TargetMetadata;
   brief: {
@@ -75,8 +94,8 @@ export type ProjectSnapshot = {
     };
     queue?: Record<string, unknown>;
     conveyor?: Record<string, unknown>;
+    state?: CanonicalStateSnapshot | Record<string, unknown>;
     progress?: Record<string, unknown>;
-    signals?: Record<string, unknown>;
     scorecard?: Record<string, unknown>;
     first_review?: Record<string, unknown>;
     follow_through?: Record<string, unknown>;
@@ -173,12 +192,6 @@ export type ObservatorySnapshot = {
     deferred_backlog: Array<Record<string, unknown>>;
     deferred_triage?: Record<string, unknown>;
     recent_outcomes: Array<Record<string, unknown>>;
-  };
-  signals: {
-    active_count: number;
-    updated_at?: string;
-    nudges: Array<Record<string, unknown>>;
-    recent_completed: Array<Record<string, unknown>>;
   };
   timeline: Array<Record<string, unknown>>;
   metrics: Record<string, number>;
@@ -314,6 +327,11 @@ export type AdvancedDebugBundleResult = {
   omitted: string[];
 };
 
+export type StateSnapshotResult = {
+  target: TargetMetadata;
+  state: CanonicalStateSnapshot;
+};
+
 export type DiagnosticsSnapshot = {
   target: TargetMetadata;
   prerequisites: {
@@ -322,6 +340,7 @@ export type DiagnosticsSnapshot = {
     required_failures: Array<Record<string, unknown>>;
   };
   required_files: Record<string, unknown>;
+  state?: Record<string, unknown>;
   integration_safety: Record<string, unknown>;
   tools: Array<Record<string, unknown>>;
   target_writability: Record<string, unknown>;

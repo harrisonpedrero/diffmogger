@@ -730,7 +730,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         const response = await fetch(STATE_URL + "?t=" + Date.now(), {cache: "no-store"});
         render(await response.json());
       } catch (error) {
-        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, signals: {active_count: 0, active: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, first_review: {}, follow_through: {}, recommendation_history: {records: []}, worker_strategy: {}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
+        const fallback = INITIAL_STATE || {target_name: "target", generated_at: new Date().toISOString(), task: {}, human: {}, git: {}, queue: {totals: {}, counts_by_role: {}, manifests: []}, conveyor: {decision_queue: [], history: []}, scorecard: {items: []}, first_review: {}, follow_through: {}, recommendation_history: {records: []}, worker_strategy: {}, review: {items: [], checks: [], known_issues: []}, empty_states: {}, logs: []};
         fallback.progress_recent = "Observatory refresh failed: " + error;
         render(fallback);
       }

@@ -42,7 +42,7 @@ function projectSnapshot(): ProjectSnapshot {
 }
 
 describe("AdvancedPage", () => {
-  it("renders Sidecar files, diagnostics, settings, and debug bundle tabs", () => {
+  it("renders Sidecar files, canonical state, diagnostics, settings, and debug bundle tabs", () => {
     const html = renderToStaticMarkup(
       <AdvancedPage
         snapshot={projectSnapshot()}
@@ -55,6 +55,7 @@ describe("AdvancedPage", () => {
     expect(html).toContain("Managed files");
     expect(html).toContain('role="tablist"');
     expect(html).toContain("Files");
+    expect(html).toContain("Canonical state");
     expect(html).toContain("Diagnostics");
     expect(html).toContain("Settings");
     expect(html).toContain("Debug bundle");

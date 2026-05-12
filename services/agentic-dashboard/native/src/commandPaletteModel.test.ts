@@ -74,12 +74,13 @@ describe("command palette model", () => {
     expect(ids).toContain("open-run-control");
     expect(ids).toContain("open-human-bridge");
     expect(ids).toContain("open-sidecar");
+    expect(ids).toContain("open-canonical-state");
     expect(ids).toContain("create-new-project");
     expect(ids).toContain("close-project");
     expect(ids).toContain("start-automation");
     expect(ids).toContain("stop-automation");
     expect(ids).toContain("export-debug-bundle");
-    expect(ids).toHaveLength(22);
+    expect(ids).toHaveLength(23);
   });
 
   it("explains disabled target-scoped commands without a selected target", () => {
@@ -145,6 +146,7 @@ describe("command palette model", () => {
     expect(filterPaletteCommands(commands, "inbox").map((command) => command.id)).toContain("open-human-bridge");
     expect(filterPaletteCommands(commands, "advanced").map((command) => command.id)).toContain("open-sidecar");
     expect(filterPaletteCommands(commands, "sidecar").map((command) => command.id)).toContain("open-sidecar");
+    expect(filterPaletteCommands(commands, "sqlite state").map((command) => command.id)).toContain("open-canonical-state");
     expect(filterPaletteCommands(commands, "debug bundle").map((command) => command.id)).toContain("export-debug-bundle");
     expect(filterPaletteCommands(commands, "inbox note").map((command) => command.id)).toContain("send-note-next-run");
     expect(filterPaletteCommands(commands, "raw tasks").map((command) => command.id)).toEqual([

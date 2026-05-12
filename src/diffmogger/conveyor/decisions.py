@@ -17,7 +17,7 @@ from .queue_state import (
     repeated_hardener_guardrail_deferral_info,
     target_has_multi_role,
     target_role_profile,
-    unhandled_human_inbox_count,
+    unhandled_human_message_count,
 )
 from .state import *
 from .tickets import candidate_done_hardener_catchup_reason, ticket_campaign_terminal, unverified_candidate_done_cluster_info
@@ -125,8 +125,8 @@ def choose_next(
                 False,
             )
 
-    if unhandled_human_inbox_count(target):
-        return "planner", "unhandled human inbox message(s) need triage", False
+    if unhandled_human_message_count(target):
+        return "planner", "unhandled human message(s) need triage", False
 
     if post_builder_hardener_pending(state):
         return "hardener", post_builder_hardener_reason(target), False
@@ -261,8 +261,8 @@ def conveyor_decision_queue(
             add("planner", "ready", f"no-progress circuit breaker tripped: {reason}")
         else:
             add(None, "blocked", f"no-progress circuit breaker active after planner handoff: {reason}")
-    elif unhandled_human_inbox_count(target):
-        add("planner", "ready", "unhandled human inbox message(s) need triage")
+    elif unhandled_human_message_count(target):
+        add("planner", "ready", "unhandled human message(s) need triage")
     else:
         fast_follow_reason = planner_fast_follow_reason_after_deferral_change(state)
         if fast_follow_reason:

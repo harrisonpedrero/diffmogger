@@ -23,6 +23,7 @@ from diffmogger.runtime.paths import (
     sidecar_rel,
     sidecarize_text,
 )
+from diffmogger.runtime.state_store import write_canonical_state_brief, write_ticket_run_state
 
 
 def find_kit_root() -> Path:
@@ -36,12 +37,15 @@ KIT_ROOT = find_kit_root()
 TEMPLATE_ROOT = KIT_ROOT / "templates"
 RUNTIME_PACKAGE_ROOT = KIT_ROOT / "src" / "diffmogger"
 STARTER_KIT_MANIFEST = KIT_ROOT / "validation" / "starter_kit_manifest.json"
-HUMAN_BRIDGE_FILES = {
-    "docs/HUMAN_REQUESTS.md",
+HUMAN_BRIDGE_SETUP_FILES = {
+    "docs/HUMAN_BRIDGE_SETUP.md",
+}
+LEGACY_MARKDOWN_QUEUE_ALIASES = {
     "docs/HUMAN_INBOX.md",
     "docs/HUMAN_OUTBOX.md",
+    "docs/HUMAN_REQUESTS.md",
     "docs/HUMAN_RESPONSES_ARCHIVE.md",
-    "docs/HUMAN_BRIDGE_SETUP.md",
+    "docs/TICKET_RUN.md",
 }
 VALID_HUMAN_BRIDGE_MODES = {"disabled", "file_only", "local_notifier", "discord_notifier"}
 VALID_PROJECT_MODES = {"fresh_project", "existing_project"}
@@ -51,9 +55,6 @@ DEFAULT_MAX_WRITE_WORKER_COUNT = 3
 VALID_ROLE_PROFILES = {"single_lane", "planner_builder_hardener_integrator"}
 VALID_AUTOMATION_RUN_MODES = {"continuous_improvement", "ticket_campaign"}
 VALID_OPTIONAL_MCP_SERVERS = {"context7", "playwright"}
-TICKET_RUN_FILES = {
-    "docs/TICKET_RUN.md",
-}
 MULTI_ROLE_FILES = {
     ".agentic/roles/planner.md",
     ".agentic/roles/builder.md",
@@ -91,13 +92,16 @@ DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS = [
     "/target/automation_runner.json",
     "/target/automation_venvs/",
     "/target/automation_worktrees/",
+    "/target/canonical_state_brief.md",
     "/target/codex_automation.lock",
+    "/target/orchestration.sqlite3",
+    "/target/orchestration.sqlite3-shm",
+    "/target/orchestration.sqlite3-wal",
     "/target/prisma-cache/",
     "/target/ticket_run_completion.json",
     "/target/ticket_run_reports/",
 ]
 
-DEFAULT_TICKET_RUN_FILE = sidecar_rel("docs/TICKET_RUN.md")
 INITIAL_GIT_COMMIT_MESSAGE = "chore: initial commit"
 GIT_SETUP_IDENTITY = {
     "GIT_AUTHOR_NAME": "Diffmogger Setup",
@@ -520,13 +524,13 @@ No project-scoped MCP config is generated unless `optional_mcp_servers` is set i
 
 def ticket_run_values(data: dict[str, Any]) -> dict[str, str]:
     mode = normalize_automation_run_mode(data.get("automation_run_mode"))
-    ticket_file = str(data.get("ticket_run_file") or DEFAULT_TICKET_RUN_FILE).strip() or DEFAULT_TICKET_RUN_FILE
+    ticket_file = "SQLite ticket queue"
     notify = normalize_bool(data.get("ticket_completion_notify"), True)
     ticket_json = json.dumps(seed_ticket_items(data), indent=4)
     if mode == "ticket_campaign":
         section = f"""Automation run mode: `ticket_campaign`
 
-Use `{ticket_file}` as the bounded ticket source of truth. Do not invent new backlog after listed tickets are done or blocked.
+Use the dashboard-backed SQLite ticket queue as the bounded ticket-scope surface. Runtime decisions, events, blockers, next actions, and ticket status remain canonical in `target/orchestration.sqlite3`; agents should read `target/canonical_state_brief.md` and use `scripts/ticket_run.py` instead of inspecting SQLite manually. Do not invent new backlog after listed tickets are done or blocked.
 
 Before choosing ticket work in any normal campaign run, run:
 
@@ -547,15 +551,15 @@ python3 scripts/ticket_run.py . should-halt --finalize
 Then stop launching new work. Diffmogger writes a local report, sends a native desktop notification when enabled, records fallback outbox state if notification delivery fails, and leaves remote push/PR creation to the human."""
         task_notes = f"""Ticket campaign mode: `ticket_campaign`
 
-- Ticket source: `{ticket_file}`
+- Ticket authoring surface: dashboard-backed SQLite ticket queue
 - Bootstrap boundary: readiness-only; do not implement tickets during bootstrap.
 - Normal campaign runs select one dependency-ready ticket with `python3 scripts/ticket_run.py . next --json`.
-- Optional dependencies: use `depends_on` arrays in `{ticket_file}` when one ticket must wait for another.
+- Optional dependencies: use `depends_on` arrays in the dashboard ticket queue when one ticket must wait for another.
 - Halt when every ticket is done or all remaining tickets are blocked.
 - Completion report is written under `target/ticket_run_reports/`.
 - Completion notification uses the local desktop notification system when enabled.
 - Remote push/PR creation is manual."""
-        development = f"""Ticket campaign mode is enabled. Edit `{ticket_file}` with concrete local tickets before starting unattended automation. Use optional `depends_on` arrays when one ticket must wait for another ticket to be `done` with evidence.
+        development = """Ticket campaign mode is enabled. Edit the dashboard ticket queue with concrete local tickets before starting unattended automation. Use optional `depends_on` arrays when one ticket must wait for another ticket to be `done` with evidence.
 
 ```bash
 python3 scripts/ticket_run.py . status --json
@@ -563,15 +567,15 @@ python3 scripts/ticket_run.py . next --json
 python3 scripts/ticket_run.py . should-halt --finalize
 ```
 
-Bootstrap is readiness-only in ticket-campaign mode: it should confirm setup, ticket shape, and verification commands, but it must not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, or finalize the campaign. Normal campaign runs should act on at most one `next --json` selection. The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in `docs/HUMAN_OUTBOX.md`."""
+Bootstrap is readiness-only in ticket-campaign mode: it should confirm setup, ticket shape, and verification commands, but it must not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, or finalize the campaign. Normal campaign runs should act on at most one `next --json` selection. The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in typed human-message state."""
     else:
         section = """Automation run mode: `continuous_improvement`
 
-Use the normal horizon/backlog loop. Ticket-campaign halting is inactive unless the project intake explicitly sets `automation_run_mode: ticket_campaign` and provides `docs/TICKET_RUN.md`. The helper `scripts/ticket_run.py` is available for future bounded ticket runs."""
+Use the normal horizon/backlog loop. Ticket-campaign halting is inactive unless the project intake explicitly sets `automation_run_mode: ticket_campaign` and seeds the dashboard-backed SQLite ticket queue. The helper `scripts/ticket_run.py` is available for future bounded ticket runs."""
         task_notes = """Ticket campaign mode: disabled.
 
 - Use the normal continuous-improvement horizon loop."""
-        development = """Ticket campaign mode is disabled by default. To run against bounded tickets later, set `automation_run_mode` to `ticket_campaign` in `.agentic/project_intake.json` and add `docs/TICKET_RUN.md`.
+        development = """Ticket campaign mode is disabled by default. To run against bounded tickets later, set `automation_run_mode` to `ticket_campaign` in `.agentic/project_intake.json` and add tickets through the dashboard.
 
 ```bash
 python3 scripts/ticket_run.py . status --json
@@ -579,7 +583,6 @@ python3 scripts/ticket_run.py . should-halt --finalize
 ```"""
     return {
         "AUTOMATION_RUN_MODE": mode,
-        "TICKET_RUN_FILE": ticket_file,
         "TICKET_RUN_TICKETS_JSON": ticket_json,
         "TICKET_COMPLETION_NOTIFY": "true" if notify else "false",
         "TICKET_CAMPAIGN_SECTION": section.strip(),
@@ -621,14 +624,14 @@ def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str
         data.get("beyond_mvp"),
         "continue improving core value, demo quality, integrations, and automation reliability",
     )
-    ticket_file = str(data.get("ticket_run_file") or DEFAULT_TICKET_RUN_FILE).strip() or DEFAULT_TICKET_RUN_FILE
+    ticket_file = "dashboard-backed SQLite ticket queue"
 
     if mode == "ticket_campaign":
         rows = [
             (
                 "T1 Ticket-run readiness",
-                f"Confirm `{ticket_file}`, local setup, and verification are ready for `{project_name}`.",
-                "The ticket source exists, setup expectations are clear, and at least one useful verification path is available or honestly blocked.",
+                    f"Confirm the {ticket_file}, local setup, and verification are ready for `{project_name}`.",
+                "The ticket queue exists, setup expectations are clear, and at least one useful verification path is available or honestly blocked.",
             ),
             (
                 "T2 Ticket implementation",
@@ -646,7 +649,7 @@ def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str
                 "`scripts/ticket_run.py . should-halt --finalize` writes the report and completion state, then automation stops launching new work.",
             ),
         ]
-        guidance = f"""Progression is mode-aware for this target. Because `automation_run_mode` is `ticket_campaign`, use the bounded ticket-run phases below instead of a product roadmap. `{ticket_file}` is the source of truth for scope; do not invent new roadmap work after listed tickets are done or blocked. After T1 readiness, select ticket work with `python3 scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run.
+        guidance = f"""Progression is mode-aware for this target. Because `automation_run_mode` is `ticket_campaign`, use the bounded ticket-run phases below instead of a product roadmap. The {ticket_file} is the ticket-scope authoring surface; runtime decisions and blockers remain canonical in SQLite. Do not invent new roadmap work after listed tickets are done or blocked. After T1 readiness, select ticket work with `python3 scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run.
 
 {markdown_table(rows)}
 
@@ -664,11 +667,11 @@ If the phase criteria are met, update the current horizon to the next ticket-run
         return {
             "PRODUCT_HORIZON_GUIDANCE": guidance.strip(),
             "CURRENT_HORIZON": "T1 Ticket-run readiness",
-            "HORIZON_GOAL": f"Confirm `{ticket_file}`, local setup, and verification are ready for `{project_name}`.",
+            "HORIZON_GOAL": f"Confirm the {ticket_file}, local setup, and verification are ready for `{project_name}`.",
             "HORIZON_ADVANCEMENT_CRITERIA": "\n".join(
                 [
-                    f"  - `{ticket_file}` exists and contains the bounded ticket source of truth.",
-                    "  - `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` can parse the ticket file, or an honest blocker is documented.",
+                    "  - The dashboard-backed SQLite ticket queue contains the bounded ticket scope.",
+                    "  - `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` can read the ticket queue, or an honest blocker is documented.",
                     "  - Local setup and verification expectations are documented.",
                     "  - The first ticket implementation run can start safely, or an environment blocker is documented.",
                 ]
@@ -676,34 +679,34 @@ If the phase criteria are met, update the current horizon to the next ticket-run
             "NEXT_HORIZON_CANDIDATE": "T2 Ticket implementation",
             "REMAINING_WORK_BEFORE_ADVANCEMENT": "\n".join(
                 [
-                    f"  - Populate or confirm `{ticket_file}`.",
+                    "  - Populate or confirm the dashboard ticket queue.",
                     "  - Run the readiness-only bootstrap prompt, verify local setup, and record ticket-readiness evidence.",
                     "  - Do not implement ticket acceptance criteria during bootstrap.",
                 ]
             ),
             "INITIAL_KNOWN_ISSUES": "\n".join(
                 [
-                    "- Ticket source still needs to be populated or confirmed.",
+                    "- Ticket queue still needs to be populated or confirmed.",
                     "- Verification commands may need adjustment after bootstrap.",
                     "- Automation runs should use `scripts/run_codex_automation.sh`, which wraps local lock acquire/release before code mutation.",
-                    "- Continuous conveyor automation should use `scripts/run_conveyor_automation.sh`, which records local state and delegates to the target-local wrappers.",
+                    "- Continuous conveyor automation should use `scripts/run_conveyor_automation.sh`, which records canonical SQLite state and delegates to the target-local wrappers.",
                 ]
             ),
             "BEST_NEXT_MILESTONE": f"Complete T1 readiness-only ticket bootstrap for `{project_name}` and record whether one-ticket campaign runs can start.",
-            "SUGGESTED_NEXT_SPRINT_TASK": f"Run `docs/INITIAL_BOOTSTRAP_PROMPT.md` in Codex, confirm `{ticket_file}`, run ticket status/next parsing, setup docs, checks, automation state, and ticket-readiness evidence without implementing tickets.",
+            "SUGGESTED_NEXT_SPRINT_TASK": "Run `docs/INITIAL_BOOTSTRAP_PROMPT.md` in Codex, confirm the dashboard ticket queue, run ticket status/next parsing, setup docs, checks, automation state, and ticket-readiness evidence without implementing tickets.",
             "BACKLOG_SECTION_HEADING": "Deferred / Follow-Up Tickets",
             "BACKLOG_SECTION_BODY": "\n".join(
                 [
-                    "- Keep follow-up work in `docs/TICKET_RUN.md` or a new local ticket file.",
+                    "- Keep follow-up work in the dashboard-backed ticket queue.",
                     "- Record blocked tickets with the exact missing human or environment action.",
                     "- Do not create open-ended roadmap work after the bounded ticket set is finalized.",
                 ]
             ),
-            "CONTINUE_RATIONALE": "Continue. The ticket campaign has a bounded local source of truth and no active blocker.",
-            "AGENTS_PROGRESS_RULE": "Treat the ticket source as a bounded, dependency-aware execution queue; after readiness, act on at most one `scripts/ticket_run.py . next --json` selection per run.",
+            "CONTINUE_RATIONALE": "Continue. The ticket campaign has bounded local ticket scope and no active blocker.",
+            "AGENTS_PROGRESS_RULE": "Treat the ticket queue as a bounded, dependency-aware execution queue; after readiness, act on at most one `scripts/ticket_run.py . next --json` selection per run.",
             "INITIAL_PROGRESS_EVIDENCE_LABEL": "ticket-readiness evidence",
-            "BOOTSTRAP_SCOPE_BOUNDARY": "Ticket-campaign bootstrap is readiness-only: inspect the repo, confirm the ticket file parses, run `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` when possible, configure docs/checks, and update task state. If the ticket file is missing, placeholder-only, malformed, or ambiguous, record `ACTIVE_WITH_PENDING_USER_INPUT` or an honest blocker instead of solving tickets. Do not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, finalize the campaign, or continue into the first ticket.",
-            "BOOTSTRAP_END_NOTE": "Use the ticket source as the first bounded readiness phase. Do not implement tickets during bootstrap, and do not create extra roadmap work after every ticket is done or blocked.",
+            "BOOTSTRAP_SCOPE_BOUNDARY": "Ticket-campaign bootstrap is readiness-only: inspect the repo, confirm the dashboard ticket queue parses, run `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` when possible, configure docs/checks, and update task state. If the ticket queue is empty, placeholder-only, malformed, or ambiguous, record `ACTIVE_WITH_PENDING_USER_INPUT` or an honest blocker instead of solving tickets. Do not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, finalize the campaign, or continue into the first ticket.",
+            "BOOTSTRAP_END_NOTE": "Use the ticket queue as the first bounded readiness phase. Do not implement tickets during bootstrap, and do not create extra roadmap work after every ticket is done or blocked.",
         }
 
     rows = [
@@ -748,7 +751,7 @@ If the phase criteria are met, update the current horizon to the next ticket-run
             "The workflow has been reviewed, simplified, strengthened, or compacted based on real automation evidence.",
         ),
     ]
-    guidance = f"""Product horizons are explicit state, not just inspiration. At the start of each run, read the `## Product Horizon State` section in `docs/CODEX_AUTOMATION_TASKS.md`. Choose work that advances the current horizon unless a regression, blocker, or human instruction requires a different focus.
+    guidance = f"""Product horizons are explicit prompt/handoff state, not just inspiration. At the start of each run, read `target/canonical_state_brief.md` and the `## Product Horizon State` section in `docs/CODEX_AUTOMATION_TASKS.md`. Choose work that advances the current horizon unless a regression, blocker, or human instruction requires a different focus.
 
 These horizons were scaffolded from the project intake:
 
@@ -785,7 +788,7 @@ Long-run direction: {long_run}"""
                 "- Product baseline still needs to be created or inspected.",
                 "- Verification commands may need adjustment after bootstrap.",
                 "- Automation runs should use `scripts/run_codex_automation.sh`, which wraps local lock acquire/release before code mutation.",
-                "- Continuous conveyor automation should use `scripts/run_conveyor_automation.sh`, which records local state and delegates to the target-local wrappers.",
+                    "- Continuous conveyor automation should use `scripts/run_conveyor_automation.sh`, which records canonical SQLite state and delegates to the target-local wrappers.",
             ]
         ),
         "BEST_NEXT_MILESTONE": f"Complete H1 Runnable baseline for `{project_name}` and record whether the project is ready to advance to H2 Local-first demo.",
@@ -1120,18 +1123,18 @@ def multi_role_values(data: dict[str, Any]) -> dict[str, str]:
 
 Role profile: `{profile}`
 
-Diffmogger uses a continuous local state-machine conveyor. Role prompts live under `.agentic/roles/`, isolated git worktrees live under `target/automation_worktrees/`, queued patches live under `target/automation_queue/`, and durable progress state lives in `docs/MULTI_ROLE_PROGRESS.md`.
+Diffmogger uses a continuous local state-machine conveyor. Role prompts live under `.agentic/roles/`, isolated git worktrees live under `target/automation_worktrees/`, queued patches live under `target/automation_queue/`, canonical runtime state lives in `target/orchestration.sqlite3`, and agents read the generated `target/canonical_state_brief.md` view. `docs/MULTI_ROLE_PROGRESS.md` is a human-readable projection/export.
 
-The dashboard Start button launches `scripts/run_conveyor_automation.sh` as a detached local runner. The conveyor chooses the next runnable lane from current state, prioritizing queued integration first, baseline repair, human inbox triage, fast-follow replanning after planner deferral changes, post-builder hardening, candidate verification, and then planner/builder/hardener state transitions.
+The dashboard Start button launches `scripts/run_conveyor_automation.sh` as a detached local runner. The conveyor chooses the next runnable lane from current state, prioritizing queued integration first, baseline repair, typed human-message triage, fast-follow replanning after planner deferral changes, post-builder hardening, candidate verification, and then planner/builder/hardener state transitions.
 
 Multi-role mode is local-only. Roles must never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run any git command that touches a remote. Local commits, local branches, local tags, and local worktrees are allowed. Any remote-touching attempt is a `CRITICAL_STOP`.
 
-Planner, builder, and hardener start from the latest main `HEAD` at run start. They may see partially integrated state from earlier patches in the same cycle; this is accepted. The integrator owns the main checkout, applies queued patches FIFO, verifies, creates local checkpoint commits, updates `docs/CODEX_AUTOMATION_TASKS.md`, updates `docs/MULTI_ROLE_PROGRESS.md`, and enforces retention."""
+Planner, builder, and hardener start from the latest main `HEAD` at run start. They may see partially integrated state from earlier patches in the same cycle; this is accepted. The integrator owns the main checkout, applies queued patches FIFO, verifies, creates local checkpoint commits, updates typed state plus `docs/CODEX_AUTOMATION_TASKS.md`, refreshes `docs/MULTI_ROLE_PROGRESS.md` as a projection, and enforces retention."""
         guardrails = """- Multi-role automation is enabled by default and runs through the continuous conveyor.
 - Multi-role role runs require an initialized local git repo.
 - Multi-role mode is local-only: never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run git commands that touch a remote.
 - Role scripts must refuse to run when `git remote -v` is non-empty unless `MULTI_ROLE_ALLOW_REMOTES=1`.
-- Integrator owns main-checkout mutation, local checkpoint commits, FIFO patch application, verification, task-state updates, and `docs/MULTI_ROLE_PROGRESS.md`.
+- Integrator owns main-checkout mutation, local checkpoint commits, FIFO patch application, verification, typed state updates, and generated task/progress projections.
 - Planner, builder, and hardener must use isolated worktrees and queue patches instead of mutating the main checkout.
 - Integrator must checkpoint dirty main changes as-is before applying queued patches; do not revert or discard human changes.
 - Integrator must defer conflicting, stale, guardrail-violating, or verification-failing patches with machine-readable deferral reasons."""
@@ -1139,8 +1142,8 @@ Planner, builder, and hardener start from the latest main `HEAD` at run start. T
 
 - Role profile: `{profile}`
 - Continuous conveyor: `scripts/run_conveyor_automation.sh`.
-- The conveyor prioritizes queued integration, baseline repair, human inbox triage, fast-follow replanning, post-builder hardening, candidate verification, and then planner/builder/hardener state transitions.
-- Integrator maintains `docs/MULTI_ROLE_PROGRESS.md` and local checkpoint commits.
+- The conveyor prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning, post-builder hardening, candidate verification, and then planner/builder/hardener state transitions.
+- Integrator refreshes `docs/MULTI_ROLE_PROGRESS.md` as a projection and creates local checkpoint commits.
 - Deferred patches remain visible through `scripts/list_deferred_patches.py`; use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local triage or add `--decision-template` for a per-manifest cleanup worksheet.
 - Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""
         development = f"""Multi-role automations allowed: true
@@ -1270,37 +1273,23 @@ def parse_intake(path: Path) -> dict[str, Any]:
 def bridge_values(mode: str, text_responses: bool) -> dict[str, str]:
     enabled = mode != "disabled"
     file_reads = ""
-    if enabled:
-        file_reads = """docs/HUMAN_REQUESTS.md
-docs/HUMAN_INBOX.md
-docs/HUMAN_OUTBOX.md
-docs/HUMAN_RESPONSES_ARCHIVE.md"""
 
     if mode in {"local_notifier", "discord_notifier"}:
         channel_note = (
             "Discord notifier mode posts progress updates to the configured progress channel, "
             "direct human messages to the configured messaging channel, and captures only bot mentions/replies "
-            "from the messaging channel into `docs/HUMAN_INBOX.md`. Local automation commits trigger brief "
+            "from the messaging channel into typed dashboard/SQLite human-message state. Local automation commits trigger brief "
             "`event_kind: \"progress\"` updates with the commit subject and work summary."
             if mode == "discord_notifier"
             else "Local notifier mode uses the same loopback API for native desktop notifications only; Discord is not required."
         )
-        agents_read = """If human bridge files exist, also read:
-
-```text
-docs/HUMAN_REQUESTS.md
-docs/HUMAN_INBOX.md
-docs/HUMAN_OUTBOX.md
-docs/HUMAN_RESPONSES_ARCHIVE.md
-```"""
-        agents_rules = """- Process human inbox messages, including freeform commands.
+        agents_read = "Read `target/canonical_state_brief.md`; human messages and requests come from typed dashboard/SQLite state, not Markdown inbox files."
+        agents_rules = """- Process queued human messages, including freeform commands.
 - If the human asks to be messaged or sent a status update, use the local notifier API when available instead of only writing Markdown.
-- Process handled human inbox messages only after completing or intentionally deferring the requested action, then archive concise notes."""
-        run_steps = """1. Classify and handle new human inbox messages, including freeform commands.
+- Record handled human messages through the dashboard/typed state surface after completing or intentionally deferring the requested action."""
+        run_steps = """1. Classify and handle new queued human messages, including freeform commands.
 1. If a human message asks to be messaged, replied to, or sent a summary/status update, send a concise `event_kind: "message"` notification through the local notifier API.
-1. Resolve any handled human replies from `docs/HUMAN_INBOX.md`.
-1. Remove handled messages from `docs/HUMAN_INBOX.md` only after the requested action has actually been completed or intentionally deferred.
-1. Archive concise notes to `docs/HUMAN_RESPONSES_ARCHIVE.md`."""
+1. Resolve handled human messages through the dashboard/typed state surface only after the requested action has actually been completed or intentionally deferred."""
         protocol = f"""Human bridge enabled: true
 
 Human bridge mode: `{mode}`
@@ -1315,11 +1304,11 @@ POST http://127.0.0.1:8765/api/notify
 
 {channel_note} This target project must not inspect, clone, import, or modify the notifier service during normal automation runs. This project must not handle Discord credentials.
 
-### Human Inbox Interpretation
+### Queued Human Messages
 
-At the beginning of every run, read `docs/HUMAN_INBOX.md`.
+At the beginning of every run, read `target/canonical_state_brief.md`; it includes a compact summary of typed human-message state.
 
-Human inbox entries can be structured replies such as `HR-001 DONE` or freeform instructions such as `send me a summary of what you've accomplished so far`. Interpret natural language intent; do not treat every freeform message as a request to create a local file.
+Queued human messages can be structured replies such as `HR-001 DONE` or freeform instructions such as `send me a summary of what you've accomplished so far`. Interpret natural language intent; do not treat every freeform message as a request to create a local file.
 
 If the human asks to be messaged, replied to, or sent a summary/status update, create a concise response and send it via `POST http://127.0.0.1:8765/api/notify` with `event_kind: "message"`. Human-unlock requests, blockers that need human input, and replies to user messages also use `event_kind: "message"` so they route to the messaging channel. Do not satisfy that request only by writing a local Markdown file. You may also update local docs, but the primary requested action is outbound notification.
 
@@ -1353,76 +1342,25 @@ Payload shape for direct human-requested outbound responses:
 If the notifier is not reachable:
 
 1. Do not claim a message was delivered.
-2. Write the intended outbound message to `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE`.
-3. Keep or annotate the inbox entry as unresolved if a response is required.
+2. Record the intended outbound message in typed human-message state with status `NOTIFIER_UNREACHABLE`.
+3. Keep the message unresolved if a response is required.
 4. Continue useful offline/product work.
 5. Set status to `ACTIVE_WITH_PENDING_USER_INPUT` only if the unresolved item matters and useful work remains."""
         guardrails = """- Ask the human only for meaningful unlocks.
 - For reversible choices, choose a safe default and document it.
 - Use `ACTIVE_WITH_PENDING_USER_INPUT` when work can continue around a pending request.
-- Use `POST http://127.0.0.1:8765/api/notify` when the local notifier is available; otherwise fall back to `docs/HUMAN_REQUESTS.md`.
+- Use `POST http://127.0.0.1:8765/api/notify` when the local notifier is available; otherwise record the pending outbound message in typed human-message state.
 - The notifier owns Discord credentials and local notification delivery. This repo must not import notifier code or print, copy, store, or commit notifier credential values.
 - If the human asks to be messaged or sent a summary/status update, send a concise notifier response rather than only writing Markdown.
-- If the notifier is unreachable, do not claim delivery. Record `NOTIFIER_UNREACHABLE` in `docs/HUMAN_OUTBOX.md` and continue useful work.
-- Remove handled entries from `docs/HUMAN_INBOX.md` only after the requested action is complete or intentionally deferred, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`."""
+- If the notifier is unreachable, do not claim delivery. Record `NOTIFIER_UNREACHABLE` in typed human-message state and continue useful work.
+- Mark handled messages resolved only after the requested action is complete or intentionally deferred."""
         task_notes = f"""Human bridge mode: `{mode}`
 
-- The automation must read `docs/HUMAN_INBOX.md` at run start, interpret structured replies and freeform commands, remove handled entries only after completion or intentional deferral, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
+- The automation must read `target/canonical_state_brief.md` at run start, then handle any queued typed human messages through the dashboard/SQLite state surface.
 - If the local notifier is running, this project may call `POST http://127.0.0.1:8765/api/notify`.
 - Direct human messages should use `event_kind: "message"`; progress updates should use `event_kind: "progress"`.
 - In `discord_notifier` mode, each local automation commit created by the multi-role integrator sends a brief `event_kind: "progress"` update with the commit subject and work summary.
-- If the notifier is unavailable, record the intended outbound message in `docs/HUMAN_OUTBOX.md` with status `NOTIFIER_UNREACHABLE` and continue useful work."""
-        inbox = f"""# Human Inbox
-
-Active inbox for replies from the human owner.
-
-{('The Discord notifier writes captured bot mentions/replies from the messaging channel here. The human may also paste replies here manually.' if mode == 'discord_notifier' else 'The human may paste replies here manually. Local notifier mode does not require Discord inbound replies.')}
-
-At the start of every automation run, Codex should:
-
-1. read this file
-2. handle any `status: unhandled` messages, including structured replies and freeform commands
-3. update related requests in `docs/HUMAN_REQUESTS.md`
-4. send a notifier response if the human asked to be messaged or sent a status update
-5. remove handled messages from this file only after the requested action is complete or intentionally deferred
-6. append concise records to `docs/HUMAN_RESPONSES_ARCHIVE.md`
-
-Keep this file short. It is not a permanent log.
-
-## Active Inbound Messages
-
-None.
-
-## Entry Template
-
-```markdown
-### INBOX-YYYY-MM-DD-001
-
-- received_at: YYYY-MM-DDTHH:MM:SS
-- channel: discord
-- request_id: HR-YYYY-MM-DD-001
-- status: unhandled
-
-#### Body
-
-HR-001 DONE. Key added locally.
-```"""
-        outbox = """# Human Outbox
-
-Lightweight audit log of outbound human notifications sent or attempted through the local notifier service.
-
-Use this file for:
-
-- human-unlock requests sent through the notifier
-- direct status/update responses sent because the human asked to be messaged
-- failed notifier attempts with status `NOTIFIER_UNREACHABLE`, `DISCORD_SEND_FAILED`, or `LOCAL_NOTIFICATION_FAILED`
-
-Do not write secrets, raw stack traces, or long reports here.
-
-## Outbound Notifications
-
-None yet.
-"""
+- If the notifier is unavailable, record the intended outbound message in typed human-message state with status `NOTIFIER_UNREACHABLE` and continue useful work."""
         setup = f"""# Human Bridge Setup
 
 This project uses `{mode}` mode.
@@ -1443,94 +1381,62 @@ POST http://127.0.0.1:8765/api/notify
 
 The notifier owns credentials, dedupe state, optional JSONL queues, Discord inbound handling, and native desktop notification delivery. This repo must not print, copy, store, or commit notifier credential values.
 
-## Inbox Handling Rules
+## Human Message Handling Rules
 
-- Treat `docs/HUMAN_INBOX.md` as an active queue, not a permanent log.
+- Treat dashboard/SQLite human-message state as the active queue.
 - Handle structured replies such as `HR-001 DONE` and freeform commands.
-- Remove handled inbox entries only after the requested action is complete or intentionally deferred.
-- Archive concise resolution notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
-- Record outbound messages and notifier failures in `docs/HUMAN_OUTBOX.md`.
+- Mark handled messages resolved only after the requested action is complete or intentionally deferred.
+- Record concise resolution notes and notifier failures in typed human-message state.
 """
     elif mode == "file_only":
-        agents_read = """If human bridge files exist, also read:
-
-```text
-docs/HUMAN_REQUESTS.md
-docs/HUMAN_INBOX.md
-docs/HUMAN_OUTBOX.md
-docs/HUMAN_RESPONSES_ARCHIVE.md
-```"""
-        agents_rules = """- Process human inbox messages, including freeform commands.
-- If the human asks for a summary, status update, explanation, or report, satisfy it locally in Markdown or app artifacts.
+        agents_read = "Read `target/canonical_state_brief.md`; human messages and requests come from typed dashboard/SQLite state, not Markdown inbox files."
+        agents_rules = """- Process queued human messages, including freeform commands.
+- If the human asks for a summary, status update, explanation, or report, answer through the dashboard/typed state surface or requested artifact.
 - Do not use Discord or notifier APIs unless the human explicitly changes bridge mode.
-- Process handled human inbox messages only after completing or intentionally deferring the requested action, then archive concise notes."""
-        run_steps = """1. Classify and handle new human inbox messages, including freeform commands.
-1. Resolve any handled human replies from `docs/HUMAN_INBOX.md`.
-1. Remove handled messages from `docs/HUMAN_INBOX.md` only after the requested action has actually been completed or intentionally deferred.
-1. Archive concise notes to `docs/HUMAN_RESPONSES_ARCHIVE.md`."""
+- Mark handled human messages resolved only after completing or intentionally deferring the requested action."""
+        run_steps = """1. Classify and handle new queued human messages, including freeform commands.
+1. Resolve handled human messages through the dashboard/typed state surface after the requested action has actually been completed or intentionally deferred."""
         protocol = """Human bridge enabled: true
 
 Human bridge mode: `file_only`
 
 Use file-only human intervention. Do not use Discord or notifier APIs for this project unless the human explicitly changes the bridge mode later.
 
-The human owner will periodically inspect `docs/HUMAN_REQUESTS.md`, perform any manual action, and reply in `docs/HUMAN_INBOX.md`. If the human asks for a summary, status update, explanation, local report, or decision record, satisfy that request locally by updating the relevant Markdown file or app artifact."""
+The human owner uses the Diffmogger dashboard to review automation requests and send replies. If the human asks for a summary, status update, explanation, local report, or decision record, satisfy that request through the dashboard/typed state surface or the explicitly requested artifact."""
         guardrails = """- Ask the human only for meaningful unlocks.
 - For reversible choices, choose a safe default and document it.
 - Use `ACTIVE_WITH_PENDING_USER_INPUT` when work can continue around a pending request.
-- Use file-only handoff files: write requests to `docs/HUMAN_REQUESTS.md`, read replies from `docs/HUMAN_INBOX.md`, and archive handled replies in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
+- Use dashboard/SQLite human-message state for requests, replies, and resolution notes.
 - Do not use Discord or notifier APIs unless the human explicitly changes the bridge mode.
-- If the human asks for a summary or status update, answer locally in the requested Markdown/app artifact.
-- Remove handled entries from `docs/HUMAN_INBOX.md` only after the requested action is complete or intentionally deferred."""
+- If the human asks for a summary or status update, answer through the dashboard or requested local artifact.
+- Mark messages handled only after the requested action is complete or intentionally deferred."""
         task_notes = """Human bridge mode: `file_only`
 
-- The automation must read `docs/HUMAN_INBOX.md` at run start, interpret structured replies and freeform commands, remove handled entries only after completion or intentional deferral, and archive concise notes in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
-- The human manually inspects `docs/HUMAN_REQUESTS.md` and replies in `docs/HUMAN_INBOX.md`.
+- The automation must read `target/canonical_state_brief.md` at run start and handle queued typed human messages from the dashboard.
+- The human uses the dashboard to inspect requests and reply.
 - Do not use Discord or notifier APIs in this mode."""
-        inbox = """# Human Inbox
-
-Active inbox for replies from the human owner.
-
-In file-only mode, the human manually pastes replies here after reading `docs/HUMAN_REQUESTS.md`. Do not use Discord or notifier APIs in file-only mode.
-
-## Active Inbound Messages
-
-None.
-"""
-        outbox = """# Human Outbox
-
-File-only audit log of local outbound human-facing notes.
-
-Use this file for concise records of local status summaries, request notices, or artifacts produced because the human asked for an update. Do not use it as a notifier delivery log in file-only mode.
-
-## Outbound Records
-
-None yet.
-"""
         setup = """# Human Bridge Setup
 
-This project uses file-only human intervention.
+This project uses dashboard-backed file-only human intervention.
 
-The automation writes active requests to `docs/HUMAN_REQUESTS.md`. The human manually replies in `docs/HUMAN_INBOX.md`. The next run consumes handled replies and archives concise notes.
+The automation records requests, replies, and resolution notes in typed SQLite state exposed by the Diffmogger dashboard. Markdown human queue files are not generated for new targets.
 
 No Discord, webhook, notifier API, or messaging credentials are used in this mode.
 """
     else:
-        agents_read = "Human bridge files are not required unless the human later enables the bridge."
+        agents_read = "Human bridge state is not required unless the human later enables the bridge."
         agents_rules = "- Human bridge is disabled; do not create human request queues unless the human later enables the bridge."
-        run_steps = "1. Skip human inbox processing because the human bridge is disabled for this project."
+        run_steps = "1. Skip human-message processing because the human bridge is disabled for this project."
         protocol = """Human bridge enabled: false
 
 Human bridge mode: `disabled`
 
-Do not create human requests or wait for human replies during normal automation runs. If work becomes unsafe or impossible without the human, record the blocker in `docs/CODEX_AUTOMATION_TASKS.md` and use `BLOCKED_ON_USER` only when no useful work can continue."""
+Do not create human requests or wait for human replies during normal automation runs. If work becomes unsafe or impossible without the human, record the blocker through typed runtime state so generated projections can reflect it, and use `BLOCKED_ON_USER` only when no useful work can continue."""
         guardrails = """- Human bridge is disabled.
 - Do not create human request queues during normal runs.
 - For reversible choices, choose a safe default and document it.
 - Use `BLOCKED_ON_USER` only when no valuable work can continue without the human."""
         task_notes = "Human bridge mode: `disabled`. No human request queue is active."
-        inbox = "# Human Inbox\n\nHuman bridge disabled for this project.\n"
-        outbox = "# Human Outbox\n\nHuman bridge disabled for this project.\n"
         setup = "# Human Bridge Setup\n\nHuman bridge disabled for this project.\n"
 
     if mode in {"local_notifier", "discord_notifier"}:
@@ -1542,12 +1448,12 @@ Do not create human requests or wait for human replies during normal automation 
             "Use notifier mode. This repo may call `POST http://127.0.0.1:8765/api/notify` when the separate notifier service is running, but must not handle messaging credentials."
         )
     elif mode == "file_only":
-        end_requirements = "- human inbox messages handled and local response artifacts created\n"
-        delivery_sentence = "The human reads `docs/HUMAN_REQUESTS.md` and replies in `docs/HUMAN_INBOX.md`. The automation handles replies on later runs and archives them in `docs/HUMAN_RESPONSES_ARCHIVE.md`."
-        bootstrap_sentence = "Use file-only mode. Create project-side human bridge files and do not use Discord or notifier APIs unless the human explicitly changes mode later."
+        end_requirements = "- human messages handled and local response artifacts created\n"
+        delivery_sentence = "The human reviews requests and replies through the Diffmogger dashboard. The automation handles dashboard-backed typed human messages on later runs."
+        bootstrap_sentence = "Use dashboard-backed file-only mode. Do not create Markdown human queue files and do not use Discord or notifier APIs unless the human explicitly changes mode later."
     else:
         end_requirements = ""
-        delivery_sentence = "No human bridge files are required for normal runs."
+        delivery_sentence = "No human bridge queue is required for normal runs."
         bootstrap_sentence = "Human bridge disabled. Do not create human request queues unless the human later enables the bridge."
 
     development = f"""Human bridge enabled: {str(enabled).lower()}
@@ -1574,8 +1480,6 @@ Human bridge mode: `{mode}`
         "HUMAN_PROTOCOL": protocol,
         "HUMAN_GUARDRAILS_POLICY": guardrails,
         "HUMAN_TASK_NOTES": task_notes,
-        "HUMAN_INBOX_CONTENT": inbox,
-        "HUMAN_OUTBOX_CONTENT": outbox,
         "HUMAN_BRIDGE_SETUP_CONTENT": setup,
         "HUMAN_END_REQUIREMENTS": end_requirements.rstrip(),
         "HUMAN_DEVELOPMENT_SECTION": development.strip(),
@@ -1646,9 +1550,7 @@ def render_template(text: str, values: dict[str, str]) -> str:
 
 
 def template_included(rel: str, values: dict[str, str]) -> bool:
-    if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel in HUMAN_BRIDGE_FILES:
-        return False
-    if values.get("AUTOMATION_RUN_MODE") != "ticket_campaign" and rel in TICKET_RUN_FILES:
+    if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel in HUMAN_BRIDGE_SETUP_FILES:
         return False
     if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and rel in MULTI_ROLE_FILES:
         return False
@@ -1802,9 +1704,13 @@ def diffmogger_runtime_paths(values: dict[str, str]) -> list[str]:
         sidecar_rel("target/automation_logs"),
         sidecar_rel("target/automation_runner.json"),
         sidecar_rel("target/automation_venvs"),
+        sidecar_rel("target/canonical_state_brief.md"),
         sidecar_rel("target/codex_automation.lock"),
         sidecar_rel("target/first-review"),
         sidecar_rel("target/integration_safety_check.json"),
+        sidecar_rel("target/orchestration.sqlite3"),
+        sidecar_rel("target/orchestration.sqlite3-shm"),
+        sidecar_rel("target/orchestration.sqlite3-wal"),
         sidecar_rel("target/prisma-cache"),
         sidecar_rel("target/ticket_drafts"),
         sidecar_rel("target/ticket_run_completion.json"),
@@ -1822,15 +1728,27 @@ def diffmogger_runtime_paths(values: dict[str, str]) -> list[str]:
 
 
 def diffmogger_human_state_paths(values: dict[str, str]) -> list[str]:
-    if values.get("HUMAN_BRIDGE_MODE") == "disabled":
-        return []
-    return [
-        sidecar_rel("docs/HUMAN_REQUESTS.md"),
-        sidecar_rel("docs/HUMAN_INBOX.md"),
-        sidecar_rel("docs/HUMAN_OUTBOX.md"),
-        sidecar_rel("docs/HUMAN_RESPONSES_ARCHIVE.md"),
-        sidecar_rel("docs/HUMAN_BRIDGE_SETUP.md"),
-    ]
+    return []
+
+
+def seed_runtime_state(target: Path, values: dict[str, str]) -> None:
+    if values.get("AUTOMATION_RUN_MODE") == "ticket_campaign":
+        try:
+            tickets = json.loads(values.get("TICKET_RUN_TICKETS_JSON") or "[]")
+        except json.JSONDecodeError:
+            tickets = []
+        write_ticket_run_state(
+            target,
+            {
+                "run_id": slugify(values.get("PROJECT_NAME") or "ticket-run"),
+                "halt_when_complete": True,
+                "notify_on_complete": values.get("TICKET_COMPLETION_NOTIFY") == "true",
+                "tickets": tickets if isinstance(tickets, list) else [],
+            },
+            actor_role="scaffold",
+            event_type="ticket.run_seeded",
+        )
+    write_canonical_state_brief(target)
 
 
 def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -> dict[str, Any]:
@@ -1841,8 +1759,14 @@ def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -
         path
         for path in owned_paths
         if path.startswith((".diffmogger/agentic/", ".diffmogger/context", ".diffmogger/state/", ".diffmogger/scripts/", ".diffmogger/lib/"))
+        or path == sidecar_rel("target/canonical_state_brief.md")
     ]
-    path_aliases = {**PATH_ALIASES, **generated_script_aliases(values)}
+    path_aliases = {
+        key: value
+        for key, value in PATH_ALIASES.items()
+        if key not in LEGACY_MARKDOWN_QUEUE_ALIASES
+    }
+    path_aliases.update(generated_script_aliases(values))
     return sidecar_manifest(
         owned_paths=owned_paths,
         runtime_paths=runtime_paths,
@@ -2153,6 +2077,7 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
     manifest_dest.parent.mkdir(parents=True, exist_ok=True)
     manifest_dest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     written.append(manifest_dest)
+    seed_runtime_state(target, values)
     install_diffmogger_local_excludes(target, values)
     return written
 

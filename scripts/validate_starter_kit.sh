@@ -219,16 +219,6 @@ if "{{HUMAN_BRIDGE_SETUP_CONTENT}}" not in human_setup:
     print("Human bridge setup template missing mode-aware placeholder", file=sys.stderr)
     raise SystemExit(1)
 
-for path in [
-    Path("templates/docs/HUMAN_INBOX.md"),
-    Path("templates/docs/HUMAN_OUTBOX.md"),
-    Path("templates/docs/HUMAN_REQUESTS.md"),
-    Path("templates/docs/HUMAN_RESPONSES_ARCHIVE.md"),
-]:
-    if not path.exists() or not path.read_text(encoding="utf-8").strip():
-        print(f"Missing required human bridge template: {path}", file=sys.stderr)
-        raise SystemExit(1)
-
 for marker in [
     "CODEX_LOCK_ALREADY_ACQUIRED=true",
     ".diffmogger/scripts/run_codex_automation.sh",
@@ -236,6 +226,7 @@ for marker in [
     ".diffmogger/scripts/release_codex_lock.sh",
     ".diffmogger/scripts/spawn_worker_agent.sh",
     ".diffmogger/scripts/summarize_worker_outputs.py",
+    "target/canonical_state_brief.md",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
     "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS",
     "Parallelism budget:",
@@ -275,6 +266,8 @@ for marker in [
     "codex exec --full-auto",
     "--skip-git-repo-check",
     "repair_environment.py",
+    "state_brief.py",
+    "canonical_state_brief.md",
     "ticket_run.py",
     "normalize_task_state_headings",
     "commit_single_lane_changes",
@@ -388,12 +381,15 @@ for marker in [
 
 conveyor_files = [
     Path("src/diffmogger/runtime/run_conveyor_automation.py"),
+    Path("src/diffmogger/runtime/state_store.py"),
     *sorted(Path("src/diffmogger/conveyor").glob("*.py")),
 ]
 conveyor = "\n".join(path.read_text(encoding="utf-8") for path in conveyor_files)
 for marker in [
     "automation_conveyor.lock",
     "automation_conveyor_state.json",
+    "orchestration.sqlite3",
+    "conveyor.state",
     "queued role patch",
     "run_role_automation.sh",
     "run_codex_automation.sh",
@@ -418,8 +414,8 @@ observatory_files = [
 observatory = "\n".join(path.read_text(encoding="utf-8") for path in observatory_files)
 for marker in [
     "Diffmogger Observatory",
-    "automation_conveyor_state.json",
-    "automation_runner.json",
+    "state_snapshot",
+    "runner_projection_path_for_target",
 	    "automation_queue",
 	    "ThreadingHTTPServer",
 	    "--open",
@@ -461,6 +457,7 @@ for role in ["planner", "builder", "hardener", "integrator"]:
         "NEVER configure a remote",
         "NEVER set up upstream tracking",
         "CRITICAL_STOP",
+        "target/canonical_state_brief.md",
         "docs/MULTI_ROLE_PROGRESS.md",
     ]
     if role != "integrator":
@@ -508,6 +505,8 @@ for marker in [
     "scripts/run_playwright_mcp.sh",
     "Runtime Summary Contract",
     "Commit subject:",
+    "state_brief.py",
+    "canonical_state_brief.md",
 ]:
     if marker not in run_role:
         print(f"Role runner template missing marker: {marker}", file=sys.stderr)
@@ -630,7 +629,7 @@ for marker in [
     "automation.start",
     "automation.stop",
     "run_conveyor_automation.sh",
-    "automation_runner.json",
+    "runner_projection_path_for_target",
     "automation_logs",
     "start_new_session=True",
     "safety.run_check",
@@ -643,6 +642,8 @@ for marker in [
     "review.load",
     "review.export_bundle",
     "review.mark_reviewed",
+    "state.snapshot",
+    "state.validate",
     "diagnostics.environment",
     "diagnostics.run_checks",
     "advanced.list_files",
@@ -731,6 +732,8 @@ for marker in [
     "observatory.load_html",
     "review.load",
     "review.mark_reviewed",
+    "state.snapshot",
+    "state.validate",
     "advanced.save_file",
     "advanced.validate_file",
     "advanced.export_debug_bundle",
@@ -771,6 +774,7 @@ for marker in [
     "openProjectInEditor",
     "AdvancedSettings",
     "AdvancedDebugBundleResult",
+    "CanonicalStateSnapshot",
     "ObservatorySnapshot",
     "ownership",
 ]:
@@ -1261,7 +1265,7 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests.runtime.test_run_observatory tests.dashboard.test_dashboard_backend_cli tests.dashboard.test_dashboard_env_loading tests.kit.test_native_rebuild_guardrails tests.kit.test_starter_kit_manifest tests.runtime.test_run_conveyor_automation tests.runtime.test_run_role_automation tests.runtime.test_load_automation_env tests.runtime.test_repair_environment tests.runtime.test_integrate_role_outputs tests.runtime.test_list_deferred_patches tests.runtime.test_ticket_run tests.kit.test_check_integration_safety tests.kit.test_check_required_files tests.runtime.test_summarize_worker_outputs
+python3 -m unittest tests.runtime.test_state_store tests.runtime.test_run_observatory tests.dashboard.test_dashboard_backend_cli tests.dashboard.test_dashboard_env_loading tests.kit.test_native_rebuild_guardrails tests.kit.test_starter_kit_manifest tests.runtime.test_run_conveyor_automation tests.runtime.test_run_role_automation tests.runtime.test_load_automation_env tests.runtime.test_repair_environment tests.runtime.test_integrate_role_outputs tests.runtime.test_list_deferred_patches tests.runtime.test_ticket_run tests.kit.test_check_integration_safety tests.kit.test_check_required_files tests.runtime.test_summarize_worker_outputs
 
 python3 scripts/check_integration_safety.py >/tmp/Diffmogger-integration-safety.log
 
@@ -1317,6 +1321,26 @@ if [ -f "$tmp_dir/.diffmogger/state/TICKET_RUN.md" ]; then
     rm -rf "$tmp_dir"
     exit 1
 fi
+python3 - "$tmp_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+manifest = json.loads((target / ".diffmogger/manifest.json").read_text(encoding="utf-8"))
+aliases = manifest.get("path_aliases") if isinstance(manifest.get("path_aliases"), dict) else {}
+legacy = {
+    "docs/HUMAN_INBOX.md",
+    "docs/HUMAN_OUTBOX.md",
+    "docs/HUMAN_REQUESTS.md",
+    "docs/HUMAN_RESPONSES_ARCHIVE.md",
+    "docs/TICKET_RUN.md",
+}
+present = sorted(legacy & set(aliases))
+if present:
+    print(f"Default scaffold manifest still aliases removed Markdown queues: {present}", file=sys.stderr)
+    raise SystemExit(1)
+PY
 for unexpected_mcp_path in \
     ".codex/config.toml" \
     ".diffmogger/agentic/codex_config.toml" \
@@ -1375,7 +1399,7 @@ JSON
   git commit -m "product base" >/tmp/Diffmogger-local-excludes-commit.log
 )
 python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-local-excludes-scaffold.log
-for ignored_path in ".diffmogger/agentic/automation_prompt.md" ".diffmogger/state/CODEX_AUTOMATION_TASKS.md" ".diffmogger/state/TICKET_RUN.md" ".diffmogger/scripts/run_role_automation.sh" ".diffmogger/runtime/agent_runs/run-1/summary.md" ".diffmogger/runtime/prisma-cache/node/cache-file"; do
+for ignored_path in ".diffmogger/agentic/automation_prompt.md" ".diffmogger/state/CODEX_AUTOMATION_TASKS.md" ".diffmogger/scripts/run_role_automation.sh" ".diffmogger/runtime/agent_runs/run-1/summary.md" ".diffmogger/runtime/prisma-cache/node/cache-file"; do
     if ! git -C "$tmp_dir" check-ignore -q -- "$ignored_path"; then
         echo "Existing-project scaffold failed to locally ignore Diffmogger path: $ignored_path" >&2
         cat "$tmp_dir/.git/info/exclude" >&2
@@ -1442,7 +1466,7 @@ done
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
 }
-if ! grep -R "Automation run mode: \`ticket_campaign\`\\|.diffmogger/state/TICKET_RUN.md\\|.diffmogger/scripts/ticket_run.py" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" "$tmp_dir/.diffmogger/scripts" >/tmp/Diffmogger-ticket-campaign-grep.log 2>&1; then
+if ! grep -R "Automation run mode: \`ticket_campaign\`\\|SQLite ticket queue\\|.diffmogger/scripts/ticket_run.py" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" "$tmp_dir/.diffmogger/scripts" >/tmp/Diffmogger-ticket-campaign-grep.log 2>&1; then
     echo "Ticket-campaign scaffold missing mode markers" >&2
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
@@ -1455,7 +1479,7 @@ for marker in \
     "at most one dependency-ready ticket per run" \
     "depends_on" \
     "## Deferred / Follow-Up Tickets"; do
-    if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" "$tmp_dir/.diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md" "$tmp_dir/.diffmogger/state/TICKET_RUN.md" >/tmp/Diffmogger-ticket-horizon-grep.log 2>&1; then
+    if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" "$tmp_dir/.diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md" >/tmp/Diffmogger-ticket-horizon-grep.log 2>&1; then
         echo "Ticket-campaign scaffold missing ticket progression marker: $marker" >&2
         cat /tmp/Diffmogger-ticket-horizon-grep.log >&2
         rm -rf "$tmp_dir" "$tmp_intake"

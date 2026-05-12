@@ -165,7 +165,7 @@ def check_integration_safety(root: Path) -> list[Problem]:
         (
             "src/diffmogger/dashboard/shared/__init__.py",
             "allow_remotes: bool = False",
-            "dashboard scheduling helpers must default remote opt-in to false",
+            "dashboard run-control helpers must default remote opt-in to false",
         ),
     ]
 

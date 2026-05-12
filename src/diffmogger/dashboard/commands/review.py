@@ -6,7 +6,7 @@ from ..errors import *
 from ..jsonio import *
 from ..target import *
 
-from .run_schedule import automation_prerequisites, latest_run_log, prereq_rows
+from .run_control import automation_prerequisites, latest_run_log, prereq_rows
 
 def is_integration_safety_check(text: str) -> bool:
     lower = text.lower()

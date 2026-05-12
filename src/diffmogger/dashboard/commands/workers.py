@@ -4,7 +4,7 @@ from ..errors import *
 from ..jsonio import *
 from ..target import *
 
-from .run_schedule import run_subprocess_streamed
+from .run_control import run_subprocess_streamed
 
 def command_worker_run_read_only(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)

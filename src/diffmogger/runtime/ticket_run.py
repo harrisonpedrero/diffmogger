@@ -26,6 +26,13 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from diffmogger.runtime.paths import existing_or_target_path, target_path
+from diffmogger.runtime.state_store import (
+    database_path_for_target,
+    load_ticket_run_state,
+    record_human_message,
+    sha256_text,
+    write_ticket_run_state,
+)
 
 
 DEFAULT_TICKET_FILE = "docs/TICKET_RUN.md"
@@ -69,11 +76,27 @@ def ticket_file_path(target: Path) -> Path:
     configured = str(intake.get("ticket_run_file") or "").strip()
     if configured:
         return target / configured
-    return target_path(target, DEFAULT_TICKET_FILE)
+    legacy = target_path(target, DEFAULT_TICKET_FILE)
+    if legacy.exists():
+        return legacy
+    return ticket_state_path(target)
 
 
-def load_ticket_run(target: Path, ticket_file: Path | None = None) -> tuple[dict[str, Any], Path, str]:
-    path = ticket_file or ticket_file_path(target)
+def ticket_state_path(target: Path) -> Path:
+    return database_path_for_target(target)
+
+
+def empty_ticket_run(target: Path) -> dict[str, Any]:
+    intake = project_intake(target)
+    return {
+        "run_id": "ticket-run",
+        "halt_when_complete": True,
+        "notify_on_complete": bool_value(intake.get("ticket_completion_notify", True), True),
+        "tickets": [],
+    }
+
+
+def read_ticket_run_markdown(path: Path) -> tuple[dict[str, Any], str]:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -89,6 +112,38 @@ def load_ticket_run(target: Path, ticket_file: Path | None = None) -> tuple[dict
         raise SystemExit(f"Malformed ticket-run JSON in {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise SystemExit(f"Ticket-run JSON in {path} must be an object.")
+    return data, text
+
+
+def load_ticket_run(target: Path, ticket_file: Path | None = None) -> tuple[dict[str, Any], Path, str]:
+    target = target.expanduser().resolve()
+    if ticket_file is not None:
+        path = ticket_file
+        data, text = read_ticket_run_markdown(path)
+        write_ticket_run_state(
+            target,
+            data,
+            actor_role="ticket-cli",
+            event_type="compatibility.ticket_markdown_imported",
+            source_path=str(path),
+        )
+        return data, ticket_state_path(target), text
+
+    state = load_ticket_run_state(target)
+    if state:
+        return state, ticket_state_path(target), ""
+
+    path = ticket_file_path(target)
+    if path == ticket_state_path(target):
+        return empty_ticket_run(target), path, ""
+    data, text = read_ticket_run_markdown(path)
+    write_ticket_run_state(
+        target,
+        data,
+        actor_role="migration",
+        event_type="compatibility.legacy_ticket_markdown_imported",
+        source_path=str(path),
+    )
     return data, path, text
 
 
@@ -373,10 +428,10 @@ def ticket_run_payload(data: dict[str, Any], target: Path | None = None) -> dict
 
 def ticket_source_state(target: Path, ticket_file: Path | None = None) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    path = ticket_file or ticket_file_path(target)
     try:
-        data, path, _text = load_ticket_run(target, path)
+        data, path, _text = load_ticket_run(target, ticket_file)
     except SystemExit as exc:
+        path = ticket_file or ticket_file_path(target)
         return {
             "path": str(path),
             "confirmed": False,
@@ -398,13 +453,13 @@ def ticket_source_state(target: Path, ticket_file: Path | None = None) -> dict[s
     placeholder_only = total > 0 and len(placeholders) == total
 
     if errors:
-        reason = str(errors[0].get("detail") or errors[0].get("type") or "Ticket source has validation errors.")
+        reason = str(errors[0].get("detail") or errors[0].get("type") or "Ticket queue has validation errors.")
     elif total <= 0:
-        reason = "Ticket source has no tickets."
+        reason = "Ticket queue has no tickets."
     elif placeholder_only:
-        reason = "Ticket source still contains placeholder tickets."
+        reason = "Ticket queue still contains placeholder tickets."
     else:
-        reason = "Ticket source is populated and confirmed."
+        reason = "Ticket queue is populated and confirmed."
 
     confirmed = bool(total > 0 and not placeholder_only and not errors)
     actionable = confirmed and str(next_payload.get("status") or "") == "selected"
@@ -489,7 +544,7 @@ def next_ticket_selection(data: dict[str, Any]) -> dict[str, Any]:
     if not items:
         return {
             "status": "blocked",
-            "reason": "ticket source has no tickets",
+            "reason": "ticket queue has no tickets",
             "ticket": None,
             "selection_order": [entry[0] for entry in order],
             **report,
@@ -497,7 +552,7 @@ def next_ticket_selection(data: dict[str, Any]) -> dict[str, Any]:
     if len(report["placeholder_tickets"]) == len(items):
         return {
             "status": "blocked",
-            "reason": "ticket source still contains placeholder tickets",
+            "reason": "ticket queue still contains placeholder tickets",
             "ticket": None,
             "selection_order": [entry[0] for entry in order],
             **report,
@@ -686,16 +741,18 @@ def ticket_notification_message(target: Path, data: dict[str, Any], summary: dic
 
 
 def append_outbox(target: Path, message: str, status: str, detail: str) -> None:
-    path = target_path(target, "docs/HUMAN_OUTBOX.md")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing = path.read_text(encoding="utf-8") if path.exists() else "# Human Outbox\n"
-    entry = (
-        f"\n## {utc_now()} ticket-run-notification\n\n"
-        f"- status: {status}\n"
-        f"- detail: {detail}\n"
-        f"- message_body: {message}\n"
+    record_human_message(
+        target,
+        kind="outbound",
+        body=message,
+        request_id="ticket-run-notification",
+        status=status,
+        channel="notifier-fallback",
+        sender="automation",
+        recipient="human",
+        summary=detail,
+        actor_role="ticket-run",
     )
-    path.write_text(existing.rstrip() + "\n" + entry, encoding="utf-8")
 
 
 def post_notifier(payload: dict[str, Any]) -> dict[str, Any]:
@@ -973,8 +1030,19 @@ def write_if_valid(target: Path, path: Path, text: str, data: dict[str, Any], *,
     blocking = [issue for issue in issues if issue.get("level") == "error"]
     if blocking:
         return {"written": False, "ticket_file": str(path), "validation_issues": issues, **ticket_run_payload(data, target)}
-    write_ticket_run_data(path, text, data)
-    return {"written": True, "ticket_file": str(path), "validation_issues": issues, **ticket_run_payload(data, target)}
+    source_path = "" if path == ticket_state_path(target) else str(path)
+    write_ticket_run_state(target, data, actor_role="dashboard", event_type="ticket.run_updated", source_path=source_path)
+    if source_path and text and path.exists():
+        write_ticket_run_data(path, text, data)
+    state_path = ticket_state_path(target)
+    return {
+        "written": True,
+        "ticket_file": str(state_path),
+        "ticket_store": str(state_path),
+        "ticket_source": "sqlite",
+        "validation_issues": issues,
+        **ticket_run_payload(data, target),
+    }
 
 
 def command_status(args: argparse.Namespace) -> int:
@@ -1104,16 +1172,12 @@ def command_next(args: argparse.Namespace) -> int:
 
 def command_should_halt(args: argparse.Namespace) -> int:
     target = Path(args.target).expanduser().resolve()
-    path = Path(args.ticket_file).resolve() if args.ticket_file else ticket_file_path(target)
-    if not path.exists():
-        if args.json:
-            print(json.dumps({"status": "inactive", "should_halt": False, "ticket_file": str(path)}, indent=2))
-        return 1
-    data, path, _text = load_ticket_run(target, path)
+    ticket_file = Path(args.ticket_file).resolve() if args.ticket_file else None
+    data, path, _text = load_ticket_run(target, ticket_file)
     summary = ticket_summary(data, target)
     payload: dict[str, Any] = {"ticket_file": str(path), **summary}
     if args.finalize and summary["should_halt"]:
-        payload = finalize(target, ticket_file=path)
+        payload = finalize(target, ticket_file=ticket_file)
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if summary["should_halt"] else 1

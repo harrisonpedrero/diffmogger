@@ -12,7 +12,7 @@ from diffmogger.dashboard.errors import *  # noqa: F401,F403
 from diffmogger.dashboard.jsonio import *  # noqa: F401,F403
 from diffmogger.dashboard.target import *  # noqa: F401,F403
 from diffmogger.dashboard import target as _target
-from diffmogger.dashboard.commands import run_schedule as _run_schedule
+from diffmogger.dashboard.commands import run_control as _run_control
 from diffmogger.dashboard.commands.advanced import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.brief import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.context import *  # noqa: F401,F403
@@ -21,24 +21,17 @@ from diffmogger.dashboard.commands.inbox import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.observatory import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.project import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.review import *  # noqa: F401,F403
-from diffmogger.dashboard.commands.run_schedule import *  # noqa: F401,F403
+from diffmogger.dashboard.commands.run_control import *  # noqa: F401,F403
+from diffmogger.dashboard.commands.state import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.tickets import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.workers import *  # noqa: F401,F403
 
-_RUN_SCHEDULE_SYNC_NAMES = [
+_RUN_CONTROL_SYNC_NAMES = [
     "load_dashboard_module",
-    "automation_status_snapshot",
-    "automation_ready",
-    "automation_prerequisites",
-    "running_runner_state",
-    "process_is_alive",
-    "subprocess",
-    "os",
-    "time",
 ]
-_RUN_SCHEDULE_ORIGINALS = {
-    name: getattr(_run_schedule, name)
-    for name in _RUN_SCHEDULE_SYNC_NAMES
+_RUN_CONTROL_ORIGINALS = {
+    name: getattr(_run_control, name)
+    for name in _RUN_CONTROL_SYNC_NAMES
 }
 
 
@@ -46,23 +39,16 @@ def _sync_target_overrides() -> None:
     _target.KIT_ROOT = globals()["KIT_ROOT"]
 
 
-def _sync_schedule_overrides() -> None:
+def _sync_run_control_overrides() -> None:
     _sync_target_overrides()
-    for name in _RUN_SCHEDULE_SYNC_NAMES:
+    for name in _RUN_CONTROL_SYNC_NAMES:
         if name in globals():
-            value = globals()[name]
-            if (
-                name == "automation_status_snapshot"
-                and getattr(value, "__module__", "") == __name__
-                and getattr(value, "__name__", "") == "automation_status_snapshot"
-            ):
-                value = _RUN_SCHEDULE_ORIGINALS[name]
-            setattr(_run_schedule, name, value)
+            setattr(_run_control, name, globals()[name])
 
 
-def _restore_schedule_overrides() -> None:
-    for name, value in _RUN_SCHEDULE_ORIGINALS.items():
-        setattr(_run_schedule, name, value)
+def _restore_run_control_overrides() -> None:
+    for name, value in _RUN_CONTROL_ORIGINALS.items():
+        setattr(_run_control, name, value)
 
 
 def load_repo_dotenv_for_backend() -> int:
@@ -72,26 +58,26 @@ def load_repo_dotenv_for_backend() -> int:
 
 def automation_status_snapshot(*args, **kwargs):
     try:
-        _sync_schedule_overrides()
-        return _run_schedule.automation_status_snapshot(*args, **kwargs)
+        _sync_run_control_overrides()
+        return _run_control.automation_status_snapshot(*args, **kwargs)
     finally:
-        _restore_schedule_overrides()
+        _restore_run_control_overrides()
 
 
 def command_automation_start(*args, **kwargs):
     try:
-        _sync_schedule_overrides()
-        return _run_schedule.command_automation_start(*args, **kwargs)
+        _sync_run_control_overrides()
+        return _run_control.command_automation_start(*args, **kwargs)
     finally:
-        _restore_schedule_overrides()
+        _restore_run_control_overrides()
 
 
 def command_automation_stop(*args, **kwargs):
     try:
-        _sync_schedule_overrides()
-        return _run_schedule.command_automation_stop(*args, **kwargs)
+        _sync_run_control_overrides()
+        return _run_control.command_automation_stop(*args, **kwargs)
     finally:
-        _restore_schedule_overrides()
+        _restore_run_control_overrides()
 
 
 if __name__ == "__main__":

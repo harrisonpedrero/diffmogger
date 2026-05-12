@@ -59,7 +59,6 @@ function snapshot(overrides: DeepPartial<ObservatorySnapshot> = {}): Observatory
       deferred_backlog: [],
       recent_outcomes: [],
     },
-    signals: { active_count: 0, nudges: [], recent_completed: [] },
     timeline: [],
     metrics: { pending_human: 0, queued_patches: 0 },
   };

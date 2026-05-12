@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from .state import *
 from diffmogger.runtime.paths import load_manifest
+from diffmogger.runtime.state_store import unhandled_human_message_count as runtime_unhandled_human_message_count
 
-def unhandled_human_inbox_count(target: Path) -> int:
-    text = read_text(dpath(target, "docs/HUMAN_INBOX.md"))
-    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
-    return len(re.findall(r"^\s*-\s*status:\s*unhandled\s*$", text, re.MULTILINE | re.IGNORECASE))
+def unhandled_human_message_count(target: Path) -> int:
+    return runtime_unhandled_human_message_count(target)
 
 def target_has_multi_role(target: Path) -> bool:
     if not script_path(target, "scripts/run_role_automation.sh").exists():

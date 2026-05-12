@@ -276,7 +276,6 @@ def first_review_snapshot(target: Path, task: dict[str, Any]) -> dict[str, Any]:
 def self_review_snapshot(
     task: dict[str, Any],
     queue: dict[str, Any],
-    signals: dict[str, Any],
     conveyor: dict[str, Any],
     human: dict[str, int],
     progress: dict[str, Any],
@@ -325,7 +324,7 @@ def self_review_snapshot(
     validation = task.get("validation") if isinstance(task.get("validation"), dict) else {}
     integration_safety = task.get("integration_safety") if isinstance(task.get("integration_safety"), dict) else {}
     deferred_triage = progress.get("deferred_triage") if isinstance(progress.get("deferred_triage"), dict) else {}
-    action_plan = scorecard_action_plan(task, queue, signals, conveyor, human, progress)
+    action_plan = scorecard_action_plan(task, queue, conveyor, human, progress)
     deferred_summary = clean_text(
         deferred_triage.get("summary") or "No deferred patch backlog recorded.",
         limit=300,

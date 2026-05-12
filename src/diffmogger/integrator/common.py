@@ -48,12 +48,9 @@ RUNTIME_STATE_WHITELIST = {
     ".agentic/roles/builder.md",
     ".agentic/roles/hardener.md",
     ".agentic/roles/integrator.md",
-    "docs/HUMAN_INBOX.md",
-    "docs/HUMAN_RESPONSES_ARCHIVE.md",
-    "docs/HUMAN_REQUESTS.md",
-    "docs/HUMAN_OUTBOX.md",
     "docs/CODEX_AUTOMATION_TASKS.md",
     "docs/MULTI_ROLE_PROGRESS.md",
+    "target/automation_conveyor_state.json",
     "target/automation_runner.json",
 }
 
@@ -99,7 +96,14 @@ RUNTIME_STATE_MAX_BYTES = 1024 * 1024
 
 RUNTIME_STATE_BLOCKING_STATUSES = {"blocked", "conflict", "error", "rejected"}
 
-RUNTIME_STATE_VOLATILE_PATHS = {"target/automation_runner.json", sidecar_rel("target/automation_runner.json")}
+RUNTIME_STATE_VOLATILE_PATHS = {
+    "target/automation_conveyor_state.json",
+    sidecar_rel("target/automation_conveyor_state.json"),
+    "target/automation_runner.json",
+    sidecar_rel("target/automation_runner.json"),
+    "target/canonical_state_brief.md",
+    sidecar_rel("target/canonical_state_brief.md"),
+}
 
 PROGRESS_SECTIONS = [
     "Project State At Last Integration",

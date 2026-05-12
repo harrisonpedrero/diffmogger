@@ -4,7 +4,7 @@ from ..errors import *
 from ..jsonio import *
 from ..target import *
 
-from .run_schedule import (
+from .run_control import (
     automation_status_snapshot,
     native_prerequisites,
     prereq_rows,
@@ -13,6 +13,7 @@ from .run_schedule import (
     setup_fix_suggestions,
     tool_status,
 )
+from diffmogger.runtime.state_store import validate_state_database
 
 def required_file_flags(target: Path) -> list[str]:
     intake = load_intake(target)
@@ -130,6 +131,15 @@ def command_diagnostics_run_checks(args: argparse.Namespace) -> dict[str, Any]:
     safety = run_subprocess([sys.executable, str(CHECK_INTEGRATION_SAFETY_SCRIPT), str(safety_target)])
     safety["status"] = "pass" if safety["exit_code"] == 0 else "fail"
     safety["checked_target"] = str(safety_target)
+    state_validation = validate_state_database(target) if has_generated_state else {
+        "status": "not_run",
+        "items": [
+            {
+                "ok": True,
+                "detail": "Target does not contain generated Diffmogger automation state yet.",
+            }
+        ],
+    }
     automation = automation_status_snapshot(target, dashboard_app)
 
     target_writable = os.access(target, os.W_OK)
@@ -145,6 +155,7 @@ def command_diagnostics_run_checks(args: argparse.Namespace) -> dict[str, Any]:
             "run": 1,
             "inbox": 1,
             "review": 1,
+            "state": 1,
             "advanced": 1,
         },
     }
@@ -157,6 +168,7 @@ def command_diagnostics_run_checks(args: argparse.Namespace) -> dict[str, Any]:
             "required_failures": required_failures,
         },
         "required_files": required_files,
+        "state": state_validation,
         "integration_safety": safety,
         "tools": [
             tool_status("codex", ["--version"], required=True, path=runtime_environment.get("effective_path")),

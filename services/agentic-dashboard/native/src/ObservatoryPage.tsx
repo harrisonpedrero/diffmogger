@@ -141,8 +141,6 @@ function buildActivityEvents(snapshot: ObservatorySnapshot | null): ActivityEven
   snapshot.progress.recent_outcomes.forEach((item, index) => push("outcome", index, item, "role result", "Role result recorded."));
   snapshot.patches.manifests.forEach((item, index) => push("patch", index, item, "patch", "Patch queued or deferred."));
   snapshot.patches.recent_outcomes.forEach((item, index) => push("patch-result", index, item, "patch result", "Patch result recorded."));
-  snapshot.signals.nudges.forEach((item, index) => push("signal", index, item, "signal", "Signal recorded."));
-  snapshot.signals.recent_completed.forEach((item, index) => push("signal-done", index, item, "signal done", "Signal completed."));
   snapshot.progress.landed_work_feed.forEach((commit, index) => {
     const status = text(commit.role, "commit");
     events.push({
@@ -684,30 +682,28 @@ function ActivityEventLedger(props: {
   );
 }
 
-function PatchSignalSection(props: { snapshot: ObservatorySnapshot | null; className?: string }) {
+function PatchQueueSection(props: { snapshot: ObservatorySnapshot | null; className?: string }) {
   const queueEntries = Object.entries(props.snapshot?.patches.queue_totals ?? {});
-  const signals = props.snapshot?.signals ?? { active_count: 0, nudges: [], recent_completed: [] };
-  const nudges = signals.nudges.slice(0, 3);
-  const completed = signals.recent_completed.slice(0, 3);
+  const outcomes = (props.snapshot?.patches.recent_outcomes ?? []).slice(0, 3);
   return (
-    <ObsSection title="Patches and signals" className={props.className}>
-      <div className="activity-patch-signal-grid">
+    <ObsSection title="Patch queue" className={props.className}>
+      <div className="activity-patch-grid">
         <div className="obs-compact-table">
           {queueEntries.length ? queueEntries.map(([key, value]) => (
             <div key={key}><span>{key}</span><strong>{value}</strong></div>
           )) : <p className="obs-muted">No patch queue totals recorded.</p>}
         </div>
-        <div className="activity-signal-list">
+        <div className="activity-patch-outcome-list">
           <div className="obs-item-title">
-            <strong>Signals</strong>
-            <CompactBadge label="active" value={signals.active_count} tone={number(signals.active_count) > 0 ? "warn" : "quiet"} />
+            <strong>Recent outcomes</strong>
+            <CompactBadge label="shown" value={outcomes.length} tone={outcomes.length ? "info" : "quiet"} />
           </div>
-          {[...nudges, ...completed].length ? (
-            [...nudges, ...completed].map((item, index) => (
-              <ManifestRow item={item} key={`${text(item.id ?? item.run_id, "signal")}-${index}`} />
+          {outcomes.length ? (
+            outcomes.map((item, index) => (
+              <ManifestRow item={item} key={`${text(item.id ?? item.run_id, "patch")}-${index}`} />
             ))
           ) : (
-            <p className="obs-muted">No active or recently completed signals.</p>
+            <p className="obs-muted">No recent patch outcomes recorded.</p>
           )}
         </div>
       </div>
@@ -916,7 +912,7 @@ export function ObservatoryPage(props: {
             className="activity-main-ledger"
           />
           <div className="obs-summary-lower activity-bottom-grid">
-            <PatchSignalSection snapshot={snapshot} />
+            <PatchQueueSection snapshot={snapshot} />
             <ValidationSafetySection snapshot={snapshot} />
             <RuntimeMetricsSection snapshot={snapshot} />
             <ReviewSummarySection snapshot={snapshot} />
