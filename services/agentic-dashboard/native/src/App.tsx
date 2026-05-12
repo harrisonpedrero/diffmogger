@@ -90,7 +90,7 @@ type ViewDefinition = {
 };
 
 const views: ViewDefinition[] = [
-  { key: "Home", label: "Control Room", legacyLabel: "Home", icon: Home },
+  { key: "Home", label: "Home", legacyLabel: "Control Room", icon: Home },
   { key: "Brief", label: "Setup", legacyLabel: "Brief", icon: FileText },
   { key: "Run", label: "Run", legacyLabel: "Run", icon: PlayCircle },
   { key: "Observatory", label: "Activity", legacyLabel: "Observatory", icon: Telescope },
@@ -536,7 +536,7 @@ function OperationalStatusHero(props: {
     props.noTarget || props.model.headline.toLowerCase() !== props.model.statusLabel.toLowerCase();
   return (
     <section
-      aria-label="Control Room operational status"
+      aria-label="Home operational status"
       className={`operational-hero ${props.model.statusTone}`}
       data-testid="operational-status-hero"
     >
@@ -783,7 +783,7 @@ function HomePage(props: {
 
   return (
     <section
-      aria-label="Control Room"
+      aria-label="Home"
       className={`home-page control-room-page ${noTarget ? "no-target" : "with-target"} ${hasRecentTargets ? "has-recents" : "no-recents"}`}
       data-testid="control-room-home"
     >

@@ -17,6 +17,8 @@
   --border-strong: #3a4742;
   --border-selected: #29fb0f;
   --border-focus: #29fb0f;
+  --component-frame-border: rgba(41, 251, 15, 0.2);
+  --component-frame-accent: rgba(41, 251, 15, 0.28);
   --text-primary: #fdfdfd;
   --text-secondary: #d7d7d7;
   --text-muted: #9a9a9a;
@@ -5356,7 +5358,7 @@ textarea:focus-visible {
   padding: 20px;
   border: 1px solid #303a3c;
   border-radius: 0;
-  background: #15191c;
+  background: var(--color-panel);
 }
 
 .obs-eyebrow,
@@ -5393,7 +5395,7 @@ textarea:focus-visible {
   padding: 14px;
   border: 1px solid rgba(41, 251, 15, 0.18);
   border-radius: 0;
-  background: rgba(14, 20, 20, 0.55);
+  background: var(--color-panel-alt);
 }
 
 .obs-project-panel.actions-only {
@@ -5422,7 +5424,7 @@ textarea:focus-visible {
   padding: 10px;
   border: 1px solid rgba(253, 253, 253, 0.28);
   border-radius: 0;
-  background: rgba(22, 34, 45, 0.52);
+  background: var(--color-panel-alt);
 }
 
 .obs-status-callout b {
@@ -5485,7 +5487,7 @@ textarea:focus-visible {
   border: 1px solid #343b35;
   border-radius: 0;
   color: #d7d7d7;
-  background: rgba(25, 26, 27, 0.68);
+  background: var(--color-panel-alt);
   font-size: 12px;
   font-weight: 850;
   text-overflow: ellipsis;
@@ -5503,7 +5505,7 @@ textarea:focus-visible {
 .obs-chip.next {
   color: var(--brand-gradient-end);
   border-color: rgba(253, 253, 253, 0.48);
-  background: rgba(253, 253, 253, 0.35);
+  background: var(--status-info-soft);
 }
 
 .obs-chip.warn,
@@ -5540,7 +5542,7 @@ textarea:focus-visible {
   padding: 10px;
   border: 1px solid #30312d;
   border-radius: 0;
-  background: #191a1b;
+  background: var(--color-panel);
 }
 
 .obs-mission-strip-item {
@@ -5552,7 +5554,7 @@ textarea:focus-visible {
   padding: 10px;
   border: 1px solid #2e3330;
   border-radius: 0;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .obs-mission-strip-item span {
@@ -5584,7 +5586,7 @@ textarea:focus-visible {
 .obs-mission-strip-item.info,
 .obs-mission-strip-item.next {
   border-color: rgba(253, 253, 253, 0.4);
-  background: rgba(253, 253, 253, 0.24);
+  background: var(--status-info-soft);
 }
 
 .obs-mission-strip-item.warn,
@@ -5618,7 +5620,7 @@ textarea:focus-visible {
   padding: 28px;
   border: 1px solid #303b40;
   border-radius: 0;
-  background: #0f1316;
+  background: var(--color-panel);
   color: #fdfdfd;
 }
 
@@ -5651,7 +5653,7 @@ textarea:focus-visible {
   padding: 4px;
   border: 1px solid #30312d;
   border-radius: 0;
-  background: #191a1b;
+  background: var(--color-panel);
 }
 
 .obs-tabs button {
@@ -5716,7 +5718,7 @@ textarea:focus-visible {
   padding: 16px;
   border: 1px solid #30312d;
   border-radius: 0;
-  background: #191a1b;
+  background: var(--color-panel);
 }
 
 .obs-section > h2 {
@@ -5774,7 +5776,7 @@ textarea:focus-visible {
 .obs-conveyor-section {
   padding: 20px;
   border-color: rgba(41, 251, 15, 0.46);
-  background: #191a1b;
+  background: var(--color-panel);
   box-shadow:
     0 0 0 1px rgba(41, 251, 15, 0.1) inset,
     0 16px 46px rgba(0, 0, 0, 0.18);
@@ -5831,9 +5833,9 @@ textarea:focus-visible {
   border: 1px solid rgba(41, 251, 15, 0.45);
   border-radius: 999px;
   color: var(--brand-gradient-end);
-  background: #171b1c;
+  background: var(--color-panel-elevated);
   box-shadow:
-    0 0 0 4px #191a1b,
+    0 0 0 4px var(--color-panel),
     0 0 0 5px rgba(41, 251, 15, 0.08);
   font-size: 17px;
   font-weight: 900;
@@ -5854,7 +5856,7 @@ textarea:focus-visible {
   padding: 14px;
   border: 1px solid #30312d;
   border-radius: 0;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .obs-role.running {
@@ -5865,7 +5867,7 @@ textarea:focus-visible {
 
 .obs-role.next {
   border-color: rgba(253, 253, 253, 0.62);
-  background: rgba(253, 253, 253, 0.24);
+  background: var(--status-info-soft);
 }
 
 .obs-role.warn,
@@ -5943,7 +5945,7 @@ textarea:focus-visible {
   padding: 12px;
   border: 1px solid #30312d;
   border-radius: 0;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .obs-running-banner {
@@ -5954,7 +5956,7 @@ textarea:focus-visible {
 
 .obs-running-banner.quiet {
   border-color: #30312d;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .obs-running-banner strong,
@@ -6301,7 +6303,7 @@ textarea:focus-visible {
 
 .activity-run-state.quiet {
   border-color: #30312d;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .activity-run-state span,
@@ -6348,7 +6350,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 10px;
   border: 1px solid #30312d;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .activity-mini-list {
@@ -6385,7 +6387,7 @@ textarea:focus-visible {
   min-height: 30px;
   padding: 0 9px;
   border: 1px solid #303a3c;
-  background: #101416;
+  background: var(--color-field);
   color: #d7d7d7;
   font-size: 12px;
   font-weight: 900;
@@ -6426,7 +6428,7 @@ textarea:focus-visible {
   padding: 10px;
   border: 1px solid #30312d;
   border-left: 3px solid #607079;
-  background: #202121;
+  background: var(--color-panel-alt);
   color: #fdfdfd;
   text-align: left;
 }
@@ -6452,7 +6454,7 @@ textarea:focus-visible {
 .activity-event-row:focus-visible,
 .activity-event-row.selected {
   border-color: rgba(41, 251, 15, 0.48);
-  background: #232827;
+  background: var(--color-panel-elevated);
   outline: 0;
 }
 
@@ -6491,7 +6493,7 @@ textarea:focus-visible {
   gap: 8px;
   min-height: 160px;
   border: 1px dashed #303a3c;
-  background: #15191c;
+  background: var(--color-panel);
   color: #d7d7d7;
   text-align: center;
 }
@@ -6981,7 +6983,7 @@ textarea:focus-visible {
   min-width: 0;
   border-color: rgba(41, 251, 15, 0.2);
   border-left: 2px solid rgba(41, 251, 15, 0.55);
-  background: #15191c;
+  background: var(--color-panel);
   color: #fdfdfd;
   text-align: center;
 }
@@ -7024,7 +7026,7 @@ textarea:focus-visible {
   min-width: 0;
   border-color: #30312d;
   border-top-color: rgba(41, 251, 15, 0.34);
-  background: #191a1b;
+  background: var(--color-panel);
 }
 
 .inbox-metrics span {
@@ -7053,7 +7055,7 @@ textarea:focus-visible {
 .inbox-tabs {
   gap: 6px;
   border-color: rgba(41, 251, 15, 0.18);
-  background: #191a1b;
+  background: var(--color-panel);
 }
 
 .inbox-tabs button {
@@ -7086,7 +7088,7 @@ textarea:focus-visible {
   min-width: 0;
   border-color: #30312d;
   border-left-color: rgba(41, 251, 15, 0.28);
-  background: #191a1b;
+  background: var(--color-panel);
 }
 
 .inbox-list-panel h2,
@@ -7106,13 +7108,13 @@ textarea:focus-visible {
 .message-card {
   min-width: 0;
   border-color: #30312d;
-  background: #202121;
+  background: var(--color-panel-alt);
   color: #fdfdfd;
 }
 
 .message-card:hover {
   border-color: rgba(41, 251, 15, 0.34);
-  background: #232827;
+  background: var(--color-panel-elevated);
 }
 
 .message-card.selected {
@@ -7136,7 +7138,7 @@ textarea:focus-visible {
 
 .message-card-head em,
 .chat-bubble footer em {
-  background: rgba(253, 253, 253, 0.35);
+  background: var(--status-info-soft);
   color: var(--brand-gradient-end);
 }
 
@@ -7175,11 +7177,11 @@ textarea:focus-visible {
 
 .selected-request-summary {
   border-color: rgba(41, 251, 15, 0.22);
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .chat-bubble {
-  background: rgba(253, 253, 253, 0.34);
+  background: var(--status-info-soft);
   color: #fdfdfd;
 }
 
@@ -7194,7 +7196,7 @@ textarea:focus-visible {
 
 .inbox-empty {
   border-color: #303a3c;
-  background: #15191c;
+  background: var(--color-panel);
   color: #d7d7d7;
 }
 
@@ -7222,14 +7224,14 @@ textarea:focus-visible {
   padding: 12px;
   border: 1px solid #30312d;
   border-top-color: rgba(41, 251, 15, 0.24);
-  background: #191a1b;
+  background: var(--color-panel);
 }
 
 .bridge-mode-panel div {
   min-width: 0;
   padding: 10px;
   border: 1px solid #30312d;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .bridge-mode-panel code {
@@ -7287,19 +7289,19 @@ textarea:focus-visible {
 
 .raw-file-actions button {
   border-color: #303a3c;
-  background: #202121;
+  background: var(--color-panel-alt);
   color: #fdfdfd;
 }
 
 .raw-file-actions button.active {
   border-color: rgba(253, 253, 253, 0.58);
-  background: rgba(253, 253, 253, 0.35);
+  background: var(--status-info-soft);
   color: var(--brand-gradient-end);
 }
 
 .raw-files-panel pre {
   border-color: #30312d;
-  background: #0e1112;
+  background: var(--color-field);
 }
 
 .review-page {
@@ -7319,7 +7321,7 @@ textarea:focus-visible {
   padding: 20px;
   border: 1px solid #303a3c;
   border-radius: 0;
-  background: #15191c;
+  background: var(--color-panel);
   text-align: left;
 }
 
@@ -7371,7 +7373,7 @@ textarea:focus-visible {
   padding: 14px;
   border: 1px solid rgba(41, 251, 15, 0.18);
   border-radius: 0;
-  background: rgba(14, 20, 20, 0.55);
+  background: var(--color-panel-alt);
 }
 
 .review-mode-summary {
@@ -7412,7 +7414,7 @@ textarea:focus-visible {
   padding: 10px;
   border: 1px solid #30312d;
   border-radius: 0;
-  background: #191a1b;
+  background: var(--color-panel);
 }
 
 .review-snapshot-item {
@@ -7423,7 +7425,7 @@ textarea:focus-visible {
   padding: 10px;
   border: 1px solid #2e3330;
   border-radius: 0;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-snapshot-item span {
@@ -7451,7 +7453,7 @@ textarea:focus-visible {
 
 .review-snapshot-item.info {
   border-color: rgba(253, 253, 253, 0.4);
-  background: rgba(253, 253, 253, 0.24);
+  background: var(--status-info-soft);
 }
 
 .review-snapshot-item.warn {
@@ -7499,7 +7501,7 @@ textarea:focus-visible {
   padding: 16px;
   border: 1px solid #30312d;
   border-radius: 0;
-  background: #191a1b;
+  background: var(--color-panel);
 }
 
 .review-section h2 {
@@ -7528,7 +7530,7 @@ textarea:focus-visible {
   padding: 12px;
   border: 1px solid #30312d;
   border-left: 4px solid #fdfdfd;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-decision-panel span,
@@ -7586,7 +7588,7 @@ textarea:focus-visible {
   min-width: 0;
   padding: 10px;
   border: 1px solid #30312d;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-deferred-panel {
@@ -7598,7 +7600,7 @@ textarea:focus-visible {
   padding: 12px;
   border: 1px solid #30312d;
   border-radius: 0;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-badge {
@@ -7612,7 +7614,7 @@ textarea:focus-visible {
   border: 1px solid #343b35;
   border-radius: 0;
   color: #d7d7d7;
-  background: rgba(25, 26, 27, 0.68);
+  background: var(--color-panel-alt);
   font-size: 12px;
   font-weight: 850;
   line-height: 1.2;
@@ -7629,7 +7631,7 @@ textarea:focus-visible {
 .review-badge.info {
   color: var(--brand-gradient-end);
   border-color: rgba(253, 253, 253, 0.48);
-  background: rgba(253, 253, 253, 0.35);
+  background: var(--status-info-soft);
 }
 
 .review-badge.warn {
@@ -7647,7 +7649,7 @@ textarea:focus-visible {
 .review-badge.quiet {
   color: #d7d7d7;
   border-color: #343b35;
-  background: rgba(25, 26, 27, 0.68);
+  background: var(--color-panel-alt);
 }
 
 .review-verdict-line {
@@ -7682,7 +7684,7 @@ textarea:focus-visible {
   padding: 12px;
   border: 1px solid #30312d;
   border-radius: 0;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-trust-item.wide {
@@ -7725,7 +7727,7 @@ textarea:focus-visible {
   border: 1px solid #30312d;
   border-left: 4px solid #fdfdfd;
   border-radius: 0;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-latest-run-item.good {
@@ -7785,7 +7787,7 @@ textarea:focus-visible {
   border: 1px solid #30312d;
   border-left: 4px solid #fdfdfd;
   border-radius: 0;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-status-card.good,
@@ -7867,7 +7869,7 @@ textarea:focus-visible {
   border: 1px solid #30312d;
   border-left: 4px solid #fdfdfd;
   border-radius: 0;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-check,
@@ -7924,7 +7926,7 @@ textarea:focus-visible {
   padding: 13px;
   border: 1px solid #30312d;
   border-radius: 0;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-commit-card footer {
@@ -8014,7 +8016,7 @@ select,
   appearance: none;
   -webkit-appearance: none;
   border-radius: 0;
-  background-color: #202121;
+  background-color: var(--color-panel-alt);
   background-image: url("data:image/svg+xml,%3Csvg width='14' height='14' viewBox='0 0 14 14' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3.5 5.25L7 8.75L10.5 5.25' stroke='%23c8c3b7' stroke-width='1.6' stroke-linecap='square' stroke-linejoin='miter'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 12px center;
@@ -8147,7 +8149,7 @@ select option {
   padding: 10px;
   border: 1px solid #30312d;
   border-radius: 0;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-artifact-card > span {
@@ -8179,7 +8181,7 @@ select option {
   padding: 5px 7px;
   border-color: #303a3c;
   color: #fdfdfd;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-bundle-actions .icon-text-button:hover {
@@ -8202,7 +8204,7 @@ select option {
   min-width: 0;
   padding: 12px;
   border: 1px solid #30312d;
-  background: #202121;
+  background: var(--color-panel-alt);
 }
 
 .review-human-state.good {
@@ -8272,7 +8274,7 @@ select option {
   min-height: 460px;
   border: 1px dashed #303a3c;
   border-radius: 0;
-  background: #15191c;
+  background: var(--color-panel);
   color: #d7d7d7;
   text-align: center;
 }
@@ -8292,6 +8294,62 @@ select option {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: center;
+}
+
+.stage :is(
+  .target-placeholder,
+  .recent-panel,
+  .skeleton-banner,
+  .skeleton-card,
+  .panel,
+  .advanced-header,
+  .sidecar-state-strip,
+  .advanced-tabs,
+  .control-panel,
+  .operational-hero,
+  .metric-signal-strip,
+  .brief-header,
+  .setup-stepper.wizard-tabs,
+  .setup-recipe-summary,
+  .brief-section,
+  .run-banner,
+  .run-status-hero,
+  .run-control-layout > .panel,
+  .obs-page-header,
+  .obs-mission-strip,
+  .observatory-shell,
+  .obs-tabs,
+  .obs-section,
+  .inbox-hero,
+  .inbox-metrics div,
+  .inbox-tabs,
+  .inbox-list-panel,
+  .reply-panel,
+  .chat-panel,
+  .archive-panel,
+  .raw-files-panel,
+  .bridge-mode-panel,
+  .review-hero,
+  .review-snapshot-strip,
+  .review-section,
+  .review-empty
+) {
+  border-top-color: var(--component-frame-border);
+  border-right-color: var(--component-frame-border);
+  border-bottom-color: var(--component-frame-border);
+}
+
+.stage :is(
+  .inbox-list-panel,
+  .reply-panel,
+  .chat-panel,
+  .archive-panel,
+  .raw-files-panel,
+  .brief-section,
+  .run-control-layout > .panel,
+  .obs-section
+) {
+  border-left-color: var(--component-frame-accent);
 }
 
 @media (max-width: 1180px) {

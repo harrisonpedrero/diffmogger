@@ -57,7 +57,8 @@ describe("App shell", () => {
 
     expect(positions.every((position) => position > -1)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
-    expect(html).toContain('aria-label="Control Room"');
+    expect(html).toContain('aria-label="Home"');
+    expect(html).toContain('title="Home"');
     expect(html).toContain('aria-label="Run"');
     expect(html).toContain('aria-label="Inbox"');
     expect(html).toContain('aria-label="Sidecar"');
@@ -68,7 +69,7 @@ describe("App shell", () => {
 
     expect(html).toContain('data-testid="primary-icon-rail"');
     expect(html).toContain('data-testid="sidebar-nav-Home"');
-    expect(html).toContain('data-aliases="Control Room Home"');
+    expect(html).toContain('data-aliases="Home Control Room"');
     expect(html).toContain('data-aliases="Setup Brief"');
     expect(html).toContain('data-aliases="Activity Observatory"');
     expect(html).toContain('data-aliases="Inbox Handoffs"');

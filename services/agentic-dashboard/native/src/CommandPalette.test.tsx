@@ -6,7 +6,7 @@ import type { PaletteCommand } from "./commandPaletteModel";
 const commands: PaletteCommand[] = [
   {
     id: "open-control-room",
-    title: "Open Control Room",
+    title: "Open Home",
     section: "Navigation",
     description: "Open the Home overview.",
     keywords: ["home", "control room"],

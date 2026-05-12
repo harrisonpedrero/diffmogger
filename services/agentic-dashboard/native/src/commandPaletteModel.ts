@@ -85,7 +85,7 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
   return [
     {
       id: "open-control-room",
-      title: "Open Control Room",
+      title: "Open Home",
       section: "Navigation",
       description: "Open the Home overview.",
       keywords: ["home", "control room", "overview", "ready"],
