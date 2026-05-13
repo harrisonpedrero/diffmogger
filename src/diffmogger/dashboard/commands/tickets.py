@@ -128,6 +128,18 @@ def _import_text(args: argparse.Namespace) -> str:
     return str(args.input_text)
 
 
+def _draft_direction(args: argparse.Namespace) -> str:
+    direction = str(getattr(args, "direction", "") or "").strip()
+    if len(direction) > 4000:
+        raise BackendError(
+            "Ticket draft direction is too long.",
+            exit_code=2,
+            error_type="ticket_draft_direction_too_long",
+            details={"max_length": 4000, "actual_length": len(direction)},
+        )
+    return direction
+
+
 def command_ticket_import(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     data, path, text = _load_ticket_state(target, args)
@@ -292,6 +304,18 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
     current_tickets = ticket_run.tickets(data)
     current_ids = {str(item.get("id") or "").strip() for item in current_tickets if str(item.get("id") or "").strip()}
     next_ticket_id = _next_available_ticket_id(set(current_ids))
+    direction = _draft_direction(args)
+    direction_block = (
+        [
+            "User-provided draft direction:",
+            direction,
+            "",
+            "Apply this direction when deciding which genuinely new tickets to propose, while preserving the append-only rules.",
+            "",
+        ]
+        if direction
+        else []
+    )
     prompt = "\n".join(
         [
             "Draft additional Diffmogger ticket-campaign tickets from this project intake.",
@@ -304,6 +328,7 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
             f"- Use fresh ticket IDs starting at {next_ticket_id} or later.",
             "- Dependencies may point to current tickets or to newly proposed tickets.",
             "",
+            *direction_block,
             "Project intake JSON:",
             json.dumps(intake, indent=2, sort_keys=True, default=json_default),
             "",

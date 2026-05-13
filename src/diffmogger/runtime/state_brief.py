@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from diffmogger.runtime.state_store import write_canonical_state_brief
+from diffmogger.runtime.state_store import write_automation_control_state, write_canonical_state_brief
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -19,11 +19,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit metadata as JSON")
     parser.add_argument("--print", dest="print_markdown", action="store_true", help="Print the Markdown brief")
     parser.add_argument("--quiet", action="store_true", help="Only write the brief")
+    parser.add_argument("--set-status", choices=["ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT", "BLOCKED_ON_USER", "BLOCKED_ON_ENVIRONMENT", "CRITICAL_STOP"], default="", help="Update typed automation status before rendering")
+    parser.add_argument("--horizon", default="", help="Update typed current horizon before rendering")
+    parser.add_argument("--horizon-decision", default="", help="Update typed horizon decision before rendering")
+    parser.add_argument("--current-assessment", default="", help="Update typed current assessment before rendering")
+    parser.add_argument("--best-next-milestone", default="", help="Update typed best next milestone before rendering")
+    parser.add_argument("--suggested-next-task", default="", help="Update typed suggested next sprint-sized task before rendering")
     args = parser.parse_args(argv)
 
     target = Path(args.target).expanduser().resolve()
     output = Path(args.output) if args.output else None
     try:
+        updates = {
+            key: value
+            for key, value in {
+                "status": args.set_status,
+                "horizon": args.horizon,
+                "horizon_decision": args.horizon_decision,
+                "current_assessment": args.current_assessment,
+                "best_next_milestone": args.best_next_milestone,
+                "suggested_next_task": args.suggested_next_task,
+            }.items()
+            if value
+        }
+        if updates:
+            write_automation_control_state(
+                target,
+                updates,
+                actor_role="state_brief",
+                event_type="automation.control_updated_from_state_brief_cli",
+            )
         result = write_canonical_state_brief(target, output_path=output)
     except Exception as exc:
         print(f"STATE_BRIEF_FAILED target={target} error={exc}", file=sys.stderr)

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { ProjectSnapshot } from "./api/backend";
-import { RunPage } from "./RunPage";
+import { RunPage, ticketSnapshotReloadKey } from "./RunPage";
 
 function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
   const base: ProjectSnapshot = {
@@ -93,6 +93,8 @@ describe("RunPage", () => {
 
     expect(html).toContain("Ticket Queue");
     expect(html).toContain("Draft candidates");
+    expect(html).toContain("Agent direction (optional)");
+    expect(html).toContain("Focus the draft on a feature area, workflow, or constraint.");
     expect(html).toContain("Draft New Tickets");
     expect(html).toContain("Manual ticket");
     expect(html).toContain("New Ticket");
@@ -100,6 +102,38 @@ describe("RunPage", () => {
     expect(html).toContain("Apply Import");
     expect(html).toContain("Run Codex to propose only new pending tickets");
     expect(html).toContain("Create a blank pending ticket in the editor");
+  });
+
+  it("changes the ticket reload key when the parent snapshot advances canonical ticket state", () => {
+    const first = snapshot({
+      run: {
+        snapshot_generated_at: "2026-05-07T12:00:00+00:00",
+        state: {
+          ticket_run: {
+            run_id: "campaign",
+            status: "active",
+            total: 5,
+            counts: { pending: 5, done: 0 },
+          },
+        },
+      },
+    });
+    const refreshed = snapshot({
+      run: {
+        snapshot_generated_at: "2026-05-07T12:05:00+00:00",
+        state: {
+          ticket_run: {
+            run_id: "campaign",
+            status: "active",
+            total: 5,
+            counts: { pending: 3, done: 2 },
+          },
+        },
+      },
+    });
+
+    expect(ticketSnapshotReloadKey(first)).not.toEqual(ticketSnapshotReloadKey(refreshed));
+    expect(ticketSnapshotReloadKey(refreshed)).toContain("done:2");
   });
 
   it("keeps the ready run banner badge-only instead of duplicating the headline", () => {
@@ -158,11 +192,83 @@ describe("RunPage", () => {
 
     expect(html).toContain("Helper Strategy");
     expect(html).toContain("Recommended: one read-only builder report");
-    expect(html).toContain("target/agent_runs/&lt;run-id&gt;/worker_builder_strategy.md");
+    expect(html).toContain(".diffmogger/runtime/agent_runs/&lt;run-id&gt;/worker_builder_strategy.md");
     expect(html).toContain("Advanced helper controls");
     expect(html).toContain("Run read-only worker");
     expect(html).not.toContain("Run write worker");
     expect(html).not.toContain("Run integrator");
+  });
+
+  it("renders the typed conveyor state machine panel", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            state: {
+              next_actions: [{ owner_role: "builder", status: "next", reason: "Implement the selected work item." }],
+              conveyor_machine: {
+                current_stage: "implementation",
+                stage_status: "ready",
+                owner_role: "builder",
+                work_item: {
+                  id: "workitem:default",
+                  status: "ACTIVE",
+                  current_stage: "implementation",
+                  stage_status: "ready",
+                  owner_role: "builder",
+                  capability_manifest_id: "capability:repo",
+                  capability_manifest_version: 2,
+                  validation_status: "passed",
+                  continuation_token: "workitem:default:implementation:42",
+                },
+                capability_manifest: {
+                  languages: { primary: "TypeScript" },
+                  commands: [{ kind: "test", command: "npm test" }],
+                },
+              },
+            },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("State Machine");
+    expect(html).toContain("workitem:default:implementation:42");
+    expect(html).toContain("TypeScript / 1 command");
+    expect(html).toContain("Implement the selected work item.");
+  });
+
+  it("renders a recheck action for baseline blockers", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            environment_blockers: [
+              {
+                name: "Baseline verification",
+                detail: "Baseline requires DATABASE_URL.",
+                required: true,
+                can_recheck: true,
+                recheck_command: "blocker.recheck_baseline",
+                recheck_label: "Recheck blocker",
+              },
+            ],
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Baseline verification");
+    expect(html).toContain("Baseline requires DATABASE_URL.");
+    expect(html).toContain("Recheck blocker");
   });
 
 });

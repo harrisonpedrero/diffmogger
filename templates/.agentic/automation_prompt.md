@@ -20,7 +20,7 @@ docs/AUTONOMY_EXPERIMENT_LOG.md
 
 Also inspect relevant source files, tests, scripts, and recent worker reports under `target/agent_runs/` as needed.
 
-The task file is dynamic and must be rewritten at the end of every run, but it is a human/prompt projection. Canonical runtime state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated, bounded agent-readable view. Read the brief instead of inspecting SQLite manually. `target/automation_conveyor_state.json` is generated from SQLite for compatibility and dashboard inspection. Do not hand-edit generated runtime JSON as authoritative state. The guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
+The task file is dynamic, but it is a generated human/prompt projection. Canonical runtime and task-control state lives in `target/orchestration.sqlite3`; the typed state stores automation status, product horizon, validation receipts, blockers, next actions, stage contracts, the current work item, and repo capability manifest. `target/canonical_state_brief.md` is the generated, bounded agent-readable view. Read the brief instead of inspecting SQLite manually. Use `.diffmogger/scripts/state_brief.py` to update typed status/horizon/task summary fields and regenerate the brief. `target/automation_conveyor_state.json` is generated from SQLite for compatibility and dashboard inspection. Do not hand-edit generated runtime JSON as authoritative state. The guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
 
 ## Mission
 
@@ -42,7 +42,7 @@ A strong run usually combines implementation, tests or fixtures, integration int
 
 A weak run is one that only reads files and summarizes, makes a tiny doc-only change when implementation work is available, adds a placeholder without wiring it into the product, avoids Codex CLI worker usage on a broad task without explaining why, or updates the task file without improving the app, tests, reports, or automation process.
 
-Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. Use `python3 .diffmogger/scripts/ticket_run.py . next --json` to select one dependency-ready ticket, treat that single selection as the run's implementation scope, and do not continue into another ticket after it is completed, blocked, or marked `candidate_done`. If the command reports placeholder tickets, missing dependencies, duplicate ticket IDs, cycles, blocked dependencies, or no actionable ticket, record that structured blocker instead of guessing. Do not invent new backlog after every ticket is `done` or `blocked`; finalize the ticket run and stop only after remaining blockers are not repairable baseline/service setup work.
+Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. Use `python3 .diffmogger/scripts/ticket_run.py . next --json` to select one dependency-ready ticket, treat that single selection as the run's implementation scope, and do not continue into another ticket after it is completed, blocked, or marked `candidate_done`. Use `.diffmogger/scripts/ticket_run.py update` to record ticket status and evidence; planner/builder/hardener role worktrees stage that as a typed action for integrator reconciliation after patch acceptance. If the command reports placeholder tickets, missing dependencies, duplicate ticket IDs, cycles, blocked dependencies, or no actionable ticket, record that structured blocker instead of guessing. Do not invent new backlog after every ticket is `done` or `blocked`; finalize the ticket run and stop only after remaining blockers are not repairable baseline/service setup work.
 
 ## Run Structure
 
@@ -50,14 +50,14 @@ Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. 
 1. Read `target/canonical_state_brief.md` and the required files above. If Markdown or JSON projections contradict the brief, regenerate or reconcile through the target-local Diffmogger typed state APIs.
 {{HUMAN_RUN_STEPS}}
 1. Inspect the repo enough to understand current state.
-1. Treat the dashboard/conveyor SQLite state as canonical for run, event, checkpoint, blocker, validation, and next-action state.
-1. Read the current product horizon state from `docs/CODEX_AUTOMATION_TASKS.md`.
+1. Treat the dashboard/conveyor SQLite state as canonical for automation status, product horizon, run, event, stage, capability-manifest, checkpoint, blocker, validation, and next-action state.
+1. Read the current product horizon and next task from `target/canonical_state_brief.md`.
 1. Identify the highest-leverage milestone for this run within the current product horizon.
 1. Decide whether Codex CLI worker agents would materially improve speed, coverage, or quality.
 1. Choose a sprint-sized scope that can fit within the run window.
 1. Implement it and adjacent safe work.
 1. Run relevant verification.
-1. Update artifacts, docs, task state, worker activity, human request state when enabled, generated artifacts, checks run, and next sprint.
+1. Update typed runtime state, artifacts, docs, worker activity, human request state when enabled, generated projections, checks run, and next sprint.
 1. If this Codex run acquired the lock itself, release it with the target repo's local `.diffmogger/scripts/release_codex_lock.sh` when possible. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, leave lock release to `.diffmogger/scripts/run_codex_automation.sh`. Summarize results.
 
 ## Sprint Sizing
@@ -74,7 +74,7 @@ For reversible or low-impact choices, choose a reasonable default and document t
 
 {{PRODUCT_HORIZON_GUIDANCE}}
 
-The dynamic task file must keep the parser-compatible sections `## Product Horizon State` and `## Horizon Transition Log`.
+The task file may mirror `## Product Horizon State` and `## Horizon Transition Log` for humans, but it is a projection. Update typed control state first, then regenerate projections.
 
 ## Ticket Campaign Mode
 
@@ -97,7 +97,7 @@ Parallelism budget: <0-N workers>
 Reason: <one sentence>
 ```
 
-Record this decision in `docs/CODEX_AUTOMATION_TASKS.md` at the end of the run.
+Record this decision in the generated task projection at the end of the run, and keep live status/task summary changes in typed state.
 
 This target repo includes local helper scripts for bounded CLI workers:
 
@@ -239,7 +239,7 @@ If this Codex run acquired the lock itself, release it at the end:
 bash .diffmogger/scripts/release_codex_lock.sh
 ```
 
-Lock-file behavior is required for every mutating automation run. If acquiring the lock fails because a fresh active lock exists, do not mutate code. If the helper removes a stale lock, record that fact in `docs/CODEX_AUTOMATION_TASKS.md`. Lock scripts reduce overlap risk; they do not remove the need to review diffs.
+Lock-file behavior is required for every mutating automation run. If acquiring the lock fails because a fresh active lock exists, do not mutate code. If the helper removes a stale lock, record that fact in typed runtime state and refresh generated handoff projections. Lock scripts reduce overlap risk; they do not remove the need to review diffs.
 
 ## Verification
 
@@ -267,7 +267,21 @@ Use `DIFFMOGGER_BROWSER_PATH` or `CHROME_PATH` when launching headless browser c
 
 ## End-Of-Run Requirements
 
-Rewrite `docs/CODEX_AUTOMATION_TASKS.md` with:
+Update typed control state before changing generated projections. Use the target-local helper, for example:
+
+```bash
+python3 .diffmogger/scripts/state_brief.py \
+  --target . \
+  --set-status ACTIVE \
+  --horizon "<current horizon or phase>" \
+  --horizon-decision "stay|advance|defer" \
+  --current-assessment "<brief current state>" \
+  --best-next-milestone "<next milestone>" \
+  --suggested-next-task "<next sprint-sized task>" \
+  --quiet
+```
+
+Then refresh `docs/CODEX_AUTOMATION_TASKS.md` as a generated prompt/handoff projection with:
 
 - automation status
 - current project state
@@ -288,7 +302,7 @@ Rewrite `docs/CODEX_AUTOMATION_TASKS.md` with:
 - ambitious ideas backlog
 - continue/block/critical-stop rationale
 
-Keep the parser-compatible headings from the scaffolded task file. In particular, do not rename `## Completed Last Run` to `## Completed This Run`, and do not rename `## Checks From Last Run` to alternate wording.
+Keep the projection headings from the scaffolded task file for human continuity. Do not treat those headings as live dashboard or conveyor state.
 
 Update `docs/AUTONOMY_EXPERIMENT_LOG.md` when the workflow itself teaches something useful.
 

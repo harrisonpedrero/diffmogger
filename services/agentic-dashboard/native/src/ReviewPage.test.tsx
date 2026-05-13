@@ -82,12 +82,12 @@ function reviewSnapshot(overrides: DeepPartial<ReviewSnapshot> = {}): ReviewSnap
     self_review: {
       markdown_preview: "# Diffmogger Self-Review Snapshot",
       truncated: false,
-      default_markdown_path: "/tmp/project/target/first-review/Diffmogger-self-review.md",
+      default_markdown_path: "/tmp/project/.diffmogger/runtime/first-review/Diffmogger-self-review.md",
     },
     bundle: {
-      review_dir: "/tmp/project/target/first-review",
-      html_path: "/tmp/project/target/first-review/Diffmogger-observatory.html",
-      markdown_path: "/tmp/project/target/first-review/Diffmogger-self-review.md",
+      review_dir: "/tmp/project/.diffmogger/runtime/first-review",
+      html_path: "/tmp/project/.diffmogger/runtime/first-review/Diffmogger-observatory.html",
+      markdown_path: "/tmp/project/.diffmogger/runtime/first-review/Diffmogger-self-review.md",
     },
     reviewed: {
       exists: false,
@@ -126,8 +126,10 @@ describe("ReviewPage", () => {
     );
 
     expect(html).toContain("Latest Run Review");
-    expect(html).toContain("Outcome review");
-    expect(html).toContain("Review status");
+    expect(html).not.toContain("Latest stable outcome");
+    expect(html).toContain("Review marker");
+    expect(html).toContain("Stable snapshot");
+    expect(html).not.toContain("Outcome review");
     expect(html).toContain("Safety check");
     expect(html).toContain("Verification");
     expect(html).toContain("Changed files");

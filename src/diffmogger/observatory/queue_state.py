@@ -159,12 +159,26 @@ def normalized_deferral_reason(value: Any) -> str:
         return "guardrail_violation"
     return "other"
 
-def deferred_backlog_items(progress_text: str) -> list[str]:
+def deferred_backlog_items(target: Path) -> list[str]:
     items: list[str] = []
-    for item in section_bullets(progress_text, "Deferred-Patch Backlog", limit=MAX_REVIEW_ITEMS):
-        if clean_text(item, limit=120).lower() in EMPTY_DEFERRED_BACKLOG_MARKERS:
+    queue_root = runtime_path(target, "target/automation_queue")
+    for manifest_path in sorted(queue_root.glob("*/*/manifest.json")):
+        manifest = read_json(manifest_path)
+        if manifest.get("status") != "deferred":
             continue
-        items.append(item)
+        role = clean_text(manifest.get("role") or manifest_path.parent.parent.name, limit=40)
+        run_id = clean_text(manifest.get("run_id") or manifest_path.parent.name, limit=80)
+        reason = clean_text(manifest.get("deferral_reason") or "other", limit=80)
+        detail = clean_text(
+            manifest.get("deferral_root_cause")
+            or manifest.get("deferral_detail")
+            or manifest.get("summary")
+            or "No detail recorded.",
+            limit=320,
+        )
+        items.append(f"{role} `{run_id}`: {reason}; {detail}")
+        if len(items) >= MAX_MANIFESTS:
+            break
     return items
 
 def parse_deferred_backlog_item(item: str) -> dict[str, str]:
@@ -251,17 +265,31 @@ def deferred_backlog_triage(backlog_items: list[str]) -> dict[str, Any]:
         "items": entries,
     }
 
-def progress_snapshot(progress_text: str) -> dict[str, Any]:
-    accepted_by_role = cumulative_role_counts(progress_text, "Accepted patches by role")
-    deferred_by_role = cumulative_role_counts(progress_text, "Deferred patches by role")
-    deferred_depth = 0
-    match = re.search(r"^-\s*Current deferred queue depth:\s*(\d+)", progress_text, re.MULTILINE)
-    if match:
-        deferred_depth = int(match.group(1))
-    backlog = deferred_backlog_items(progress_text)
+def progress_snapshot(target: Path) -> dict[str, Any]:
+    accepted_by_role = {role: 0 for role in ROLES if role != "integrator"}
+    deferred_by_role = {role: 0 for role in ROLES if role != "integrator"}
+    integrator_runs = 0
+    latest_activity: tuple[str, str] | None = None
+    queue_root = runtime_path(target, "target/automation_queue")
+    for manifest_path in sorted(queue_root.glob("*/*/manifest.json")):
+        manifest = read_json(manifest_path)
+        role = str(manifest.get("role") or manifest_path.parent.parent.name)
+        status = str(manifest.get("status") or "")
+        timestamp = str(manifest.get("integrated_at") or manifest.get("created_at") or "")
+        summary = clean_text(manifest.get("summary") or "No summary recorded.", limit=260)
+        if role == "integrator":
+            integrator_runs += 1
+        if role in accepted_by_role and status == "applied":
+            accepted_by_role[role] += 1
+        if role in deferred_by_role and status == "deferred":
+            deferred_by_role[role] += 1
+        if timestamp and (latest_activity is None or timestamp >= latest_activity[0]):
+            latest_activity = (timestamp, f"{role} `{manifest.get('run_id') or manifest_path.parent.name}` {status or 'recorded'}: {summary}")
+    backlog = deferred_backlog_items(target)
+    deferred_depth = len(backlog)
     return {
-        "recent_activity": first_nonempty_section_line(progress_text, "Recent Activity Log") or "No multi-role activity recorded yet.",
-        "integrator_runs": cumulative_metric_int(progress_text, "Total integrator runs"),
+        "recent_activity": latest_activity[1] if latest_activity else "No multi-role activity recorded yet.",
+        "integrator_runs": integrator_runs,
         "accepted_by_role": accepted_by_role,
         "accepted_total": sum(accepted_by_role.values()),
         "deferred_by_role": deferred_by_role,
@@ -270,31 +298,6 @@ def progress_snapshot(progress_text: str) -> dict[str, Any]:
         "deferred_backlog": backlog,
         "deferred_triage": deferred_backlog_triage(backlog),
     }
-
-def cumulative_metric_int(progress_text: str, key: str) -> int:
-    section = markdown_section(progress_text, "Cumulative Metrics")
-    match = re.search(rf"^-\s*{re.escape(key)}:\s*(\d+)", section, re.MULTILINE)
-    return int(match.group(1)) if match else 0
-
-def cumulative_role_counts(progress_text: str, key: str) -> dict[str, int]:
-    section = markdown_section(progress_text, "Cumulative Metrics")
-    counts = {role: 0 for role in ROLES if role != "integrator"}
-    in_target_block = False
-    for raw in section.splitlines():
-        if re.match(rf"^-\s*{re.escape(key)}:\s*$", raw):
-            in_target_block = True
-            continue
-        if not in_target_block:
-            continue
-        if raw.startswith("- "):
-            break
-        item = re.match(r"\s+-\s+([A-Za-z0-9_-]+):\s*(\d+)\s*$", raw)
-        if not item:
-            continue
-        role = item.group(1)
-        if role in counts:
-            counts[role] = int(item.group(2))
-    return counts
 
 def role_count_summary(counts: dict[str, int], *, empty: str) -> str:
     parts = [f"{role} {int(counts.get(role, 0) or 0)}" for role in ROLES if role in counts and int(counts.get(role, 0) or 0)]

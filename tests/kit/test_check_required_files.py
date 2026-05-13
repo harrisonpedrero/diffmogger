@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -57,9 +58,11 @@ class RequiredFilesCheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self.scaffold_target(target)
+            manifest = json.loads((target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8"))
 
             result = self.run_check(target)
 
+            self.assertIn("AGENTS.md", manifest["worktree_seed_paths"])
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
 
@@ -93,7 +96,6 @@ class RequiredFilesCheckTests(unittest.TestCase):
   "desired_first_demo": "Generated docs only.",
   "human_bridge_enabled": false,
   "human_bridge_mode": "disabled",
-  "multi_role_automations_allowed": true,
   "automation_role_profile": "planner_builder_hardener_integrator",
   "optional_mcp_servers": ["context7", "playwright"],
   "verification_commands": ["npm test"]
@@ -164,7 +166,6 @@ class RequiredFilesCheckTests(unittest.TestCase):
   "desired_first_demo": "Generated docs only.",
   "human_bridge_enabled": false,
   "human_bridge_mode": "disabled",
-  "multi_role_automations_allowed": false,
   "automation_role_profile": "single_lane",
   "verification_commands": ["npm test"]
 }
@@ -568,7 +569,7 @@ exit 0
             ensure_initial_git_commit(target, placeholders(intake))
 
             (target / ".env.local").write_text("SECRET=do-not-commit\n", encoding="utf-8")
-            subprocess.run(["git", "add", ".env.local"], cwd=target, check=True)
+            subprocess.run(["git", "add", "-f", ".env.local"], cwd=target, check=True)
 
             fake_bin = target / "fake-bin"
             fake_bin.mkdir()

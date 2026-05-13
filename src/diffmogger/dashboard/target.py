@@ -176,6 +176,31 @@ def normalize_string_list(value: Any) -> list[str]:
         return [line.strip().removeprefix("-").strip() for line in value.splitlines() if line.strip()]
     return []
 
+def legacy_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+def normalize_automation_role_profile(
+    data: dict[str, Any],
+    *,
+    default: str = "planner_builder_hardener_integrator",
+) -> str:
+    profile = str(data.get("automation_role_profile") or "").strip().lower()
+    profile = profile.replace("-", "_").replace(" ", "_")
+    if profile in {"single_lane", "planner_builder_hardener_integrator"}:
+        return profile
+    if "multi_role_automations_allowed" in data:
+        return "planner_builder_hardener_integrator" if legacy_bool(data.get("multi_role_automations_allowed"), True) else "single_lane"
+    return default if default in {"single_lane", "planner_builder_hardener_integrator"} else "planner_builder_hardener_integrator"
+
 def dashboard_state_from_intake(
     target: Path,
     intake: dict[str, Any],
@@ -186,14 +211,13 @@ def dashboard_state_from_intake(
     existing = load_dashboard_state(target)
     optional_mcp = dashboard_app.optional_mcp_servers_from_value(intake.get("optional_mcp_servers"))
     write_workers_enabled = bool(intake.get("write_worker_agents_allowed")) and bool(intake.get("worker_agents_allowed", True))
-    raw_role_profile = str(intake.get("automation_role_profile") or "").strip()
-    requested_multi_role = bool(intake.get("multi_role_automations_allowed", True))
-    if raw_role_profile == "single_lane" or not requested_multi_role:
-        automation_role_profile = "single_lane"
-        multi_role_enabled = False
-    else:
-        automation_role_profile = "planner_builder_hardener_integrator"
-        multi_role_enabled = True
+    automation_role_profile = normalize_automation_role_profile(intake)
+    multi_role_enabled = automation_role_profile == "planner_builder_hardener_integrator"
+    normalized_intake = {
+        **intake,
+        "automation_role_profile": automation_role_profile,
+        "multi_role_automations_allowed": multi_role_enabled,
+    }
     state = {
         **existing,
         "schema_version": 1,
@@ -221,13 +245,16 @@ def dashboard_state_from_intake(
         "ticket_run_file": str(intake.get("ticket_run_file") or ""),
         "ticket_completion_notify": bool(intake.get("ticket_completion_notify", True)),
         "overwrite_existing_scaffold_files": bool(intake.get("overwrite_existing_scaffold_files", False)),
-        "brief_draft_intake": intake,
+        "brief_draft_intake": normalized_intake,
         "last_action": last_action,
     }
     return state
 
 def project_intake_payload(intake: dict[str, Any]) -> dict[str, Any]:
     payload = dict(intake)
+    automation_role_profile = normalize_automation_role_profile(payload)
+    payload["automation_role_profile"] = automation_role_profile
+    payload["multi_role_automations_allowed"] = automation_role_profile == "planner_builder_hardener_integrator"
     payload.pop("overwrite_existing_scaffold_files", None)
     return payload
 

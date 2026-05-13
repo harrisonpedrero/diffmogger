@@ -2,11 +2,11 @@
 
 These records preserve historical source-kit decisions. Active setup and operating guidance lives in `docs/README.md`, `DEVELOPMENT.md`, and `docs/OPERATING_MODEL.md`.
 
-## DR-001: Separate Stable Prompt From Dynamic Task State
+## DR-001: Separate Stable Prompt From Typed Runtime State
 
-Decision: keep recurring behavior in `.diffmogger/agentic/automation_prompt.md` and changing state in `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
+Decision: keep recurring behavior in `.diffmogger/agentic/automation_prompt.md` and changing runtime/task-control state in `.diffmogger/runtime/orchestration.sqlite3`. `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` remains a generated prompt/handoff projection.
 
-Why: earlier automation trials showed that recurring agents need stable behavior plus fresh handoff state. Combining them makes prompts stale and bloated.
+Why: earlier automation trials showed that recurring agents need stable behavior plus fresh handoff state. Combining them makes prompts stale and bloated; keeping live state typed makes dashboard, conveyor, and observatory behavior auditable.
 
 ## DR-002: Prefer File-Only Human Bridge First
 
@@ -92,11 +92,11 @@ Why: nested Codex workers launched from inside a scheduled automation sandbox ma
 
 Decision: generated target projects support optional bounded write-capable workers only when the intake explicitly enables `write_worker_agents_allowed`, with `max_write_worker_count` capped at 10 and read-only worker reports preserved as the default.
 
-Why: high-throughput implementation can help when work can split into reviewable lanes, but overlapping autonomous writes are risky. The main agent must choose a strategy and parallelism budget each run, define enough ownership and contracts before spawning write workers, tell workers they are not alone in the codebase, review and integrate diffs, run verification, and update task state. Integration-only runs with no workers remain valid when faster or safer.
+Why: high-throughput implementation can help when work can split into reviewable lanes, but overlapping autonomous writes are risky. The main agent must choose a strategy and parallelism budget each run, define enough ownership and contracts before spawning write workers, tell workers they are not alone in the codebase, review and integrate diffs, run verification, update typed runtime state, and refresh generated projections. Integration-only runs with no workers remain valid when faster or safer.
 
 ## DR-016: Multi-Role Worktree Orchestration Is Opt-In
 
-Decision: generated target projects may opt into `multi_role_automations_allowed` with the v1 `planner_builder_hardener_integrator` profile. Planner, builder, and hardener run in isolated local worktrees from current main `HEAD`; the integrator owns the main checkout and processes queued patches FIFO.
+Decision: generated target projects may opt into the v1 `planner_builder_hardener_integrator` profile. Older intakes used `multi_role_automations_allowed` as the selector; current intakes use canonical `automation_role_profile` and treat the boolean as a derived compatibility mirror. Planner, builder, and hardener run in isolated local worktrees from current main `HEAD`; the integrator owns the main checkout and processes queued patches FIFO.
 
 Why: separate roles can increase useful autonomous throughput without making every target adopt that complexity. Fresh-HEAD role runs minimize stale work, while integrator-side `git apply --check` preserves correctness.
 
@@ -118,11 +118,11 @@ Decision: generated role prompts prohibit pushes, fetches, pulls, remote configu
 
 Why: prompts guide agent intent, while script guards catch mistakes and environment drift. Multi-role automation is local-only by default.
 
-## DR-020: Multi-Role Progress Is Durable Markdown State
+## DR-020: Multi-Role Progress Is A Generated Projection
 
-Decision: generated multi-role targets include `.diffmogger/state/MULTI_ROLE_PROGRESS.md` as the durable progress record for project state, cumulative metrics, recent activity, historical summaries, deferred backlog, architectural decisions, and role health.
+Decision: generated multi-role targets include `.diffmogger/state/MULTI_ROLE_PROGRESS.md` as a human-readable export/projection. Durable state for project status, cumulative metrics, recent activity, deferred backlog, integration summaries, and role health lives in SQLite plus role manifests.
 
-Why: role run directories and logs are transient. Humans and future automation need a compact weeks-long record that survives compaction.
+Why: role run directories and logs are transient. Humans still need a compact weeks-long view, but automation decisions must come from typed state and role manifests rather than scraped Markdown.
 
 ## DR-021: Planner Runs Hourly For Stable Execution
 

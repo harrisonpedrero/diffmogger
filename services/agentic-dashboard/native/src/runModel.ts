@@ -56,6 +56,17 @@ export type RunModel = {
     lastUpdated: string;
     summary: string;
   };
+  stateMachine: {
+    stage: string;
+    stageStatus: string;
+    ownerRole: string;
+    validationStatus: string;
+    capability: string;
+    capabilityVersion: string;
+    continuationToken: string;
+    enteredAt: string;
+    nextActions: Array<{ role: string; state: string; reason: string }>;
+  };
   runLog: {
     exists: boolean;
     path: string;
@@ -79,7 +90,14 @@ export type RunModel = {
     };
   };
   safety: RunSafetyRow[];
-  blockers: Array<{ name: string; detail: string; required: boolean }>;
+  blockers: Array<{
+    name: string;
+    detail: string;
+    required: boolean;
+    canRecheck: boolean;
+    recheckCommand: string;
+    recheckLabel: string;
+  }>;
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -137,6 +155,14 @@ function statusTone(status: string, blockers: unknown[]): RunTone {
   if (status.includes("RUNNING")) return "info";
   if (status === "ACTIVE" || status === "ACTIVE_WITH_PENDING_USER_INPUT") return "good";
   return "quiet";
+}
+
+function bannerTone(title: string, status: string, blockers: unknown[]): RunTone {
+  if (title === "Critical stop") return "critical";
+  if (title === "Env blocked" || title === "User input" || title === "Stale") return "warn";
+  if (title === "Running") return "info";
+  if (title === "No target" || title === "Unknown") return "quiet";
+  return statusTone(status, blockers);
 }
 
 function safetyTone(value: unknown): RunTone {
@@ -211,6 +237,49 @@ function workerRole(strategy: Record<string, unknown>): string {
     .replace(/^_+|_+$/g, "");
 }
 
+function stateMachineSnapshot(snapshot: ProjectSnapshot | null): Record<string, unknown> {
+  const state = record(snapshot?.run.state);
+  const machine = record(state.conveyor_machine);
+  if (Object.keys(machine).length) return machine;
+  return record(record(snapshot?.run.conveyor).state_machine);
+}
+
+function capabilityLabel(capability: Record<string, unknown>): string {
+  const languages = record(capability.languages);
+  const primary = text(languages.primary, "");
+  const commands = list(capability.commands).length;
+  if (primary && commands) return `${primary} / ${commands} command${commands === 1 ? "" : "s"}`;
+  if (primary) return primary;
+  if (commands) return `${commands} command${commands === 1 ? "" : "s"}`;
+  return "Not discovered";
+}
+
+function stateMachineModel(snapshot: ProjectSnapshot | null): RunModel["stateMachine"] {
+  const machine = stateMachineSnapshot(snapshot);
+  const workItem = record(machine.work_item);
+  const capability = record(machine.capability_manifest);
+  const state = record(snapshot?.run.state);
+  const actions = list(state.next_actions)
+    .map(record)
+    .slice(0, 4)
+    .map((item) => ({
+      role: text(item.owner_role, "idle"),
+      state: text(item.status, "planned"),
+      reason: text(item.reason, "No reason recorded."),
+    }));
+  return {
+    stage: text(workItem.current_stage, text(machine.current_stage, "intake")),
+    stageStatus: text(workItem.stage_status, text(machine.stage_status, "ready")),
+    ownerRole: text(workItem.owner_role, text(machine.owner_role, "planner")),
+    validationStatus: text(workItem.validation_status, "not recorded"),
+    capability: capabilityLabel(capability),
+    capabilityVersion: text(workItem.capability_manifest_version, text(capability.version, "0")),
+    continuationToken: text(workItem.continuation_token, ""),
+    enteredAt: text(workItem.entered_at, ""),
+    nextActions: actions,
+  };
+}
+
 function runLog(snapshot: ProjectSnapshot | null): RunModel["runLog"] {
   const raw = record(snapshot?.run.run_log);
   const lines = list(raw.lines)
@@ -252,6 +321,15 @@ function safetyRows(snapshot: ProjectSnapshot | null, scaffolded: boolean, block
   const pendingHuman = number(snapshot.run.human?.pending_requests) + number(snapshot.run.human?.unhandled_inbox);
   const validationStatus = number(validationCounts.fail) ? "fail" : number(validationCounts.pending) ? "pending" : number(validationCounts.pass) ? "pass" : "not recorded";
   const integrationSafetyStatus = text(integrationSafety.status, scaffolded ? "pending" : "setup needed");
+  const recheckableBlocker = blockers.find((item) => bool(item.can_recheck) && text(item.recheck_command, ""));
+  const environmentAction = recheckableBlocker
+    ? makeAction(
+        text(recheckableBlocker.recheck_label, "Recheck blocker"),
+        scaffolded,
+        "Rerun baseline verification in a freshly loaded automation environment.",
+        text(recheckableBlocker.recheck_command, "blocker.recheck_baseline"),
+      )
+    : routeAction("Sidecar", "Advanced", "Open diagnostics.");
   return [
     {
       label: "Integration safety",
@@ -288,7 +366,7 @@ function safetyRows(snapshot: ProjectSnapshot | null, scaffolded: boolean, block
       summary: blockers.length ? blockers.map((item) => text(item.name, "Environment blocker")).join(", ") : "No environment blocker is recorded.",
       source: "run.environment_blockers",
       tone: blockers.length ? "warn" : "good",
-      action: routeAction("Sidecar", "Advanced", "Open diagnostics."),
+      action: environmentAction,
     },
     {
       label: "Human input",
@@ -388,7 +466,7 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
       headline,
       subheadline,
       badge,
-      tone: statusTone(statusUpper, blockers),
+      tone: bannerTone(title, statusUpper, blockers),
       primaryAction,
     },
     controls: {
@@ -410,13 +488,14 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
       lastUpdated: text(task.last_updated, text(snapshot?.run.snapshot_generated_at, "Not recorded")),
       summary: text(snapshot?.run.progress_recent, text(task.suggested_next_task, "No run has been recorded yet.")),
     },
+    stateMachine: stateMachineModel(snapshot),
     runLog: runLog(snapshot),
     worker: {
       headline: workerHeadline(workerStrategy),
       mode: workerMode(workerStrategy),
       tone: workerTone(workerStrategy),
       focus: `${text(workerStrategy.action_lane, "local")} lane`,
-      output: `target/agent_runs/<run-id>/worker_${workerRole(workerStrategy)}.md`,
+      output: `.diffmogger/runtime/agent_runs/<run-id>/worker_${workerRole(workerStrategy)}.md`,
       summary: text(workerStrategy.summary, text(workerStrategy.reason, "No worker strategy detail recorded yet.")),
       raw: workerStrategy,
       latest: text(latestWorker.label, "No worker result recorded."),
@@ -446,6 +525,9 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
       name: text(item.name, "Environment blocker"),
       detail: text(item.detail, ""),
       required: bool(item.required),
+      canRecheck: bool(item.can_recheck),
+      recheckCommand: text(item.recheck_command, ""),
+      recheckLabel: text(item.recheck_label, "Recheck blocker"),
     })),
   };
 }

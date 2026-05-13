@@ -50,6 +50,7 @@ const MUTATING_BACKEND_COMMANDS: &[&str] = &[
     "inbox.reply_request",
     "automation.start",
     "automation.stop",
+    "blocker.recheck_baseline",
     "safety.run_check",
     "worker.run_read_only",
     "worker.run_write",
@@ -837,6 +838,13 @@ fn build_backend_args(
         args.push(provided[0].1.to_string());
         if preview.unwrap_or(false) {
             args.push("--preview".to_string());
+        }
+    }
+
+    if command == "ticket.draft_from_intake" {
+        if let Some(direction) = body.filter(|value| !value.trim().is_empty()) {
+            args.push("--direction".to_string());
+            args.push(direction.to_string());
         }
     }
 
@@ -1665,7 +1673,47 @@ mod tests {
         assert!(backend_command_allowed("ticket.load"));
         assert!(backend_command_allowed("ticket.add"));
         assert!(backend_command_allowed("ticket.import"));
+        assert!(backend_command_allowed("ticket.draft_from_intake"));
         assert!(backend_command_allowed("ticket.accept_draft"));
+    }
+
+    #[test]
+    fn ticket_draft_forwards_optional_direction() {
+        let root = kit_root().expect("Diffmogger kit root should resolve during native tests");
+        let root_text = root.display().to_string();
+        let (_cwd, args) = build_backend_args(
+            "ticket.draft_from_intake",
+            Some(&root_text),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("Focus on onboarding setup tickets."),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("ticket draft args should build");
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--direction", "Focus on onboarding setup tickets."]));
     }
 
     #[test]

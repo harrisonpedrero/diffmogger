@@ -8,8 +8,10 @@ from ..target import *
 
 from diffmogger.runtime import ticket_run
 from diffmogger.runtime.state_store import (
+    automation_control_state,
     load_runner_state as load_canonical_runner_state,
     runner_projection_path_for_target,
+    state_snapshot as canonical_state_snapshot,
     write_runner_state as write_canonical_runner_state,
 )
 
@@ -164,28 +166,23 @@ def native_prerequisites(target: Path, dashboard_app: Any) -> list[Any]:
     )
 
 def target_multi_role_enabled(target: Path) -> bool:
+    control = automation_control_state(target, import_legacy_if_empty=True)
+    payload = control.get("payload") if isinstance(control.get("payload"), dict) else {}
+    role_profile = str(payload.get("role_profile") or "").strip().lower()
+    role_profile = role_profile.replace("-", "_").replace(" ", "_")
+    if role_profile == "single_lane":
+        return False
+    if role_profile == "planner_builder_hardener_integrator":
+        return True
     for data in (load_intake(target), load_dashboard_state(target)):
-        profile = str(data.get("automation_role_profile") or "").strip()
+        profile = str(data.get("automation_role_profile") or "").strip().lower()
+        profile = profile.replace("-", "_").replace(" ", "_")
         if profile == "single_lane":
             return False
         if profile == "planner_builder_hardener_integrator":
-            return bool(data.get("multi_role_automations_allowed", True))
+            return True
         if "multi_role_automations_allowed" in data:
             return bool(data.get("multi_role_automations_allowed"))
-    for marker_path in [
-        existing_or_target_path(target, ".agentic/automation_prompt.md"),
-        existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md"),
-    ]:
-        if marker_path.exists():
-            text = marker_path.read_text(encoding="utf-8", errors="replace")
-            if "Role profile: `single_lane`" in text:
-                return False
-            if "Role profile: `planner_builder_hardener_integrator`" in text:
-                return True
-            if "Multi-role automations allowed: true" in text:
-                return True
-            if "Multi-role automations allowed: false" in text:
-                return False
     return False
 
 def target_ticket_campaign_enabled(target: Path) -> bool:
@@ -217,17 +214,11 @@ def target_git_remotes(target: Path) -> str:
     )
     return (result.stdout or result.stderr).strip() if result.returncode == 0 else ""
 
-def task_file_control_state(target: Path) -> tuple[Path, str, str]:
-    """Read the generated task projection for the remaining start-gate boundary.
-
-    Canonical runner and conveyor state live in SQLite. The task Markdown still
-    carries operator-authored status for existing targets until a typed task
-    status writer owns that field end to end.
-    """
-    task_path = existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md")
-    task_text = task_path.read_text(encoding="utf-8", errors="replace")
-    status_match = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", task_text, re.MULTILINE)
-    return task_path, task_text, status_match.group(1).strip().upper() if status_match else ""
+def task_file_control_state(target: Path) -> tuple[Path, dict[str, Any], str]:
+    """Return typed automation control state; the path is only for compatibility messages."""
+    control = automation_control_state(target)
+    status = str(control.get("status") or "").strip().upper()
+    return existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md"), control, status
 
 def startable_statuses(dashboard_app: Any) -> set[str]:
     statuses = getattr(dashboard_app, "STARTABLE_STATUSES", {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"})
@@ -263,18 +254,18 @@ def automation_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
         return False, "Missing " + ", ".join(missing)
     if not dashboard_app.target_has_initial_commit(target):
         return False, "Continuous automation requires an initialized git repo with an initial commit."
-    task_path, task_text, status = task_file_control_state(target)
+    task_path, control_state, status = task_file_control_state(target)
     if not status:
-        return False, f"Missing AUTOMATION_STATUS in {target_relative_display(target, task_path)}."
+        return False, "Missing typed automation control status in SQLite."
     if status not in startable_statuses(dashboard_app):
         return False, f"Automation status is {status}; start requires ACTIVE or ACTIVE_WITH_PENDING_USER_INPUT."
     if ticket_campaign_enabled:
         ticket_state = ticket_run.ticket_source_state(target)
         if not bool(ticket_state.get("actionable")):
             return False, str(ticket_state.get("start_reason") or "Ticket campaign has no actionable ticket.")
-        if "Current baseline: not bootstrapped yet" in task_text:
+        if bool(control_state.get("bootstrap_pending")):
             return True, str(ticket_state.get("start_reason") or "Ready to run ticket campaign bootstrap.")
-    elif "Current baseline: not bootstrapped yet" in task_text:
+    elif bool(control_state.get("bootstrap_pending")):
         return False, "Bootstrap has not completed yet."
     return True, "Ready."
 
@@ -288,9 +279,9 @@ def run_once_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
     missing = [path.relative_to(target).as_posix() for path in required if not path.exists()]
     if missing:
         return False, "Missing " + ", ".join(missing)
-    task_path, _task_text, status = task_file_control_state(target)
+    task_path, _control_state, status = task_file_control_state(target)
     if not status:
-        return False, f"Missing AUTOMATION_STATUS in {task_path.relative_to(target)}."
+        return False, "Missing typed automation control status in SQLite."
     if status not in startable_statuses(dashboard_app):
         return False, f"Automation status is {status}; run-once requires ACTIVE or ACTIVE_WITH_PENDING_USER_INPUT."
     return True, "Ready."
@@ -464,6 +455,30 @@ def worker_controls_snapshot(target: Path, dashboard_app: Any, strategy: dict[st
         "integrator_reason": "Supported by current worker strategy." if integrator_helper_exists and name == "INTEGRATION_ONLY" else f"Current strategy is {name}.",
     }
 
+def baseline_blocker_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    state = snapshot.get("state") if isinstance(snapshot.get("state"), dict) else {}
+    rows: list[dict[str, Any]] = []
+    for blocker in state.get("open_blockers") or []:
+        if not isinstance(blocker, dict) or str(blocker.get("kind") or "") != "baseline_verification":
+            continue
+        review = blocker.get("blocker_review") if isinstance(blocker.get("blocker_review"), dict) else {}
+        rows.append(
+            {
+                "name": "Baseline verification",
+                "ok": False,
+                "required": True,
+                "category": "baseline",
+                "kind": "baseline_verification",
+                "status": str(blocker.get("status") or "open"),
+                "detail": compact_text(blocker.get("summary") or review.get("summary") or "Baseline verification is blocked."),
+                "blocker_id": str(blocker.get("blocker_id") or review.get("blocker_id") or ""),
+                "can_recheck": True,
+                "recheck_command": "blocker.recheck_baseline",
+                "recheck_label": "Recheck blocker",
+            }
+        )
+    return rows
+
 def run_controls_snapshot(target: Path, dashboard_app: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
     active_role_run = snapshot.get("conveyor", {}).get("active_role_run") if isinstance(snapshot.get("conveyor"), dict) else {}
     automation = automation_status_snapshot(target, dashboard_app)
@@ -538,6 +553,7 @@ def command_run_load(args: argparse.Namespace) -> dict[str, Any]:
         row for row in prereq_rows(prerequisites)
         if row["required"] and not row["ok"]
     ]
+    environment_blockers.extend(baseline_blocker_rows(snapshot))
     latest_worker_result = dashboard_app.latest_worker_result(target)
     return {
         "target": target_metadata(target),
@@ -565,6 +581,68 @@ def command_run_load(args: argparse.Namespace) -> dict[str, Any]:
         "latest_worker_result": latest_worker_result,
         "environment_blockers": environment_blockers,
         "snapshot_generated_at": snapshot.get("generated_at"),
+    }
+
+def runtime_script_for_target(target: Path, legacy_rel: str) -> Path:
+    script = target_script_path(target, legacy_rel)
+    if script.exists():
+        return script
+    fallback = KIT_ROOT / "scripts" / "runtime" / Path(legacy_rel).name
+    return fallback if fallback.exists() else script
+
+def baseline_recheck_command(target: Path, run_id: str) -> list[str]:
+    integrator = runtime_script_for_target(target, "scripts/integrate_role_outputs.py")
+    if not integrator.exists():
+        raise BackendError(
+            "Baseline recheck requires the integrator runtime script.",
+            error_type="baseline_recheck_unavailable",
+            details={"missing": str(integrator)},
+        )
+    command = [
+        sys.executable,
+        str(integrator),
+        str(target),
+        "--run-id",
+        run_id,
+        "--force-baseline",
+        "--baseline-only",
+    ]
+    loader = runtime_script_for_target(target, "scripts/load_automation_env.py")
+    if loader.exists():
+        return [sys.executable, str(loader), "--target", str(target), "--", *command]
+    return command
+
+def command_blocker_recheck_baseline(args: argparse.Namespace) -> dict[str, Any]:
+    target = resolve_target(args.target)
+    dashboard_app = load_dashboard_module()
+    run_id = dashboard_app.dashboard_run_id("dashboard-baseline-recheck")
+    command = baseline_recheck_command(target, run_id)
+    env = {**os.environ, **dashboard_app.automation_environment(target)}
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    result = run_subprocess_streamed(args, command, cwd=target, stage="baseline", env=env)
+    finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    baseline = read_json_file(existing_or_target_path(target, "target/baseline_verification.json"))
+    state = canonical_state_snapshot(target)
+    baseline_status = str(baseline.get("status") or "unknown")
+    write_dashboard_action_state(
+        target,
+        last_action="baseline_recheck_passed" if baseline_status == "passing" else "baseline_recheck_recorded",
+        updates={
+            "last_baseline_recheck_run_id": run_id,
+            "last_baseline_recheck_started_at": started_at,
+            "last_baseline_recheck_finished_at": finished_at,
+            "last_baseline_recheck_status": baseline_status,
+        },
+    )
+    return {
+        "target": target_metadata(target),
+        "run_id": run_id,
+        "status": "pass" if baseline_status == "passing" else "blocked",
+        "baseline_verification": baseline,
+        "open_blockers": state.get("open_blockers") if isinstance(state.get("open_blockers"), list) else [],
+        "result": result,
+        "started_at": started_at,
+        "finished_at": finished_at,
     }
 
 def command_run_load_log(args: argparse.Namespace) -> dict[str, Any]:

@@ -390,6 +390,17 @@ for marker in [
     "automation_conveyor_state.json",
     "orchestration.sqlite3",
     "conveyor.state",
+    "conveyor.machine",
+    "conveyor_work_items",
+    "conveyor_stage_contracts",
+    "conveyor_stage_attempts",
+    "capability_manifests",
+    "validation_receipts",
+    "automation_control",
+    "automation.control",
+    "escalations",
+    "task_edges",
+    "repo.capability_manifest",
     "queued role patch",
     "run_role_automation.sh",
     "run_codex_automation.sh",
@@ -993,7 +1004,7 @@ for marker in [
     "review-trust-summary",
     "Latest Run Review",
     "Run in progress",
-    "Review status",
+    "Review marker",
     "Next action",
     "Changed files",
     "Commits",
@@ -1381,7 +1392,6 @@ cat >"$tmp_intake" <<'JSON'
   "desired_first_demo": "Generated local automation state is ignored.",
   "human_bridge_enabled": true,
   "human_bridge_mode": "file_only",
-  "multi_role_automations_allowed": true,
   "automation_role_profile": "planner_builder_hardener_integrator",
   "automation_run_mode": "ticket_campaign",
   "verification_commands": ["npm test"]
@@ -1563,7 +1573,6 @@ cat >"$tmp_intake" <<'JSON'
   "desired_first_demo": "Generated docs only.",
   "human_bridge_enabled": false,
   "human_bridge_mode": "disabled",
-  "multi_role_automations_allowed": true,
   "automation_role_profile": "planner_builder_hardener_integrator",
   "optional_mcp_servers": ["context7", "playwright"],
   "verification_commands": ["npm test"]
@@ -1619,7 +1628,6 @@ cat >"$tmp_intake" <<'JSON'
   "desired_first_demo": "Generated docs only.",
   "human_bridge_enabled": false,
   "human_bridge_mode": "disabled",
-  "multi_role_automations_allowed": true,
   "automation_role_profile": "planner_builder_hardener_integrator",
   "automation_checkpoint_commits": true,
   "verification_commands": ["test -f accepted.txt"]
@@ -2316,6 +2324,22 @@ target = Path(sys.argv[1])
             "summary": "Render a local observatory page.",
             "changed_files": ["scripts/run_observatory.py"],
             "created_at": "2026-05-03T00:00:00+00:00",
+        }
+    ),
+    encoding="utf-8",
+)
+(target / "target/automation_queue/planner/run-stale").mkdir(parents=True)
+(target / "target/automation_queue/planner/run-stale/manifest.json").write_text(
+    json.dumps(
+        {
+            "role": "planner",
+            "run_id": "run-stale",
+            "status": "deferred",
+            "summary": "Patch base no longer matches HEAD.",
+            "deferral_reason": "staleness",
+            "deferral_detail": "Patch base no longer matches HEAD.",
+            "changed_files": ["docs/CODEX_AUTOMATION_TASKS.md"],
+            "created_at": "2026-05-03T00:00:30+00:00",
         }
     ),
     encoding="utf-8",

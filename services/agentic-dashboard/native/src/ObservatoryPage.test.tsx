@@ -143,6 +143,54 @@ describe("ObservatoryPage", () => {
     expect(html).toContain("Patch is queued.");
   });
 
+  it("renders the full typed conveyor state machine before role lanes", () => {
+    const html = render(
+      observatorySnapshot({
+        conveyor: {
+          state_machine: {
+            current_stage: "validation",
+            stage_status: "ready",
+            owner_role: "hardener",
+            work_item: {
+              id: "workitem:default",
+              status: "ACTIVE",
+              current_stage: "validation",
+              stage_status: "ready",
+              owner_role: "hardener",
+              capability_manifest_id: "capability:repo",
+              capability_manifest_version: 4,
+              validation_status: "pending",
+              continuation_token: "workitem:default:validation:77",
+            },
+            capability_manifest: {
+              languages: { primary: "TypeScript" },
+              commands: [{ kind: "test", command: "npm test" }, { kind: "build", command: "npm run build" }],
+            },
+            stage_contracts: [
+              { stage: "intake", exit_criteria: ["work item is normalized"] },
+              { stage: "validation", exit_criteria: ["required receipts pass, fail with blocker, or expire as stale"] },
+            ],
+          },
+        },
+      }),
+    );
+
+    expect(html).toContain("State Machine");
+    expect(html).toContain("Intake");
+    expect(html).toContain("Discovery");
+    expect(html).toContain("Decomposition");
+    expect(html).toContain("Planning");
+    expect(html).toContain("Implementation");
+    expect(html).toContain("Review");
+    expect(html).toContain("Validation");
+    expect(html).toContain("Integration");
+    expect(html).toContain("Handoff");
+    expect(html).toContain("Continuation");
+    expect(html).toContain("workitem:default:validation:77");
+    expect(html).toContain("TypeScript / 2 commands");
+    expect(html.indexOf("Execution Lanes")).toBeLessThan(html.indexOf("State Machine"));
+  });
+
   it("renders blocked user input", () => {
     const html = render(
       observatorySnapshot({

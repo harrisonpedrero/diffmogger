@@ -2,8 +2,6 @@
 
 Generated dashboard/export projection for optional multi-role automation. SQLite in `target/orchestration.sqlite3` is the live state authority; `target/canonical_state_brief.md` is the bounded state view agents should read at run start.
 
-Multi-role automations allowed: {{MULTI_ROLE_AUTOMATIONS_ALLOWED}}
-
 Role profile: `{{AUTOMATION_ROLE_PROFILE}}`
 
 Continuous conveyor mode uses one local dispatcher that prioritizes queued integration first, baseline preflight/repair, safety triage, typed human-message handling, fast-follow replanning after planner deferral changes, one focused hardener pass after integrated builder work, catch-up hardening for the oldest unverified `candidate_done` cluster, planner-needed transitions, and builder momentum by default.

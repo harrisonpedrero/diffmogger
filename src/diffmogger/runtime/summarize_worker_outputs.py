@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Summarize bounded worker reports for one automation run.
 
-The script reads target/agent_runs/<run_id>/worker_*.md and writes
-target/agent_runs/<run_id>/summary.md. It is intentionally mechanical: the main
-agent still owns judgment, integration, and verification.
+The script reads the resolved worker-run directory, typically
+.diffmogger/runtime/agent_runs/<run_id>/worker_*.md, and writes summary.md
+beside the reports. It is intentionally mechanical: the main agent still owns
+judgment, integration, and verification.
 """
 
 from __future__ import annotations
@@ -153,7 +154,7 @@ def build_summary(target: Path, run_id: str) -> tuple[Path, str]:
         [
             "## Integration Reminder",
             "",
-            "The main automation agent should decide which findings to accept, reject, or defer, then record that decision in `docs/CODEX_AUTOMATION_TASKS.md`.",
+            "The main automation agent should decide which findings to accept, reject, or defer, then record that decision in typed runtime state and refresh generated handoff projections.",
             "",
         ]
     )
@@ -168,7 +169,7 @@ def main() -> int:
         default=".",
         help="Target project directory. Default: current directory",
     )
-    parser.add_argument("--run-id", help="Run id under target/agent_runs/. Default: latest")
+    parser.add_argument("--run-id", help="Run id under the resolved agent_runs directory. Default: latest")
     args = parser.parse_args()
 
     target = Path(args.target).resolve()

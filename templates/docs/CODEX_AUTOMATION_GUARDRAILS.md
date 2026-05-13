@@ -73,7 +73,7 @@ Do not build unrelated apps or large unrelated systems.
 - Manual runs should use local `.diffmogger/scripts/acquire_codex_lock.sh` and `.diffmogger/scripts/release_codex_lock.sh`.
 - Set `CODEX_RUN_ID` before acquire/release so the lock can identify the current run.
 - If an active lock exists, do not mutate code.
-- If a stale lock is removed, record that decision in `docs/CODEX_AUTOMATION_TASKS.md`.
+- If a stale lock is removed, record that decision in typed runtime state and refresh generated handoff projections.
 
 ## Human-Intervention Policy
 
@@ -99,12 +99,12 @@ Use `CRITICAL_STOP` only when continuing autonomously is unsafe.
 ## Context-Bloat Policy
 
 - Keep active files short.
-- Canonical runtime/task state is typed SQLite in `target/orchestration.sqlite3`. Agents should read `target/canonical_state_brief.md`, the generated bounded view, instead of inspecting SQLite manually.
+- Canonical runtime/task state is typed SQLite in `target/orchestration.sqlite3`, including automation control, conveyor stage contracts, the current work item, repository capability manifest, validation receipts, blockers, human messages, and next actions. Agents should read `target/canonical_state_brief.md`, the generated bounded view, instead of inspecting SQLite manually.
 - Markdown and JSON state files are prompt inputs, handoff surfaces, authored import/export surfaces, compatibility projections, exports, or migration aids.
 - If a Markdown or JSON projection is stale or contradictory, regenerate it or reconcile through the target-local Diffmogger typed state APIs.
 - Do not edit `target/automation_conveyor_state.json` as a source of truth; the conveyor regenerates it from SQLite.
 - Record handled human messages and concise resolution notes through typed human-message state.
-- Prune stale tasks from `docs/CODEX_AUTOMATION_TASKS.md`.
+- Prune stale task text from generated projections after reconciling the typed state.
 - Use local `.diffmogger/scripts/compact_agent_state.py --dry-run .` before compacting long-running Markdown state.
 - Never silently discard active or unresolved human requests.
 - Keep this guardrails file lean.

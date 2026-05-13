@@ -22,8 +22,7 @@ def required_file_flags(target: Path) -> list[str]:
     flags.extend(["--human-bridge-mode", bridge_mode])
     if bool(intake.get("write_worker_agents_allowed", False)):
         flags.append("--write-workers-enabled")
-    role_profile = str(intake.get("automation_role_profile") or "").strip()
-    if role_profile != "single_lane" and bool(intake.get("multi_role_automations_allowed", False)):
+    if normalize_automation_role_profile(intake, default="single_lane") == "planner_builder_hardener_integrator":
         flags.append("--multi-role-enabled")
     if str(intake.get("automation_run_mode") or "") == "ticket_campaign":
         flags.append("--ticket-campaign-enabled")

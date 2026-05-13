@@ -112,6 +112,8 @@ def load_settings(load_dotenv_file: bool | None = None) -> Settings:
         if explicit:
             return explicit
         if repo_dir:
+            if (repo_dir / ".diffmogger" / "manifest.json").exists():
+                return repo_dir / ".diffmogger" / "state" / default_name
             return repo_dir / "docs" / default_name
         return None
 

@@ -18,7 +18,7 @@ Reason: <one sentence>
 - Use write-capable workers only when the generated project intake explicitly enables them.
 - Use write-capable workers as bounded acceleration when work can split into reviewable write scopes or isolated work areas.
 - The main agent owns integration and verification.
-- Record worker activity in `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
+- Record worker activity in typed runtime state and refresh `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` only as the generated handoff projection.
 
 Check Codex CLI availability before using CLI workers:
 
@@ -105,7 +105,7 @@ Prefer 1-3 workers for:
 
 Skip workers for tiny bugs, simple test reruns, or cases where delegation overhead is higher than the work.
 
-If workers are skipped on a broad task, record the reason in `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
+If workers are skipped on a broad task, record the reason in typed automation control state so the canonical brief and generated handoff projection reflect it.
 
 ## Optional Write Workers
 
@@ -146,7 +146,7 @@ Each write worker must be told:
 - it must not spawn workers, touch `.env`, handle credentials, use network, send messages, or run destructive cleanup
 - it must list changed files, checks run, integration notes, and risks
 
-After write workers finish, the main agent must review diffs, integrate the slices, resolve conflicts, run verification, and update the task file. Worker changes are never accepted blindly.
+After write workers finish, the main agent must review diffs, integrate the slices, resolve conflicts, run verification, update typed runtime state, and refresh generated handoff projections. Worker changes are never accepted blindly.
 
 Integration-only runs with no workers are valid when the main agent can finish faster or more safely. Ambitious local changes may break temporarily, but the breakage must be visible, reviewable, and repaired by the same run or follow-up integration work.
 
@@ -156,12 +156,11 @@ Multi-role automation is a project-level role mode, not the same thing as write-
 
 ```json
 {
-  "multi_role_automations_allowed": true,
   "automation_role_profile": "planner_builder_hardener_integrator"
 }
 ```
 
-In multi-role mode, planner, builder, and hardener run in isolated git worktrees and queue patches. The integrator owns the main checkout, applies patches FIFO, verifies, creates local commits, updates `.diffmogger/state/MULTI_ROLE_PROGRESS.md`, and manages retention.
+In multi-role mode, planner, builder, and hardener run in isolated git worktrees and queue patches. The integrator owns the main checkout, applies patches FIFO, verifies, creates local commits, updates typed SQLite state and role manifests, refreshes `.diffmogger/state/MULTI_ROLE_PROGRESS.md` as a generated projection, and manages retention.
 
 The worker-agent rules still matter inside each role: read-only worker reports remain the default for exploration, write workers remain optional, and no role may create unbounded recursive agents. Overlapping write ownership still requires an explicit coordination protocol.
 
@@ -197,4 +196,4 @@ Worker rules:
 
 ## Integration Requirement
 
-Before ending the run, the main agent must state which worker findings were accepted, rejected, or deferred and update the task file accordingly.
+Before ending the run, the main agent must state which worker findings were accepted, rejected, or deferred, update typed runtime state, and refresh generated handoff projections accordingly.

@@ -72,6 +72,10 @@
           "contains": {"const": "ACTIVE"}
         },
         "canonical_runtime_state": {"type": "string"},
+        "conveyor_stages": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
         "compatibility_surfaces": {
           "type": "array",
           "items": {"type": "string"}
@@ -126,6 +130,89 @@
     },
     "conveyor_state": {
       "type": "object",
+      "additionalProperties": true
+    },
+    "conveyor_machine": {
+      "type": "object",
+      "required": ["schema_version", "machine_version", "authority", "work_item", "current_stage", "stage_contract", "capability_manifest"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "machine_version": {"type": "integer"},
+        "authority": {"const": "sqlite"},
+        "current_stage": {"type": "string"},
+        "stage_status": {"type": "string"},
+        "owner_role": {"type": "string"},
+        "work_item": {
+          "type": "object",
+          "required": ["id", "status", "current_stage", "stage_status", "owner_role", "capability_manifest_id", "validation_status", "continuation_token"],
+          "properties": {
+            "id": {"type": "string"},
+            "status": {"type": "string"},
+            "current_stage": {"type": "string"},
+            "stage_status": {"type": "string"},
+            "owner_role": {"type": "string"},
+            "capability_manifest_id": {"type": "string"},
+            "capability_manifest_version": {"type": "integer"},
+            "validation_status": {"type": "string"},
+            "continuation_token": {"type": "string"}
+          },
+          "additionalProperties": true
+        },
+        "stage_contract": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "stage_contracts": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": true}
+        },
+        "capability_manifest": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "stage_attempts": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": true}
+        },
+        "validation_receipts": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": true}
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "automation_control": {
+      "type": "object",
+      "required": ["schema_version", "authority", "control_id", "status"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "authority": {"const": "sqlite"},
+        "control_id": {"type": "string"},
+        "status": {"type": "string"},
+        "horizon": {"type": "string"},
+        "horizon_decision": {"type": "string"},
+        "current_assessment": {"type": "string"},
+        "best_next_milestone": {"type": "string"},
+        "suggested_next_task": {"type": "string"},
+        "known_issues": {"type": "array", "items": {"type": "string"}},
+        "worker": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": true
+    },
+    "capability_manifest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "manifest_id": {"type": "string"},
+        "version": {"type": "integer"},
+        "digest": {"type": "string"},
+        "languages": {"type": "object", "additionalProperties": true},
+        "commands": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
+      },
       "additionalProperties": true
     },
     "runner_state": {

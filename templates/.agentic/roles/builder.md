@@ -18,7 +18,7 @@ docs/PROJECT_CONTEXT.md
 {{HUMAN_FILE_READS}}
 ```
 
-Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or projections.
+Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/conveyor authority.
 
 ## Mission
 
@@ -26,7 +26,7 @@ Implement one scoped product or code increment that advances the current project
 
 ## Responsibilities
 
-- Choose builder work from the current plan, task file, and deferred backlog.
+- Choose builder work from the canonical state brief, current plan, and deferred role-manifest backlog.
 - If Context7 MCP is mounted, use it only for documentation-assisted implementation. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, do not halt or mark the run blocked; immediately fall back to normal web search, repo docs, package metadata, or existing knowledge and continue the sprint.
 - Do not use Playwright MCP for implementation-time browsing; browser validation belongs to Hardener and Integrator workflows.
 - Keep ownership narrow enough for clean integration.

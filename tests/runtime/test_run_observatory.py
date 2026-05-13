@@ -224,6 +224,41 @@ class ObservatorySnapshotTests(unittest.TestCase):
                 "created_at": "2026-05-03T22:30:00+00:00",
             },
         )
+        for role, count in {"planner": 3, "builder": 6, "hardener": 4}.items():
+            for index in range(count):
+                run_id = f"{role}-applied-{index + 1}"
+                self.write_json(
+                    root,
+                    f"target/automation_queue/{role}/{run_id}/manifest.json",
+                    {
+                        "role": role,
+                        "run_id": run_id,
+                        "status": "applied",
+                        "summary": f"Applied {role} fixture patch {index + 1}.",
+                        "changed_files": [f"src/{role}_{index + 1}.txt"],
+                        "created_at": f"2026-05-03T21:{index:02d}:00+00:00",
+                        "integrated_at": f"2026-05-03T21:{index:02d}:30+00:00",
+                    },
+                )
+        for role, run_id, reason, detail in [
+            ("planner", "planner-stale", "staleness", "Patch base no longer matches HEAD."),
+            ("builder", "builder-conflict", "conflict", "docs/CODEX_AUTOMATION_TASKS.md changed since role start."),
+            ("builder", "builder-verify", "verification_failure", "$ bash scripts/validate_starter_kit.sh"),
+        ]:
+            self.write_json(
+                root,
+                f"target/automation_queue/{role}/{run_id}/manifest.json",
+                {
+                    "role": role,
+                    "run_id": run_id,
+                    "status": "deferred",
+                    "summary": detail,
+                    "deferral_reason": reason,
+                    "deferral_detail": detail,
+                    "changed_files": ["docs/CODEX_AUTOMATION_TASKS.md"],
+                    "created_at": "2026-05-03T22:20:00+00:00",
+                },
+            )
         self.write_json(
             root,
             "target/automation_conveyor_state.json",
@@ -541,6 +576,19 @@ class ObservatorySnapshotTests(unittest.TestCase):
         )
         self.write_json(
             root,
+            "target/automation_queue/builder/builder-applied-follow-through/manifest.json",
+            {
+                "role": "builder",
+                "run_id": "builder-applied-follow-through",
+                "status": "applied",
+                "summary": "Completed a local reporting increment.",
+                "changed_files": ["src/reporting_fixture.py"],
+                "created_at": "2026-05-03T22:59:00+00:00",
+                "integrated_at": "2026-05-03T23:00:00+00:00",
+            },
+        )
+        self.write_json(
+            root,
             "target/action_plan_history.json",
             {
                 "schema_version": 1,
@@ -767,7 +815,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(snapshot["human"]["unhandled_inbox"], 1)
                     self.assertEqual(snapshot["human"]["outbound_records"], 1)
                     self.assertEqual(snapshot["queue"]["totals"]["queued"], 1)
-                    self.assertEqual(snapshot["progress"]["deferred_queue_depth"], 1)
+                    self.assertEqual(snapshot["progress"]["deferred_queue_depth"], 3)
                     self.assertEqual(len(snapshot["progress"]["deferred_backlog"]), 3)
                     triage_groups = {
                         item["reason"]: item
@@ -776,6 +824,38 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(triage_groups["staleness"]["count"], 1)
                     self.assertEqual(triage_groups["conflict"]["count"], 1)
                     self.assertEqual(triage_groups["verification_failure"]["count"], 1)
+
+    def test_snapshot_ignores_task_markdown_after_typed_state_exists(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+
+                    seeded = module.build_snapshot(target)
+                    self.write_text(
+                        target,
+                        "docs/CODEX_AUTOMATION_TASKS.md",
+                        """
+                        AUTOMATION_STATUS: CRITICAL_STOP
+
+                        ## Product Horizon State
+
+                        - Current horizon: H9 Poisoned Markdown
+                        - Advancement decision: advance
+
+                        ## Known Issues
+
+                        - This should not become live state.
+                        """,
+                    )
+                    snapshot = module.build_snapshot(target)
+
+                    self.assertEqual("ACTIVE", seeded["task"]["status"])
+                    self.assertEqual("ACTIVE", snapshot["task"]["status"])
+                    self.assertEqual("H2 Offline/local demo", snapshot["task"]["horizon"])
+                    self.assertNotIn("Poisoned", snapshot["task"]["horizon"])
+                    self.assertNotIn("This should not become live state.", " ".join(snapshot["task"]["known_issues"]))
 
     def test_validation_and_runner_snapshots_feed_self_review(self) -> None:
         for path, module in self.modules:
@@ -806,7 +886,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     scorecard_items = {item["label"]: item for item in snapshot["scorecard"]["items"]}
                     self.assertEqual(scorecard_items["Accepted patches"]["value"], 13)
                     self.assertIn("builder 6", scorecard_items["Accepted patches"]["detail"])
-                    self.assertEqual(scorecard_items["Deferred pressure"]["value"], "1/1")
+                    self.assertEqual(scorecard_items["Deferred pressure"]["value"], "1/3")
                     self.assertIn("1 staleness", scorecard_items["Deferred pressure"]["detail"])
                     self.assertEqual(scorecard_items["Validation"]["value"], "2/1")
                     self.assertEqual(scorecard_items["Integration safety"]["value"], "pass")
@@ -1123,7 +1203,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(history["records"][0]["status"], "superseded")
                     self.assertIn("## Scorecard", report)
                     self.assertIn("Accepted patches: 13", report)
-                    self.assertIn("Deferred pressure: 1/1", report)
+                    self.assertIn("Deferred pressure: 1/3", report)
                     self.assertIn("## Validation", report)
                     self.assertIn("PASS:", report)
                     self.assertIn("FAIL:", report)

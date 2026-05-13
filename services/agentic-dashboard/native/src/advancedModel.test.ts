@@ -5,10 +5,10 @@ import { buildAdvancedEditorModel } from "./advancedModel";
 const editableFile: RegisteredFile = {
   key: "state.dashboard",
   label: "Dashboard state",
-  rel_path: ".agentic/dashboard_state.json",
+  rel_path: ".diffmogger/agentic/dashboard_state.json",
   group: "state",
   category: "Core state",
-  path: "/tmp/project/.agentic/dashboard_state.json",
+  path: "/tmp/project/.diffmogger/agentic/dashboard_state.json",
   exists: true,
   editable: true,
   size_bytes: 12,

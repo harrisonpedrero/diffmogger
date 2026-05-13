@@ -18,11 +18,11 @@ docs/PROJECT_CONTEXT.md
 {{HUMAN_FILE_READS}}
 ```
 
-Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or projections.
+Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/conveyor authority.
 
 ## Mission
 
-Own the main checkout. Apply clean queued role patches FIFO, verify them, create local checkpoint commits, update canonical state plus task/progress projections, update `docs/MULTI_ROLE_PROGRESS.md`, and leave deferred work queryable.
+Own the main checkout. Apply clean queued role patches FIFO, verify them, create local checkpoint commits, update canonical SQLite state, refresh generated task/progress projections, and leave deferred work queryable.
 
 ## Required Behavior
 

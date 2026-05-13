@@ -87,6 +87,9 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual("ok", state["status"])
             self.assertGreaterEqual(state["counts"]["events"], 1)
             self.assertTrue(Path(state["database"]["path"]).exists())
+            self.assertEqual("sqlite", state["conveyor_machine"]["authority"])
+            self.assertEqual("intake", state["conveyor_machine"]["current_stage"])
+            self.assertTrue(state["capability_manifest"]["digest"])
 
     def test_state_brief_command_writes_agent_readable_view(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -286,6 +289,7 @@ class DashboardBackendCliTests(unittest.TestCase):
 
         class FakeDashboard:
             STARTABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
+            WORKER_REPORT_STRATEGIES = {"READ_ONLY_REPORTS", "WRITE_WORKERS"}
 
             PrerequisiteItem = SharedPrerequisiteItem
 
@@ -304,6 +308,12 @@ class DashboardBackendCliTests(unittest.TestCase):
             def automation_environment(self, _target: Path, *, allow_remotes: bool = False) -> dict[str, str]:
                 return {"PATH": os.environ.get("PATH", ""), "HOME": str(Path.home())}
 
+            def dashboard_run_id(self, prefix: str) -> str:
+                return f"{prefix}-test"
+
+            def latest_worker_result(self, _target: Path) -> dict[str, object]:
+                return {"label": "Latest worker result: none yet."}
+
         return module, FakeDashboard()
 
     def test_populated_ticket_campaign_can_start_initial_bootstrap(self) -> None:
@@ -321,6 +331,93 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertTrue(ready)
             self.assertIn("TICKET-001", reason)
             self.assertNotIn("Ticket queue still needs to be populated or confirmed.", snapshot["task"]["known_issues"])
+            self.assertEqual("Verification commands may need adjustment after bootstrap.", snapshot["task"]["known_issue"])
+
+    def test_automation_ready_uses_typed_status_not_task_markdown(self) -> None:
+        module, fake_dashboard = self.fake_dashboard_for_automation()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            self.write_ready_automation_target(target)
+
+            first_ready, _first_reason = module.automation_ready(target, fake_dashboard)
+            generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md").write_text(
+                "AUTOMATION_STATUS: CRITICAL_STOP\n",
+                encoding="utf-8",
+            )
+            second_ready, second_reason = module.automation_ready(target, fake_dashboard)
+
+            self.assertTrue(first_ready)
+            self.assertTrue(second_ready)
+            self.assertEqual("Ready.", second_reason)
+
+    def test_resolved_role_worktree_ticket_issue_is_filtered(self) -> None:
+        from diffmogger.observatory.snapshots import build_snapshot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            self.write_populated_ticket_campaign_target(target)
+            generated_path(target, ".diffmogger/manifest.json").write_text(
+                json.dumps({"schema_version": 1, "layout": "sidecar_v1"}),
+                encoding="utf-8",
+            )
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "test-ticket-campaign",
+                    "halt_when_complete": True,
+                    "tickets": [
+                        {
+                            "id": "TICKET-001",
+                            "summary": "Build the first useful slice",
+                            "status": "pending",
+                        }
+                    ],
+                },
+                actor_role="test",
+                event_type="ticket.run_seeded",
+            )
+            generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md").write_text(
+                """AUTOMATION_STATUS: ACTIVE
+
+## Current Project State
+
+- Current baseline: ticket helper repaired.
+
+## Known Issues
+
+- Canonical state reports 4 pending tickets, but the isolated role-worktree `ticket_run.py . status --json` helper currently reports 0 tickets from `target/orchestration.sqlite3`.
+- Invoking the ticket helper against the main target path from this role sandbox fails to open the canonical SQLite database, so role worktrees cannot currently mutate dashboard ticket state directly.
+- Canonical ticket helper read-only commands currently fail in this role worktree with `sqlite3.OperationalError: unable to open database file`.
+- Isolated builder/hardener worktrees cannot currently run canonical `ticket_run.py . status --json` or `next --json` because opening the canonical SQLite path fails under the role sandbox.
+- Verification commands may need adjustment after bootstrap.
+""",
+                encoding="utf-8",
+            )
+            helper = (
+                generated_path(target, "target/automation_worktrees")
+                / "builder"
+                / "run-1"
+                / ".diffmogger"
+                / "lib"
+                / "diffmogger"
+                / "runtime"
+                / "ticket_run.py"
+            )
+            helper.parent.mkdir(parents=True)
+            helper.write_text(
+                "def canonical_target_from_role_worktree(path):\n    return None\n"
+                "def resolve_ticket_target(path):\n    return path\n",
+                encoding="utf-8",
+            )
+
+            snapshot = build_snapshot(target)
+
+            self.assertNotIn("Canonical state reports", " ".join(snapshot["task"]["known_issues"]))
+            self.assertNotIn("role worktrees cannot currently mutate", " ".join(snapshot["task"]["known_issues"]))
+            self.assertNotIn("Canonical ticket helper read-only commands", " ".join(snapshot["task"]["known_issues"]))
+            self.assertNotIn("worktrees cannot currently run canonical", " ".join(snapshot["task"]["known_issues"]))
             self.assertEqual("Verification commands may need adjustment after bootstrap.", snapshot["task"]["known_issue"])
 
     def test_automation_start_stop_and_idempotent_running_state(self) -> None:
@@ -373,6 +470,83 @@ class DashboardBackendCliTests(unittest.TestCase):
 
             self.assertFalse(payload["stopped"])
             self.assertEqual("automation_stop_noop", json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))["last_action"])
+
+    def test_run_load_exposes_baseline_recheck_blocker_action(self) -> None:
+        module, fake_dashboard = self.fake_dashboard_for_automation()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            self.write_ready_automation_target(target)
+            baseline_path = generated_path(target, "target/baseline_verification.json")
+            baseline_path.parent.mkdir(parents=True, exist_ok=True)
+            baseline_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "blocked_environment",
+                        "category": "missing_env_var",
+                        "root_cause": "Missing required environment variable DATABASE_URL.",
+                        "failure_signature": "verification_environment_failure:missing_env_var:abc",
+                        "checks_run": ["npm test"],
+                        "detail": "$ npm test\nexit=1\nDATABASE_URL missing",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(target=str(target), stream_jsonl=False)
+
+            with mock.patch.object(module, "load_dashboard_module", return_value=fake_dashboard):
+                payload = module.command_run_load(args)
+
+            blockers = payload["environment_blockers"]
+            baseline = next(item for item in blockers if item.get("kind") == "baseline_verification")
+            self.assertEqual("Recheck blocker", baseline["recheck_label"])
+            self.assertEqual("blocker.recheck_baseline", baseline["recheck_command"])
+            self.assertTrue(baseline["can_recheck"])
+
+    def test_blocker_recheck_baseline_runs_forced_loaded_recheck(self) -> None:
+        module, fake_dashboard = self.fake_dashboard_for_automation()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            self.write_ready_automation_target(target)
+            calls: list[dict[str, object]] = []
+
+            def fake_run_subprocess(args, command, *, cwd, stage, env=None):
+                calls.append({"command": command, "cwd": cwd, "stage": stage, "env": env})
+                baseline_path = target / "target" / "baseline_verification.json"
+                baseline_path.parent.mkdir(parents=True, exist_ok=True)
+                baseline_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "status": "passing",
+                            "category": "",
+                            "root_cause": "",
+                            "checks_run": ["python3 -m unittest"],
+                            "detail": "ok",
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return {"command": "baseline recheck", "exit_code": 0, "stdout": "ok", "stderr": ""}
+
+            args = argparse.Namespace(target=str(target), stream_jsonl=False)
+            with (
+                mock.patch.object(module, "load_dashboard_module", return_value=fake_dashboard),
+                mock.patch.object(module._run_control, "run_subprocess_streamed", side_effect=fake_run_subprocess),
+            ):
+                payload = module.command_blocker_recheck_baseline(args)
+
+            self.assertEqual("pass", payload["status"])
+            self.assertEqual("passing", payload["baseline_verification"]["status"])
+            command = [str(item) for item in calls[0]["command"]]
+            self.assertIn("load_automation_env.py", " ".join(command))
+            self.assertIn("--force-baseline", command)
+            self.assertIn("--baseline-only", command)
+            dashboard_state = json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
+            self.assertEqual("baseline_recheck_passed", dashboard_state["last_action"])
 
     def test_missing_target_returns_structured_json_error(self) -> None:
         missing = Path(tempfile.gettempdir()) / "diffmogger-backend-missing-target"
@@ -1047,6 +1221,48 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertIn("TICKET-004", tickets_by_id)
             self.assertEqual("pending", tickets_by_id["TICKET-001"]["status"])
             self.assertEqual("pending", tickets_by_id["TICKET-002"]["status"])
+
+    def test_ticket_draft_from_intake_includes_optional_direction_in_prompt(self) -> None:
+        from diffmogger.dashboard.commands import tickets as ticket_commands
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_ticket_target(target)
+            captured_prompts: list[str] = []
+
+            def fake_run(cmd, **_kwargs):
+                if cmd[:2] == ["git", "status"]:
+                    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+                if cmd[:2] == ["codex", "exec"]:
+                    captured_prompts.append(cmd[-1])
+                    return subprocess.CompletedProcess(
+                        cmd,
+                        0,
+                        stdout=json.dumps([
+                            {
+                                "id": "TICKET-003",
+                                "summary": "Add guided ticket drafting",
+                                "status": "pending",
+                            }
+                        ]),
+                        stderr="",
+                    )
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            args = argparse.Namespace(
+                target=str(target),
+                stream_jsonl=False,
+                ticket_file="",
+                direction="Focus on onboarding setup tickets and skip reporting polish.",
+            )
+            with mock.patch.object(ticket_commands.subprocess, "run", side_effect=fake_run):
+                draft = ticket_commands.command_ticket_draft_from_intake(args)
+
+            self.assertEqual(1, draft["candidate_count"])
+            self.assertEqual(1, len(captured_prompts))
+            self.assertIn("User-provided draft direction:", captured_prompts[0])
+            self.assertIn("Focus on onboarding setup tickets and skip reporting polish.", captured_prompts[0])
+            self.assertIn("preserving the append-only rules", captured_prompts[0])
 
     def test_ticket_draft_from_intake_returns_empty_append_draft_when_nothing_new(self) -> None:
         from diffmogger.dashboard.commands import tickets as ticket_commands

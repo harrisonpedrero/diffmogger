@@ -97,6 +97,8 @@ def observatory_native_snapshot(raw: dict[str, Any], target: Path) -> dict[str, 
     baseline = raw.get("baseline_verification") if isinstance(raw.get("baseline_verification"), dict) else {}
     first_review = raw.get("first_review") if isinstance(raw.get("first_review"), dict) else {}
     review = raw.get("review") if isinstance(raw.get("review"), dict) else {}
+    state = raw.get("state") if isinstance(raw.get("state"), dict) else {}
+    state_machine = state.get("conveyor_machine") if isinstance(state.get("conveyor_machine"), dict) else {}
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     counts_by_role = queue.get("counts_by_role") if isinstance(queue.get("counts_by_role"), dict) else {}
     active = conveyor.get("active_role_run") if isinstance(conveyor.get("active_role_run"), dict) else {}
@@ -192,6 +194,7 @@ def observatory_native_snapshot(raw: dict[str, Any], target: Path) -> dict[str, 
             "cycles": as_int(conveyor.get("cycles")),
             "updated_at": conveyor.get("updated_at") or "never",
             "roles": roles,
+            "state_machine": state_machine,
             "active_run": active,
             "decision_queue": decisions,
             "health": conveyor.get("health") if isinstance(conveyor.get("health"), dict) else {},

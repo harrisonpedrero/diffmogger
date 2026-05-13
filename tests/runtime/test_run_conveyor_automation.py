@@ -131,6 +131,29 @@ class ConveyorDecisionTests(unittest.TestCase):
             ],
         }
 
+    def test_conveyor_ignores_task_markdown_after_typed_status_seeded(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.assertEqual("ACTIVE", module.automation_status(target))
+                    self.write_text(
+                        target,
+                        "docs/CODEX_AUTOMATION_TASKS.md",
+                        """
+                        # Codex Automation Tasks
+
+                        AUTOMATION_STATUS: CRITICAL_STOP
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+
+                    self.assertEqual("builder", role)
+                    self.assertIn("builder", reason)
+                    self.assertFalse(stop)
+
     def test_planner_deferral_changes_fast_follow_transition(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
@@ -163,6 +186,24 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertIn("planner deferred patch resolved", reason)
                     self.assertIn("fast-follow replanning", reason)
                     self.assertFalse(stop)
+
+    def test_no_progress_projection_keeps_required_fast_follow_marker(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+
+                    module.write_no_progress_progress_note(
+                        target,
+                        {
+                            "streak": 2,
+                            "reason": "integrator accepted no patches",
+                        },
+                    )
+
+                    progress = (target / "docs" / "MULTI_ROLE_PROGRESS.md").read_text(encoding="utf-8")
+                    self.assertIn("fast-follow replanning", progress)
 
     def test_non_planner_deferral_does_not_preempt_builder_hardening(self) -> None:
         for path, module in self.modules:
@@ -258,6 +299,29 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertFalse(stop)
                     self.assertEqual("single_lane", queue[0]["role"])
                     self.assertIn("single-lane automation profile selected", queue[0]["reason"])
+
+    def test_role_profile_wins_over_legacy_multi_role_flag(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(
+                        target,
+                        ".agentic/project_intake.json",
+                        json.dumps(
+                            {
+                                "automation_role_profile": "planner_builder_hardener_integrator",
+                                "multi_role_automations_allowed": False,
+                            }
+                        ),
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+
+                    self.assertEqual("builder", role)
+                    self.assertIn("builder", reason)
+                    self.assertFalse(stop)
 
     def test_missing_multi_role_files_falls_back_to_single_lane_wrapper(self) -> None:
         for path, module in self.modules:
@@ -565,6 +629,37 @@ class ConveyorDecisionTests(unittest.TestCase):
                     target = Path(tmp)
                     self.seed_target(target)
                     self.write_text(target, ".agentic/verification_commands.txt", "python3 -m pytest\n")
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+
+                    self.assertEqual("integrator", role)
+                    self.assertIn("baseline verification ledger", reason)
+                    self.assertFalse(stop)
+
+    def test_false_positive_baseline_blocker_routes_to_preflight_refresh(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "npm ci\n")
+                    self.write_text(
+                        target,
+                        "target/baseline_verification.json",
+                        """
+                        {
+                          "schema_version": 1,
+                          "head": "abc",
+                          "verification_config_hash": "missing",
+                          "status": "blocked_environment",
+                          "category": "missing_env_var",
+                          "root_cause": "Missing required environment variable `EBADENGINE`.",
+                          "failure_signature": "verification_environment_failure:missing_env_var:abc",
+                          "checks_run": ["npm ci"],
+                          "detail": "$ npm ci\\nexit=0\\nnpm warn EBADENGINE Unsupported engine {\\nnpm warn EBADENGINE   required: { node: '^20.19.0 || ^22.13.0 || >=24' }\\nnpm warn EBADENGINE }"
+                        }
+                        """,
+                    )
 
                     role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
 

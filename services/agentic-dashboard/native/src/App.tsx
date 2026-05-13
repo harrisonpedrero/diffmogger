@@ -154,8 +154,8 @@ const targetRequiredCopy: Record<
   },
   Inbox: {
     title: "Select a project to open Inbox",
-    body: "Requests, replies, and next-run notes live in target-local Markdown files.",
-    detail: "Choose a target to see pending requests or complete setup for file-based messaging.",
+    body: "Requests, replies, and next-run notes live in target-local typed state.",
+    detail: "Choose a target to see pending requests or complete setup for the dashboard Inbox.",
   },
   Review: {
     title: "Select a project to review a run",
@@ -187,8 +187,8 @@ function formatTimestamp(value: number): string {
   });
 }
 
-function targetSubdir(target: string, leaf: string): string {
-  return `${target.replace(/[\\/]+$/, "")}/target/${leaf}`;
+function targetRuntimeSubdir(target: string, leaf: string): string {
+  return `${target.replace(/[\\/]+$/, "")}/.diffmogger/runtime/${leaf}`;
 }
 
 function textValue(value: unknown, fallback = ""): string {
@@ -1688,7 +1688,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
         const payload = await runBackendCommand({
           command: "review.export_bundle",
           target,
-          reviewDir: targetSubdir(target, "first-review"),
+          reviewDir: targetRuntimeSubdir(target, "first-review"),
         });
         if (!payload.ok) {
           const message = payload.message ?? "Could not export the review files.";
@@ -1727,7 +1727,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       setPaletteBusyId(command.id);
       try {
         const settings = await getAdvancedSettings();
-        const outputDir = settings.reviewExportDir || targetSubdir(target, "debug-bundles");
+        const outputDir = settings.reviewExportDir || targetRuntimeSubdir(target, "debug-bundles");
         const payload = await runBackendCommand({
           command: "advanced.export_debug_bundle",
           target,

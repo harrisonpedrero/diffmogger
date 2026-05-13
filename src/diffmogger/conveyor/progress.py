@@ -4,42 +4,70 @@ from .active_role import update_timeout_streak, timeout_streak_count
 from .baseline import current_head
 from .queue_state import latest_applied_role_manifest_info, queue_snapshot, role_manifest_records, format_file_list
 from .state import *
+from diffmogger.runtime.paths import target_rel
+from diffmogger.runtime.state_store import automation_control_state
 
 def write_no_progress_progress_note(target: Path, info: dict[str, Any]) -> None:
     progress = dpath(target, "docs/MULTI_ROLE_PROGRESS.md")
-    if not progress.exists():
-        return
-    text = read_text(progress)
-    header, sections, order = split_h2_sections(text)
-    if not header:
-        header = "# Multi-Role Progress"
+    sqlite_rel = target_rel(target, "target/orchestration.sqlite3")
+    queue_rel = target_rel(target, "target/automation_queue")
     reason = re.sub(r"\s+", " ", str(info.get("reason") or "integrator made no patch progress")).strip()
     reason = reason[:240] if len(reason) > 240 else reason
     stamp = utc_now()
-    entry = "\n".join(
+    snapshot = queue_snapshot(target)
+    control = automation_control_state(target)
+    applied_by_role = snapshot.get("applied_by_role") if isinstance(snapshot.get("applied_by_role"), dict) else {}
+    deferred_by_role = snapshot.get("deferred_by_role") if isinstance(snapshot.get("deferred_by_role"), dict) else {}
+    deferred_depth = int(snapshot.get("deferred", 0) or 0)
+    body = "\n".join(
         [
+            "# Multi-Role Progress",
+            "",
+            f"Generated dashboard/export projection for optional multi-role automation. SQLite in `{sqlite_rel}` is the live state authority.",
+            "Continuous conveyor mode prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning after planner deferral changes, post-builder hardening, candidate verification, and builder momentum.",
+            "",
+            "## Project State At Last Integration",
+            "",
+            f"- Current product horizon: {control.get('horizon') or 'unknown'}",
+            "- Latest evidence: no-progress circuit breaker tripped after an integrator cycle.",
+            f"- Last integrator run: {stamp}",
+            "- Last verification status: recorded in typed validation receipts",
+            "",
+            "## Cumulative Metrics",
+            "",
+            "- Total integrator runs: recorded in role manifests",
+            "- Accepted patches by role:",
+            *[f"  - {role}: {int(applied_by_role.get(role, 0) or 0)}" for role in QUEUE_ROLES],
+            "- Deferred patches by role:",
+            *[f"  - {role}: {int(deferred_by_role.get(role, 0) or 0)}" for role in QUEUE_ROLES],
+            f"- Current deferred queue depth: {deferred_depth}",
+            "",
+            "## Recent Activity Log",
+            "",
             f"### {stamp} conveyor-no-progress",
             "",
             f"- circuit_breaker: active after {info.get('streak', 0)} no-progress integrator cycle(s).",
             f"- reason: {reason}",
             "- next_lane: planner handoff or idle until the blocked condition changes.",
+            "",
+            "## Historical Summary",
+            "",
+            "- Historical progress is represented by role manifests and SQLite events.",
+            "",
+            "## Deferred-Patch Backlog",
+            "",
+            f"- See role manifests under `{queue_rel}/` for deferred patch details.",
+            "",
+            "## Architectural Decisions",
+            "",
+            "- None recorded in typed state.",
+            "",
+            "## Role Health",
+            "",
+            f"- conveyor: no-progress circuit breaker active; {reason}",
         ]
     )
-    recent = sections.get("Recent Activity Log", "").strip()
-    if recent == "- No multi-role integrator runs yet.":
-        recent = ""
-    sections["Recent Activity Log"] = (recent.rstrip() + "\n\n" + entry).strip()
-    role_health = sections.get("Role Health", "").splitlines()
-    role_health = [line for line in role_health if not line.startswith("- conveyor:")]
-    role_health.append(f"- conveyor: no-progress circuit breaker active; {reason}")
-    sections["Role Health"] = "\n".join(line for line in role_health if line.strip())
-    if "Recent Activity Log" not in order:
-        order.append("Recent Activity Log")
-    if "Role Health" not in order:
-        order.append("Role Health")
-    body = header.rstrip() + "\n\n"
-    for section in order:
-        body += f"## {section}\n\n{sections.get(section, '').strip()}\n\n"
+    progress.parent.mkdir(parents=True, exist_ok=True)
     progress.write_text(body.rstrip() + "\n", encoding="utf-8")
 
 def no_progress_info(state: dict[str, Any]) -> dict[str, Any]:

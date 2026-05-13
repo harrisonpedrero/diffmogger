@@ -20,16 +20,19 @@ Capture:
 8. Safety constraints.
 9. External services or integrations.
 10. Verification commands or expected checks.
-11. Desired automation cadence as an integer number of minutes greater than 30.
+11. Environment access policy: project commands only, or direct local `.env*` reads allowed.
 12. Whether a human bridge is enabled.
-13. Human bridge mode: file-only, local notifier, or disabled.
+13. Human bridge mode: file-only dashboard Inbox, local notifier, Discord notifier, or disabled.
 14. Whether freeform human requests should receive direct notifier messages when the notifier is available.
 15. Whether worker agents are allowed and whether Codex CLI worker reports are expected on broad runs.
 16. Whether optional write-capable worker agents are allowed, the maximum write-worker count from 0-10, and guidance that enabled write workers are bounded acceleration for work that can split into reviewable lanes.
 17. Automation role profile: use `single_lane` for docs, research, cleanup, reports, small apps, bounded/simple work, and non-engineering workflows; use `planner_builder_hardener_integrator` for larger software engineering work where separate planning, implementation, verification, and integration lanes add value. Capture checkpoint-commit preference and local-only remote opt-in when multi-role is enabled.
-18. What counts as a meaningful integrated deliverable.
-19. Long-run direction after the initial scope, unless the work is a bounded ticket campaign.
-20. What the automation must never do.
+18. Automation run mode: continuous improvement or bounded ticket campaign.
+19. Optional MCP servers: Context7 and/or Playwright, only when useful.
+20. Seed tickets for a bounded ticket campaign, if any.
+21. What counts as a meaningful integrated deliverable.
+22. Long-run direction after the initial scope, unless the work is a bounded ticket campaign.
+23. What the automation must never do.
 
 For existing project integration, explicitly capture what already exists, which stack and commands must be preserved, and what the first integrated change should prove.
 
@@ -60,7 +63,7 @@ Output in this structure:
 
 ## Verification
 
-## Automation Cadence
+## Environment Access
 
 ## Human Bridge
 
@@ -78,7 +81,11 @@ Output in this structure:
 
 ## Automation Checkpoint Commits
 
-## Multi-Role Base Cadence
+## Automation Run Mode
+
+## Optional MCP Servers
+
+## Ticket Campaign Seed Tickets
 
 ## Meaningful Deliverable
 

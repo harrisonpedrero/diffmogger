@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from .state import *
+from diffmogger.runtime.blocker_review import (
+    adjudicate_baseline_blocker,
+    baseline_review_allows_progress,
+    baseline_review_requests_rerun,
+)
+from diffmogger.runtime.state_store import automation_control_state
 
 def automation_status(target: Path) -> str:
-    # Compatibility boundary: older targets still expose the operator status in
-    # the task Markdown. Typed task status should replace this shim.
-    task_text = read_text(dpath(target, "docs/CODEX_AUTOMATION_TASKS.md"))
-    match = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", task_text, re.MULTILINE)
-    return match.group(1).strip().upper() if match else "UNKNOWN"
+    control = automation_control_state(target)
+    return str(control.get("status") or "UNKNOWN").strip().upper()
 
 def verification_config_hash(target: Path) -> str:
     path = dpath(target, ".agentic/verification_commands.txt")
@@ -32,6 +35,8 @@ def baseline_record_is_current(target: Path, record: dict[str, Any]) -> bool:
     if not record:
         return False
     head_value = current_head(target)
+    if baseline_review_requests_rerun(record):
+        return False
     if not head_value:
         return True
     return (
@@ -69,8 +74,18 @@ def baseline_repair_route(target: Path, state: dict[str, Any]) -> tuple[str | No
         return None
     status = str(record.get("status") or "unknown")
     root = str(record.get("root_cause") or "No baseline root cause recorded.")
+    review = adjudicate_baseline_blocker(record)
     if status in {"passing", ""}:
         return None
+    if baseline_review_allows_progress(record):
+        return (
+            "integrator",
+            (
+                "blocker review superseded baseline blocker as a likely false positive; "
+                f"rerun clean-HEAD preflight to refresh receipts: {review.get('summary') or root}"
+            ),
+            False,
+        )
     if status in {"failing_source", "missing_config", "repairable_local_service"}:
         source_role = last_baseline_repair_source_role(state)
         if source_role == "planner":

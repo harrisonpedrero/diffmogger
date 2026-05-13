@@ -1,6 +1,6 @@
 # Codex Automation Tasks
 
-Generated prompt/handoff projection. SQLite in `target/orchestration.sqlite3` is live runtime authority; `target/canonical_state_brief.md` is the current bounded agent-readable view.
+Generated prompt/handoff projection. SQLite in `target/orchestration.sqlite3` is live runtime authority for automation status, product horizon, task summary, conveyor stages, repo capabilities, events, validations, blockers, and next actions; `target/canonical_state_brief.md` is the current bounded agent-readable view.
 
 AUTOMATION_STATUS: ACTIVE
 
@@ -16,7 +16,8 @@ Last updated: {{CREATED_AT}}
 - Tech preferences: {{TECH_PREFERENCES}}
 - Project-mode guidance: {{PROJECT_MODE_GUIDANCE}}
 - Current baseline: not bootstrapped yet.
-- State authority: canonical runtime state is `target/orchestration.sqlite3`; this Markdown file is a generated prompt/handoff projection and compatibility status surface.
+- State authority: canonical runtime/task-control state is `target/orchestration.sqlite3`; this Markdown file is a generated prompt/handoff projection.
+- Conveyor state machine: stage contracts, current work item, repository capability manifest, validation receipts, blockers, and next actions are typed SQLite state.
 
 ## Automation Must Never Do
 
@@ -79,7 +80,7 @@ Last updated: {{CREATED_AT}}
 
 - Playwright UI artifacts path: `docs/backlog/ui_artifacts/<run_id>/`
 - Current screenshot-backed UI bugs: none yet.
-- When a validation run captures a UI failure, link the screenshot here. In multi-role mode, also link it in `docs/MULTI_ROLE_PROGRESS.md`.
+- When a validation run captures a UI failure, record the screenshot in typed validation/role state and mirror the link here. In multi-role mode, also mirror it in `docs/MULTI_ROLE_PROGRESS.md`.
 
 ## Known Issues
 

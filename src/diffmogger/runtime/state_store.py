@@ -10,24 +10,38 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import subprocess
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from diffmogger.runtime.paths import existing_or_target_path, target_path
+from diffmogger.runtime.blocker_review import adjudicate_baseline_blocker
+from diffmogger.runtime.paths import existing_or_target_path, target_path, target_rel
 
 
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 STATE_APPLICATION_ID = 0x444D4752  # DMGR
 CANONICAL_DB_RELATIVE = "target/orchestration.sqlite3"
 CONVEYOR_PROJECTION_RELATIVE = "target/automation_conveyor_state.json"
 CONVEYOR_STREAM_ID = "stream:conveyor"
 CONVEYOR_TASK_ID = "task:conveyor"
+CONVEYOR_WORK_ITEM_ID = "workitem:default"
 CONVEYOR_PROJECTION_NAME = "conveyor.state"
+CONVEYOR_MACHINE_PROJECTION_NAME = "conveyor.machine"
+BLOCKER_REVIEW_PROJECTION_NAME = "blocker.review"
+CAPABILITY_PROJECTION_NAME = "repo.capability_manifest"
+CAPABILITY_MANIFEST_ID = "capability:repo"
+AUTOMATION_CONTROL_ID = "automation-control:default"
+AUTOMATION_CONTROL_STREAM_ID = "stream:automation-control"
+AUTOMATION_CONTROL_TASK_ID = "task:automation-control"
+AUTOMATION_CONTROL_PROJECTION_NAME = "automation.control"
+CONVEYOR_MACHINE_VERSION = 1
+STAGE_CONTRACT_VERSION = 1
 RUNNER_PROJECTION_RELATIVE = "target/automation_runner.json"
 RUNNER_STREAM_ID = "stream:automation-runner"
 RUNNER_TASK_ID = "task:automation-runner"
@@ -70,8 +84,106 @@ ORCHESTRATION_TABLES = (
     "human_messages",
     "ticket_runs",
     "ticket_items",
+    "automation_control",
+    "conveyor_work_items",
+    "conveyor_stage_contracts",
+    "conveyor_stage_attempts",
+    "capability_manifests",
+    "validation_receipts",
+    "escalations",
+    "task_edges",
     "compatibility_migrations",
 )
+
+CONVEYOR_STAGES = (
+    "intake",
+    "discovery",
+    "decomposition",
+    "planning",
+    "implementation",
+    "review",
+    "validation",
+    "integration",
+    "handoff",
+    "continuation",
+)
+
+STAGE_TO_OWNER_ROLE = {
+    "intake": "planner",
+    "discovery": "planner",
+    "decomposition": "planner",
+    "planning": "planner",
+    "implementation": "builder",
+    "review": "hardener",
+    "validation": "hardener",
+    "integration": "integrator",
+    "handoff": "planner",
+    "continuation": "conveyor",
+}
+
+ROLE_TO_CONVEYOR_STAGE = {
+    "planner": ("planning", "planner"),
+    "builder": ("implementation", "builder"),
+    "single_lane": ("implementation", "single_lane"),
+    "hardener": ("validation", "hardener"),
+    "integrator": ("integration", "integrator"),
+}
+
+CAPABILITY_SCAN_IGNORED_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".diffmogger",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+    "dist",
+    "dist-ssr",
+    "build",
+    "target",
+    "coverage",
+    ".next",
+    ".turbo",
+    "vendor",
+}
+
+LANGUAGE_BY_EXTENSION = {
+    ".py": "Python",
+    ".js": "JavaScript",
+    ".jsx": "JavaScript",
+    ".ts": "TypeScript",
+    ".tsx": "TypeScript",
+    ".rs": "Rust",
+    ".go": "Go",
+    ".java": "Java",
+    ".kt": "Kotlin",
+    ".kts": "Kotlin",
+    ".rb": "Ruby",
+    ".php": "PHP",
+    ".cs": "C#",
+    ".c": "C",
+    ".h": "C/C++",
+    ".cc": "C++",
+    ".cpp": "C++",
+    ".hpp": "C++",
+    ".swift": "Swift",
+    ".sh": "Shell",
+    ".bash": "Shell",
+    ".zsh": "Shell",
+    ".sql": "SQL",
+    ".html": "HTML",
+    ".css": "CSS",
+    ".scss": "CSS",
+    ".md": "Markdown",
+    ".yml": "YAML",
+    ".yaml": "YAML",
+    ".json": "JSON",
+    ".toml": "TOML",
+}
 
 HUMAN_REQUEST_ACTIVE_STATUSES = {"active", "awaiting_user", "awaiting_human", "pending", "open", "unresolved"}
 HUMAN_ARCHIVE_STATUSES = {"resolved", "handled", "consumed", "archived", "done", "closed", "skipped"}
@@ -112,7 +224,9 @@ def write_json_projection(path: Path, payload: dict[str, Any]) -> None:
 
 def default_conveyor_state() -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "state_machine_version": CONVEYOR_MACHINE_VERSION,
+        "status": "ACTIVE",
         "cycles": 0,
         "role_counts": {},
         "history": [],
@@ -121,7 +235,9 @@ def default_conveyor_state() -> dict[str, Any]:
 
 def normalize_conveyor_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
     normalized = dict(state or {})
-    normalized.setdefault("schema_version", 1)
+    normalized.setdefault("schema_version", 2)
+    normalized.setdefault("state_machine_version", CONVEYOR_MACHINE_VERSION)
+    normalized.setdefault("status", "ACTIVE")
     normalized.setdefault("cycles", 0)
     normalized.setdefault("role_counts", {})
     normalized.setdefault("history", [])
@@ -177,6 +293,309 @@ class StateEvent:
     causation_id: int | None = None
     correlation_id: str = ""
     occurred_at: str = ""
+
+
+def default_stage_contracts() -> dict[str, dict[str, Any]]:
+    """Reusable stage contracts for the project-agnostic conveyor state machine."""
+
+    contracts: dict[str, dict[str, Any]] = {
+        "intake": {
+            "entry_criteria": ["external request, generated intake, ticket queue, or existing task state is present"],
+            "required_artifacts": ["canonical work item", "requested outcome", "acceptance criteria or honest unknown"],
+            "allowed_tools": ["dashboard", "typed_state_api", "read_repo_metadata"],
+            "exit_criteria": ["work item has repository identity, base revision, constraints, and risk tier"],
+            "retry_policy": {"max_attempts": 2, "backoff_seconds": 60, "on_exhausted": "handoff"},
+            "escalation_policy": {"trigger": "ambiguous or unsafe requested outcome", "target": "user"},
+            "parallelism": {"mode": "serial", "may_spawn_children": False},
+        },
+        "discovery": {
+            "entry_criteria": ["work item exists", "target repository path is known"],
+            "required_artifacts": ["capability manifest", "repo instruction list", "build/test command candidates"],
+            "allowed_tools": ["read_repo", "git_status", "capability_scan", "read_only_workers"],
+            "exit_criteria": ["capability manifest is current for repository files and lockfiles"],
+            "retry_policy": {"max_attempts": 3, "backoff_seconds": 120, "on_exhausted": "handoff"},
+            "escalation_policy": {"trigger": "no runnable verification path can be inferred", "target": "planner"},
+            "parallelism": {"mode": "read_only_fanout", "may_spawn_children": True},
+        },
+        "decomposition": {
+            "entry_criteria": ["capability manifest exists", "requested outcome is bounded"],
+            "required_artifacts": ["subtask or lane plan", "dependency notes", "predicted write scopes"],
+            "allowed_tools": ["planner", "read_repo", "typed_state_api"],
+            "exit_criteria": ["next implementation, validation, or integration lane is explicit"],
+            "retry_policy": {"max_attempts": 3, "backoff_seconds": 120, "on_exhausted": "handoff"},
+            "escalation_policy": {"trigger": "dependencies or scope cannot be made safe", "target": "user"},
+            "parallelism": {"mode": "serial_planning", "may_spawn_children": False},
+        },
+        "planning": {
+            "entry_criteria": ["discovery evidence is available", "no higher-priority blocker owns the next move"],
+            "required_artifacts": ["plan artifact", "validation plan", "risk notes"],
+            "allowed_tools": ["planner", "read_repo", "context_packs", "typed_state_api"],
+            "exit_criteria": ["implementation or review lane has an owner and a reason"],
+            "retry_policy": {"max_attempts": 3, "backoff_seconds": 120, "on_exhausted": "handoff"},
+            "escalation_policy": {"trigger": "plan conflict or repeated no-progress", "target": "user_or_planner"},
+            "parallelism": {"mode": "mostly_serial", "may_spawn_children": True},
+        },
+        "implementation": {
+            "entry_criteria": ["plan or bounded ticket is selected", "write scope is allowed"],
+            "required_artifacts": ["patch artifact or implementation notes", "changed-file metadata", "local evidence"],
+            "allowed_tools": ["builder", "single_lane", "isolated_worktree", "bounded_write_workers"],
+            "exit_criteria": ["candidate patch is queued, committed, blocked, or explicitly handed off"],
+            "retry_policy": {"max_attempts": 3, "backoff_seconds": 300, "on_exhausted": "validation_or_handoff"},
+            "escalation_policy": {"trigger": "unsafe mutation, unknown dependency, or repeated patch churn", "target": "planner"},
+            "parallelism": {"mode": "write_scope_leases", "may_spawn_children": True},
+        },
+        "review": {
+            "entry_criteria": ["candidate change or queued patch exists"],
+            "required_artifacts": ["review record", "policy findings", "missing-test notes"],
+            "allowed_tools": ["hardener", "read_repo", "diff_review", "read_only_workers"],
+            "exit_criteria": ["change is accepted for validation, sent for repair, or blocked with evidence"],
+            "retry_policy": {"max_attempts": 2, "backoff_seconds": 180, "on_exhausted": "planning"},
+            "escalation_policy": {"trigger": "policy finding requires human judgment", "target": "user"},
+            "parallelism": {"mode": "review_fanout_then_serial_decision", "may_spawn_children": True},
+        },
+        "validation": {
+            "entry_criteria": ["candidate change, baseline preflight, or ticket candidate needs proof"],
+            "required_artifacts": ["validation receipts", "command logs", "environment lease"],
+            "allowed_tools": ["hardener", "integrator", "test_runner", "browser_validation", "ci_probe"],
+            "exit_criteria": ["required receipts pass, fail with blocker, or expire as stale"],
+            "retry_policy": {"max_attempts": 3, "backoff_seconds": 300, "on_exhausted": "repair_or_handoff"},
+            "escalation_policy": {"trigger": "environment cannot be reproduced", "target": "environment"},
+            "parallelism": {"mode": "validation_fanout", "may_spawn_children": True},
+        },
+        "integration": {
+            "entry_criteria": ["validated candidate or queued role patch exists"],
+            "required_artifacts": ["integration result", "checkpoint commit or deferral record", "post-integration validation"],
+            "allowed_tools": ["integrator", "git_worktree", "patch_queue", "validation_runner"],
+            "exit_criteria": ["change is integrated with evidence, deferred with machine-readable reason, or stopped"],
+            "retry_policy": {"max_attempts": 2, "backoff_seconds": 300, "on_exhausted": "planning"},
+            "escalation_policy": {"trigger": "merge conflict, protected path, or remote/policy boundary", "target": "user_or_planner"},
+            "parallelism": {"mode": "serialized_integrator", "may_spawn_children": False},
+        },
+        "handoff": {
+            "entry_criteria": ["human input, environment action, or policy decision is required"],
+            "required_artifacts": ["escalation record", "minimum context", "resume token"],
+            "allowed_tools": ["dashboard", "human_message_state", "notifier_when_enabled"],
+            "exit_criteria": ["reply is recorded, blocker is closed, or continuation is suspended"],
+            "retry_policy": {"max_attempts": 1, "backoff_seconds": 0, "on_exhausted": "suspend"},
+            "escalation_policy": {"trigger": "unanswered blocking decision", "target": "user"},
+            "parallelism": {"mode": "interrupt_wait", "may_spawn_children": False},
+        },
+        "continuation": {
+            "entry_criteria": ["run is complete, blocked, idle, or ready to roll forward"],
+            "required_artifacts": ["continuation decision", "next action queue", "state brief"],
+            "allowed_tools": ["conveyor", "typed_state_api", "dashboard"],
+            "exit_criteria": ["completed, suspended, forked, or next bounded run is selected"],
+            "retry_policy": {"max_attempts": 1, "backoff_seconds": 0, "on_exhausted": "suspend"},
+            "escalation_policy": {"trigger": "no ready work above policy threshold", "target": "dashboard"},
+            "parallelism": {"mode": "serial_decision", "may_spawn_children": False},
+        },
+    }
+    for stage, contract in contracts.items():
+        contract["stage"] = stage
+        contract["schema_version"] = STAGE_CONTRACT_VERSION
+    return contracts
+
+
+def target_from_projection_path(projection_path: Path) -> Path:
+    path = projection_path.expanduser().resolve()
+    parts = list(path.parts)
+    if ".diffmogger" in parts:
+        index = parts.index(".diffmogger")
+        return Path(*parts[:index]) if index > 0 else path.parent
+    if path.parent.name == "target":
+        return path.parent.parent
+    return path.parent
+
+
+def git_value(target: Path, *args: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=target,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def read_optional_text(path: Path, *, limit: int = 200_000) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[:limit]
+    except OSError:
+        return ""
+
+
+def file_digest(path: Path) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    return hashlib.sha256(data).hexdigest()
+
+
+def scan_repo_files(target: Path, *, limit: int = 5000) -> list[Path]:
+    files: list[Path] = []
+    for root, dirnames, filenames in os.walk(target):
+        root_path = Path(root)
+        dirnames[:] = [
+            name
+            for name in sorted(dirnames)
+            if name not in CAPABILITY_SCAN_IGNORED_DIRS and not name.startswith(".cache")
+        ]
+        for filename in sorted(filenames):
+            path = root_path / filename
+            try:
+                rel = path.relative_to(target)
+            except ValueError:
+                continue
+            if any(part in CAPABILITY_SCAN_IGNORED_DIRS for part in rel.parts):
+                continue
+            files.append(path)
+            if len(files) >= limit:
+                return files
+    return files
+
+
+def _json_file(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _line_commands(path: Path) -> list[str]:
+    commands: list[str] = []
+    for raw in read_optional_text(path, limit=40_000).splitlines():
+        line = re.sub(r"^[-*]\s+", "", raw.strip())
+        if line and not line.startswith("#"):
+            commands.append(line)
+    return commands
+
+
+def discover_repo_capabilities(target: Path) -> dict[str, Any]:
+    """Infer reusable repository capabilities without product-specific assumptions."""
+
+    target = target.expanduser().resolve()
+    files = scan_repo_files(target)
+    rel_files = [path.relative_to(target).as_posix() for path in files]
+    language_counts: dict[str, int] = {}
+    for path in files:
+        language = LANGUAGE_BY_EXTENSION.get(path.suffix.lower())
+        if language:
+            language_counts[language] = language_counts.get(language, 0) + 1
+
+    markers = {rel: target / rel for rel in rel_files}
+    lockfile_names = {
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "Cargo.lock",
+        "poetry.lock",
+        "uv.lock",
+        "requirements.txt",
+        "go.sum",
+        "Gemfile.lock",
+        "composer.lock",
+    }
+    lockfiles = [
+        {"path": rel, "sha256": file_digest(path)}
+        for rel, path in sorted(markers.items())
+        if Path(rel).name in lockfile_names
+    ]
+
+    ci_files = [
+        rel
+        for rel in rel_files
+        if rel.startswith(".github/workflows/") and Path(rel).suffix.lower() in {".yml", ".yaml"}
+        or rel in {".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile"}
+    ]
+    instruction_files = [
+        rel
+        for rel in rel_files
+        if Path(rel).name in {"AGENTS.md", "README.md", "CONTRIBUTING.md", "DEVELOPMENT.md", "CLAUDE.md"}
+    ][:20]
+
+    commands: list[dict[str, str]] = []
+    verification_path = existing_or_target_path(target, ".agentic/verification_commands.txt")
+    smoke_path = existing_or_target_path(target, ".agentic/smoke_commands.txt")
+    for command in _line_commands(verification_path):
+        commands.append({"kind": "verification", "command": command, "source": target_rel(target, ".agentic/verification_commands.txt")})
+    for command in _line_commands(smoke_path):
+        commands.append({"kind": "smoke", "command": command, "source": target_rel(target, ".agentic/smoke_commands.txt")})
+
+    package_json = _json_file(target / "package.json")
+    scripts = package_json.get("scripts") if isinstance(package_json.get("scripts"), dict) else {}
+    for name in ("test", "lint", "typecheck", "build", "check"):
+        if name in scripts:
+            commands.append({"kind": name, "command": f"npm run {name}", "source": "package.json"})
+    if (target / "pyproject.toml").exists() or (target / "pytest.ini").exists() or (target / "setup.cfg").exists():
+        commands.append({"kind": "test", "command": "python3 -m pytest", "source": "python project metadata"})
+    if (target / "Cargo.toml").exists():
+        commands.append({"kind": "test", "command": "cargo test", "source": "Cargo.toml"})
+        commands.append({"kind": "lint", "command": "cargo clippy --all-targets --all-features", "source": "Cargo.toml"})
+    if (target / "go.mod").exists():
+        commands.append({"kind": "test", "command": "go test ./...", "source": "go.mod"})
+    if (target / "Makefile").exists():
+        commands.append({"kind": "make", "command": "make test", "source": "Makefile"})
+
+    analyzers: list[str] = []
+    joined_ci = "\n".join(read_optional_text(target / rel, limit=20_000) for rel in ci_files).lower()
+    if "codeql" in joined_ci:
+        analyzers.append("codeql")
+    if "eslint" in stable_json(package_json).lower():
+        analyzers.append("eslint")
+    if any((target / name).exists() for name in ("pyproject.toml", "ruff.toml", ".ruff.toml")):
+        analyzers.append("ruff")
+    if (target / "mypy.ini").exists() or "mypy" in read_optional_text(target / "pyproject.toml").lower():
+        analyzers.append("mypy")
+    if (target / "Cargo.toml").exists():
+        analyzers.append("cargo-clippy")
+    if (target / "go.mod").exists():
+        analyzers.append("go-vet")
+
+    head = git_value(target, "rev-parse", "--verify", "HEAD")
+    branch = git_value(target, "branch", "--show-current")
+    status_porcelain = git_value(target, "status", "--porcelain=v1", "--untracked-files=no")
+    payload = {
+        "schema_version": 1,
+        "manifest_id": CAPABILITY_MANIFEST_ID,
+        "generated_at": utc_now(),
+        "repo": {
+            "root": str(target),
+            "name": target.name,
+            "vcs": "git" if (target / ".git").exists() or git_value(target, "rev-parse", "--is-inside-work-tree") == "true" else "unknown",
+            "branch": branch,
+            "head_commit": head,
+            "dirty_tracked_files": len([line for line in status_porcelain.splitlines() if line.strip()]),
+        },
+        "languages": {
+            "counts": dict(sorted(language_counts.items(), key=lambda item: (-item[1], item[0]))),
+            "primary": max(language_counts, key=language_counts.get) if language_counts else "unknown",
+        },
+        "files": {
+            "scanned_count": len(files),
+            "truncated": len(files) >= 5000,
+            "instructions": instruction_files,
+            "ci": ci_files[:40],
+            "lockfiles": lockfiles,
+        },
+        "commands": commands,
+        "analyzers": sorted(set(analyzers)),
+        "policy": {
+            "canonical_state": "sqlite",
+            "agents_propose_transitions": True,
+            "integration_serialized": True,
+            "markdown_is_projection": True,
+        },
+    }
+    payload["digest"] = sha256_text(stable_json({key: value for key, value in payload.items() if key != "generated_at"}))
+    return payload
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -417,6 +836,135 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_ticket_items_run_status ON ticket_items(run_id, status, position);
 
+        CREATE TABLE IF NOT EXISTS automation_control (
+            control_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            last_updated TEXT NOT NULL DEFAULT '',
+            current_horizon TEXT NOT NULL DEFAULT '',
+            horizon_decision TEXT NOT NULL DEFAULT '',
+            current_assessment TEXT NOT NULL DEFAULT '',
+            best_next_milestone TEXT NOT NULL DEFAULT '',
+            suggested_next_task TEXT NOT NULL DEFAULT '',
+            bootstrap_status TEXT NOT NULL DEFAULT '',
+            worker_agents_allowed INTEGER NOT NULL DEFAULT 1,
+            write_workers_allowed INTEGER NOT NULL DEFAULT 0,
+            max_write_worker_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS conveyor_work_items (
+            work_item_id TEXT PRIMARY KEY,
+            parent_work_item_id TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            current_stage TEXT NOT NULL,
+            stage_status TEXT NOT NULL,
+            owner_role TEXT NOT NULL DEFAULT '',
+            dependency_state TEXT NOT NULL DEFAULT 'unblocked',
+            workspace_id TEXT NOT NULL DEFAULT '',
+            repo_root TEXT NOT NULL DEFAULT '',
+            base_commit TEXT NOT NULL DEFAULT '',
+            head_commit TEXT NOT NULL DEFAULT '',
+            capability_manifest_id TEXT NOT NULL DEFAULT '',
+            capability_manifest_version INTEGER NOT NULL DEFAULT 0,
+            validation_status TEXT NOT NULL DEFAULT 'not_recorded',
+            risk_tier TEXT NOT NULL DEFAULT 'medium',
+            handoff_target TEXT NOT NULL DEFAULT '',
+            continuation_token TEXT NOT NULL DEFAULT '',
+            ledger_event_id INTEGER REFERENCES events(event_id),
+            entered_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_conveyor_work_items_stage ON conveyor_work_items(current_stage, status, updated_at);
+
+        CREATE TABLE IF NOT EXISTS conveyor_stage_contracts (
+            stage TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            entry_criteria_json TEXT NOT NULL,
+            required_artifacts_json TEXT NOT NULL,
+            allowed_tools_json TEXT NOT NULL,
+            exit_criteria_json TEXT NOT NULL,
+            retry_policy_json TEXT NOT NULL,
+            escalation_policy_json TEXT NOT NULL,
+            parallelism_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS conveyor_stage_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            work_item_id TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            status TEXT NOT NULL,
+            owner_role TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            run_id TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL DEFAULT '',
+            finished_at TEXT NOT NULL DEFAULT '',
+            event_id INTEGER REFERENCES events(event_id),
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_conveyor_stage_attempts_work ON conveyor_stage_attempts(work_item_id, stage, started_at);
+
+        CREATE TABLE IF NOT EXISTS capability_manifests (
+            manifest_id TEXT PRIMARY KEY,
+            repo_root TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            digest TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            languages_json TEXT NOT NULL DEFAULT '{}',
+            commands_json TEXT NOT NULL DEFAULT '[]',
+            ci_json TEXT NOT NULL DEFAULT '[]',
+            lockfiles_json TEXT NOT NULL DEFAULT '[]',
+            analyzers_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_capability_manifests_repo ON capability_manifests(repo_root, generated_at);
+
+        CREATE TABLE IF NOT EXISTS validation_receipts (
+            receipt_id TEXT PRIMARY KEY,
+            work_item_id TEXT NOT NULL,
+            run_id TEXT NOT NULL DEFAULT '',
+            stage TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            command TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            lease_json TEXT NOT NULL DEFAULT '{}',
+            started_at TEXT NOT NULL DEFAULT '',
+            finished_at TEXT NOT NULL DEFAULT '',
+            log_artifact_id TEXT NOT NULL DEFAULT '',
+            event_id INTEGER REFERENCES events(event_id),
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_validation_receipts_work ON validation_receipts(work_item_id, status, finished_at);
+
+        CREATE TABLE IF NOT EXISTS escalations (
+            escalation_id TEXT PRIMARY KEY,
+            work_item_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            question TEXT NOT NULL,
+            options_json TEXT NOT NULL DEFAULT '[]',
+            resume_token TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            event_id INTEGER REFERENCES events(event_id),
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_escalations_status ON escalations(status, kind, updated_at);
+
+        CREATE TABLE IF NOT EXISTS task_edges (
+            parent_task_id TEXT NOT NULL,
+            child_task_id TEXT NOT NULL,
+            relation TEXT NOT NULL DEFAULT 'depends_on',
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(parent_task_id, child_task_id, relation)
+        );
+
         CREATE TABLE IF NOT EXISTS compatibility_migrations (
             source_path TEXT PRIMARY KEY,
             source_sha256 TEXT NOT NULL,
@@ -437,7 +985,46 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
         ("state_authority", "sqlite", now),
     )
+    seed_stage_contracts(conn)
     conn.commit()
+
+
+def seed_stage_contracts(conn: sqlite3.Connection) -> None:
+    now = utc_now()
+    with conn:
+        for stage, contract in default_stage_contracts().items():
+            conn.execute(
+                """
+                INSERT INTO conveyor_stage_contracts(
+                    stage, schema_version, entry_criteria_json, required_artifacts_json,
+                    allowed_tools_json, exit_criteria_json, retry_policy_json,
+                    escalation_policy_json, parallelism_json, updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(stage) DO UPDATE SET
+                    schema_version=excluded.schema_version,
+                    entry_criteria_json=excluded.entry_criteria_json,
+                    required_artifacts_json=excluded.required_artifacts_json,
+                    allowed_tools_json=excluded.allowed_tools_json,
+                    exit_criteria_json=excluded.exit_criteria_json,
+                    retry_policy_json=excluded.retry_policy_json,
+                    escalation_policy_json=excluded.escalation_policy_json,
+                    parallelism_json=excluded.parallelism_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    stage,
+                    STAGE_CONTRACT_VERSION,
+                    stable_json(contract["entry_criteria"]),
+                    stable_json(contract["required_artifacts"]),
+                    stable_json(contract["allowed_tools"]),
+                    stable_json(contract["exit_criteria"]),
+                    stable_json(contract["retry_policy"]),
+                    stable_json(contract["escalation_policy"]),
+                    stable_json(contract["parallelism"]),
+                    now,
+                ),
+            )
 
 
 def append_event(conn: sqlite3.Connection, event: StateEvent) -> int:
@@ -603,11 +1190,696 @@ def checkpoint_stream(
     return checkpoint_id
 
 
+def _json_cell(value: Any, fallback: Any) -> Any:
+    try:
+        parsed = json.loads(str(value or ""))
+    except json.JSONDecodeError:
+        return fallback
+    return parsed
+
+
+def stage_contract_payload(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    return {
+        "stage": str(row["stage"]),
+        "schema_version": int(row["schema_version"]),
+        "entry_criteria": _json_cell(row["entry_criteria_json"], []),
+        "required_artifacts": _json_cell(row["required_artifacts_json"], []),
+        "allowed_tools": _json_cell(row["allowed_tools_json"], []),
+        "exit_criteria": _json_cell(row["exit_criteria_json"], []),
+        "retry_policy": _json_cell(row["retry_policy_json"], {}),
+        "escalation_policy": _json_cell(row["escalation_policy_json"], {}),
+        "parallelism": _json_cell(row["parallelism_json"], {}),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def capability_manifest_payload(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    payload = _json_cell(row["payload_json"], {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def refresh_capability_manifest_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    actor_role: str = "runtime",
+    append_event_first: bool = False,
+) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    manifest = discover_repo_capabilities(target)
+    current = conn.execute(
+        "SELECT digest, version, payload_json FROM capability_manifests WHERE manifest_id = ?",
+        (CAPABILITY_MANIFEST_ID,),
+    ).fetchone()
+    current_digest = str(current["digest"]) if current else ""
+    current_version = int(current["version"]) if current else 0
+    if current_digest == manifest["digest"]:
+        payload = capability_manifest_payload(current)
+        return payload if payload else manifest
+
+    version = current_version + 1
+    manifest["version"] = version
+    event_id = None
+    if append_event_first:
+        event_id = append_event(
+            conn,
+            StateEvent(
+                stream_id=CONVEYOR_STREAM_ID,
+                event_type="capabilities.manifest_discovered",
+                actor_role=actor_role,
+                phase="discovery",
+                status="ACTIVE",
+                task_id=CONVEYOR_TASK_ID,
+                payload={
+                    "manifest_id": CAPABILITY_MANIFEST_ID,
+                    "version": version,
+                    "digest": manifest["digest"],
+                    "primary_language": manifest.get("languages", {}).get("primary"),
+                    "command_count": len(manifest.get("commands", [])),
+                },
+            ),
+        )
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO capability_manifests(
+                manifest_id, repo_root, version, digest, generated_at,
+                languages_json, commands_json, ci_json, lockfiles_json, analyzers_json, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(manifest_id) DO UPDATE SET
+                repo_root=excluded.repo_root,
+                version=excluded.version,
+                digest=excluded.digest,
+                generated_at=excluded.generated_at,
+                languages_json=excluded.languages_json,
+                commands_json=excluded.commands_json,
+                ci_json=excluded.ci_json,
+                lockfiles_json=excluded.lockfiles_json,
+                analyzers_json=excluded.analyzers_json,
+                payload_json=excluded.payload_json
+            """,
+            (
+                CAPABILITY_MANIFEST_ID,
+                str(target),
+                version,
+                str(manifest["digest"]),
+                str(manifest["generated_at"]),
+                stable_json(manifest.get("languages") or {}),
+                stable_json(manifest.get("commands") or []),
+                stable_json((manifest.get("files") or {}).get("ci") or []),
+                stable_json((manifest.get("files") or {}).get("lockfiles") or []),
+                stable_json(manifest.get("analyzers") or []),
+                stable_json(manifest),
+            ),
+        )
+        replace_projection(conn, name=CAPABILITY_PROJECTION_NAME, payload=manifest, event_id=event_id)
+    return manifest
+
+
+def latest_capability_manifest(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT payload_json FROM capability_manifests WHERE manifest_id = ?",
+        (CAPABILITY_MANIFEST_ID,),
+    ).fetchone()
+    if row is None:
+        return {}
+    payload = _json_cell(row["payload_json"], {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def infer_conveyor_stage(state: Mapping[str, Any]) -> tuple[str, str, str]:
+    active = state.get("active_role_run") if isinstance(state.get("active_role_run"), dict) else {}
+    decision = state.get("last_decision") if isinstance(state.get("last_decision"), dict) else {}
+    active_role = str(active.get("role") or "").strip()
+    decision_role = str(decision.get("role") or "").strip()
+    role = active_role or decision_role
+    reason = str(active.get("reason") or decision.get("reason") or "").strip().lower()
+    status = str(state.get("status") or "ACTIVE").strip().upper()
+    stage_status = "running" if active else "ready"
+
+    if status == "CRITICAL_STOP":
+        return "handoff", "blocked", "conveyor"
+    if status in {"BLOCKED_ON_USER", "ACTIVE_WITH_PENDING_USER_INPUT"}:
+        return "handoff", "waiting", "planner"
+    if active_role in ROLE_TO_CONVEYOR_STAGE:
+        stage, owner_role = ROLE_TO_CONVEYOR_STAGE[active_role]
+        return stage, stage_status, owner_role
+    if decision_role in ROLE_TO_CONVEYOR_STAGE:
+        stage, owner_role = ROLE_TO_CONVEYOR_STAGE[decision_role]
+        return stage, stage_status, owner_role
+    if "human" in reason or "user" in reason:
+        return "handoff", "waiting", "planner"
+    if "complete" in reason or "should-halt" in reason or "stop" in reason:
+        return "continuation", "closed", "conveyor"
+    if "baseline" in reason or "verification" in reason or "candidate" in reason:
+        return "validation", stage_status, role or "hardener"
+    if "queued role patch" in reason or "integration" in reason:
+        return "integration", stage_status, "integrator"
+    if reason:
+        return "continuation", "idle", "conveyor"
+    return "intake", "ready", "planner"
+
+
+def validation_status_from_rows(conn: sqlite3.Connection, work_item_id: str) -> str:
+    rows = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM validation_receipts WHERE work_item_id = ? GROUP BY status",
+        (work_item_id,),
+    ).fetchall()
+    counts = {str(row["status"]).lower(): int(row["count"]) for row in rows}
+    if counts.get("fail") or counts.get("failed"):
+        return "failed"
+    if counts.get("blocked") or counts.get("blocked_environment"):
+        return "blocked"
+    if counts.get("warn") or counts.get("warning"):
+        return "warning"
+    if counts.get("running") or counts.get("pending"):
+        return "pending"
+    if counts.get("pass") or counts.get("passed"):
+        return "passed"
+    legacy = validation_summary(conn).get("counts", {})
+    if isinstance(legacy, dict):
+        if any(int(value or 0) for key, value in legacy.items() if str(key).lower() in {"fail", "failed"}):
+            return "failed"
+        if any(int(value or 0) for key, value in legacy.items() if str(key).lower() in {"pass", "passed", "ok"}):
+            return "passed"
+    return "not_recorded"
+
+
+def validation_receipt_status(source_status: Any, *, source_kind: str = "") -> str:
+    status = str(source_status or "").strip().lower()
+    if source_kind == "baseline_verification":
+        if status == "passing":
+            return "pass"
+        if status == "blocked_environment":
+            return "blocked"
+        if status in {"missing_config", "repairable_local_service", "failing_source", "unknown"}:
+            return "fail"
+    if status in {"passing", "passed", "pass", "ok", "success", "clean"}:
+        return "pass"
+    if status in {"failing", "failed", "fail", "error", "critical", "critical_stop"}:
+        return "fail"
+    if status in {"blocked", "blocked_environment", "environment"}:
+        return "blocked"
+    if status in {"warn", "warning"}:
+        return "warn"
+    if status in {"running", "pending", "not_run"}:
+        return "pending"
+    return status or "unknown"
+
+
+def baseline_validation_receipt_status(baseline: Mapping[str, Any]) -> str:
+    status = validation_receipt_status(baseline.get("status"), source_kind="baseline_verification")
+    review = adjudicate_baseline_blocker(baseline)
+    if status in {"blocked", "fail"} and not review.get("is_blocker"):
+        return "warn"
+    return status
+
+
+def upsert_validation_receipt(
+    conn: sqlite3.Connection,
+    *,
+    receipt_id: str,
+    work_item_id: str,
+    stage: str,
+    kind: str,
+    run_id: str = "",
+    command: str = "",
+    status: str = "unknown",
+    started_at: str = "",
+    finished_at: str = "",
+    log_artifact_id: str = "",
+    event_id: int | None = None,
+    payload: Mapping[str, Any] | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO validation_receipts(
+            receipt_id, work_item_id, run_id, stage, kind, command, status,
+            lease_json, started_at, finished_at, log_artifact_id, event_id, payload_json
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?)
+        ON CONFLICT(receipt_id) DO UPDATE SET
+            work_item_id=excluded.work_item_id,
+            run_id=excluded.run_id,
+            stage=excluded.stage,
+            kind=excluded.kind,
+            command=excluded.command,
+            status=excluded.status,
+            started_at=excluded.started_at,
+            finished_at=excluded.finished_at,
+            log_artifact_id=excluded.log_artifact_id,
+            event_id=excluded.event_id,
+            payload_json=excluded.payload_json
+        """,
+        (
+            receipt_id,
+            work_item_id,
+            run_id,
+            stage,
+            kind,
+            command,
+            status,
+            started_at,
+            finished_at,
+            log_artifact_id,
+            event_id,
+            stable_json(dict(payload or {})),
+        ),
+    )
+
+
+def upsert_blocker(
+    conn: sqlite3.Connection,
+    *,
+    blocker_id: str,
+    task_id: str,
+    kind: str,
+    status: str,
+    summary: str,
+    resume_token: str = "",
+    created_at: str = "",
+    updated_at: str = "",
+    payload: Mapping[str, Any] | None = None,
+) -> None:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO blockers(blocker_id, task_id, kind, status, summary, resume_token, created_at, updated_at, payload_json)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(blocker_id) DO UPDATE SET
+            task_id=excluded.task_id,
+            kind=excluded.kind,
+            status=excluded.status,
+            summary=excluded.summary,
+            resume_token=excluded.resume_token,
+            updated_at=excluded.updated_at,
+            payload_json=excluded.payload_json
+        """,
+        (
+            blocker_id,
+            task_id,
+            kind,
+            status,
+            summary,
+            resume_token,
+            created_at or now,
+            updated_at or now,
+            stable_json(dict(payload or {})),
+        ),
+    )
+
+
+def materialize_blocker_reviews(conn: sqlite3.Connection, target: Path) -> None:
+    """Record adjudicated blockers with audit payloads instead of only raw labels."""
+
+    baseline = read_json_file(existing_or_target_path(target, "target/baseline_verification.json"))
+    conn.execute(
+        "DELETE FROM next_actions WHERE source_projection = ?",
+        (BLOCKER_REVIEW_PROJECTION_NAME,),
+    )
+    if not baseline:
+        return
+    review = adjudicate_baseline_blocker(baseline)
+    status = str(review.get("blocker_status") or ("open" if review.get("is_blocker") else "superseded"))
+    verdict = str(review.get("verdict") or "needs_human")
+    if verdict == "not_applicable":
+        conn.execute(
+            """
+            UPDATE blockers
+            SET status = 'resolved', updated_at = ?
+            WHERE kind = 'baseline_verification' AND status NOT IN ('closed', 'resolved', 'superseded')
+            """,
+            (utc_now(),),
+        )
+        return
+    upsert_blocker(
+        conn,
+        blocker_id=str(review.get("blocker_id") or "blocker:baseline_verification:baseline"),
+        task_id=CONVEYOR_TASK_ID,
+        kind="baseline_verification",
+        status=status,
+        summary=str(review.get("summary") or baseline.get("root_cause") or "Baseline blocker needs review."),
+        resume_token=str(baseline.get("failure_signature") or ""),
+        created_at=str(baseline.get("first_seen_at") or ""),
+        updated_at=str(baseline.get("last_seen_at") or ""),
+        payload={
+            "source": "baseline_verification",
+            "baseline": baseline,
+            "blocker_review": review,
+        },
+    )
+    if verdict == "needs_human":
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO next_actions(action_id, task_id, owner_role, kind, status, reason, priority, created_at, updated_at, source_projection, payload_json)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"next:blocker-review:{str(review.get('blocker_id') or 'baseline')[:120]}",
+                CONVEYOR_TASK_ID,
+                "planner",
+                "blocker_adjudication",
+                "planned",
+                str(review.get("recommended_action") or "Adjudicate whether the blocker is real before stopping automation."),
+                -10,
+                now,
+                now,
+                BLOCKER_REVIEW_PROJECTION_NAME,
+                stable_json({"blocker_review": review}),
+            ),
+        )
+
+
+def materialize_validation_receipts(conn: sqlite3.Connection, target: Path) -> None:
+    """Project validation evidence into typed receipts without making files authoritative."""
+
+    now = utc_now()
+    with conn:
+        rows = conn.execute(
+            """
+            SELECT validation_id, task_id, run_id, kind, command, status,
+                   started_at, finished_at, log_artifact_id, payload_json
+            FROM validations
+            ORDER BY COALESCE(NULLIF(finished_at, ''), started_at) DESC
+            LIMIT 100
+            """
+        ).fetchall()
+        for row in rows:
+            payload = _json_cell(row["payload_json"], {})
+            upsert_validation_receipt(
+                conn,
+                receipt_id=f"receipt:validation:{row['validation_id']}",
+                work_item_id=CONVEYOR_WORK_ITEM_ID,
+                stage="validation",
+                kind=str(row["kind"] or "validation"),
+                run_id=str(row["run_id"] or ""),
+                command=str(row["command"] or ""),
+                status=validation_receipt_status(row["status"]),
+                started_at=str(row["started_at"] or ""),
+                finished_at=str(row["finished_at"] or ""),
+                log_artifact_id=str(row["log_artifact_id"] or ""),
+                payload={
+                    "source": "validations",
+                    "validation_id": str(row["validation_id"]),
+                    "task_id": str(row["task_id"] or ""),
+                    "run_id": str(row["run_id"] or ""),
+                    "payload": payload if isinstance(payload, dict) else {},
+                },
+            )
+
+        baseline = read_json_file(existing_or_target_path(target, "target/baseline_verification.json"))
+        if baseline:
+            checks = baseline.get("checks_run") if isinstance(baseline.get("checks_run"), list) else []
+            upsert_validation_receipt(
+                conn,
+                receipt_id="receipt:baseline_verification",
+                work_item_id=CONVEYOR_WORK_ITEM_ID,
+                stage="validation",
+                kind="baseline_verification",
+                command="; ".join(str(item) for item in checks[:4]),
+                status=baseline_validation_receipt_status(baseline),
+                started_at=str(baseline.get("first_seen_at") or ""),
+                finished_at=str(baseline.get("last_seen_at") or now),
+                log_artifact_id="target/baseline_verification.json",
+                payload={
+                    "source": "baseline_verification",
+                    "record": baseline,
+                    "blocker_review": adjudicate_baseline_blocker(baseline),
+                },
+            )
+
+        safety = read_json_file(existing_or_target_path(target, "target/integration_safety_check.json"))
+        if safety:
+            upsert_validation_receipt(
+                conn,
+                receipt_id="receipt:integration_safety",
+                work_item_id=CONVEYOR_WORK_ITEM_ID,
+                stage="validation",
+                kind="integration_safety",
+                command=str(safety.get("command") or "python3 scripts/check_integration_safety.py"),
+                status=validation_receipt_status(safety.get("status")),
+                started_at=str(safety.get("checked_at") or ""),
+                finished_at=str(safety.get("checked_at") or now),
+                log_artifact_id="target/integration_safety_check.json",
+                payload={"source": "integration_safety_check", "record": safety},
+            )
+
+
+def upsert_conveyor_stage_attempt(
+    conn: sqlite3.Connection,
+    *,
+    work_item_id: str,
+    stage: str,
+    stage_status: str,
+    owner_role: str,
+    reason: str,
+    run_id: str,
+    event_id: int | None,
+    payload: Mapping[str, Any],
+) -> None:
+    if event_id is None:
+        return
+    attempt_id = f"attempt:{work_item_id}:{event_id}"
+    now = utc_now()
+    started_at = str(payload.get("started_at") or payload.get("decided_at") or now)
+    finished_at = str(payload.get("finished_at") or "") if stage_status in {"finished", "closed", "blocked"} else ""
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO conveyor_stage_attempts(
+                attempt_id, work_item_id, stage, status, owner_role, reason,
+                run_id, started_at, finished_at, event_id, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(attempt_id) DO UPDATE SET
+                status=excluded.status,
+                owner_role=excluded.owner_role,
+                reason=excluded.reason,
+                run_id=excluded.run_id,
+                finished_at=excluded.finished_at,
+                payload_json=excluded.payload_json
+            """,
+            (
+                attempt_id,
+                work_item_id,
+                stage,
+                stage_status,
+                owner_role,
+                reason,
+                run_id,
+                started_at,
+                finished_at,
+                event_id,
+                stable_json(dict(payload)),
+            ),
+        )
+
+
+def apply_conveyor_machine_read_models(
+    conn: sqlite3.Connection,
+    target: Path,
+    state: Mapping[str, Any],
+    *,
+    event_id: int | None,
+    event_type: str = "",
+) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    capability = latest_capability_manifest(conn) or refresh_capability_manifest_conn(conn, target)
+    materialize_validation_receipts(conn, target)
+    materialize_blocker_reviews(conn, target)
+    stage, stage_status, owner_role = infer_conveyor_stage(state)
+    now = utc_now()
+    active = state.get("active_role_run") if isinstance(state.get("active_role_run"), dict) else {}
+    last_decision = state.get("last_decision") if isinstance(state.get("last_decision"), dict) else {}
+    reason = str(active.get("reason") or last_decision.get("reason") or "")
+    last_active = state.get("last_active_role_run") if isinstance(state.get("last_active_role_run"), dict) else {}
+    run_id = str(active.get("run_id") or last_active.get("run_id") or "")
+    head = str((capability.get("repo") if isinstance(capability.get("repo"), dict) else {}).get("head_commit") or "")
+    status = str(state.get("status") or "ACTIVE")
+    if stage_status == "waiting" and status == "ACTIVE":
+        status = "ACTIVE_WITH_PENDING_USER_INPUT"
+    validation_status = validation_status_from_rows(conn, CONVEYOR_WORK_ITEM_ID)
+    row = conn.execute(
+        "SELECT current_stage, entered_at, created_at FROM conveyor_work_items WHERE work_item_id = ?",
+        (CONVEYOR_WORK_ITEM_ID,),
+    ).fetchone()
+    entered_at = now if row is None or str(row["current_stage"]) != stage else str(row["entered_at"])
+    created_at = now if row is None else str(row["created_at"])
+    continuation_token = f"{CONVEYOR_WORK_ITEM_ID}:{stage}:{event_id or 0}"
+    payload = {
+        "event_type": event_type,
+        "legacy_projection_keys": sorted(str(key) for key in state.keys()),
+        "reason": reason,
+        "decision": last_decision if isinstance(last_decision, dict) else {},
+        "active_role_run": active if isinstance(active, dict) else {},
+        "capability_digest": capability.get("digest"),
+    }
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO conveyor_work_items(
+                work_item_id, parent_work_item_id, title, status, current_stage, stage_status,
+                owner_role, dependency_state, workspace_id, repo_root, base_commit, head_commit,
+                capability_manifest_id, capability_manifest_version, validation_status, risk_tier,
+                handoff_target, continuation_token, ledger_event_id, entered_at, created_at, updated_at, payload_json
+            )
+            VALUES(?, '', ?, ?, ?, ?, ?, 'unblocked', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(work_item_id) DO UPDATE SET
+                status=excluded.status,
+                current_stage=excluded.current_stage,
+                stage_status=excluded.stage_status,
+                owner_role=excluded.owner_role,
+                dependency_state=excluded.dependency_state,
+                workspace_id=excluded.workspace_id,
+                repo_root=excluded.repo_root,
+                base_commit=excluded.base_commit,
+                head_commit=excluded.head_commit,
+                capability_manifest_id=excluded.capability_manifest_id,
+                capability_manifest_version=excluded.capability_manifest_version,
+                validation_status=excluded.validation_status,
+                risk_tier=excluded.risk_tier,
+                handoff_target=excluded.handoff_target,
+                continuation_token=excluded.continuation_token,
+                ledger_event_id=excluded.ledger_event_id,
+                entered_at=excluded.entered_at,
+                updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (
+                CONVEYOR_WORK_ITEM_ID,
+                "Default conveyor work item",
+                status,
+                stage,
+                stage_status,
+                owner_role,
+                str(active.get("worktree_id") or active.get("role") or ""),
+                str(target),
+                head,
+                head,
+                CAPABILITY_MANIFEST_ID,
+                int(capability.get("version") or 0),
+                validation_status,
+                "medium",
+                "user" if stage == "handoff" else "",
+                continuation_token,
+                event_id,
+                entered_at,
+                created_at,
+                now,
+                stable_json(payload),
+            ),
+        )
+    upsert_conveyor_stage_attempt(
+        conn,
+        work_item_id=CONVEYOR_WORK_ITEM_ID,
+        stage=stage,
+        stage_status=stage_status,
+        owner_role=owner_role,
+        reason=reason,
+        run_id=run_id,
+        event_id=event_id,
+        payload=payload,
+    )
+    return conveyor_machine_payload(conn, target)
+
+
+def conveyor_machine_payload(conn: sqlite3.Connection, target: Path) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT * FROM conveyor_work_items WHERE work_item_id = ?",
+        (CONVEYOR_WORK_ITEM_ID,),
+    ).fetchone()
+    if row is None:
+        return {}
+    stage = str(row["current_stage"])
+    contract = stage_contract_payload(
+        conn.execute("SELECT * FROM conveyor_stage_contracts WHERE stage = ?", (stage,)).fetchone()
+    )
+    contract_rows = conn.execute(
+        "SELECT * FROM conveyor_stage_contracts ORDER BY rowid ASC"
+    ).fetchall()
+    attempts = conn.execute(
+        """
+        SELECT attempt_id, stage, status, owner_role, reason, run_id, started_at, finished_at, event_id
+        FROM conveyor_stage_attempts
+        WHERE work_item_id = ?
+        ORDER BY COALESCE(NULLIF(started_at, ''), attempt_id) DESC
+        LIMIT 12
+        """,
+        (CONVEYOR_WORK_ITEM_ID,),
+    ).fetchall()
+    receipts = conn.execute(
+        """
+        SELECT receipt_id, stage, kind, command, status, started_at, finished_at, log_artifact_id
+        FROM validation_receipts
+        WHERE work_item_id = ?
+        ORDER BY COALESCE(NULLIF(finished_at, ''), started_at) DESC
+        LIMIT 12
+        """,
+        (CONVEYOR_WORK_ITEM_ID,),
+    ).fetchall()
+    capability = latest_capability_manifest(conn)
+    payload_json = _json_cell(row["payload_json"], {})
+    work_item = {
+        "id": str(row["work_item_id"]),
+        "title": str(row["title"]),
+        "status": str(row["status"]),
+        "current_stage": stage,
+        "stage_status": str(row["stage_status"]),
+        "owner_role": str(row["owner_role"]),
+        "dependency_state": str(row["dependency_state"]),
+        "workspace_id": str(row["workspace_id"]),
+        "repo_root": str(row["repo_root"]),
+        "base_commit": str(row["base_commit"]),
+        "head_commit": str(row["head_commit"]),
+        "capability_manifest_id": str(row["capability_manifest_id"]),
+        "capability_manifest_version": int(row["capability_manifest_version"]),
+        "validation_status": str(row["validation_status"]),
+        "risk_tier": str(row["risk_tier"]),
+        "handoff_target": str(row["handoff_target"]),
+        "continuation_token": str(row["continuation_token"]),
+        "ledger_event_id": int(row["ledger_event_id"]) if row["ledger_event_id"] is not None else None,
+        "entered_at": str(row["entered_at"]),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+        "payload": payload_json if isinstance(payload_json, dict) else {},
+    }
+    return {
+        "schema_version": 1,
+        "machine_version": CONVEYOR_MACHINE_VERSION,
+        "authority": "sqlite",
+        "work_item": work_item,
+        "current_stage": stage,
+        "stage_status": work_item["stage_status"],
+        "owner_role": work_item["owner_role"],
+        "stage_contract": contract,
+        "stage_contracts": [stage_contract_payload(item) for item in contract_rows],
+        "capability_manifest": capability,
+        "stage_attempts": [dict(item) for item in attempts],
+        "validation_receipts": [dict(item) for item in receipts],
+        "policy": {
+            "workflow_owns_truth": True,
+            "agents_propose_transitions": True,
+            "sqlite_is_canonical": True,
+            "markdown_and_json_are_projections": True,
+            "integration_is_serialized": True,
+            "target": str(target),
+        },
+    }
+
+
 def apply_conveyor_read_models(conn: sqlite3.Connection, state: Mapping[str, Any], *, event_id: int | None) -> None:
     now = utc_now()
     active = state.get("active_role_run") if isinstance(state.get("active_role_run"), dict) else {}
     last_decision = state.get("last_decision") if isinstance(state.get("last_decision"), dict) else {}
-    phase = str(last_decision.get("role") or active.get("role") or "idle")
+    machine = state.get("state_machine") if isinstance(state.get("state_machine"), dict) else {}
+    work_item = machine.get("work_item") if isinstance(machine.get("work_item"), dict) else {}
+    phase = str(work_item.get("current_stage") or machine.get("current_stage") or last_decision.get("role") or active.get("role") or "idle")
     with conn:
         conn.execute(
             """
@@ -694,7 +1966,13 @@ def apply_conveyor_read_models(conn: sqlite3.Connection, state: Mapping[str, Any
             )
 
 
-def annotate_projection_state(state: dict[str, Any], db_path: Path, event_id: int | None) -> dict[str, Any]:
+def annotate_projection_state(
+    state: dict[str, Any],
+    db_path: Path,
+    event_id: int | None,
+    *,
+    machine: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     annotated = normalize_conveyor_state(state)
     annotated["canonical_state"] = {
         "authority": "sqlite",
@@ -704,6 +1982,8 @@ def annotate_projection_state(state: dict[str, Any], db_path: Path, event_id: in
         "event_id": event_id,
         "note": "This JSON file is a generated projection. Do not edit it as authoritative state.",
     }
+    if machine:
+        annotated["state_machine"] = dict(machine)
     return annotated
 
 
@@ -720,8 +2000,11 @@ def write_conveyor_state(
     base_state = normalize_conveyor_state(state)
     base_state["updated_at"] = utc_now()
     db_path = database_path_for_projection(projection_path)
+    target = target_from_projection_path(projection_path)
     active_run = base_state.get("active_role_run") if isinstance(base_state.get("active_role_run"), dict) else {}
     with closing(connect(db_path)) as conn:
+        ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
+        refresh_capability_manifest_conn(conn, target, actor_role=actor_role, append_event_first=True)
         event_payload = {
             "projection": CONVEYOR_PROJECTION_NAME,
             "state": base_state,
@@ -741,9 +2024,17 @@ def write_conveyor_state(
                 payload=event_payload,
             ),
         )
-        annotated = annotate_projection_state(base_state, db_path, event_id)
+        machine = apply_conveyor_machine_read_models(
+            conn,
+            target,
+            base_state,
+            event_id=event_id,
+            event_type=event_type,
+        )
+        annotated = annotate_projection_state(base_state, db_path, event_id, machine=machine)
         replace_projection(conn, name=CONVEYOR_PROJECTION_NAME, payload=annotated, event_id=event_id)
         apply_conveyor_read_models(conn, annotated, event_id=event_id)
+        replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=event_id)
         checkpoint_stream(
             conn,
             stream_id=CONVEYOR_STREAM_ID,
@@ -758,7 +2049,9 @@ def write_conveyor_state(
 def import_legacy_conveyor_json(projection_path: Path, db_path: Path) -> dict[str, Any]:
     legacy = normalize_conveyor_state(read_json_file(projection_path))
     source_hash = sha256_text(stable_json(legacy))
+    target = target_from_projection_path(projection_path)
     with closing(connect(db_path)) as conn:
+        ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
         existing = conn.execute(
             "SELECT event_id FROM compatibility_migrations WHERE source_path = ? AND source_sha256 = ?",
             (str(projection_path), source_hash),
@@ -767,6 +2060,7 @@ def import_legacy_conveyor_json(projection_path: Path, db_path: Path) -> dict[st
             projected = load_projection(conn, CONVEYOR_PROJECTION_NAME)
             if projected:
                 return normalize_conveyor_state(projected)
+        refresh_capability_manifest_conn(conn, target, actor_role="migration", append_event_first=True)
         event_id = append_event(
             conn,
             StateEvent(
@@ -779,9 +2073,17 @@ def import_legacy_conveyor_json(projection_path: Path, db_path: Path) -> dict[st
                 payload={"source_path": str(projection_path), "source_sha256": source_hash, "state": legacy},
             ),
         )
-        annotated = annotate_projection_state(legacy, db_path, event_id)
+        machine = apply_conveyor_machine_read_models(
+            conn,
+            target,
+            legacy,
+            event_id=event_id,
+            event_type="compatibility.legacy_conveyor_json_imported",
+        )
+        annotated = annotate_projection_state(legacy, db_path, event_id, machine=machine)
         replace_projection(conn, name=CONVEYOR_PROJECTION_NAME, payload=annotated, event_id=event_id)
         apply_conveyor_read_models(conn, annotated, event_id=event_id)
+        replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=event_id)
         checkpoint_stream(
             conn,
             stream_id=CONVEYOR_STREAM_ID,
@@ -819,7 +2121,23 @@ def load_conveyor_state(projection_path: Path) -> dict[str, Any]:
         with closing(connect(db_path)) as conn:
             projected = load_projection(conn, CONVEYOR_PROJECTION_NAME)
             if projected:
-                return normalize_conveyor_state(projected)
+                normalized = normalize_conveyor_state(projected)
+                if isinstance(normalized.get("state_machine"), dict):
+                    return normalized
+                target = target_from_projection_path(projection_path)
+                refresh_capability_manifest_conn(conn, target, actor_role="runtime", append_event_first=True)
+                machine = apply_conveyor_machine_read_models(
+                    conn,
+                    target,
+                    normalized,
+                    event_id=None,
+                    event_type="conveyor.state_machine_backfilled",
+                )
+                annotated = annotate_projection_state(normalized, db_path, None, machine=machine)
+                replace_projection(conn, name=CONVEYOR_PROJECTION_NAME, payload=annotated, event_id=None)
+                replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=None)
+                write_json_projection(projection_path, annotated)
+                return normalize_conveyor_state(annotated)
     if projection_path.exists():
         return import_legacy_conveyor_json(projection_path, db_path)
     return initialize_conveyor_state(projection_path, db_path)
@@ -945,6 +2263,461 @@ def load_runner_state(projection_path: Path) -> dict[str, Any]:
     if projection_path.exists():
         return import_legacy_runner_json(projection_path, db_path)
     return {}
+
+
+def _normalize_status(value: Any, *, default: str = "ACTIVE") -> str:
+    status = str(value or "").strip().upper()
+    return status if status in STATUS_MODEL else default
+
+
+def _markdown_section(text: str, heading: str) -> str:
+    pattern = re.compile(rf"^##\s+{re.escape(heading)}\s*$", re.MULTILINE)
+    match = pattern.search(text)
+    if not match:
+        return ""
+    next_heading = re.search(r"^##\s+", text[match.end() :], re.MULTILINE)
+    end = match.end() + next_heading.start() if next_heading else len(text)
+    return text[match.end() : end]
+
+
+def _first_section_line(text: str, heading: str) -> str:
+    section = _markdown_section(text, heading)
+    for raw in section.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        return _brief_text(re.sub(r"^[-*]\s+", "", line), limit=260)
+    return ""
+
+
+def _section_bullets(text: str, heading: str, *, limit: int = BRIEF_ITEM_LIMIT) -> list[str]:
+    section = _markdown_section(text, heading)
+    bullets: list[str] = []
+    in_code = False
+    for raw in section.splitlines():
+        line = raw.strip()
+        if line.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code or not line.startswith("- "):
+            continue
+        item = _brief_text(line[2:], limit=320)
+        if item:
+            bullets.append(item)
+        if len(bullets) >= limit:
+            break
+    return bullets
+
+
+def _keyed_section_value(text: str, heading: str, keys: list[str]) -> str:
+    section = _markdown_section(text, heading)
+    for key in keys:
+        match = re.search(rf"^-\s*{re.escape(key)}:\s*(.+)", section, re.MULTILINE)
+        if match:
+            value = _brief_text(match.group(1), limit=320)
+            if value:
+                return value
+    return ""
+
+
+def _task_bool_value(text: str, label: str, *, default: bool) -> bool:
+    match = re.search(rf"^-\s*{re.escape(label)}:\s*(true|false)\s*$", text, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return default
+    return match.group(1).lower() == "true"
+
+
+def _task_int_value(text: str, label: str, *, default: int, minimum: int = 0, maximum: int = 10) -> int:
+    match = re.search(rf"^-\s*{re.escape(label)}:\s*(\d+)\s*$", text, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return default
+    try:
+        value = int(match.group(1))
+    except ValueError:
+        return default
+    return min(max(value, minimum), maximum)
+
+
+def _validation_check_status(text: str) -> str:
+    lower = text.lower().strip()
+    if lower.startswith("pass"):
+        return "pass"
+    if lower.startswith("fail"):
+        return "fail"
+    if lower.startswith("warn"):
+        return "warn"
+    if lower.startswith("pending") or lower.startswith("not run") or "not run yet" in lower:
+        return "pending"
+    if re.search(r"\bpassed\b", lower):
+        return "pass"
+    if re.search(r"\bfailed\b|\bfailure\b", lower):
+        return "fail"
+    if re.search(r"\bwarning\b|\bwarned\b", lower):
+        return "warn"
+    if re.search(r"\bnot run\b", lower):
+        return "pending"
+    return "info"
+
+
+def _default_automation_control_from_setup(target: Path) -> dict[str, Any]:
+    intake = read_json_file(existing_or_target_path(target, ".agentic/project_intake.json"))
+    dashboard = read_json_file(existing_or_target_path(target, ".agentic/dashboard_state.json"))
+    setup = {**intake, **dashboard}
+    project_name = str(setup.get("project_name") or target.name or "target")
+    workers_allowed = bool(setup.get("worker_agents_allowed", True))
+    write_workers = bool(setup.get("write_worker_agents_allowed", False)) and workers_allowed
+    try:
+        max_write_workers = int(setup.get("max_write_worker_count") or (1 if write_workers else 0))
+    except (TypeError, ValueError):
+        max_write_workers = 1 if write_workers else 0
+    run_mode = str(setup.get("automation_run_mode") or "continuous_improvement")
+    if run_mode == "ticket_campaign":
+        horizon = "T1 Ticket-run readiness"
+        milestone = "Confirm the ticket queue, setup, and verification path."
+        suggested = "Run ticket readiness checks and select one dependency-ready ticket."
+    else:
+        horizon = "H1 Runnable baseline"
+        milestone = "Create or confirm setup, local run path, and verification."
+        suggested = "Run one bootstrap pass that records local verification evidence."
+    return {
+        "status": "ACTIVE",
+        "last_updated": "",
+        "horizon": horizon,
+        "horizon_decision": "stay",
+        "current_assessment": f"{project_name} has typed runtime state initialized; no completed automation run is recorded yet.",
+        "best_next_milestone": milestone,
+        "suggested_next_task": suggested,
+        "known_issue": "No active issue summary.",
+        "known_issues": [],
+        "bootstrap_status": "pending",
+        "worker": {
+            "agents_allowed": workers_allowed,
+            "write_workers_allowed": write_workers,
+            "max_write_worker_count": max(0, max_write_workers if write_workers else 0),
+        },
+        "source": "setup_json",
+        "payload": {
+            "project_name": project_name,
+            "automation_run_mode": run_mode,
+            "role_profile": str(setup.get("automation_role_profile") or ""),
+        },
+    }
+
+
+def _automation_setup_available(target: Path) -> bool:
+    return any(
+        existing_or_target_path(target, rel).exists()
+        for rel in (
+            ".agentic/project_intake.json",
+            ".agentic/dashboard_state.json",
+            ".agentic/automation_prompt.md",
+            "docs/CODEX_AUTOMATION_TASKS.md",
+        )
+    ) or (target / ".diffmogger" / "manifest.json").exists()
+
+
+def _unknown_automation_control(target: Path) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "authority": "none",
+        "control_id": AUTOMATION_CONTROL_ID,
+        "status": "UNKNOWN",
+        "last_updated": "",
+        "horizon": "",
+        "horizon_decision": "",
+        "current_assessment": f"{target.name or 'target'} has no Diffmogger automation state yet.",
+        "best_next_milestone": "",
+        "suggested_next_task": "",
+        "known_issue": "No automation state initialized.",
+        "known_issues": [],
+        "bootstrap_status": "unknown",
+        "bootstrap_pending": False,
+        "worker": {
+            "agents_allowed": False,
+            "write_workers_allowed": False,
+            "max_write_worker_count": 0,
+        },
+        "updated_at": "",
+        "payload": {},
+    }
+
+
+def _parse_legacy_task_markdown(text: str, *, source_path: Path) -> dict[str, Any]:
+    status_match = re.search(r"^AUTOMATION_STATUS:\s*(\S+)", text, re.MULTILINE)
+    updated_match = re.search(r"^Last updated:\s*(.+)", text, re.MULTILINE)
+    horizon_match = re.search(r"^-\s*Current horizon:\s*(.+)", text, re.MULTILINE)
+    decision_match = re.search(r"^-\s*Advancement decision:\s*(.+)", text, re.MULTILINE)
+    current_assessment = _keyed_section_value(
+        text,
+        "Current Project State",
+        ["Current assessment", "Current baseline", "Goal"],
+    )
+    bootstrap_status = "unknown"
+    if re.search(r"Current baseline:\s*not bootstrapped yet", text, re.IGNORECASE):
+        bootstrap_status = "pending"
+    elif current_assessment:
+        bootstrap_status = "bootstrapped"
+    known_issues = [
+        item
+        for item in _section_bullets(text, "Known Issues", limit=25)
+        if item.lower() not in {"none", "none.", "no known issues", "no known issues."}
+    ]
+    write_workers_allowed = _task_bool_value(text, "Write-capable worker agents allowed", default=False)
+    worker_agents_allowed = _task_bool_value(text, "Worker agents allowed", default=True)
+    max_write_worker_count = _task_int_value(
+        text,
+        "Max write worker count",
+        default=0 if not write_workers_allowed else 1,
+    )
+    checks = _section_bullets(text, "Checks From Last Run", limit=25)
+    validation_items = []
+    for index, check in enumerate(checks):
+        if check.lower().startswith("preferred commands"):
+            continue
+        validation_items.append(
+            {
+                "receipt_id": f"receipt:legacy_task_markdown:{index}",
+                "kind": "legacy_task_check",
+                "command": check,
+                "status": _validation_check_status(check),
+                "payload": {
+                    "source": "legacy_task_markdown",
+                    "source_path": str(source_path),
+                    "text": check,
+                },
+            }
+        )
+    return {
+        "status": _normalize_status(status_match.group(1) if status_match else ""),
+        "last_updated": _brief_text(updated_match.group(1), limit=120) if updated_match else "",
+        "horizon": _brief_text(horizon_match.group(1), limit=180) if horizon_match else "",
+        "horizon_decision": _brief_text(decision_match.group(1), limit=160) if decision_match else "",
+        "current_assessment": current_assessment,
+        "best_next_milestone": _first_section_line(text, "Best Next Milestone"),
+        "suggested_next_task": _first_section_line(text, "Suggested Next Sprint-Sized Task"),
+        "known_issue": known_issues[0] if known_issues else "No active issue summary.",
+        "known_issues": known_issues,
+        "bootstrap_status": bootstrap_status,
+        "worker": {
+            "agents_allowed": worker_agents_allowed,
+            "write_workers_allowed": write_workers_allowed and worker_agents_allowed,
+            "max_write_worker_count": max_write_worker_count if write_workers_allowed and worker_agents_allowed else 0,
+        },
+        "source": "legacy_task_markdown",
+        "source_path": str(source_path),
+        "validation_items": validation_items,
+    }
+
+
+def _automation_control_payload_from_row(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    payload = _json_cell(row["payload_json"], {})
+    payload = payload if isinstance(payload, dict) else {}
+    known_issues = payload.get("known_issues") if isinstance(payload.get("known_issues"), list) else []
+    worker = payload.get("worker") if isinstance(payload.get("worker"), dict) else {}
+    return {
+        "schema_version": 1,
+        "authority": "sqlite",
+        "control_id": str(row["control_id"]),
+        "status": str(row["status"]),
+        "last_updated": str(row["last_updated"] or row["updated_at"] or ""),
+        "horizon": str(row["current_horizon"] or ""),
+        "horizon_decision": str(row["horizon_decision"] or ""),
+        "current_assessment": str(row["current_assessment"] or ""),
+        "best_next_milestone": str(row["best_next_milestone"] or ""),
+        "suggested_next_task": str(row["suggested_next_task"] or ""),
+        "known_issue": str(payload.get("known_issue") or (known_issues[0] if known_issues else "No active issue summary.")),
+        "known_issues": [str(item) for item in known_issues],
+        "bootstrap_status": str(row["bootstrap_status"] or ""),
+        "bootstrap_pending": str(row["bootstrap_status"] or "").lower() in {"pending", "not_bootstrapped", "not bootstrapped"},
+        "worker": {
+            "agents_allowed": bool(row["worker_agents_allowed"]),
+            "write_workers_allowed": bool(row["write_workers_allowed"]) and bool(row["worker_agents_allowed"]),
+            "max_write_worker_count": int(row["max_write_worker_count"] or 0)
+            if bool(row["write_workers_allowed"]) and bool(row["worker_agents_allowed"])
+            else 0,
+        },
+        "updated_at": str(row["updated_at"] or ""),
+        "payload": payload,
+    }
+
+
+def _upsert_automation_control_conn(
+    conn: sqlite3.Connection,
+    data: Mapping[str, Any],
+    *,
+    event_id: int | None,
+) -> dict[str, Any]:
+    now = utc_now()
+    worker = data.get("worker") if isinstance(data.get("worker"), Mapping) else {}
+    payload = {
+        "known_issue": data.get("known_issue") or "No active issue summary.",
+        "known_issues": data.get("known_issues") if isinstance(data.get("known_issues"), list) else [],
+        "source": data.get("source") or "typed_state",
+        "source_path": data.get("source_path") or "",
+        "payload": data.get("payload") if isinstance(data.get("payload"), Mapping) else {},
+    }
+    conn.execute(
+        """
+        INSERT INTO automation_control(
+            control_id, status, last_updated, current_horizon, horizon_decision,
+            current_assessment, best_next_milestone, suggested_next_task, bootstrap_status,
+            worker_agents_allowed, write_workers_allowed, max_write_worker_count,
+            updated_at, payload_json
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(control_id) DO UPDATE SET
+            status=excluded.status,
+            last_updated=excluded.last_updated,
+            current_horizon=excluded.current_horizon,
+            horizon_decision=excluded.horizon_decision,
+            current_assessment=excluded.current_assessment,
+            best_next_milestone=excluded.best_next_milestone,
+            suggested_next_task=excluded.suggested_next_task,
+            bootstrap_status=excluded.bootstrap_status,
+            worker_agents_allowed=excluded.worker_agents_allowed,
+            write_workers_allowed=excluded.write_workers_allowed,
+            max_write_worker_count=excluded.max_write_worker_count,
+            updated_at=excluded.updated_at,
+            payload_json=excluded.payload_json
+        """,
+        (
+            AUTOMATION_CONTROL_ID,
+            _normalize_status(data.get("status")),
+            str(data.get("last_updated") or now),
+            str(data.get("horizon") or data.get("current_horizon") or ""),
+            str(data.get("horizon_decision") or "stay"),
+            str(data.get("current_assessment") or ""),
+            str(data.get("best_next_milestone") or ""),
+            str(data.get("suggested_next_task") or ""),
+            str(data.get("bootstrap_status") or "unknown"),
+            1 if bool(worker.get("agents_allowed", True)) else 0,
+            1 if bool(worker.get("write_workers_allowed", False)) else 0,
+            int(worker.get("max_write_worker_count") or 0),
+            now,
+            stable_json(payload),
+        ),
+    )
+    row = conn.execute("SELECT * FROM automation_control WHERE control_id = ?", (AUTOMATION_CONTROL_ID,)).fetchone()
+    control = _automation_control_payload_from_row(row)
+    replace_projection(conn, name=AUTOMATION_CONTROL_PROJECTION_NAME, payload=control, event_id=event_id)
+    return control
+
+
+def ensure_automation_control_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    import_legacy_if_empty: bool = True,
+) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM automation_control WHERE control_id = ?", (AUTOMATION_CONTROL_ID,)).fetchone()
+    if row is not None:
+        control = _automation_control_payload_from_row(row)
+        replace_projection(conn, name=AUTOMATION_CONTROL_PROJECTION_NAME, payload=control, event_id=None)
+        return control
+
+    target = target.expanduser().resolve()
+    source_path = existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md")
+    source_text = _read_text(source_path) if import_legacy_if_empty and source_path.exists() else ""
+    if not source_text and not _automation_setup_available(target):
+        return _unknown_automation_control(target)
+    data = _parse_legacy_task_markdown(source_text, source_path=source_path) if source_text else _default_automation_control_from_setup(target)
+    source_hash = sha256_text(source_text) if source_text else sha256_text(stable_json(data))
+    event_type = "compatibility.legacy_task_markdown_imported" if source_text else "automation.control_initialized"
+    event_id = append_event(
+        conn,
+        StateEvent(
+            stream_id=AUTOMATION_CONTROL_STREAM_ID,
+            event_type=event_type,
+            actor_role="migration" if source_text else "runtime",
+            phase="automation_control",
+            status=_normalize_status(data.get("status")),
+            task_id=AUTOMATION_CONTROL_TASK_ID,
+            payload={
+                "source_path": str(source_path) if source_text else "",
+                "source_sha256": source_hash,
+                "source": data.get("source"),
+            },
+        ),
+    )
+    with conn:
+        control = _upsert_automation_control_conn(conn, data, event_id=event_id)
+        for item in data.get("validation_items") or []:
+            if not isinstance(item, dict):
+                continue
+            upsert_validation_receipt(
+                conn,
+                receipt_id=str(item.get("receipt_id") or ""),
+                work_item_id=CONVEYOR_WORK_ITEM_ID,
+                stage="validation",
+                kind=str(item.get("kind") or "legacy_task_check"),
+                command=str(item.get("command") or ""),
+                status=str(item.get("status") or "info"),
+                finished_at=str(data.get("last_updated") or ""),
+                log_artifact_id=target_rel(target, "docs/CODEX_AUTOMATION_TASKS.md"),
+                event_id=event_id,
+                payload=item.get("payload") if isinstance(item.get("payload"), Mapping) else {},
+            )
+        if source_text:
+            conn.execute(
+                "INSERT INTO compatibility_migrations(source_path, source_sha256, imported_at, event_id) "
+                "VALUES(?, ?, ?, ?) "
+                "ON CONFLICT(source_path) DO UPDATE SET source_sha256=excluded.source_sha256, "
+                "imported_at=excluded.imported_at, event_id=excluded.event_id",
+                (f"legacy-task-markdown:{target_rel(target, 'docs/CODEX_AUTOMATION_TASKS.md')}", source_hash, utc_now(), event_id),
+            )
+        checkpoint_stream(
+            conn,
+            stream_id=AUTOMATION_CONTROL_STREAM_ID,
+            kind="automation_control",
+            state=control,
+            event_id=event_id,
+        )
+        return control
+
+
+def automation_control_state(target: Path, *, import_legacy_if_empty: bool = True) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    with closing(connect(database_path_for_target(target))) as conn:
+        return ensure_automation_control_conn(conn, target, import_legacy_if_empty=import_legacy_if_empty)
+
+
+def write_automation_control_state(
+    target: Path,
+    updates: Mapping[str, Any],
+    *,
+    actor_role: str = "runtime",
+    event_type: str = "automation.control_updated",
+) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    with closing(connect(database_path_for_target(target))) as conn:
+        current = ensure_automation_control_conn(conn, target, import_legacy_if_empty=False)
+        merged = {**current, **dict(updates)}
+        if "worker" not in merged:
+            merged["worker"] = current.get("worker") if isinstance(current.get("worker"), dict) else {}
+        event_id = append_event(
+            conn,
+            StateEvent(
+                stream_id=AUTOMATION_CONTROL_STREAM_ID,
+                event_type=event_type,
+                actor_role=actor_role,
+                phase="automation_control",
+                status=_normalize_status(merged.get("status")),
+                task_id=AUTOMATION_CONTROL_TASK_ID,
+                payload={"updates": dict(updates)},
+            ),
+        )
+        with conn:
+            control = _upsert_automation_control_conn(conn, merged, event_id=event_id)
+            checkpoint_stream(
+                conn,
+                stream_id=AUTOMATION_CONTROL_STREAM_ID,
+                kind="automation_control",
+                state=control,
+                event_id=event_id,
+            )
+            return control
 
 
 def _read_text(path: Path) -> str:
@@ -1526,11 +3299,20 @@ def recent_events(conn: sqlite3.Connection, *, limit: int = DEFAULT_EVENT_LIMIT)
 
 def open_blockers(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT blocker_id, task_id, kind, status, summary, resume_token, updated_at "
+        "SELECT blocker_id, task_id, kind, status, summary, resume_token, updated_at, payload_json "
         "FROM blockers WHERE status NOT IN ('closed', 'resolved', 'superseded') "
         "ORDER BY updated_at DESC LIMIT 20"
     ).fetchall()
-    return [dict(row) for row in rows]
+    blockers: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        payload = _json_cell(item.pop("payload_json", "{}"), {})
+        if isinstance(payload, dict):
+            review = payload.get("blocker_review") if isinstance(payload.get("blocker_review"), dict) else {}
+            if review:
+                item["blocker_review"] = review
+        blockers.append(item)
+    return blockers
 
 
 def pending_next_actions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -1542,6 +3324,19 @@ def pending_next_actions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def validation_summary(conn: sqlite3.Connection) -> dict[str, Any]:
+    receipt_rows = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM validation_receipts GROUP BY status ORDER BY status"
+    ).fetchall()
+    receipt_latest = conn.execute(
+        "SELECT receipt_id AS validation_id, work_item_id AS task_id, run_id, kind, command, status, finished_at "
+        "FROM validation_receipts ORDER BY COALESCE(NULLIF(finished_at, ''), started_at) DESC LIMIT 10"
+    ).fetchall()
+    if receipt_rows or receipt_latest:
+        return {
+            "counts": {str(row["status"]): int(row["count"]) for row in receipt_rows},
+            "latest": [dict(row) for row in receipt_latest],
+            "source": "validation_receipts",
+        }
     rows = conn.execute(
         "SELECT status, COUNT(*) AS count FROM validations GROUP BY status ORDER BY status"
     ).fetchall()
@@ -1552,6 +3347,7 @@ def validation_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     return {
         "counts": {str(row["status"]): int(row["count"]) for row in rows},
         "latest": [dict(row) for row in latest],
+        "source": "validations",
     }
 
 
@@ -1581,6 +3377,18 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
     ticket_state = ticket_run_state_summary(target)
     db_path = database_path_for_target(target)
     with closing(connect(db_path)) as conn:
+        automation_control = ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
+        state = normalize_conveyor_state({**state, "status": automation_control.get("status") or state.get("status") or "ACTIVE"})
+        capability = refresh_capability_manifest_conn(conn, target, actor_role="dashboard", append_event_first=True)
+        machine = apply_conveyor_machine_read_models(
+            conn,
+            target,
+            state,
+            event_id=None,
+            event_type="state.snapshot",
+        )
+        state = normalize_conveyor_state({**state, "state_machine": machine})
+        replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=None)
         last_event = conn.execute(
             """
             SELECT event_id, stream_id, sequence, occurred_at, event_type, actor_role,
@@ -1602,6 +3410,18 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "SELECT name, updated_at, payload_sha256, event_id FROM projections WHERE name = ?",
             (RUNNER_PROJECTION_NAME,),
         ).fetchone()
+        machine_projection_row = conn.execute(
+            "SELECT name, updated_at, payload_sha256, event_id FROM projections WHERE name = ?",
+            (CONVEYOR_MACHINE_PROJECTION_NAME,),
+        ).fetchone()
+        capability_projection_row = conn.execute(
+            "SELECT name, updated_at, payload_sha256, event_id FROM projections WHERE name = ?",
+            (CAPABILITY_PROJECTION_NAME,),
+        ).fetchone()
+        automation_projection_row = conn.execute(
+            "SELECT name, updated_at, payload_sha256, event_id FROM projections WHERE name = ?",
+            (AUTOMATION_CONTROL_PROJECTION_NAME,),
+        ).fetchone()
         counts = table_counts(conn)
         projection_payload = {
             "name": CONVEYOR_PROJECTION_NAME,
@@ -1619,6 +3439,30 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "payload_sha256": runner_projection_row["payload_sha256"] if runner_projection_row else "",
             "event_id": runner_projection_row["event_id"] if runner_projection_row else None,
         }
+        machine_projection_payload = {
+            "name": CONVEYOR_MACHINE_PROJECTION_NAME,
+            "path": str(db_path),
+            "exists": bool(machine_projection_row),
+            "updated_at": machine_projection_row["updated_at"] if machine_projection_row else "",
+            "payload_sha256": machine_projection_row["payload_sha256"] if machine_projection_row else "",
+            "event_id": machine_projection_row["event_id"] if machine_projection_row else None,
+        }
+        capability_projection_payload = {
+            "name": CAPABILITY_PROJECTION_NAME,
+            "path": str(db_path),
+            "exists": bool(capability_projection_row),
+            "updated_at": capability_projection_row["updated_at"] if capability_projection_row else "",
+            "payload_sha256": capability_projection_row["payload_sha256"] if capability_projection_row else "",
+            "event_id": capability_projection_row["event_id"] if capability_projection_row else None,
+        }
+        automation_projection_payload = {
+            "name": AUTOMATION_CONTROL_PROJECTION_NAME,
+            "path": str(db_path),
+            "exists": bool(automation_projection_row),
+            "updated_at": automation_projection_row["updated_at"] if automation_projection_row else "",
+            "payload_sha256": automation_projection_row["payload_sha256"] if automation_projection_row else "",
+            "event_id": automation_projection_row["event_id"] if automation_projection_row else None,
+        }
         return {
             "schema_version": STATE_SCHEMA_VERSION,
             "authority": "sqlite",
@@ -1635,11 +3479,15 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "projections": {
                 "conveyor": projection_payload,
                 "runner": runner_projection_payload,
+                "machine": machine_projection_payload,
+                "capabilities": capability_projection_payload,
+                "automation_control": automation_projection_payload,
             },
             "contract": {
                 "tables": list(ORCHESTRATION_TABLES),
                 "status_model": list(STATUS_MODEL),
-                "canonical_runtime_state": "SQLite append-only events + typed current-state projections",
+                "conveyor_stages": list(CONVEYOR_STAGES),
+                "canonical_runtime_state": "SQLite append-only events + typed conveyor state machine projections",
                 "compatibility_surfaces": [
                     "canonical Markdown state brief",
                     "conveyor/runner JSON projections",
@@ -1655,6 +3503,9 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "next_actions": pending_next_actions(conn),
             "validations": validation_summary(conn),
             "conveyor_state": state,
+            "conveyor_machine": machine,
+            "automation_control": automation_control,
+            "capability_manifest": capability,
             "runner_state": runner_state,
             "human_messages": human_state,
             "ticket_run": ticket_state,
@@ -1713,7 +3564,12 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
     generated_at = utc_now()
     database = snapshot.get("database") if isinstance(snapshot.get("database"), dict) else {}
     conveyor_state = snapshot.get("conveyor_state") if isinstance(snapshot.get("conveyor_state"), dict) else {}
+    conveyor_machine = snapshot.get("conveyor_machine") if isinstance(snapshot.get("conveyor_machine"), dict) else {}
+    machine_work_item = conveyor_machine.get("work_item") if isinstance(conveyor_machine.get("work_item"), dict) else {}
+    capability_manifest = snapshot.get("capability_manifest") if isinstance(snapshot.get("capability_manifest"), dict) else {}
+    capability_languages = capability_manifest.get("languages") if isinstance(capability_manifest.get("languages"), dict) else {}
     runner_state = snapshot.get("runner_state") if isinstance(snapshot.get("runner_state"), dict) else {}
+    automation_control = snapshot.get("automation_control") if isinstance(snapshot.get("automation_control"), dict) else {}
     human_state = snapshot.get("human_messages") if isinstance(snapshot.get("human_messages"), dict) else {}
     human_counts = human_state.get("counts") if isinstance(human_state.get("counts"), dict) else {}
     ticket_state = snapshot.get("ticket_run") if isinstance(snapshot.get("ticket_run"), dict) else {}
@@ -1732,7 +3588,7 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         ("runner", projections.get("runner") if isinstance(projections.get("runner"), dict) else {}),
     ]
 
-    status = str(last_event.get("status") or conveyor_state.get("status") or "ACTIVE")
+    status = str(automation_control.get("status") or last_event.get("status") or conveyor_state.get("status") or "ACTIVE")
     if status not in STATUS_MODEL:
         status = "ACTIVE" if str(snapshot.get("status") or "") == "ok" else "ACTIVE_WITH_PENDING_USER_INPUT"
 
@@ -1745,6 +3601,10 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         f"- database_exists: {_brief_bool(database.get('exists'))}",
         f"- sqlite_integrity: {_brief_text(database.get('integrity_check') or 'unknown')}",
         f"- runtime_status: `{status}`",
+        f"- current_horizon: {_brief_text(automation_control.get('horizon') or 'unknown')}",
+        f"- horizon_decision: {_brief_text(automation_control.get('horizon_decision') or 'unknown')}",
+        f"- best_next_milestone: {_brief_text(automation_control.get('best_next_milestone') or 'No milestone recorded yet.')}",
+        f"- suggested_next_task: {_brief_text(automation_control.get('suggested_next_task') or 'No sprint task recorded yet.')}",
         "- agent_rule: read this brief at run start; do not inspect or edit the SQLite database manually.",
         "- reconciliation_rule: if Markdown or JSON projections disagree with this brief, regenerate/reconcile through Diffmogger typed state APIs.",
         "",
@@ -1755,6 +3615,8 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         "",
         "## Runner And Conveyor",
         "",
+        f"- conveyor_stage: {_format_key_values({'stage': machine_work_item.get('current_stage') or conveyor_machine.get('current_stage'), 'stage_status': machine_work_item.get('stage_status') or conveyor_machine.get('stage_status'), 'owner': machine_work_item.get('owner_role') or conveyor_machine.get('owner_role'), 'validation': machine_work_item.get('validation_status'), 'continuation': machine_work_item.get('continuation_token')})}",
+        f"- repo_capabilities: {_format_key_values({'primary_language': capability_languages.get('primary'), 'manifest_version': capability_manifest.get('version'), 'digest': _brief_sha(capability_manifest.get('digest')), 'commands': len(capability_manifest.get('commands') if isinstance(capability_manifest.get('commands'), list) else [])})}",
         f"- conveyor_cycles: {int(conveyor_state.get('cycles') or 0)}",
         f"- last_decision: {_format_key_values({'role': last_decision.get('role') or 'idle', 'reason': last_decision.get('reason'), 'decided_at': last_decision.get('decided_at')})}",
         f"- active_role: {_format_key_values({'role': active_role.get('role'), 'run_id': active_role.get('run_id'), 'status': active_role.get('status'), 'started_at': active_role.get('started_at'), 'reason': active_role.get('reason')})}",
@@ -1865,6 +3727,15 @@ def validate_state_database(target: Path) -> dict[str, Any]:
     snapshot = state_snapshot(target)
     counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), dict) else {}
     missing_tables = [table for table in ORCHESTRATION_TABLES if int(counts.get(table, -1)) < 0]
+    machine = snapshot.get("conveyor_machine") if isinstance(snapshot.get("conveyor_machine"), dict) else {}
+    work_item = machine.get("work_item") if isinstance(machine.get("work_item"), dict) else {}
+    work_payload = work_item.get("payload") if isinstance(work_item.get("payload"), dict) else {}
+    active_role_run = work_payload.get("active_role_run") if isinstance(work_payload.get("active_role_run"), dict) else {}
+    decision = work_payload.get("decision") if isinstance(work_payload.get("decision"), dict) else {}
+    inferred_role = str(active_role_run.get("role") or decision.get("role") or "")
+    expected_stage = ROLE_TO_CONVEYOR_STAGE.get(inferred_role, ("", ""))[0]
+    actual_stage = str(work_item.get("current_stage") or machine.get("current_stage") or "")
+    role_stage_matches = not expected_stage or actual_stage == expected_stage
     items = [
         {
             "ok": snapshot["database"]["exists"],
@@ -1885,6 +3756,24 @@ def validate_state_database(target: Path) -> dict[str, Any]:
             "detail": "Compatibility conveyor JSON projection is generated from SQLite."
             if snapshot["projection"]["exists"]
             else "Compatibility conveyor JSON projection is missing.",
+        },
+        {
+            "ok": bool((snapshot.get("conveyor_machine") or {}).get("work_item")),
+            "detail": "Typed conveyor work item and current stage are materialized."
+            if bool((snapshot.get("conveyor_machine") or {}).get("work_item"))
+            else "Typed conveyor work item is missing.",
+        },
+        {
+            "ok": role_stage_matches,
+            "detail": f"Typed conveyor stage matches role {inferred_role}: {actual_stage}."
+            if role_stage_matches
+            else f"Typed conveyor stage mismatch for role {inferred_role}: expected {expected_stage}, got {actual_stage}.",
+        },
+        {
+            "ok": bool((snapshot.get("capability_manifest") or {}).get("digest")),
+            "detail": "Repository capability manifest is current in SQLite."
+            if bool((snapshot.get("capability_manifest") or {}).get("digest"))
+            else "Repository capability manifest is missing.",
         },
     ]
     return {

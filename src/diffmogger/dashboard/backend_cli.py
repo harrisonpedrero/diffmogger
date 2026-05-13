@@ -80,5 +80,13 @@ def command_automation_stop(*args, **kwargs):
         _restore_run_control_overrides()
 
 
+def command_blocker_recheck_baseline(*args, **kwargs):
+    try:
+        _sync_run_control_overrides()
+        return _run_control.command_blocker_recheck_baseline(*args, **kwargs)
+    finally:
+        _restore_run_control_overrides()
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

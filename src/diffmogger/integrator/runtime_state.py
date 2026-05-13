@@ -3,6 +3,14 @@ from __future__ import annotations
 from .common import *
 from .git_safety import git
 from .queue import resolve_runtime_state_actions_path
+from diffmogger.runtime.state_store import (
+    TICKET_ITEM_STATUSES,
+    load_ticket_run_state,
+    sha256_text,
+    stable_json,
+    write_ticket_run_state,
+)
+from diffmogger.runtime.ticket_run import ticket_validation_issues
 
 def runtime_state_path_safe(rel_text: str) -> tuple[bool, str]:
     rel = Path(rel_text)
@@ -112,6 +120,132 @@ def runtime_state_deferral_detail(manifest: dict[str, Any]) -> str:
         details.append(f"{path}: {status}: {detail}")
     return "; ".join(details) or "runtime-state action was deferred"
 
+
+def ticket_digest(ticket: dict[str, Any]) -> str:
+    return sha256_text(stable_json(dict(ticket)))
+
+
+def ticket_items(data: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = data.get("tickets")
+    return [dict(item) for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
+def ticket_index_by_id(items: list[dict[str, Any]]) -> dict[str, int]:
+    return {str(item.get("id") or "").strip(): index for index, item in enumerate(items) if str(item.get("id") or "").strip()}
+
+
+def validate_ticket_action_common(action: dict[str, Any], result: dict[str, Any]) -> str | None:
+    ticket_id = str(action.get("ticket_id") or "").strip()
+    if not ticket_id:
+        result.update({"status": "rejected", "detail": "ticket_id is required"})
+        return None
+    result["ticket_id"] = ticket_id
+    start_hash = action.get("start_hash")
+    if start_hash is not None and not isinstance(start_hash, str):
+        result.update({"status": "rejected", "detail": "start_hash must be a string or null"})
+        return None
+    if start_hash is not None:
+        result["start_hash"] = start_hash
+    return ticket_id
+
+
+def plan_ticket_update_action(
+    target: Path,
+    manifest: dict[str, Any],
+    action: dict[str, Any],
+    result: dict[str, Any],
+    tickets: list[dict[str, Any]],
+    ids: dict[str, int],
+) -> tuple[list[dict[str, Any]], bool]:
+    ticket_id = validate_ticket_action_common(action, result)
+    if ticket_id is None:
+        return tickets, False
+    raw_ticket = action.get("ticket")
+    if not isinstance(raw_ticket, dict):
+        result.update({"status": "rejected", "detail": "ticket must be an object"})
+        return tickets, False
+    desired = dict(raw_ticket)
+    desired["id"] = ticket_id
+    desired["summary"] = str(desired.get("summary") or "").strip()
+    desired_status = str(desired.get("status") or "pending").strip().lower()
+    if desired_status not in TICKET_ITEM_STATUSES:
+        result.update({"status": "rejected", "detail": f"unsupported ticket status: {desired_status}"})
+        return tickets, False
+    desired["status"] = desired_status
+    if not desired["summary"]:
+        result.update({"status": "rejected", "detail": "ticket summary is required"})
+        return tickets, False
+
+    expected_end_hash = action.get("end_hash")
+    if not isinstance(expected_end_hash, str):
+        result.update({"status": "rejected", "detail": "end_hash must be a string"})
+        return tickets, False
+    actual_end_hash = ticket_digest(desired)
+    result["end_hash"] = expected_end_hash
+    result["actual_end_hash"] = actual_end_hash
+    if actual_end_hash != expected_end_hash:
+        result.update({"status": "rejected", "detail": "ticket content hash does not match end_hash"})
+        return tickets, False
+
+    current_index = ids.get(ticket_id)
+    current = tickets[current_index] if current_index is not None else None
+    current_hash = ticket_digest(current) if current is not None else None
+    result["current_hash"] = current_hash
+    if current_hash == actual_end_hash:
+        result.update({"status": "already_applied", "detail": "ticket already matches desired state"})
+        return tickets, False
+
+    start_hash = action.get("start_hash")
+    if start_hash is not None and current_hash != start_hash:
+        result.update({"status": "conflict", "detail": "current ticket hash differs from role-start hash"})
+        return tickets, False
+    if start_hash is None and current is not None:
+        result.update({"status": "conflict", "detail": "ticket already exists and start_hash was omitted"})
+        return tickets, False
+
+    next_tickets = list(tickets)
+    if current_index is None:
+        ids[ticket_id] = len(next_tickets)
+        next_tickets.append(desired)
+    else:
+        next_tickets[current_index] = desired
+    result.update(
+        {
+            "status": "would_apply",
+            "detail": "ticket state will be updated after patch acceptance",
+            "run_id": str((manifest.get("run_id") or "")),
+        }
+    )
+    return next_tickets, True
+
+
+def plan_ticket_delete_action(
+    action: dict[str, Any],
+    result: dict[str, Any],
+    tickets: list[dict[str, Any]],
+    ids: dict[str, int],
+) -> tuple[list[dict[str, Any]], bool]:
+    ticket_id = validate_ticket_action_common(action, result)
+    if ticket_id is None:
+        return tickets, False
+    current_index = ids.get(ticket_id)
+    if current_index is None:
+        result.update({"status": "already_applied", "detail": "ticket is already absent"})
+        return tickets, False
+    current = tickets[current_index]
+    current_hash = ticket_digest(current)
+    result["current_hash"] = current_hash
+    start_hash = action.get("start_hash")
+    if start_hash is not None and current_hash != start_hash:
+        result.update({"status": "conflict", "detail": "current ticket hash differs from role-start hash"})
+        return tickets, False
+    next_tickets = [item for index, item in enumerate(tickets) if index != current_index]
+    ids.clear()
+    ids.update(ticket_index_by_id(next_tickets))
+    result.update({"status": "would_apply", "detail": "ticket will be deleted after patch acceptance"})
+    return next_tickets, True
+
+
 def apply_runtime_state_actions(target: Path, manifest: dict[str, Any], *, dry_run: bool) -> list[dict[str, Any]]:
     actions_path = resolve_runtime_state_actions_path(target, manifest)
     if actions_path is None:
@@ -162,20 +296,59 @@ def apply_runtime_state_actions(target: Path, manifest: dict[str, Any], *, dry_r
 
     target_resolved = target.resolve()
     planned_writes: list[tuple[int, Path, bytes]] = []
+    planned_ticket_results: list[int] = []
+    ticket_data = load_ticket_run_state(target) or {}
+    planned_ticket_data = dict(ticket_data)
+    planned_tickets = ticket_items(ticket_data)
+    planned_ticket_ids = ticket_index_by_id(planned_tickets)
     results: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
+    seen_tickets: set[str] = set()
 
     for index, action in enumerate(raw_actions):
         result: dict[str, Any] = {
-            "action": "replace_file",
+            "action": str(action.get("action") or "") if isinstance(action, dict) else "",
             "path": str(action.get("path") or "") if isinstance(action, dict) else "",
         }
         if not isinstance(action, dict):
             result.update({"status": "rejected", "detail": "runtime-state action must be an object"})
             results.append(result)
             continue
-        if action.get("action") != "replace_file":
-            result.update({"status": "rejected", "detail": "only replace_file runtime-state actions are supported"})
+        action_name = str(action.get("action") or "").strip()
+        if action_name in {"update_ticket", "delete_ticket"}:
+            ticket_id = str(action.get("ticket_id") or "").strip()
+            if ticket_id and ticket_id in seen_tickets:
+                result.update({"ticket_id": ticket_id, "status": "rejected", "detail": "duplicate ticket-state action for ticket"})
+                results.append(result)
+                continue
+            if ticket_id:
+                seen_tickets.add(ticket_id)
+            if not ticket_data:
+                result.update({"ticket_id": ticket_id, "status": "error", "detail": "ticket run state is missing"})
+                results.append(result)
+                continue
+            if action_name == "update_ticket":
+                planned_tickets, changed = plan_ticket_update_action(
+                    target,
+                    manifest,
+                    action,
+                    result,
+                    planned_tickets,
+                    planned_ticket_ids,
+                )
+            else:
+                planned_tickets, changed = plan_ticket_delete_action(action, result, planned_tickets, planned_ticket_ids)
+            if changed:
+                planned_ticket_results.append(len(results))
+            results.append(result)
+            continue
+        if action_name != "replace_file":
+            result.update(
+                {
+                    "status": "rejected",
+                    "detail": "only replace_file, update_ticket, and delete_ticket runtime-state actions are supported",
+                }
+            )
             results.append(result)
             continue
 
@@ -264,6 +437,15 @@ def apply_runtime_state_actions(target: Path, manifest: dict[str, Any], *, dry_r
         planned_writes.append((index, destination, content_bytes))
         results.append(result)
 
+    if planned_ticket_results:
+        planned_ticket_data["tickets"] = planned_tickets
+        blocking_issues = [issue for issue in ticket_validation_issues(planned_ticket_data) if issue.get("level") == "error"]
+        if blocking_issues:
+            detail = "; ".join(str(issue.get("detail") or issue.get("type") or "invalid ticket state") for issue in blocking_issues)
+            for result_index in planned_ticket_results:
+                results[result_index]["status"] = "rejected"
+                results[result_index]["detail"] = f"ticket-state validation failed: {detail}"
+
     if any(str(item.get("status") or "") in RUNTIME_STATE_BLOCKING_STATUSES for item in results):
         for index, item in enumerate(results):
             if item.get("status") == "would_apply":
@@ -286,6 +468,18 @@ def apply_runtime_state_actions(target: Path, manifest: dict[str, Any], *, dry_r
             temp_path.unlink(missing_ok=True)
         results[index]["status"] = "applied"
         results[index]["detail"] = "runtime-state file replaced"
+
+    if planned_ticket_results:
+        write_ticket_run_state(
+            target,
+            planned_ticket_data,
+            actor_role="integrator",
+            event_type="ticket.run_reconciled",
+            source_path=str(manifest.get("run_id") or ""),
+        )
+        for result_index in planned_ticket_results:
+            results[result_index]["status"] = "applied"
+            results[result_index]["detail"] = "ticket state updated"
 
     set_runtime_state_results(manifest, results)
     return results

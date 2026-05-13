@@ -38,6 +38,8 @@ def is_integration_safety_check(text: str) -> bool:
     )
 
 def validation_snapshot(text: str) -> dict[str, Any]:
+    """Compatibility parser for explicit review/import Markdown, not live Observatory state."""
+
     checks: list[dict[str, str]] = []
     counts = {"pass": 0, "fail": 0, "warn": 0, "pending": 0, "info": 0}
     counted_checks = 0
@@ -100,6 +102,11 @@ def integration_safety_record_snapshot(target: Path) -> dict[str, Any]:
     }
 
 def integration_safety_snapshot(validation: dict[str, Any], target: Path | None = None) -> dict[str, Any]:
+    if target is not None:
+        record_snapshot = integration_safety_record_snapshot(target)
+        if record_snapshot:
+            return record_snapshot
+
     items = [item for item in list(validation.get("items") or []) if isinstance(item, dict)]
     pending_snapshot: dict[str, Any] | None = None
     for item in items:
@@ -130,11 +137,6 @@ def integration_safety_snapshot(validation: dict[str, Any], target: Path | None 
             pending_snapshot = item_snapshot
             continue
         return item_snapshot
-
-    if target is not None:
-        record_snapshot = integration_safety_record_snapshot(target)
-        if record_snapshot:
-            return record_snapshot
 
     if pending_snapshot:
         return pending_snapshot
@@ -209,8 +211,7 @@ def first_review_validation_missing_action(target: Path) -> str:
     if (target / "scripts" / "validate_starter_kit.sh").is_file():
         return "Record a passing `bash scripts/validate_starter_kit.sh` run."
     return (
-        "Complete the first bootstrap and record a passing target-local verification run in "
-        "`docs/CODEX_AUTOMATION_TASKS.md`."
+        "Complete the first bootstrap and record a passing target-local verification receipt in typed runtime state."
     )
 
 def first_review_snapshot(target: Path, task: dict[str, Any]) -> dict[str, Any]:

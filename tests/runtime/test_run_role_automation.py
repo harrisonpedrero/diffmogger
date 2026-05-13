@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -12,6 +13,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+from diffmogger.runtime.state_store import load_ticket_run_state, write_ticket_run_state
+
 SOURCE_ROLE_RUNNER = ROOT / "scripts" / "target" / "run_role_automation.sh"
 TEMPLATE_ROLE_RUNNER = ROOT / "templates" / "scripts" / "run_role_automation.sh"
 ROLE_RUNNER_PATHS = [SOURCE_ROLE_RUNNER]
@@ -47,6 +52,52 @@ class RunRoleAutomationTests(unittest.TestCase):
         self.write_text(target, "docs/CODEX_AUTOMATION_TASKS.md", "AUTOMATION_STATUS: ACTIVE\n")
         self.write_text(target, "docs/MULTI_ROLE_PROGRESS.md", "# Multi-Role Progress\n")
 
+    def seed_sidecar_git_target(self, target: Path) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=target, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=target, check=True)
+        self.write_text(target, "README.md", "# Sidecar Role Runner Test\n")
+        subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
+        subprocess.run(["git", "commit", "-m", "init", "-q"], cwd=target, check=True)
+        for role in ("planner", "builder", "hardener", "integrator"):
+            self.write_text(target, f".diffmogger/agentic/roles/{role}.md", f"# {role} prompt\n")
+        self.write_text(target, ".diffmogger/agentic/automation_prompt.md", "# Automation Prompt\n")
+        self.write_text(target, ".diffmogger/state/CODEX_AUTOMATION_TASKS.md", "AUTOMATION_STATUS: ACTIVE\n")
+        self.write_text(target, ".diffmogger/state/MULTI_ROLE_PROGRESS.md", "# Multi-Role Progress\n")
+        self.write_text(
+            target,
+            ".diffmogger/manifest.json",
+            json.dumps(
+                {
+                    "layout": "sidecar_v1",
+                    "path_aliases": {
+                        ".agentic/automation_prompt.md": ".diffmogger/agentic/automation_prompt.md",
+                        ".agentic/roles": ".diffmogger/agentic/roles",
+                        ".agentic/roles/builder.md": ".diffmogger/agentic/roles/builder.md",
+                        ".agentic/roles/hardener.md": ".diffmogger/agentic/roles/hardener.md",
+                        ".agentic/roles/integrator.md": ".diffmogger/agentic/roles/integrator.md",
+                        ".agentic/roles/planner.md": ".diffmogger/agentic/roles/planner.md",
+                        "docs/CODEX_AUTOMATION_TASKS.md": ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+                        "docs/MULTI_ROLE_PROGRESS.md": ".diffmogger/state/MULTI_ROLE_PROGRESS.md",
+                        "target/automation_logs": ".diffmogger/runtime/automation_logs",
+                        "target/automation_queue": ".diffmogger/runtime/automation_queue",
+                        "target/automation_worktrees": ".diffmogger/runtime/automation_worktrees",
+                        "target/canonical_state_brief.md": ".diffmogger/runtime/canonical_state_brief.md",
+                    },
+                    "patch_exclude_paths": [".diffmogger/runtime"],
+                    "worktree_seed_paths": [
+                        ".diffmogger/agentic/automation_prompt.md",
+                        ".diffmogger/agentic/roles",
+                        ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+                        ".diffmogger/state/MULTI_ROLE_PROGRESS.md",
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+
     def write_fake_codex(self, root: Path) -> Path:
         bin_dir = root / "bin"
         codex = bin_dir / "codex"
@@ -56,6 +107,41 @@ class RunRoleAutomationTests(unittest.TestCase):
             "if [[ -n \"${FAKE_CODEX_ARG_LOG:-}\" ]]; then\n"
             "  printf '%s\\n' \"$@\" >\"$FAKE_CODEX_ARG_LOG\"\n"
             "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
+        return bin_dir
+
+    def write_ticket_action_codex(self, root: Path) -> Path:
+        bin_dir = root / "bin"
+        codex = bin_dir / "codex"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ -z \"${DIFFMOGGER_TICKET_STATE_ACTIONS_PATH:-}\" ]]; then\n"
+            "  echo 'ticket action path missing' >&2\n"
+            "  exit 70\n"
+            "fi\n"
+            "mkdir -p \"$(dirname \"$DIFFMOGGER_TICKET_STATE_ACTIONS_PATH\")\"\n"
+            "cat >\"$DIFFMOGGER_TICKET_STATE_ACTIONS_PATH\" <<'JSON'\n"
+            "{\n"
+            "  \"schema_version\": 1,\n"
+            "  \"actions\": [\n"
+            "    {\n"
+            "      \"action\": \"update_ticket\",\n"
+            "      \"ticket_id\": \"TICKET-001\",\n"
+            "      \"start_hash\": \"role-start-hash\",\n"
+            "      \"end_hash\": \"role-end-hash\",\n"
+            "      \"ticket\": {\n"
+            "        \"id\": \"TICKET-001\",\n"
+            "        \"summary\": \"Build first slice\",\n"
+            "        \"status\": \"candidate_done\"\n"
+            "      }\n"
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            "JSON\n"
             "exit 0\n",
             encoding="utf-8",
         )
@@ -117,6 +203,9 @@ class RunRoleAutomationTests(unittest.TestCase):
             "scripts/run_role_automation.sh",
             "run_process_watchdog.py",
             "integrate_role_outputs.py",
+            "DIFFMOGGER_TICKET_STATE_ACTIONS_PATH",
+            "ticket_state_actions_path",
+            "runtime_state_action_count",
         ]:
             self.assertIn(marker, source)
             self.assertIn(marker, template)
@@ -209,6 +298,107 @@ class RunRoleAutomationTests(unittest.TestCase):
             self.assertIn("PLAYWRIGHT_MCP_OUTPUT_DIR", hardener_args)
             self.assertNotIn('mcp_servers.context7.command="npx"', hardener_args)
             self.assertNotIn('mcp_servers.context7.env_vars=["CONTEXT7_API_KEY"]', hardener_args)
+
+    def test_source_runner_keeps_sidecar_alias_paths_dotted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            target = tmp_path / "target"
+            target.mkdir()
+            self.seed_sidecar_git_target(target)
+            fake_bin = tmp_path / "bin"
+            fake_bin.mkdir()
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "worktree=\"\"\n"
+                "while [[ $# -gt 0 ]]; do\n"
+                "  if [[ \"$1\" == \"-C\" ]]; then worktree=\"$2\"; shift 2; continue; fi\n"
+                "  shift\n"
+                "done\n"
+                "test -f \"$worktree/.diffmogger/agentic/roles/builder.md\" || exit 61\n"
+                "test ! -e \"$worktree/diffmogger/agentic/roles/builder.md\" || exit 62\n"
+                "printf 'sidecar alias check\\n' > \"$worktree/sidecar-check.txt\"\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(fake_codex.stat().st_mode | stat.S_IXUSR)
+
+            env = os.environ.copy()
+            env["CODEX_AUTOMATION_PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            env["CODEX_RUN_ID"] = "sidecar-paths"
+
+            result = subprocess.run(
+                ["bash", str(SOURCE_ROLE_RUNNER), "--target", str(target), "--role", "builder"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((target / "diffmogger").exists())
+            self.assertTrue(
+                (
+                    target
+                    / ".diffmogger"
+                    / "runtime"
+                    / "automation_queue"
+                    / "builder"
+                    / "sidecar-paths"
+                    / "manifest.json"
+                ).exists()
+            )
+
+    def test_builder_role_claims_next_pending_ticket_before_codex(self) -> None:
+        for path in ROLE_RUNNER_PATHS:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    target = tmp_path / "target"
+                    target.mkdir()
+                    self.seed_git_target(target)
+                    write_ticket_run_state(
+                        target,
+                        {
+                            "run_id": "ticket-run",
+                            "tickets": [
+                                {"id": "TICKET-001", "summary": "Build first slice", "status": "pending"},
+                                {
+                                    "id": "TICKET-002",
+                                    "summary": "Follow up",
+                                    "status": "pending",
+                                    "depends_on": ["TICKET-001"],
+                                },
+                            ],
+                        },
+                        actor_role="test",
+                        event_type="ticket.run_seeded",
+                    )
+                    fake_bin = self.write_fake_codex(tmp_path)
+
+                    env = os.environ.copy()
+                    env["CODEX_AUTOMATION_PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+                    env["CODEX_RUN_ID"] = "claim-builder-ticket"
+
+                    result = subprocess.run(
+                        ["bash", str(path), "--target", str(target), "--role", "builder"],
+                        cwd=ROOT,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    queue_dir = target / "target" / "automation_queue" / "builder" / "claim-builder-ticket"
+                    claim = json.loads((queue_dir / "ticket_claim.json").read_text(encoding="utf-8"))
+                    loaded = load_ticket_run_state(target)
+                    self.assertTrue(claim["claimed"])
+                    self.assertEqual("TICKET-001", claim["selected"]["ticket"]["id"])
+                    self.assertEqual("in_progress", loaded["tickets"][0]["status"])
+                    self.assertEqual("builder", loaded["tickets"][0]["claimed_by"])
+                    self.assertEqual("claim-builder-ticket", loaded["tickets"][0]["claimed_run_id"])
 
     def test_hardener_runtime_prompt_includes_recent_guardrail_deferral(self) -> None:
         for path in ROLE_RUNNER_PATHS:
@@ -305,6 +495,46 @@ class RunRoleAutomationTests(unittest.TestCase):
                     changed_files = (queue_dir / "changed_files.txt").read_text(encoding="utf-8")
                     self.assertNotIn("scripts/ticket_run.py", patch_text)
                     self.assertNotIn("scripts/ticket_run.py", changed_files)
+
+    def test_role_worktree_ticket_actions_queue_without_product_patch(self) -> None:
+        for path in ROLE_RUNNER_PATHS:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    target = tmp_path / "target"
+                    target.mkdir()
+                    self.seed_git_target(target)
+                    fake_bin = self.write_ticket_action_codex(tmp_path)
+
+                    env = os.environ.copy()
+                    env["CODEX_AUTOMATION_PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+                    env["CODEX_RUN_ID"] = "ticket-action-only"
+
+                    result = subprocess.run(
+                        ["bash", str(path), "--target", str(target), "--role", "builder"],
+                        cwd=ROOT,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("status=queued", result.stdout)
+                    queue_dir = target / "target" / "automation_queue" / "builder" / "ticket-action-only"
+                    manifest = json.loads((queue_dir / "manifest.json").read_text(encoding="utf-8"))
+                    runtime_actions = json.loads((queue_dir / "runtime_state_actions.json").read_text(encoding="utf-8"))
+                    ticket_actions = json.loads((queue_dir / "ticket_state_actions.json").read_text(encoding="utf-8"))
+                    changed_files = (queue_dir / "changed_files.txt").read_text(encoding="utf-8")
+                    patch_text = (queue_dir / "changes.patch").read_text(encoding="utf-8")
+
+                    self.assertEqual("queued", manifest["status"])
+                    self.assertEqual("pending", manifest["runtime_state_status"])
+                    self.assertEqual(1, manifest["runtime_state_action_count"])
+                    self.assertEqual("update_ticket", runtime_actions["actions"][0]["action"])
+                    self.assertEqual("update_ticket", ticket_actions["actions"][0]["action"])
+                    self.assertEqual("", changed_files)
+                    self.assertEqual("", patch_text)
 
     def test_role_worktree_inherits_loaded_target_env_without_copying_env_files(self) -> None:
         for index, path in enumerate(ROLE_RUNNER_PATHS):

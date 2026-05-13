@@ -66,6 +66,19 @@ describe("Brief automation mode mapping", () => {
     expect(next.automation_role_profile).toBe("single_lane");
   });
 
+  it("treats automation_role_profile as canonical over the legacy boolean", () => {
+    const next = lowCortisolDraftFromGeneratedIntake(
+      {
+        automation_role_profile: "planner_builder_hardener_integrator",
+        multi_role_automations_allowed: false,
+      },
+      draft(),
+    );
+
+    expect(next.automation_role_profile).toBe("planner_builder_hardener_integrator");
+    expect(next.multi_role_automations_allowed).toBe(true);
+  });
+
   it("maps build scope between boundless build and ticket campaign", () => {
     const ticket = applyAutomationScope(draft(), "ticket_campaign");
     const boundless = applyAutomationScope(ticket, "boundless_build");

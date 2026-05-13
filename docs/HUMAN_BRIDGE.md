@@ -114,7 +114,7 @@ cp .env.example .env
 python -m agentic_notifier.run_service
 ```
 
-The example config starts with `DRY_RUN=true`; change it only after target files, Discord channels, and local notifications are verified.
+The example config starts with `DRY_RUN=true`; change it only after target-side human-message handling, Discord channels, and local notifications are verified.
 
 ## Discord Setup
 

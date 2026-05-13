@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -50,7 +51,7 @@ class TicketRunTests(unittest.TestCase):
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
-                    target = Path(tmp)
+                    target = Path(tmp).resolve()
                     data = {
                         "run_id": "run-1",
                         "halt_when_complete": True,
@@ -67,6 +68,160 @@ class TicketRunTests(unittest.TestCase):
                     self.assertEqual(summary["status"], "active")
                     self.assertEqual(summary["counts"]["done"], 1)
                     self.assertFalse(summary["should_halt"])
+
+    def test_role_worktree_target_resolves_to_canonical_ticket_state(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp).resolve()
+                    (target / ".diffmogger").mkdir(parents=True)
+                    (target / ".diffmogger" / "manifest.json").write_text(
+                        json.dumps({"schema_version": 1, "layout": "sidecar_v1"}),
+                        encoding="utf-8",
+                    )
+                    worktree = target / ".diffmogger" / "runtime" / "automation_worktrees" / "builder" / "run-1"
+                    worktree.mkdir(parents=True)
+                    module.write_ticket_run_state(
+                        target,
+                        {
+                            "run_id": "run-worktree",
+                            "tickets": [{"id": "T-1", "summary": "Do it", "status": "pending"}],
+                        },
+                        actor_role="test",
+                        event_type="ticket.run_seeded",
+                    )
+
+                    loaded, ticket_path, _text = module.load_ticket_run(worktree)
+                    summary = module.ticket_summary(loaded, worktree)
+
+                    self.assertEqual("run-worktree", loaded["run_id"])
+                    self.assertEqual(1, summary["counts"]["pending"])
+                    self.assertEqual(target / ".diffmogger" / "runtime" / "orchestration.sqlite3", ticket_path)
+
+    def test_role_worktree_update_stages_typed_ticket_action(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp).resolve()
+                    (target / ".diffmogger").mkdir(parents=True)
+                    (target / ".diffmogger" / "manifest.json").write_text(
+                        json.dumps({"schema_version": 1, "layout": "sidecar_v1"}),
+                        encoding="utf-8",
+                    )
+                    worktree = target / ".diffmogger" / "runtime" / "automation_worktrees" / "builder" / "run-1"
+                    worktree.mkdir(parents=True)
+                    seed = {
+                        "run_id": "run-worktree",
+                        "tickets": [{"id": "T-1", "summary": "Do it", "status": "pending"}],
+                    }
+                    module.write_ticket_run_state(
+                        target,
+                        seed,
+                        actor_role="test",
+                        event_type="ticket.run_seeded",
+                    )
+                    actions_path = (
+                        worktree
+                        / ".diffmogger"
+                        / "runtime"
+                        / "automation_queue"
+                        / "builder"
+                        / "run-1"
+                        / "ticket_state_actions.json"
+                    )
+                    env = os.environ.copy()
+                    env["DIFFMOGGER_TICKET_STATE_ACTIONS_PATH"] = str(actions_path)
+
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(path),
+                            str(worktree),
+                            "update",
+                            "--ticket-id",
+                            "T-1",
+                            "--ticket-json",
+                            json.dumps(
+                                {
+                                    "summary": "Do it",
+                                    "status": "candidate_done",
+                                    "evidence": ["builder completed implementation"],
+                                }
+                            ),
+                            "--json",
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        env=env,
+                    )
+
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertTrue(payload["staged"])
+                    self.assertEqual("typed_state_action", payload["ticket_source"])
+                    self.assertEqual(1, payload["staged_action_count"])
+                    canonical = module.load_ticket_run_state(target)
+                    self.assertEqual("pending", canonical["tickets"][0]["status"])
+                    actions = json.loads(actions_path.read_text(encoding="utf-8"))["actions"]
+                    self.assertEqual("update_ticket", actions[0]["action"])
+                    self.assertEqual("T-1", actions[0]["ticket_id"])
+                    self.assertEqual("pending", seed["tickets"][0]["status"])
+                    self.assertEqual("candidate_done", actions[0]["ticket"]["status"])
+                    self.assertTrue(actions[0]["start_hash"])
+                    self.assertTrue(actions[0]["end_hash"])
+
+    def test_role_worktree_delete_stages_typed_ticket_action(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp).resolve()
+                    (target / ".diffmogger").mkdir(parents=True)
+                    (target / ".diffmogger" / "manifest.json").write_text(
+                        json.dumps({"schema_version": 1, "layout": "sidecar_v1"}),
+                        encoding="utf-8",
+                    )
+                    worktree = target / ".diffmogger" / "runtime" / "automation_worktrees" / "planner" / "run-1"
+                    worktree.mkdir(parents=True)
+                    module.write_ticket_run_state(
+                        target,
+                        {
+                            "run_id": "run-worktree",
+                            "tickets": [{"id": "T-1", "summary": "Do it", "status": "pending"}],
+                        },
+                        actor_role="test",
+                        event_type="ticket.run_seeded",
+                    )
+                    actions_path = (
+                        worktree
+                        / ".diffmogger"
+                        / "runtime"
+                        / "automation_queue"
+                        / "planner"
+                        / "run-1"
+                        / "ticket_state_actions.json"
+                    )
+                    env = os.environ.copy()
+                    env["DIFFMOGGER_TICKET_STATE_ACTIONS_PATH"] = str(actions_path)
+
+                    result = subprocess.run(
+                        [sys.executable, str(path), str(worktree), "delete", "--ticket-id", "T-1", "--json"],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        env=env,
+                    )
+
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertTrue(payload["staged"])
+                    self.assertEqual(1, payload["staged_action_count"])
+                    canonical = module.load_ticket_run_state(target)
+                    self.assertEqual(1, len(canonical["tickets"]))
+                    actions = json.loads(actions_path.read_text(encoding="utf-8"))["actions"]
+                    self.assertEqual("delete_ticket", actions[0]["action"])
+                    self.assertEqual("T-1", actions[0]["ticket_id"])
+                    self.assertTrue(actions[0]["start_hash"])
 
     def test_done_ticket_without_evidence_does_not_halt(self) -> None:
         for path, module in self.modules:
@@ -202,6 +357,51 @@ class TicketRunTests(unittest.TestCase):
                         [{"ticket_id": "T-2", "depends_on": "T-1", "dependency_status": "pending"}],
                         result["waiting_on_dependencies"],
                     )
+
+    def test_claim_next_marks_pending_ticket_in_progress(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.write_ticket_run(
+                        target,
+                        {
+                            "run_id": "run-claim",
+                            "tickets": [
+                                {"id": "T-1", "summary": "Build first slice", "status": "pending"},
+                                {"id": "T-2", "summary": "Follow up", "status": "pending", "depends_on": ["T-1"]},
+                            ],
+                        },
+                    )
+
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(path),
+                            str(target),
+                            "claim-next",
+                            "--role",
+                            "builder",
+                            "--run-id",
+                            "builder-run-1",
+                            "--json",
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    payload = json.loads(result.stdout)
+                    loaded = module.load_ticket_run_state(target)
+                    self.assertTrue(payload["claimed"])
+                    self.assertEqual("T-1", payload["selected"]["ticket"]["id"])
+                    self.assertEqual("resume_in_progress", payload["next"]["action"])
+                    self.assertEqual(1, payload["summary"]["counts"]["in_progress"])
+                    self.assertEqual(1, payload["summary"]["counts"]["pending"])
+                    self.assertEqual("in_progress", loaded["tickets"][0]["status"])
+                    self.assertEqual("builder", loaded["tickets"][0]["claimed_by"])
+                    self.assertEqual("builder-run-1", loaded["tickets"][0]["claimed_run_id"])
 
     def test_next_skips_ticket_with_blocked_dependency(self) -> None:
         for path, _module in self.modules:

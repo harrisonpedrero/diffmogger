@@ -31,6 +31,7 @@ from diffmogger.runtime.state_store import (
     load_ticket_run_state,
     record_human_message,
     sha256_text,
+    stable_json,
     write_ticket_run_state,
 )
 
@@ -53,6 +54,143 @@ TICKET_LIST_FIELDS = {
 TICKET_STRING_FIELDS = {"id", "summary", "status", "blocker"}
 TICKET_IMPORT_FORMATS = {"markdown", "csv", "json"}
 TICKET_IMPORT_MODES = {"append", "replace-placeholder", "replace-all"}
+
+
+def role_worktree_context(path: Path) -> dict[str, Any] | None:
+    """Return canonical target metadata for a transient role worktree path."""
+    parts = path.parts
+    patterns = [
+        (".diffmogger", "runtime", "automation_worktrees"),
+        ("target", "automation_worktrees"),
+    ]
+    for pattern in patterns:
+        pattern_len = len(pattern)
+        for index in range(0, len(parts) - pattern_len + 1):
+            if tuple(parts[index : index + pattern_len]) != pattern:
+                continue
+            if index == 0 or len(parts) <= index + pattern_len + 1:
+                continue
+            candidate = Path(*parts[:index])
+            if (candidate / ".diffmogger" / "manifest.json").exists() or (candidate / ".agentic").exists():
+                role = parts[index + pattern_len]
+                run_id = parts[index + pattern_len + 1]
+                return {
+                    "target": candidate.resolve(),
+                    "role": role,
+                    "run_id": run_id,
+                    "worktree_root": Path(*parts[: index + pattern_len + 2]).resolve(),
+                }
+    return None
+
+
+def canonical_target_from_role_worktree(path: Path) -> Path | None:
+    """Return the owning target for a transient role worktree path."""
+    context = role_worktree_context(path)
+    return Path(context["target"]) if context else None
+
+
+def env_target_root() -> Path | None:
+    for key in ("DIFFMOGGER_TARGET_ROOT", "TARGET"):
+        value = os.getenv(key, "").strip()
+        if not value:
+            continue
+        candidate = Path(value).expanduser()
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if (resolved / ".diffmogger" / "manifest.json").exists() or (resolved / ".agentic").exists():
+            return resolved
+    return None
+
+
+def resolve_ticket_target(target: Path) -> Path:
+    resolved = target.expanduser().resolve()
+    env_root = env_target_root()
+    if env_root is not None:
+        worktree_root = target_path(env_root, "target/automation_worktrees").resolve()
+        try:
+            resolved.relative_to(worktree_root)
+            return env_root
+        except ValueError:
+            pass
+    return canonical_target_from_role_worktree(resolved) or resolved
+
+
+def ticket_state_actions_path(target: Path) -> Path | None:
+    configured = os.getenv("DIFFMOGGER_TICKET_STATE_ACTIONS_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    context = role_worktree_context(target.expanduser().resolve())
+    if not context:
+        return None
+    worktree = Path(context["worktree_root"])
+    role = str(context["role"])
+    run_id = str(context["run_id"])
+    return target_path(worktree, f"target/automation_queue/{role}/{run_id}/ticket_state_actions.json")
+
+
+def should_stage_ticket_actions(target: Path) -> bool:
+    return ticket_state_actions_path(target) is not None and os.getenv("DIFFMOGGER_TICKET_STATE_DIRECT", "").strip() != "1"
+
+
+def ticket_digest(ticket: dict[str, Any]) -> str:
+    return sha256_text(stable_json(dict(ticket)))
+
+
+def ticket_by_id(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {str(item.get("id") or "").strip(): dict(item) for item in tickets(data) if str(item.get("id") or "").strip()}
+
+
+def staged_ticket_actions(previous: dict[str, Any], next_data: dict[str, Any]) -> list[dict[str, Any]]:
+    previous_by_id = ticket_by_id(previous)
+    next_items = tickets(next_data)
+    next_ids = {str(item.get("id") or "").strip() for item in next_items if str(item.get("id") or "").strip()}
+    actions: list[dict[str, Any]] = []
+    for item in next_items:
+        ticket_id = str(item.get("id") or "").strip()
+        if not ticket_id:
+            continue
+        desired = dict(item)
+        current = previous_by_id.get(ticket_id)
+        if current == desired:
+            continue
+        actions.append(
+            {
+                "action": "update_ticket",
+                "ticket_id": ticket_id,
+                "start_hash": ticket_digest(current) if current is not None else None,
+                "end_hash": ticket_digest(desired),
+                "ticket": desired,
+            }
+        )
+    for ticket_id, current in previous_by_id.items():
+        if ticket_id in next_ids:
+            continue
+        actions.append(
+            {
+                "action": "delete_ticket",
+                "ticket_id": ticket_id,
+                "start_hash": ticket_digest(current),
+            }
+        )
+    return actions
+
+
+def append_ticket_state_actions(path: Path, actions: list[dict[str, Any]]) -> None:
+    if not actions:
+        return
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        existing = {}
+    existing_actions = existing.get("actions") if isinstance(existing, dict) else None
+    merged = [item for item in existing_actions if isinstance(item, dict)] if isinstance(existing_actions, list) else []
+    merged.extend(actions)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp_path.write_text(json.dumps({"schema_version": 1, "actions": merged}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temp_path, path)
 
 
 def utc_now() -> str:
@@ -116,17 +254,20 @@ def read_ticket_run_markdown(path: Path) -> tuple[dict[str, Any], str]:
 
 
 def load_ticket_run(target: Path, ticket_file: Path | None = None) -> tuple[dict[str, Any], Path, str]:
-    target = target.expanduser().resolve()
+    requested_target = target
+    stage_actions = should_stage_ticket_actions(requested_target)
+    target = resolve_ticket_target(target)
     if ticket_file is not None:
         path = ticket_file
         data, text = read_ticket_run_markdown(path)
-        write_ticket_run_state(
-            target,
-            data,
-            actor_role="ticket-cli",
-            event_type="compatibility.ticket_markdown_imported",
-            source_path=str(path),
-        )
+        if not stage_actions:
+            write_ticket_run_state(
+                target,
+                data,
+                actor_role="ticket-cli",
+                event_type="compatibility.ticket_markdown_imported",
+                source_path=str(path),
+            )
         return data, ticket_state_path(target), text
 
     state = load_ticket_run_state(target)
@@ -137,13 +278,14 @@ def load_ticket_run(target: Path, ticket_file: Path | None = None) -> tuple[dict
     if path == ticket_state_path(target):
         return empty_ticket_run(target), path, ""
     data, text = read_ticket_run_markdown(path)
-    write_ticket_run_state(
-        target,
-        data,
-        actor_role="migration",
-        event_type="compatibility.legacy_ticket_markdown_imported",
-        source_path=str(path),
-    )
+    if not stage_actions:
+        write_ticket_run_state(
+            target,
+            data,
+            actor_role="migration",
+            event_type="compatibility.legacy_ticket_markdown_imported",
+            source_path=str(path),
+        )
     return data, path, text
 
 
@@ -427,7 +569,7 @@ def ticket_run_payload(data: dict[str, Any], target: Path | None = None) -> dict
 
 
 def ticket_source_state(target: Path, ticket_file: Path | None = None) -> dict[str, Any]:
-    target = target.expanduser().resolve()
+    target = resolve_ticket_target(target)
     try:
         data, path, _text = load_ticket_run(target, ticket_file)
     except SystemExit as exc:
@@ -826,6 +968,7 @@ def completion_state_path(target: Path) -> Path:
 
 
 def finalize(target: Path, *, ticket_file: Path | None = None) -> dict[str, Any]:
+    target = resolve_ticket_target(target)
     data, path, _text = load_ticket_run(target, ticket_file)
     summary = ticket_summary(data, target)
     if not summary["should_halt"]:
@@ -1025,16 +1168,42 @@ def read_import_text(args: argparse.Namespace) -> str:
     return str(args.input_text)
 
 
-def write_if_valid(target: Path, path: Path, text: str, data: dict[str, Any], *, allow_warnings: bool = True) -> dict[str, Any]:
+def write_if_valid(
+    target: Path,
+    path: Path,
+    text: str,
+    data: dict[str, Any],
+    *,
+    allow_warnings: bool = True,
+    actor_role: str = "dashboard",
+    event_type: str = "ticket.run_updated",
+) -> dict[str, Any]:
     issues = ticket_validation_issues(data)
     blocking = [issue for issue in issues if issue.get("level") == "error"]
     if blocking:
         return {"written": False, "ticket_file": str(path), "validation_issues": issues, **ticket_run_payload(data, target)}
-    source_path = "" if path == ticket_state_path(target) else str(path)
-    write_ticket_run_state(target, data, actor_role="dashboard", event_type="ticket.run_updated", source_path=source_path)
+    canonical_target = resolve_ticket_target(target)
+    state_path = ticket_state_path(canonical_target)
+    source_path = "" if path == state_path else str(path)
+    staged_actions_path = ticket_state_actions_path(target)
+    if staged_actions_path is not None and should_stage_ticket_actions(target):
+        previous = load_ticket_run_state(canonical_target) or empty_ticket_run(canonical_target)
+        actions = staged_ticket_actions(previous, data)
+        append_ticket_state_actions(staged_actions_path, actions)
+        return {
+            "written": True,
+            "staged": True,
+            "ticket_file": str(state_path),
+            "ticket_store": str(state_path),
+            "ticket_source": "typed_state_action",
+            "ticket_actions_path": str(staged_actions_path),
+            "staged_action_count": len(actions),
+            "validation_issues": issues,
+            **ticket_run_payload(data, canonical_target),
+        }
+    write_ticket_run_state(canonical_target, data, actor_role=actor_role, event_type=event_type, source_path=source_path)
     if source_path and text and path.exists():
         write_ticket_run_data(path, text, data)
-    state_path = ticket_state_path(target)
     return {
         "written": True,
         "ticket_file": str(state_path),
@@ -1170,6 +1339,84 @@ def command_next(args: argparse.Namespace) -> int:
     return 0
 
 
+def data_with_claimed_next_ticket(
+    data: dict[str, Any],
+    *,
+    actor_role: str = "",
+    run_id: str = "",
+    claimed_at: str = "",
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    selection = next_ticket_selection(data)
+    selected = selection.get("ticket") if isinstance(selection.get("ticket"), dict) else {}
+    ticket_id = str(selected.get("id") or "").strip()
+    action = str(selection.get("action") or "")
+    if action != "implement_pending" or not ticket_id:
+        return data, selection, "next ticket is not a pending implementation ticket"
+
+    next_items: list[dict[str, Any]] = []
+    claimed = False
+    for item in tickets(data):
+        if str(item.get("id") or "").strip() == ticket_id and normalize_status(item.get("status")) == "pending":
+            claimed_item = dict(item)
+            claimed_item["status"] = "in_progress"
+            claimed_item["claimed_at"] = claimed_at or utc_now()
+            if actor_role:
+                claimed_item["claimed_by"] = actor_role
+            if run_id:
+                claimed_item["claimed_run_id"] = run_id
+            next_items.append(claimed_item)
+            claimed = True
+        else:
+            next_items.append(item)
+    if not claimed:
+        return data, selection, "selected ticket is no longer pending"
+    next_data = dict(data)
+    next_data["tickets"] = next_items
+    return next_data, selection, "claimed pending ticket"
+
+
+def command_claim_next(args: argparse.Namespace) -> int:
+    target = Path(args.target).expanduser().resolve()
+    data, path, text = load_ticket_run(target, Path(args.ticket_file).resolve() if args.ticket_file else None)
+    next_data, selection, claim_reason = data_with_claimed_next_ticket(
+        data,
+        actor_role=str(args.role or "").strip(),
+        run_id=str(args.run_id or "").strip(),
+    )
+    claimed = next_data is not data
+    payload: dict[str, Any] = {
+        "ticket_file": str(path),
+        "claimed": claimed,
+        "claim_reason": claim_reason,
+        "claim_role": str(args.role or "").strip(),
+        "claim_run_id": str(args.run_id or "").strip(),
+        "selected": selection,
+    }
+    if claimed:
+        payload.update(
+            write_if_valid(
+                target,
+                path,
+                text,
+                next_data,
+                actor_role=str(args.role or "").strip() or "ticket-cli",
+                event_type="ticket.claimed",
+            )
+        )
+    else:
+        payload.update(ticket_run_payload(data, target))
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        selected = selection.get("ticket") if isinstance(selection.get("ticket"), dict) else {}
+        ticket_id = str(selected.get("id") or "").strip()
+        if claimed and ticket_id:
+            print(f"claimed: {ticket_id}")
+        else:
+            print(claim_reason)
+    return 0 if not claimed or payload.get("written") else 1
+
+
 def command_should_halt(args: argparse.Namespace) -> int:
     target = Path(args.target).expanduser().resolve()
     ticket_file = Path(args.ticket_file).resolve() if args.ticket_file else None
@@ -1237,6 +1484,12 @@ def build_parser() -> argparse.ArgumentParser:
     next_parser.add_argument("--json", action="store_true")
     next_parser.set_defaults(func=command_next)
 
+    claim_next = subparsers.add_parser("claim-next", help="Mark the next pending ticket as in_progress for a role run.")
+    claim_next.add_argument("--role", default="builder")
+    claim_next.add_argument("--run-id", default="")
+    claim_next.add_argument("--json", action="store_true")
+    claim_next.set_defaults(func=command_claim_next)
+
     should_halt = subparsers.add_parser("should-halt", help="Exit 0 when the campaign should halt.")
     should_halt.add_argument("--finalize", action="store_true")
     should_halt.add_argument("--json", action="store_true")
@@ -1251,6 +1504,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "target", None):
+        args.target = str(resolve_ticket_target(Path(args.target)))
     return int(args.func(args))
 
 

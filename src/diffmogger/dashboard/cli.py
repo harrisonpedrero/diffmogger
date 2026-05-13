@@ -29,7 +29,14 @@ from .commands.inbox import command_inbox_load, command_inbox_reply_request, com
 from .commands.observatory import command_observatory_generate_html, command_observatory_load_html, command_observatory_snapshot
 from .commands.project import command_project_list_recent, command_project_load_snapshot
 from .commands.review import command_review_export_bundle, command_review_load, command_review_mark_reviewed
-from .commands.run_control import command_automation_start, command_automation_stop, command_run_load, command_run_load_log, command_run_once
+from .commands.run_control import (
+    command_automation_start,
+    command_automation_stop,
+    command_blocker_recheck_baseline,
+    command_run_load,
+    command_run_load_log,
+    command_run_once,
+)
 from .commands.state import command_state_brief, command_state_snapshot, command_state_validate
 from .commands.tickets import (
     command_ticket_accept_draft,
@@ -69,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
         "run.once": command_run_once,
         "automation.start": command_automation_start,
         "automation.stop": command_automation_stop,
+        "blocker.recheck_baseline": command_blocker_recheck_baseline,
         "ticket.load": command_ticket_load,
         "ticket.add": command_ticket_add,
         "ticket.update": command_ticket_update,
@@ -145,6 +153,8 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument("--preview", action="store_true", help="Preview import without writing")
         if name in {"ticket.draft_from_intake", "ticket.accept_draft"}:
             subparser.add_argument("--ticket-file", default="", help=argparse.SUPPRESS)
+        if name == "ticket.draft_from_intake":
+            subparser.add_argument("--direction", default="", help="Optional guidance for Codex ticket drafting")
         if name == "ticket.accept_draft":
             subparser.add_argument("--draft-id", required=True, help="Stored draft id")
             subparser.add_argument("--ticket-ids", default="", help="Comma-separated candidate ticket ids to accept")

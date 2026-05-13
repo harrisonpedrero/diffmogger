@@ -87,6 +87,23 @@ function isTicketCampaign(snapshot: ProjectSnapshot | null): boolean {
   return records.some((record) => textValue(record.automation_run_mode) === "ticket_campaign");
 }
 
+export function ticketSnapshotReloadKey(snapshot: ProjectSnapshot | null): string {
+  const run = asRecord(snapshot?.run);
+  const state = asRecord(run.state);
+  const ticketRun = asRecord(state.ticket_run);
+  const counts = asRecord(ticketRun.counts);
+  const countKey = ["pending", "in_progress", "candidate_done", "done", "blocked"]
+    .map((status) => `${status}:${counts[status] ?? 0}`)
+    .join(",");
+  return [
+    textValue(run.snapshot_generated_at),
+    textValue(ticketRun.run_id),
+    textValue(ticketRun.status),
+    String(ticketRun.total ?? ""),
+    countKey,
+  ].join("|");
+}
+
 function ActionButton(props: {
   action: RunAction;
   onRun: (action: RunAction) => void;
@@ -193,6 +210,41 @@ function RunSafetyMatrix(props: { rows: RunSafetyRow[]; busy: boolean; onRun: (a
   );
 }
 
+function RunStateMachinePanel(props: {
+  model: ReturnType<typeof buildRunModel>;
+}) {
+  return (
+    <article className="panel run-state-machine-panel" aria-label="Typed conveyor state machine">
+      <div className="panel-heading-row">
+        <div>
+          <h2>State Machine</h2>
+          <p>{props.model.stateMachine.continuationToken || "No continuation token recorded yet."}</p>
+        </div>
+        <RunTonePill tone={props.model.banner.tone}>{props.model.stateMachine.stageStatus}</RunTonePill>
+      </div>
+      <div className="state-machine-grid">
+        <DetailRow label="Stage" value={props.model.stateMachine.stage} />
+        <DetailRow label="Owner" value={props.model.stateMachine.ownerRole} />
+        <DetailRow label="Validation" value={props.model.stateMachine.validationStatus} />
+        <DetailRow label="Capabilities" value={props.model.stateMachine.capability} />
+      </div>
+      <div className="state-machine-next">
+        {props.model.stateMachine.nextActions.length ? (
+          props.model.stateMachine.nextActions.map((item, index) => (
+            <div className="state-machine-action" key={`${item.role}-${index}`}>
+              <strong>{item.role}</strong>
+              <span>{item.state}</span>
+              <p>{item.reason}</p>
+            </div>
+          ))
+        ) : (
+          <p className="empty-copy">No typed next action is queued yet.</p>
+        )}
+      </div>
+    </article>
+  );
+}
+
 export function RunPage(props: {
   snapshot: ProjectSnapshot | null;
   loading: boolean;
@@ -220,6 +272,7 @@ export function RunPage(props: {
   const [ticketImportText, setTicketImportText] = useState("");
   const [ticketImportFile, setTicketImportFile] = useState("");
   const [ticketImportPreview, setTicketImportPreview] = useState<TicketSnapshot | null>(null);
+  const [ticketDraftDirection, setTicketDraftDirection] = useState("");
   const [ticketDraft, setTicketDraft] = useState<TicketDraftState | null>(null);
   const [ticketDraftLogs, setTicketDraftLogs] = useState<RunLogEvent[]>([]);
   const [ticketPendingAction, setTicketPendingAction] = useState<
@@ -232,6 +285,7 @@ export function RunPage(props: {
 
   const target = props.snapshot?.target.path;
   const ticketCampaign = isTicketCampaign(props.snapshot);
+  const ticketReloadKey = ticketSnapshotReloadKey(props.snapshot);
   const ticketTickets = normalizeTickets(ticketSnapshot?.tickets ?? []);
   const ticketIssues = ticketSnapshot?.validation_issues ?? [];
   const ticketCounts = ticketSnapshot?.summary?.counts ?? {};
@@ -248,7 +302,13 @@ export function RunPage(props: {
     return parsed.ticket ?? emptyTicket(ticketTickets);
   }, [ticketEditorJson, ticketTickets]);
   const ticketEditorDirty = Boolean(ticketEditorJson.trim() && ticketEditorJson !== selectedTicketJson);
-  const ticketImportDirty = Boolean(ticketImportText.trim() || ticketImportFile || ticketImportPreview || ticketDraft);
+  const ticketImportDirty = Boolean(
+    ticketImportText.trim() ||
+      ticketImportFile ||
+      ticketImportPreview ||
+      ticketDraftDirection.trim() ||
+      ticketDraft,
+  );
   const routeDirtyMessage = ticketEditorDirty
     ? "Run Control has unsaved ticket editor changes."
     : ticketImportDirty
@@ -261,7 +321,7 @@ export function RunPage(props: {
       return;
     }
     void loadTickets();
-  }, [target, model.isScaffolded, ticketCampaign]);
+  }, [target, model.isScaffolded, ticketCampaign, ticketReloadKey]);
 
   useEffect(() => {
     props.onDirtyChange?.(routeDirtyMessage);
@@ -541,6 +601,7 @@ export function RunPage(props: {
 
   async function draftTickets() {
     if (!target) return;
+    const direction = ticketDraftDirection.trim();
     setTicketBusy("ticket.draft_from_intake");
     setTicketError(null);
     setTicketDraft(null);
@@ -558,6 +619,7 @@ export function RunPage(props: {
         runId,
         command: "ticket.draft_from_intake",
         target,
+        body: direction || undefined,
       });
       if (!payload.ok || !payload.data) {
         setTicketError(payload.message ?? "Ticket draft failed.");
@@ -602,6 +664,7 @@ export function RunPage(props: {
       setTicketSnapshot(payload.data);
       setTicketDraft(null);
       setTicketDraftLogs([]);
+      setTicketDraftDirection("");
       setTicketMessage("Draft tickets added to the queue.");
       setTicketPendingAction(null);
       await Promise.resolve(props.onRefresh());
@@ -719,6 +782,8 @@ export function RunPage(props: {
 
         <RunSafetyMatrix rows={model.safety} busy={isBusy} onRun={runAction} />
 
+        <RunStateMachinePanel model={model} />
+
         {ticketCampaign && (
           <article className="panel ticket-queue-panel run-ticket-panel">
             <div className="panel-heading-row">
@@ -757,6 +822,20 @@ export function RunPage(props: {
                   <h3>Draft candidates</h3>
                   <span>{ticketDraftBusy ? "Drafting" : ticketDraft ? `${ticketDraftCandidates.length} ready` : "None"}</span>
                 </div>
+              </div>
+
+              <div className="ticket-draft-controls">
+                <label className="brief-field ticket-draft-direction">
+                  <span>Agent direction (optional)</span>
+                  <textarea
+                    rows={3}
+                    maxLength={4000}
+                    value={ticketDraftDirection}
+                    onChange={(event) => setTicketDraftDirection(event.target.value)}
+                    placeholder="Focus the draft on a feature area, workflow, or constraint."
+                    disabled={ticketWriteBusy}
+                  />
+                </label>
                 <div className="inline-actions">
                   <QueueActionButton
                     tooltip="Run Codex to propose only new pending tickets. Nothing is written until you add the draft tickets."
@@ -1117,8 +1196,28 @@ export function RunPage(props: {
             <div className="blocker-list">
               {model.blockers.map((blocker) => (
                 <div className="blocker-row" key={blocker.name}>
-                  <strong>{blocker.name}</strong>
-                  <span>{value(blocker.detail, "No detail recorded.")}</span>
+                  <div>
+                    <strong>{blocker.name}</strong>
+                    <span>{value(blocker.detail, "No detail recorded.")}</span>
+                  </div>
+                  {blocker.canRecheck && blocker.recheckCommand && (
+                    <button
+                      className="ledger-action"
+                      disabled={isBusy}
+                      onClick={() =>
+                        runAction({
+                          label: blocker.recheckLabel || "Recheck blocker",
+                          kind: "backend",
+                          command: blocker.recheckCommand,
+                          enabled: true,
+                          reason: "Rerun baseline verification in a freshly loaded automation environment.",
+                        })
+                      }
+                    >
+                      <RefreshCw size={14} />
+                      {blocker.recheckLabel || "Recheck blocker"}
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

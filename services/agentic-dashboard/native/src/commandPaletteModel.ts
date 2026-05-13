@@ -259,7 +259,7 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       id: "send-note-next-run",
       title: "Send note to next run",
       section: "Inbox",
-      description: "Write a file-based note for the next run.",
+      description: "Queue a typed dashboard note for the next run.",
       keywords: ["inbox", "human bridge", "bridge", "note"],
       routesTo: "Inbox",
       disabledReason: busyReason ?? targetReason,

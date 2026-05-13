@@ -23,7 +23,7 @@ from diffmogger.runtime.paths import (
     sidecar_rel,
     sidecarize_text,
 )
-from diffmogger.runtime.state_store import write_canonical_state_brief, write_ticket_run_state
+from diffmogger.runtime.state_store import write_automation_control_state, write_canonical_state_brief, write_ticket_run_state
 
 
 def find_kit_root() -> Path:
@@ -83,6 +83,14 @@ MANAGED_EXISTING_PROJECT_FILES = {
 
 DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS = [
     "/.diffmogger/",
+    "/.env",
+    "/.env.development",
+    "/.env.development.local",
+    "/.env.local",
+    "/apps/*/.env",
+    "/apps/*/.env.development",
+    "/apps/*/.env.development.local",
+    "/apps/*/.env.local",
     "/scripts/__pycache__/",
     "/target/agent_runs/",
     "/target/automation_conveyor.lock",
@@ -307,32 +315,31 @@ def normalize_write_worker_count(value: Any, enabled: bool) -> int:
     return max(1, min(MAX_WRITE_WORKER_COUNT, count))
 
 
-def normalize_role_profile(value: Any, multi_role_enabled: bool) -> str:
+def normalize_role_profile(value: Any, legacy_multi_role_enabled: Any = None) -> str:
     text = str(value or "").strip().lower()
     text = text.replace("-", "_").replace(" ", "_")
-    if text == "single_lane":
-        return "single_lane"
-    if not multi_role_enabled:
-        return "single_lane"
-    if not text:
-        text = "planner_builder_hardener_integrator"
     if text in VALID_ROLE_PROFILES:
         return text
+    if legacy_multi_role_enabled is not None:
+        return (
+            "planner_builder_hardener_integrator"
+            if normalize_bool(legacy_multi_role_enabled, True)
+            else "single_lane"
+        )
     return "planner_builder_hardener_integrator"
 
 
 def multi_role_enabled(data: dict[str, Any]) -> bool:
-    raw_profile = str(data.get("automation_role_profile") or "").strip().lower()
-    raw_profile = raw_profile.replace("-", "_").replace(" ", "_")
-    if raw_profile == "single_lane":
-        return False
-    return normalize_bool(data.get("multi_role_automations_allowed"), True)
+    return automation_role_profile(data) == "planner_builder_hardener_integrator"
 
 
 def automation_role_profile(data: dict[str, Any]) -> str:
-    enabled = multi_role_enabled(data)
-    profile = normalize_role_profile(data.get("automation_role_profile"), enabled)
-    return "planner_builder_hardener_integrator" if enabled and profile != "single_lane" else "single_lane"
+    legacy_multi_role_enabled = (
+        data.get("multi_role_automations_allowed")
+        if "multi_role_automations_allowed" in data
+        else None
+    )
+    return normalize_role_profile(data.get("automation_role_profile"), legacy_multi_role_enabled)
 
 
 def normalize_automation_run_mode(value: Any) -> str:
@@ -540,7 +547,7 @@ python3 scripts/ticket_run.py . next --json
 
 Use that dependency-aware selection as the only ticket scope for the run. Act on at most one selected ticket per run, preserving file order as the human's priority order when dependencies allow. A single-lane run may implement and verify that one ticket, but must not continue into another ticket after it is completed, blocked, or marked `candidate_done`.
 
-If `next --json` reports placeholder tickets, missing dependencies, duplicate ticket IDs, dependency cycles, blocked dependencies, or no actionable ticket, record the structured blocker in `docs/CODEX_AUTOMATION_TASKS.md` instead of guessing or reordering the campaign by hand.
+If `next --json` reports placeholder tickets, missing dependencies, duplicate ticket IDs, dependency cycles, blocked dependencies, or no actionable ticket, record the structured blocker in typed runtime state and refresh generated handoff projections instead of guessing or reordering the campaign by hand.
 
 When every ticket is done, or when all remaining tickets are blocked, run:
 
@@ -688,8 +695,6 @@ If the phase criteria are met, update the current horizon to the next ticket-run
                 [
                     "- Ticket queue still needs to be populated or confirmed.",
                     "- Verification commands may need adjustment after bootstrap.",
-                    "- Automation runs should use `scripts/run_codex_automation.sh`, which wraps local lock acquire/release before code mutation.",
-                    "- Continuous conveyor automation should use `scripts/run_conveyor_automation.sh`, which records canonical SQLite state and delegates to the target-local wrappers.",
                 ]
             ),
             "BEST_NEXT_MILESTONE": f"Complete T1 readiness-only ticket bootstrap for `{project_name}` and record whether one-ticket campaign runs can start.",
@@ -705,7 +710,7 @@ If the phase criteria are met, update the current horizon to the next ticket-run
             "CONTINUE_RATIONALE": "Continue. The ticket campaign has bounded local ticket scope and no active blocker.",
             "AGENTS_PROGRESS_RULE": "Treat the ticket queue as a bounded, dependency-aware execution queue; after readiness, act on at most one `scripts/ticket_run.py . next --json` selection per run.",
             "INITIAL_PROGRESS_EVIDENCE_LABEL": "ticket-readiness evidence",
-            "BOOTSTRAP_SCOPE_BOUNDARY": "Ticket-campaign bootstrap is readiness-only: inspect the repo, confirm the dashboard ticket queue parses, run `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` when possible, configure docs/checks, and update task state. If the ticket queue is empty, placeholder-only, malformed, or ambiguous, record `ACTIVE_WITH_PENDING_USER_INPUT` or an honest blocker instead of solving tickets. Do not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, finalize the campaign, or continue into the first ticket.",
+            "BOOTSTRAP_SCOPE_BOUNDARY": "Ticket-campaign bootstrap is readiness-only: inspect the repo, confirm the dashboard ticket queue parses, run `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` when possible, configure docs/checks, and update typed automation control state plus generated projections. If the ticket queue is empty, placeholder-only, malformed, or ambiguous, record `ACTIVE_WITH_PENDING_USER_INPUT` or an honest blocker instead of solving tickets. Do not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, finalize the campaign, or continue into the first ticket.",
             "BOOTSTRAP_END_NOTE": "Use the ticket queue as the first bounded readiness phase. Do not implement tickets during bootstrap, and do not create extra roadmap work after every ticket is done or blocked.",
         }
 
@@ -751,13 +756,13 @@ If the phase criteria are met, update the current horizon to the next ticket-run
             "The workflow has been reviewed, simplified, strengthened, or compacted based on real automation evidence.",
         ),
     ]
-    guidance = f"""Product horizons are explicit prompt/handoff state, not just inspiration. At the start of each run, read `target/canonical_state_brief.md` and the `## Product Horizon State` section in `docs/CODEX_AUTOMATION_TASKS.md`. Choose work that advances the current horizon unless a regression, blocker, or human instruction requires a different focus.
+    guidance = f"""Product horizons are typed automation control state, not just inspiration. At the start of each run, read `target/canonical_state_brief.md`; `docs/CODEX_AUTOMATION_TASKS.md` is the generated handoff projection. Choose work that advances the current horizon unless a regression, blocker, or human instruction requires a different focus.
 
 These horizons were scaffolded from the project intake:
 
 {markdown_table(rows)}
 
-At the end of every run, update `## Product Horizon State` with:
+At the end of every run, update typed automation control state and refresh `## Product Horizon State` in the generated task projection with:
 
 - current horizon
 - horizon goal
@@ -787,8 +792,6 @@ Long-run direction: {long_run}"""
             [
                 "- Product baseline still needs to be created or inspected.",
                 "- Verification commands may need adjustment after bootstrap.",
-                "- Automation runs should use `scripts/run_codex_automation.sh`, which wraps local lock acquire/release before code mutation.",
-                    "- Continuous conveyor automation should use `scripts/run_conveyor_automation.sh`, which records canonical SQLite state and delegates to the target-local wrappers.",
             ]
         ),
         "BEST_NEXT_MILESTONE": f"Complete H1 Runnable baseline for `{project_name}` and record whether the project is ready to advance to H2 Local-first demo.",
@@ -1049,7 +1052,7 @@ After write workers finish, the main agent must:
 - resolve conflicts and contract mismatches
 - integrate the slices into one coherent change
 - run relevant verification
-- update `docs/CODEX_AUTOMATION_TASKS.md` with worker strategy, workers used, changed files, checks, accepted/rejected/deferred outputs, and final status"""
+- update typed runtime state and generated task projections with worker strategy, workers used, changed files, checks, accepted/rejected/deferred outputs, and final status"""
         guardrails = f"""- Write-capable workers are enabled but optional; use them as bounded acceleration when work can split into reviewable lanes.
 - Spawn at most {max_write_workers} write workers in one run, and use the most parallelism the task can safely absorb.
 - Define enough contracts/interfaces and file/module ownership for workers to avoid chaotic overlap, without turning planning into ceremony.
@@ -1064,7 +1067,7 @@ After write workers finish, the main agent must:
 - Write workers are optional acceleration for broad work with reviewable ownership boundaries.
 - Read-only workers remain the default for exploration and review.
 - Integration-only runs with no workers are valid when faster or safer.
-- The main agent must assign ownership, reject weak output, integrate strong output, verify, and update task state."""
+- The main agent must assign ownership, reject weak output, integrate strong output, verify, update typed runtime state, and refresh generated projections."""
         development = f"""Write-capable worker agents allowed: true
 
 Max write worker count: {max_write_workers}
@@ -1078,7 +1081,7 @@ Max write worker count: {max_write_workers}
 
 Recurring automation should use read-only worker reports for exploration and use bounded write workers as acceleration when work can split into useful parallel lanes. Keep planning lightweight, but make ownership, verification, and integration responsibilities clear."""
     else:
-        orchestration = """Write workers are disabled for this project. Do not spawn nested workers that modify source files or docs. Use read-only worker reports when useful, and let the main agent implement, integrate, verify, and update task state directly.
+        orchestration = """Write workers are disabled for this project. Do not spawn nested workers that modify source files or docs. Use read-only worker reports when useful, and let the main agent implement, integrate, verify, update typed runtime state, and refresh generated projections directly.
 
 Integration-only runs with no workers are valid."""
         guardrails = """- Write-capable workers are disabled unless the project intake is explicitly updated to enable them.
@@ -1119,9 +1122,7 @@ def multi_role_values(data: dict[str, Any]) -> dict[str, str]:
     allow_remotes = normalize_bool(data.get("multi_role_allow_remotes"), False)
 
     if enabled:
-        automation_section = f"""Multi-role automations allowed: true
-
-Role profile: `{profile}`
+        automation_section = f"""Role profile: `{profile}`
 
 Diffmogger uses a continuous local state-machine conveyor. Role prompts live under `.agentic/roles/`, isolated git worktrees live under `target/automation_worktrees/`, queued patches live under `target/automation_queue/`, canonical runtime state lives in `target/orchestration.sqlite3`, and agents read the generated `target/canonical_state_brief.md` view. `docs/MULTI_ROLE_PROGRESS.md` is a human-readable projection/export.
 
@@ -1129,7 +1130,7 @@ The dashboard Start button launches `scripts/run_conveyor_automation.sh` as a de
 
 Multi-role mode is local-only. Roles must never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run any git command that touches a remote. Local commits, local branches, local tags, and local worktrees are allowed. Any remote-touching attempt is a `CRITICAL_STOP`.
 
-Planner, builder, and hardener start from the latest main `HEAD` at run start. They may see partially integrated state from earlier patches in the same cycle; this is accepted. The integrator owns the main checkout, applies queued patches FIFO, verifies, creates local checkpoint commits, updates typed state plus `docs/CODEX_AUTOMATION_TASKS.md`, refreshes `docs/MULTI_ROLE_PROGRESS.md` as a projection, and enforces retention."""
+Planner, builder, and hardener start from the latest main `HEAD` at run start. They may see partially integrated state from earlier patches in the same cycle; this is accepted. The integrator owns the main checkout, applies queued patches FIFO, verifies, creates local checkpoint commits, updates typed state, refreshes `docs/CODEX_AUTOMATION_TASKS.md` and `docs/MULTI_ROLE_PROGRESS.md` as projections, and enforces retention."""
         guardrails = """- Multi-role automation is enabled by default and runs through the continuous conveyor.
 - Multi-role role runs require an initialized local git repo.
 - Multi-role mode is local-only: never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run git commands that touch a remote.
@@ -1138,17 +1139,13 @@ Planner, builder, and hardener start from the latest main `HEAD` at run start. T
 - Planner, builder, and hardener must use isolated worktrees and queue patches instead of mutating the main checkout.
 - Integrator must checkpoint dirty main changes as-is before applying queued patches; do not revert or discard human changes.
 - Integrator must defer conflicting, stale, guardrail-violating, or verification-failing patches with machine-readable deferral reasons."""
-        task_notes = f"""Multi-role automations allowed: true
-
-- Role profile: `{profile}`
+        task_notes = f"""- Role profile: `{profile}`
 - Continuous conveyor: `scripts/run_conveyor_automation.sh`.
 - The conveyor prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning, post-builder hardening, candidate verification, and then planner/builder/hardener state transitions.
 - Integrator refreshes `docs/MULTI_ROLE_PROGRESS.md` as a projection and creates local checkpoint commits.
 - Deferred patches remain visible through `scripts/list_deferred_patches.py`; use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local triage or add `--decision-template` for a per-manifest cleanup worksheet.
 - Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""
-        development = f"""Multi-role automations allowed: true
-
-Role profile: `{profile}`
+        development = f"""Role profile: `{profile}`
 
 Use the dashboard Start/Stop buttons or the continuous conveyor directly. The conveyor keeps work moving by running the next useful lane as soon as the previous lane finishes:
 
@@ -1176,19 +1173,15 @@ python3 scripts/list_deferred_patches.py . --decision-template
 The Markdown view groups the backlog by reason and recommended local action. The decision template adds per-manifest fields for archive, replace-from-current-HEAD, repair-and-retry, retry-as-is, or keep-deferred choices during integrator cleanup.
 
 The target must have a local git repo with an initial commit. Diffmogger scaffold creates both automatically when `HEAD` is missing. Multi-role mode creates local worktrees, local queue artifacts, and local commits only. It never pushes."""
-        bootstrap = f"""Multi-role automations allowed: true
-
-Role profile: `{profile}`
+        bootstrap = f"""Role profile: `{profile}`
 
 After bootstrap, the scaffold step ensures this target has a local git repo and initial commit before continuous automation starts. The role prompts, conveyor, and helpers are generated locally; no remote git operations are allowed."""
     else:
-        automation_section = """Multi-role automations allowed: false
-
-Role profile: `single_lane`
+        automation_section = """Role profile: `single_lane`
 
 Diffmogger uses a single-role continuous conveyor for this target. The dashboard Start button launches `scripts/run_conveyor_automation.sh` as a detached local runner, and the conveyor repeatedly dispatches the target-local single-lane wrapper `scripts/run_codex_automation.sh` when useful work remains.
 
-The solo loop is: read durable state, choose the next valuable deliverable, execute it, verify or review the result, update task state and human-bridge state, then continue, block, or stop according to `AUTOMATION_STATUS`.
+The solo loop is: read durable typed state, choose the next valuable deliverable, execute it, verify or review the result, update automation control and human-message state, refresh generated projections, then continue, block, or stop according to typed automation status.
 
 When `automation_checkpoint_commits` is true, the single-lane wrapper creates a local checkpoint commit after each successful run that leaves committable product changes. It does not push remotes.
 
@@ -1199,17 +1192,13 @@ Single-lane mode is for simpler software work, documentation, research synthesis
 - When `automation_checkpoint_commits` is true, successful single-lane runs create local-only checkpoint commits for committable changes.
 - Use the same status model as all Diffmogger targets: `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`.
 - Keep generated work target-project agnostic and keep secrets out of docs, prompts, examples, and state."""
-        task_notes = """Multi-role automations allowed: false
-
-- Role profile: `single_lane`
+        task_notes = """- Role profile: `single_lane`
 - Continuous conveyor: `scripts/run_conveyor_automation.sh`.
 - Active work runs through `scripts/run_codex_automation.sh`.
-- The solo loop is read state, pick the next valuable deliverable, execute, verify/review, update task and human-bridge state, then continue, block, or stop.
+- The solo loop is read typed state, pick the next valuable deliverable, execute, verify/review, update automation control and human-message state, refresh generated projections, then continue, block, or stop.
 - Single-lane checkpoint commits: enabled when `automation_checkpoint_commits` is true; commits are local-only and created after successful runs with committable changes.
 - This profile does not generate planner/builder/hardener/integrator role prompts, queued role patches, or `docs/MULTI_ROLE_PROGRESS.md`."""
-        development = """Multi-role automations allowed: false
-
-Role profile: `single_lane`
+        development = """Role profile: `single_lane`
 
 Use the dashboard Start/Stop buttons or the continuous conveyor directly. The conveyor keeps work moving by rerunning the single-lane wrapper as long as useful work remains:
 
@@ -1224,10 +1213,8 @@ Manual single-lane run:
 bash scripts/run_codex_automation.sh
 ```
 
-Single-lane mode is still continuous automation. It keeps the lock wrapper, watchdog, task file, worker-decision logging, human bridge, verification guidance, status model, observatory state, and local checkpoint commits when enabled, but omits multi-role role prompts and integrator queues."""
-        bootstrap = """Multi-role automations allowed: false
-
-Role profile: `single_lane`
+Single-lane mode is still continuous automation. It keeps the lock wrapper, watchdog, typed automation control, generated task projection, worker-decision logging, human bridge, verification guidance, status model, observatory state, and local checkpoint commits when enabled, but omits multi-role role prompts and integrator queues."""
+        bootstrap = """Role profile: `single_lane`
 
 After bootstrap, use the dashboard Start button or `scripts/run_conveyor_automation.sh` for continuous solo automation. The generated target does not need multi-role worktrees, role prompts, or integration queues. Successful runs create local checkpoint commits when `automation_checkpoint_commits` is enabled."""
 
@@ -1732,6 +1719,38 @@ def diffmogger_human_state_paths(values: dict[str, str]) -> list[str]:
 
 
 def seed_runtime_state(target: Path, values: dict[str, str]) -> None:
+    write_workers_allowed = values.get("WRITE_WORKER_AGENTS_ALLOWED") == "true"
+    try:
+        max_write_workers = int(values.get("MAX_WRITE_WORKER_COUNT") or "0")
+    except ValueError:
+        max_write_workers = 0
+    write_automation_control_state(
+        target,
+        {
+            "status": "ACTIVE",
+            "last_updated": values.get("CREATED_AT") or "",
+            "horizon": values.get("CURRENT_HORIZON") or "H1 Runnable baseline",
+            "horizon_decision": "stay",
+            "current_assessment": "Current baseline: not bootstrapped yet.",
+            "best_next_milestone": values.get("BEST_NEXT_MILESTONE") or "Create or confirm setup, local run path, and verification.",
+            "suggested_next_task": values.get("SUGGESTED_NEXT_SPRINT_TASK") or "Run one bootstrap pass that records local verification evidence.",
+            "known_issue": "No active issue summary.",
+            "known_issues": [],
+            "bootstrap_status": "pending",
+            "worker": {
+                "agents_allowed": values.get("WORKER_AGENTS_ALLOWED") == "true",
+                "write_workers_allowed": write_workers_allowed,
+                "max_write_worker_count": max_write_workers if write_workers_allowed else 0,
+            },
+            "payload": {
+                "project_name": values.get("PROJECT_NAME") or target.name,
+                "automation_run_mode": values.get("AUTOMATION_RUN_MODE") or "continuous_improvement",
+                "role_profile": values.get("AUTOMATION_ROLE_PROFILE") or "",
+            },
+        },
+        actor_role="scaffold",
+        event_type="automation.control_seeded",
+    )
     if values.get("AUTOMATION_RUN_MODE") == "ticket_campaign":
         try:
             tickets = json.loads(values.get("TICKET_RUN_TICKETS_JSON") or "[]")
@@ -1759,6 +1778,7 @@ def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -
         path
         for path in owned_paths
         if path.startswith((".diffmogger/agentic/", ".diffmogger/context", ".diffmogger/state/", ".diffmogger/scripts/", ".diffmogger/lib/"))
+        or path == "AGENTS.md"
         or path == sidecar_rel("target/canonical_state_brief.md")
     ]
     path_aliases = {

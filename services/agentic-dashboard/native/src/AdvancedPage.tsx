@@ -403,10 +403,10 @@ export function AdvancedPage(props: {
     try {
       const loaded = await getAdvancedSettings();
       setSettings(loaded);
-      setDebugOutputDir(loaded.reviewExportDir || `${target}/target/debug-bundles`);
+      setDebugOutputDir(loaded.reviewExportDir || `${target}/.diffmogger/runtime/debug-bundles`);
     } catch {
       setSettings(defaultSettings);
-      setDebugOutputDir(`${target}/target/debug-bundles`);
+      setDebugOutputDir(`${target}/.diffmogger/runtime/debug-bundles`);
     }
   }
 
@@ -417,7 +417,7 @@ export function AdvancedPage(props: {
     try {
       const saved = await updateAdvancedSettings(settings);
       setSettings(saved);
-      setDebugOutputDir(saved.reviewExportDir || `${target}/target/debug-bundles`);
+      setDebugOutputDir(saved.reviewExportDir || `${target}/.diffmogger/runtime/debug-bundles`);
       setNotice("Settings saved to the app-local config.");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -443,7 +443,7 @@ export function AdvancedPage(props: {
       const payload: BackendEnvelope<AdvancedDebugBundleResult> = await runBackendCommand({
         command: "advanced.export_debug_bundle",
         target,
-        outputDir: debugOutputDir || `${target}/target/debug-bundles`,
+        outputDir: debugOutputDir || `${target}/.diffmogger/runtime/debug-bundles`,
       });
       if (!payload.ok || !payload.data) {
         setError(payload.message ?? "Could not export debug files.");
@@ -552,7 +552,7 @@ export function AdvancedPage(props: {
   const prereqRows = (diagnostics?.prerequisites.items ?? []) as Array<Record<string, unknown>>;
   const toolRows = (diagnostics?.tools ?? []) as Array<Record<string, unknown>>;
   const validationItems = validation?.items ?? [];
-  const debugDir = debugOutputDir || `${target}/target/debug-bundles`;
+  const debugDir = debugOutputDir || `${target}/.diffmogger/runtime/debug-bundles`;
   const selectedPath = text(loadedFile?.file.path ?? selectedFile?.path ?? selectedFile?.rel_path, "");
   const editableFileCount = files.filter((file) => file.editable).length;
   const missingFileCount = files.filter((file) => !file.exists).length;
@@ -954,7 +954,7 @@ export function AdvancedPage(props: {
           <article className="panel">
             <h2>Storage</h2>
             <p className="empty-copy">
-              Preferences are stored in the app config. Project state remains target-local in .agentic/dashboard_state.json.
+              Preferences are stored in the app config. Project state remains target-local in .diffmogger/agentic/dashboard_state.json.
             </p>
           </article>
         </div>

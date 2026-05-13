@@ -77,6 +77,7 @@ if [[ -z "$run_id" ]]; then
 fi
 
 target_abs="$(cd "$target_dir" && pwd)"
+export DIFFMOGGER_TARGET_ROOT="$target_abs"
 cd "$target_abs"
 
 load_codex_automation_env() {
@@ -128,6 +129,14 @@ if ! grep -Fx "# Diffmogger local automation scaffold/runtime" "$exclude_path" >
   printf '%s\n' "# Diffmogger local automation scaffold/runtime" >> "$exclude_path"
 fi
 for pattern in \
+  "/.env" \
+  "/.env.development" \
+  "/.env.development.local" \
+  "/.env.local" \
+  "/apps/*/.env" \
+  "/apps/*/.env.development" \
+  "/apps/*/.env.development.local" \
+  "/apps/*/.env.local" \
   "/.agentic/" \
   "/AGENTS.md" \
   "/docs/AUTONOMY_EXPERIMENT_LOG.md" \
@@ -197,8 +206,13 @@ try:
     manifest = json.loads((target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8"))
 except Exception:
     manifest = {}
+def normalize_rel(value: str) -> str:
+    rel = str(value).strip().replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.lstrip("/")
 for rel in manifest.get("patch_exclude_paths") or []:
-    rel = str(rel).strip().lstrip("./")
+    rel = normalize_rel(str(rel))
     if rel:
         print("/" + rel.rstrip("/") + ("/" if rel.endswith("/") else ""))
 PY
@@ -222,17 +236,23 @@ except Exception:
 sidecar = manifest.get("layout") == "sidecar_v1"
 aliases = manifest.get("path_aliases") if isinstance(manifest.get("path_aliases"), dict) else {}
 
+def normalize_rel(value: str) -> str:
+    rel = str(value).strip().replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.lstrip("/")
+
 def rel(path: str) -> str:
     if not sidecar:
         return path
     if path in aliases:
-        return str(aliases[path]).strip().lstrip("./")
+        return normalize_rel(str(aliases[path]))
     for old, new in sorted(aliases.items(), key=lambda item: len(str(item[0])), reverse=True):
-        old = str(old).strip().lstrip("./").rstrip("/")
-        new = str(new).strip().lstrip("./").rstrip("/")
+        old = normalize_rel(str(old)).rstrip("/")
+        new = normalize_rel(str(new)).rstrip("/")
         if old and path.startswith(old + "/"):
             return new + path[len(old):]
-    return path
+    return normalize_rel(path)
 
 values = {
     "prompt_path": target / rel(f".agentic/roles/{role}.md"),
@@ -240,6 +260,7 @@ values = {
     "worktree_dir": target / rel(f"target/automation_worktrees/{role}/{run_id}"),
     "log_dir": target / rel("target/automation_logs"),
     "worktree_summary_rel": rel(f"target/automation_queue/{role}/{run_id}/summary.md"),
+    "worktree_ticket_state_actions_rel": rel(f"target/automation_queue/{role}/{run_id}/ticket_state_actions.json"),
     "state_brief_path": target / rel("target/canonical_state_brief.md"),
     "state_brief_rel": rel("target/canonical_state_brief.md"),
     "mcp_config_rel": rel(".codex/config.toml"),
@@ -280,6 +301,10 @@ mkdir -p "$queue_dir" "$(dirname "$worktree_dir")" "$log_dir"
 
 summary_path="$queue_dir/summary.md"
 worktree_summary_path="$worktree_dir/$worktree_summary_rel"
+ticket_state_actions_path="$queue_dir/ticket_state_actions.json"
+worktree_ticket_state_actions_path="$worktree_dir/$worktree_ticket_state_actions_rel"
+ticket_claim_path="$queue_dir/ticket_claim.json"
+ticket_claim_stderr_path="$queue_dir/ticket_claim.stderr.log"
 patch_path="$queue_dir/changes.patch"
 manifest_path="$queue_dir/manifest.json"
 raw_log="$queue_dir/codex.raw.log"
@@ -296,6 +321,19 @@ rerun_stderr="$queue_dir/codex.rerun.stderr.log"
 rerun_watchdog_status_path="$queue_dir/codex.rerun.watchdog.json"
 final_watchdog_status_path="$watchdog_status_path"
 hardener_queue_root="$(dirname "$(dirname "$queue_dir")")/hardener"
+
+if [[ "$role" == "builder" && -f "$runtime_script_dir/ticket_run.py" ]]; then
+  DIFFMOGGER_TICKET_STATE_DIRECT=1 python3 "$runtime_script_dir/ticket_run.py" "$target_abs" claim-next \
+    --role "$role" \
+    --run-id "$run_id" \
+    --json >"$ticket_claim_path" 2>"$ticket_claim_stderr_path" || {
+      printf 'WARN: failed to claim next ticket for %s run %s; continuing with role execution.\n' "$role" "$run_id" >&2
+      if [[ -s "$ticket_claim_stderr_path" ]]; then
+        cat "$ticket_claim_stderr_path" >&2
+      fi
+    }
+  regenerate_state_brief
+fi
 
 git worktree add --detach "$worktree_dir" "$base_commit" >/dev/null
 mkdir -p "$(dirname "$worktree_summary_path")"
@@ -355,8 +393,13 @@ try:
     manifest = json.loads((target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8"))
 except Exception:
     manifest = {}
+def normalize_rel(value: str) -> str:
+    rel = str(value).strip().replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.lstrip("/")
 for rel in manifest.get("worktree_seed_paths") or []:
-    rel = str(rel).strip().lstrip("./")
+    rel = normalize_rel(str(rel))
     if rel:
         print(rel)
 PY
@@ -384,7 +427,7 @@ except Exception:
     manifest = {}
 if manifest.get("layout") == "sidecar_v1":
     explicit_paths = [
-        str(item).strip().lstrip("./")
+        str(item).strip()
         for item in (manifest.get("worktree_seed_paths") or [])
         if str(item).strip().startswith((".diffmogger/agentic/", ".diffmogger/state/"))
     ]
@@ -534,6 +577,7 @@ done
 for rel in "${runtime_state_paths[@]}"; do
   context_excludes+=(":(exclude)$rel")
 done
+context_excludes+=(":(exclude)$worktree_ticket_state_actions_rel")
 
 seed_context_path() {
   local rel="$1"
@@ -559,6 +603,7 @@ for rel in "${runtime_state_paths[@]}"; do
 done
 
 export PLAYWRIGHT_MCP_OUTPUT_DIR="${PLAYWRIGHT_MCP_OUTPUT_DIR:-$worktree_dir/$playwright_artifact_rel}"
+export DIFFMOGGER_TICKET_STATE_ACTIONS_PATH="$worktree_ticket_state_actions_path"
 
 CODEX_ROLE_ARGS=(--add-dir "$HOME/.codex")
 toml_quote() {
@@ -1073,6 +1118,37 @@ actions_path.write_text(
 changed_path.write_text("\n".join(changed) + ("\n" if changed else ""), encoding="utf-8")
 PY
 
+python3 - "$runtime_state_actions_path" "$worktree_ticket_state_actions_path" "$ticket_state_actions_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+runtime_actions_path = Path(sys.argv[1])
+worktree_ticket_actions_path = Path(sys.argv[2])
+queue_ticket_actions_path = Path(sys.argv[3])
+
+def load_actions(path: Path) -> list[dict]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    raw = payload.get("actions") if isinstance(payload, dict) else None
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+runtime_actions = load_actions(runtime_actions_path)
+ticket_actions = load_actions(worktree_ticket_actions_path)
+if ticket_actions:
+    queue_ticket_actions_path.write_text(
+        json.dumps({"schema_version": 1, "actions": ticket_actions}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    runtime_actions.extend(ticket_actions)
+    runtime_actions_path.write_text(
+        json.dumps({"schema_version": 1, "actions": runtime_actions}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+PY
+
 (
   cd "$worktree_dir"
   git ls-files --others --exclude-standard -z -- . "${context_excludes[@]}" >"$queue_dir/untracked_files.z"
@@ -1152,7 +1228,7 @@ summary_path.parent.mkdir(parents=True, exist_ok=True)
 summary_path.write_text("\n".join(fallback).rstrip() + "\n", encoding="utf-8")
 PY
 
-python3 - "$manifest_path" "$role" "$run_id" "$base_commit" "$patch_path" "$summary_path" "$codex_status" "$queue_dir/changed_files.txt" "$runtime_state_actions_path" "$runtime_state_changed_files_path" "$final_watchdog_status_path" <<'PY'
+python3 - "$manifest_path" "$role" "$run_id" "$base_commit" "$patch_path" "$summary_path" "$codex_status" "$queue_dir/changed_files.txt" "$runtime_state_actions_path" "$runtime_state_changed_files_path" "$ticket_state_actions_path" "$final_watchdog_status_path" <<'PY'
 import json
 import re
 import sys
@@ -1169,7 +1245,8 @@ exit_code = int(sys.argv[7])
 changed_files_path = Path(sys.argv[8])
 runtime_state_actions_path = Path(sys.argv[9])
 runtime_state_changed_files_path = Path(sys.argv[10])
-watchdog_status_path = Path(sys.argv[11])
+ticket_state_actions_path = Path(sys.argv[11])
+watchdog_status_path = Path(sys.argv[12])
 changed_files = [
     line.strip()
     for line in changed_files_path.read_text(encoding="utf-8").splitlines()
@@ -1196,8 +1273,15 @@ def summary_field(field_name: str) -> str:
 
 verification_scope = summary_field("Verification scope").lower().replace("-", "_")
 test_change_rationale = summary_field("Test change rationale")
+try:
+    runtime_actions_payload = json.loads(runtime_state_actions_path.read_text(encoding="utf-8"))
+except Exception:
+    runtime_actions_payload = {}
+runtime_state_action_count = len(
+    [item for item in runtime_actions_payload.get("actions", []) if isinstance(item, dict)]
+) if isinstance(runtime_actions_payload, dict) else 0
 patch_empty = not patch_path.exists() or patch_path.stat().st_size == 0
-runtime_state_empty = not runtime_state_changed_files
+runtime_state_empty = not runtime_state_changed_files and runtime_state_action_count == 0
 status = "failed" if exit_code != 0 else ("skipped" if patch_empty and runtime_state_empty else "queued")
 manifest = {
     "role": role,
@@ -1210,8 +1294,10 @@ manifest = {
     "patch_path": str(patch_path),
     "changed_files": changed_files,
     "runtime_state_actions_path": str(runtime_state_actions_path),
+    "ticket_state_actions_path": str(ticket_state_actions_path),
+    "runtime_state_action_count": runtime_state_action_count,
     "runtime_state_changed_files": runtime_state_changed_files,
-    "runtime_state_status": "pending" if runtime_state_changed_files else "none",
+    "runtime_state_status": "pending" if not runtime_state_empty else "none",
     "runtime_state_results": [],
     "watchdog_status_path": str(watchdog_status_path),
     "watchdog_timed_out": bool(watchdog_status.get("timed_out")),
@@ -1232,9 +1318,22 @@ manifest = {
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
+runtime_state_action_count="$(
+  python3 - "$runtime_state_actions_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    payload = {}
+raw = payload.get("actions") if isinstance(payload, dict) else None
+print(len([item for item in raw if isinstance(item, dict)]) if isinstance(raw, list) else 0)
+PY
+)"
 if [[ "$codex_status" != "0" ]]; then
   manifest_status="failed"
-elif [[ -s "$patch_path" || -s "$runtime_state_changed_files_path" ]]; then
+elif [[ -s "$patch_path" || -s "$runtime_state_changed_files_path" || "$runtime_state_action_count" != "0" ]]; then
   manifest_status="queued"
 else
   manifest_status="skipped"

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from .state import *
 from diffmogger.runtime.paths import load_manifest
-from diffmogger.runtime.state_store import unhandled_human_message_count as runtime_unhandled_human_message_count
+from diffmogger.runtime.state_store import (
+    automation_control_state,
+    unhandled_human_message_count as runtime_unhandled_human_message_count,
+)
 
 def unhandled_human_message_count(target: Path) -> int:
     return runtime_unhandled_human_message_count(target)
@@ -14,6 +17,11 @@ def target_has_multi_role(target: Path) -> bool:
 
 
 def target_role_profile(target: Path) -> str:
+    control = automation_control_state(target, import_legacy_if_empty=True)
+    payload = control.get("payload") if isinstance(control.get("payload"), dict) else {}
+    profile = str(payload.get("role_profile") or "").strip()
+    if profile in {"single_lane", "planner_builder_hardener_integrator"}:
+        return profile
     manifest = load_manifest(target)
     features = manifest.get("features") if isinstance(manifest.get("features"), dict) else {}
     profile = str(features.get("automation_role_profile") or "").strip()
@@ -24,20 +32,15 @@ def target_role_profile(target: Path) -> str:
 
     for rel in [".agentic/project_intake.json", ".agentic/dashboard_state.json"]:
         data = read_json(dpath(target, rel))
-        profile = str(data.get("automation_role_profile") or "").strip()
+        profile = str(data.get("automation_role_profile") or "").strip().lower()
+        profile = profile.replace("-", "_").replace(" ", "_")
         if profile == "single_lane":
             return "single_lane"
         if profile == "planner_builder_hardener_integrator":
-            return "planner_builder_hardener_integrator" if data.get("multi_role_automations_allowed", True) else "single_lane"
+            return "planner_builder_hardener_integrator"
         if "multi_role_automations_allowed" in data:
             return "planner_builder_hardener_integrator" if data.get("multi_role_automations_allowed") else "single_lane"
 
-    for rel in [".agentic/automation_prompt.md", "docs/CODEX_AUTOMATION_TASKS.md"]:
-        text = read_text(dpath(target, rel))
-        if "Role profile: `single_lane`" in text or "Multi-role automations allowed: false" in text:
-            return "single_lane"
-        if "Role profile: `planner_builder_hardener_integrator`" in text or "Multi-role automations allowed: true" in text:
-            return "planner_builder_hardener_integrator"
     return ""
 
 def queued_manifests(target: Path) -> list[Path]:

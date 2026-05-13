@@ -121,12 +121,12 @@
     },
     "multi_role_automations_allowed": {
       "type": "boolean",
-      "description": "Whether the generated target project uses planner/builder/hardener/integrator automations in isolated local git worktrees. Set false for the single-lane continuous profile.",
+      "description": "Backward-compatible derived mirror of automation_role_profile. New intakes should set automation_role_profile; scaffold ignores this flag when a valid profile is present.",
       "default": true
     },
     "automation_role_profile": {
       "type": "string",
-      "description": "Automation profile. Use single_lane for simpler or non-engineering continuous work; use planner_builder_hardener_integrator for larger software engineering work.",
+      "description": "Canonical automation profile. Use single_lane for simpler or non-engineering continuous work; use planner_builder_hardener_integrator for larger software engineering work.",
       "enum": ["single_lane", "planner_builder_hardener_integrator"],
       "default": "planner_builder_hardener_integrator"
     },

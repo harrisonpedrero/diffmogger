@@ -180,7 +180,8 @@ def _normalize_low_cortisol_intake(target: Path, generated: Any, description: st
     ]:
         payload[key] = _string_list(payload.get(key), list(LOW_CORTISOL_DEFAULT_INTAKE[key]))
 
-    role_profile = str(payload.get("automation_role_profile") or "").strip()
+    role_profile = str(payload.get("automation_role_profile") or "").strip().lower()
+    role_profile = role_profile.replace("-", "_").replace(" ", "_")
     if role_profile not in {"single_lane", "planner_builder_hardener_integrator"}:
         role_profile = "planner_builder_hardener_integrator" if _bool_value(payload.get("multi_role_automations_allowed"), False) else "single_lane"
     payload["automation_role_profile"] = role_profile
@@ -237,7 +238,7 @@ def _low_cortisol_prompt(target: Path, description: str) -> str:
             "- Use pending status for every ticket. Ticket ids must be TICKET-001, TICKET-002, and so on.",
             "- Each ticket must include id, summary, status, depends_on, acceptance_criteria, verification_commands, evidence, related_commits, and blocker.",
             "- Decide automation_role_profile from complexity: single_lane for simple docs, research, cleanup, small static apps, or one-surface prototypes; planner_builder_hardener_integrator for larger multi-component software work.",
-            "- Keep multi_role_automations_allowed consistent with automation_role_profile.",
+            "- Treat automation_role_profile as canonical. multi_role_automations_allowed is a backward-compatible derived mirror only.",
             "- Set optional_mcp_servers to an empty array. Context7 and Playwright MCPs are disabled by default.",
             "- Set human_bridge_enabled true and human_bridge_mode to file_only.",
             "- Keep the intake reusable and target-project agnostic. Do not include secrets.",
@@ -423,8 +424,7 @@ def run_required_file_check_for_intake(target: Path, intake: dict[str, Any]) -> 
     ]
     if intake.get("write_worker_agents_allowed"):
         command.append("--write-workers-enabled")
-    role_profile = str(intake.get("automation_role_profile") or "").strip()
-    if role_profile != "single_lane" and bool(intake.get("multi_role_automations_allowed", True)):
+    if normalize_automation_role_profile(intake) == "planner_builder_hardener_integrator":
         command.append("--multi-role-enabled")
     if str(intake.get("automation_run_mode") or "") == "ticket_campaign":
         command.append("--ticket-campaign-enabled")

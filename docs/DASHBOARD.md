@@ -46,7 +46,7 @@ The dashboard frontend should call backend commands instead of reading arbitrary
 - Brief: `brief.load`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`.
 - Context: `context.import`.
 - Run and automation: `run.load`, `run.load_log`, `automation.start`, `automation.stop`.
-- State: `state.snapshot`, `state.validate`.
+- State: `state.snapshot`, `state.validate`; these expose the SQLite-backed conveyor work item, current stage, stage contract, capability manifest, next actions, validation receipts, and event history.
 - Tickets: `ticket.load`, `ticket.add`, `ticket.update`, `ticket.delete`, `ticket.import`, `ticket.draft_from_intake`, `ticket.accept_draft`.
 - Safety: `safety.run_check`.
 - Workers: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`.
@@ -111,7 +111,7 @@ After scaffold/bootstrap and required-file validation, the Run page can start or
 - **Start** launches `.diffmogger/scripts/run_conveyor_automation.sh` in a detached local process.
 - **Stop** terminates the recorded runner process group.
 
-Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Runner and conveyor state are canonical in `.diffmogger/runtime/orchestration.sqlite3`; `.diffmogger/runtime/canonical_state_brief.md` is the generated agent-facing view, and `.diffmogger/runtime/automation_runner.json` plus `.diffmogger/runtime/automation_conveyor_state.json` are generated compatibility projections.
+Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Runner and conveyor state are canonical in `.diffmogger/runtime/orchestration.sqlite3`; the Run page surfaces the typed state machine current stage, owner, validation status, capability manifest, continuation token, and queued next actions. `.diffmogger/runtime/canonical_state_brief.md` is the generated agent-facing view, and `.diffmogger/runtime/automation_runner.json` plus `.diffmogger/runtime/automation_conveyor_state.json` are generated compatibility projections.
 
 For scaffolded ticket-campaign targets, the Run page exposes the ticket authoring file through a structured **Ticket Queue** panel. It shows status counts, the next selected ticket, placeholder/dependency validation, and lets users inspect, edit, delete, add, preview/apply Markdown/CSV/JSON imports, draft from intake with Codex, and accept candidates. Draft candidates are stored under `.diffmogger/runtime/ticket_drafts/` and are not applied until accepted.
 
@@ -150,4 +150,4 @@ Worker artifacts live under `.diffmogger/runtime/agent_runs/<run_id>/`. The main
 
 The Inbox page writes structured notes and replies into typed human-message state in SQLite. Notifier credentials stay in `services/agentic-notifier/.env`; target projects only use the dashboard-backed queue or the loopback notifier API.
 
-The Advanced page can read, write, validate, open, or reveal only allowlisted managed files. Ticket and human-message state are edited through structured dashboard commands, while the **Canonical state** tab reads SQLite health, event counts, checkpoints, next actions, and recent event hashes through the backend API. It is for inspection and careful repair, not broad filesystem access.
+The Advanced page can read, write, validate, open, or reveal only allowlisted managed files. Ticket and human-message state are edited through structured dashboard commands, while the **Canonical state** tab reads SQLite health, event counts, stage contracts, work item state, capability manifests, checkpoints, next actions, and recent event hashes through the backend API. It is for inspection and careful repair, not broad filesystem access.

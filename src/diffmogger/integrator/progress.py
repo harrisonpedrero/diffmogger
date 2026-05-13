@@ -5,6 +5,8 @@ from .baseline import read_baseline_record
 from .commits import first_summary_line
 from .queue import all_role_manifests, parse_created_at, read_manifest, write_manifest
 from .verification import classify_deferral_cause, missing_pytest_failure
+from diffmogger.runtime.paths import target_rel
+from diffmogger.runtime.state_store import automation_control_state
 
 def scrub_local_references(text: str, target: Path) -> str:
     text = ANSI_RE.sub("", str(text))
@@ -171,13 +173,18 @@ def update_progress(
     dry_run: bool,
 ) -> None:
     progress = dpath(target, "docs/MULTI_ROLE_PROGRESS.md")
-    if progress.exists():
-        header, sections = split_h2_sections(progress.read_text(encoding="utf-8"))
-    else:
-        header = "# Multi-Role Progress\n\nDurable progress record for optional multi-role automation."
-        sections = {}
+    sqlite_rel = target_rel(target, "target/orchestration.sqlite3")
+    header = "\n\n".join(
+        [
+            "# Multi-Role Progress",
+            f"Generated dashboard/export projection for optional multi-role automation. SQLite in `{sqlite_rel}` is the live state authority.",
+            "Continuous conveyor mode prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning after planner deferral changes, post-builder hardening, candidate verification, and builder momentum.",
+        ]
+    )
+    sections: dict[str, str] = {}
     accepted_counts, deferred_counts, integrator_runs = progress_counts(target)
     deferred_items = deferred_manifests(target)
+    control = automation_control_state(target)
     baseline = read_baseline_record(target)
     baseline_status = progress_inline(str(baseline.get("status") or "not_recorded"), target, limit=80)
     baseline_root = progress_inline(str(baseline.get("root_cause") or "No baseline verification recorded."), target)
@@ -193,11 +200,7 @@ def update_progress(
     changed_files = sorted(
         {progress_inline(str(file), target, limit=160) for _, manifest, _ in committed for file in (manifest.get("changed_files") or [])}
     )
-    recent_body = sections.get("Recent Activity Log", "").strip()
-    if recent_body == "- No multi-role integrator runs yet.":
-        recent_body = ""
-    else:
-        recent_body = compact_progress_section(recent_body, target)
+    recent_body = ""
     entry_lines = [
         f"### {utc_now().isoformat(timespec='seconds')} {run_id}",
         "",
@@ -216,7 +219,8 @@ def update_progress(
     recent_body = (recent_body.rstrip() + "\n\n" + "\n".join(entry_lines)).strip()
     sections["Project State At Last Integration"] = "\n".join(
         [
-            "- Current product horizon: see `docs/CODEX_AUTOMATION_TASKS.md`",
+            f"- Current product horizon: {progress_inline(str(control.get('horizon') or 'unknown'), target)}",
+            f"- Horizon decision: {progress_inline(str(control.get('horizon_decision') or 'unknown'), target, limit=120)}",
             f"- Latest evidence: integrator run `{run_id}` accepted {len(committed)} patches and deferred {deferred_count}.",
             f"- Last integrator run: {utc_now().isoformat(timespec='seconds')}",
             f"- Last verification status: {progress_inline(verification_status, target)}",
@@ -239,9 +243,9 @@ def update_progress(
         ]
     )
     sections["Recent Activity Log"] = recent_body
-    sections["Historical Summary"] = sections.get("Historical Summary") or "- No compacted multi-role history yet."
+    sections["Historical Summary"] = "- Historical progress is represented by role manifests and SQLite events."
     sections["Deferred-Patch Backlog"] = "\n".join(backlog_lines)
-    sections["Architectural Decisions"] = sections.get("Architectural Decisions") or "- None yet."
+    sections["Architectural Decisions"] = "- None recorded in typed state."
     sections["Role Health"] = "\n".join(
         [
             f"- {role}: accepted={accepted_counts.get(role, 0)} deferred={deferred_counts.get(role, 0)}"

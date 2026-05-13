@@ -355,7 +355,7 @@ def append_multi_role_history(progress_path: Path, summaries: list[str], *, dry_
     if progress_path.exists():
         text = progress_path.read_text(encoding="utf-8")
     else:
-        text = "# Multi-Role Progress\n\nDurable progress record for optional multi-role automation.\n\n## Historical Summary\n\n- No compacted multi-role history yet.\n"
+        text = "# Multi-Role Progress\n\nGenerated dashboard/export projection for optional multi-role automation. SQLite runtime state is the live authority.\n\nContinuous conveyor mode prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning after planner deferral changes, post-builder hardening, candidate verification, and builder momentum.\n\n## Historical Summary\n\n- No compacted multi-role history yet.\n"
     header, sections = split_sections(text)
     found = False
     for section in sections:

@@ -121,6 +121,35 @@ describe("buildRunModel", () => {
     });
   });
 
+  it("uses warning banner color when active work is environment blocked", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          task: {
+            status: "ACTIVE",
+            validation: {
+              counts: { pass: 6, fail: 1, pending: 0 },
+              summary: "1 validation failure.",
+            },
+            integration_safety: {
+              status: "pass",
+              summary: "Integration safety passed.",
+            },
+          },
+          controls: {
+            can_start_automation: false,
+            can_stop_automation: false,
+            can_run_safety_check: true,
+          },
+        },
+      }),
+    );
+
+    expect(model.banner.headline).toBe("Env blocked");
+    expect(model.banner.badge).toBe("Env blocked");
+    expect(model.banner.tone).toBe("warn");
+  });
+
   it("disables start controls while automation is active", () => {
     const model = buildRunModel(
       snapshot({
@@ -197,8 +226,77 @@ describe("buildRunModel", () => {
     expect(model.worker.headline).toBe("Recommended: one read-only builder report");
     expect(model.worker.mode).toBe("Read-only report");
     expect(model.worker.focus).toBe("builder lane");
-    expect(model.worker.output).toBe("target/agent_runs/<run-id>/worker_builder_strategy.md");
+    expect(model.worker.output).toBe(".diffmogger/runtime/agent_runs/<run-id>/worker_builder_strategy.md");
     expect(model.worker.actions.readOnly.enabled).toBe(true);
     expect(model.worker.actions.write.enabled).toBe(false);
+  });
+
+  it("maps typed conveyor state machine data into the run model", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          state: {
+            next_actions: [{ owner_role: "builder", status: "next", reason: "Implement the selected work item." }],
+            conveyor_machine: {
+              current_stage: "implementation",
+              stage_status: "ready",
+              owner_role: "builder",
+              work_item: {
+                id: "workitem:default",
+                status: "ACTIVE",
+                current_stage: "implementation",
+                stage_status: "ready",
+                owner_role: "builder",
+                capability_manifest_id: "capability:repo",
+                capability_manifest_version: 3,
+                validation_status: "passed",
+                continuation_token: "workitem:default:implementation:42",
+              },
+              capability_manifest: {
+                version: 3,
+                languages: { primary: "TypeScript" },
+                commands: [{ kind: "test", command: "npm test" }],
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(model.stateMachine.stage).toBe("implementation");
+    expect(model.stateMachine.ownerRole).toBe("builder");
+    expect(model.stateMachine.validationStatus).toBe("passed");
+    expect(model.stateMachine.capability).toBe("TypeScript / 1 command");
+    expect(model.stateMachine.continuationToken).toBe("workitem:default:implementation:42");
+    expect(model.stateMachine.nextActions[0]).toMatchObject({ role: "builder", state: "next" });
+  });
+
+  it("maps baseline blockers to the recheck command instead of generic diagnostics", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          controls: {
+            can_start_automation: false,
+            can_stop_automation: false,
+            can_run_safety_check: true,
+          },
+          environment_blockers: [
+            {
+              name: "Baseline verification",
+              detail: "Baseline requires DATABASE_URL.",
+              required: true,
+              can_recheck: true,
+              recheck_command: "blocker.recheck_baseline",
+              recheck_label: "Recheck blocker",
+            },
+          ],
+        },
+      }),
+    );
+
+    const environment = model.safety.find((row) => row.label === "Environment");
+    expect(environment?.action.label).toBe("Recheck blocker");
+    expect(environment?.action.command).toBe("blocker.recheck_baseline");
+    expect(model.blockers[0]).toMatchObject({ canRecheck: true, recheckLabel: "Recheck blocker" });
   });
 });

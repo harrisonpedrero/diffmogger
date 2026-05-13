@@ -1470,6 +1470,22 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+.ticket-draft-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) max-content;
+  gap: 12px;
+  align-items: end;
+  min-width: 0;
+}
+
+.ticket-draft-direction textarea {
+  min-height: 76px;
+}
+
+.ticket-draft-controls .inline-actions {
+  align-self: end;
+}
+
 .ticket-editor-panel,
 .ticket-candidate-list,
 .ticket-draft-progress {
@@ -4684,12 +4700,20 @@ textarea:focus-visible {
 
 .blocker-row {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 4px;
+  align-items: center;
   padding: 10px;
   border: 1px solid rgba(255, 45, 85, 0.36);
   border-radius: 0;
   color: #ff2d55;
   background: rgba(255, 45, 85, 0.26);
+}
+
+.blocker-row > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
 .blocker-row span {
@@ -4856,7 +4880,8 @@ textarea:focus-visible {
   grid-template-columns: repeat(12, minmax(0, 1fr));
   grid-template-areas:
     "controls controls controls controls readiness readiness readiness readiness process process process process"
-    "safety safety safety safety safety safety blockers blockers blockers blockers blockers blockers"
+    "safety safety safety safety safety safety machine machine machine machine machine machine"
+    "blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers"
     "queue queue queue queue queue queue queue queue queue queue queue queue"
     "logs logs logs logs logs logs logs logs workers workers workers workers";
   gap: 12px;
@@ -4876,6 +4901,10 @@ textarea:focus-visible {
 
 .run-safety-panel {
   grid-area: safety;
+}
+
+.run-state-machine-panel {
+  grid-area: machine;
 }
 
 .run-control-layout > .run-ticket-panel {
@@ -4915,6 +4944,86 @@ textarea:focus-visible {
 
 .run-ticket-panel {
   align-content: start;
+}
+
+.run-state-machine-panel {
+  align-content: start;
+}
+
+.run-state-machine-panel .panel-heading-row {
+  align-items: start;
+  min-width: 0;
+}
+
+.run-state-machine-panel .panel-heading-row > div {
+  min-width: 0;
+}
+
+.run-state-machine-panel .panel-heading-row p {
+  max-width: 100%;
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.state-machine-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 12px;
+}
+
+.state-machine-next {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.state-machine-action {
+  display: grid;
+  grid-template-areas:
+    "role state"
+    "reason reason";
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 8px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-alt);
+}
+
+.state-machine-action strong {
+  grid-area: role;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.state-machine-action span {
+  grid-area: state;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.state-machine-action p {
+  grid-area: reason;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .run-ticket-panel .panel-heading-row {
@@ -5792,6 +5901,178 @@ textarea:focus-visible {
   min-width: 0;
 }
 
+.obs-machine-wrap {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.obs-machine-header,
+.obs-lane-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.obs-machine-header h3,
+.obs-lane-heading h3 {
+  margin: 0;
+  color: #fdfdfd;
+  font-size: 17px;
+  line-height: 1.15;
+}
+
+.obs-machine-header p,
+.obs-lane-heading p {
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: #9a9a9a;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.obs-machine-facts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.obs-horizontal-scroll.machine {
+  padding: 8px 8px 18px;
+  border: 1px solid rgba(41, 251, 15, 0.36);
+  background: rgba(8, 16, 13, 0.46);
+  box-shadow:
+    0 0 0 1px rgba(41, 251, 15, 0.08) inset,
+    0 12px 28px rgba(0, 0, 0, 0.18);
+}
+
+.obs-machine-belt {
+  --obs-machine-gap: 34px;
+  display: grid;
+  grid-template-columns: repeat(10, minmax(172px, 1fr));
+  align-items: stretch;
+  gap: var(--obs-machine-gap);
+  min-width: max(100%, 2020px);
+}
+
+.obs-machine-step {
+  position: relative;
+  display: grid;
+  min-width: 0;
+}
+
+.obs-machine-arrow {
+  display: inline-flex;
+  position: absolute;
+  top: 50%;
+  right: calc((var(--obs-machine-gap) * -0.5) - 13px);
+  z-index: 1;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(41, 251, 15, 0.42);
+  border-radius: 999px;
+  color: var(--brand-gradient-end);
+  background: var(--color-panel-elevated);
+  box-shadow:
+    0 0 0 4px var(--color-panel),
+    0 0 0 5px rgba(41, 251, 15, 0.08);
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.obs-machine-card {
+  display: grid;
+  grid-template-rows: auto auto minmax(52px, 1fr) auto;
+  gap: 8px;
+  min-width: 0;
+  min-height: 174px;
+  padding: 13px;
+  border: 1px solid #30312d;
+  background: rgba(25, 26, 27, 0.82);
+}
+
+.obs-machine-card.complete {
+  border-color: rgba(41, 251, 15, 0.34);
+  background: rgba(33, 65, 54, 0.16);
+}
+
+.obs-machine-card.current,
+.obs-machine-card.running,
+.obs-machine-card.ready {
+  border-color: rgba(41, 251, 15, 0.88);
+  background: rgba(33, 65, 54, 0.34);
+  box-shadow:
+    0 0 0 2px rgba(41, 251, 15, 0.26),
+    0 0 22px rgba(41, 251, 15, 0.14),
+    0 0 0 1px rgba(41, 251, 15, 0.28) inset;
+}
+
+.obs-machine-card.waiting,
+.obs-machine-card.blocked,
+.obs-machine-card.warn,
+.obs-machine-card.warning {
+  border-color: rgba(255, 122, 150, 0.65);
+  background: rgba(255, 122, 150, 0.18);
+}
+
+.obs-machine-card.closed {
+  border-color: rgba(253, 253, 253, 0.48);
+  background: rgba(253, 253, 253, 0.08);
+}
+
+.obs-machine-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.obs-machine-card-head > span {
+  color: #9a9a9a;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.obs-machine-card strong {
+  min-width: 0;
+  color: #fdfdfd;
+  font-size: 18px;
+  line-height: 1.08;
+  overflow-wrap: anywhere;
+}
+
+.obs-machine-card p {
+  display: -webkit-box;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #d7d7d7;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.obs-machine-card small {
+  color: #9a9a9a;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .obs-horizontal-scroll {
   width: 100%;
   max-width: 100%;
@@ -6539,6 +6820,33 @@ textarea:focus-visible {
 }
 
 @media (max-width: 1120px) {
+  .obs-machine-belt {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    width: max-content;
+    min-width: max-content;
+  }
+
+  .obs-machine-step {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: stretch;
+  }
+
+  .obs-machine-arrow {
+    position: static;
+    flex: 0 0 26px;
+    margin: auto 10px;
+    transform: none;
+  }
+
+  .obs-machine-card {
+    flex: 0 0 190px;
+    width: 190px;
+    min-width: 190px;
+  }
+
   .obs-belt {
     display: flex;
     align-items: stretch;
@@ -7313,7 +7621,7 @@ textarea:focus-visible {
 
 .review-hero {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.42fr);
+  grid-template-columns: minmax(96px, 1fr) minmax(0, 760px) minmax(96px, 1fr);
   gap: 18px;
   align-items: center;
   justify-items: stretch;
@@ -7351,46 +7659,24 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.review-hero-main,
-.review-hero-side {
+.review-hero-main {
   min-width: 0;
 }
 
 .review-hero-main {
+  grid-column: 2;
   align-items: center;
-  justify-self: stretch;
+  justify-self: center;
   text-align: center;
 }
 
-.review-hero-side {
-  display: grid;
-  width: min(420px, 100%);
-  max-width: 100%;
+.review-hero-actions {
+  display: flex;
+  grid-column: 3;
   justify-self: end;
-  align-content: center;
-  justify-items: start;
-  gap: 12px;
-  padding: 14px;
-  border: 1px solid rgba(41, 251, 15, 0.18);
-  border-radius: 0;
-  background: var(--color-panel-alt);
-}
-
-.review-mode-summary {
-  justify-items: start;
-  width: min(420px, 100%);
-  text-align: left;
-}
-
-.review-mode-summary strong {
-  color: #fdfdfd;
-  font-size: 14px;
-  line-height: 1.3;
-}
-
-.review-mode-summary p {
-  margin: 0;
-  font-size: 12px;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
 }
 
 .review-actions {
@@ -8386,12 +8672,14 @@ select option {
   }
 
   .review-hero-main {
+    grid-column: 1;
     align-items: center;
     justify-self: center;
     text-align: center;
   }
 
-  .review-hero-side {
+  .review-hero-actions {
+    grid-column: 1;
     justify-self: center;
   }
 
@@ -8504,6 +8792,7 @@ select option {
 
   .run-ticket-panel .panel-heading-row,
   .run-ticket-panel .ticket-next-row,
+  .run-ticket-panel .ticket-draft-controls,
   .run-ticket-panel .ticket-row,
   .run-ticket-panel .ticket-edit-grid,
   .ticket-candidate-row {
@@ -8524,6 +8813,7 @@ select option {
   }
 
   .run-ticket-panel .panel-heading-row .inline-actions,
+  .run-ticket-panel .ticket-draft-controls .inline-actions,
   .ticket-section-heading,
   .ticket-section-heading .inline-actions,
   .run-ticket-panel .ticket-import-box .inline-actions {
@@ -8575,6 +8865,28 @@ select option {
   .run-control-layout,
   .obs-page-header {
     grid-template-columns: 1fr;
+  }
+
+  .run-control-layout {
+    grid-template-areas:
+      "controls"
+      "readiness"
+      "process"
+      "safety"
+      "machine"
+      "blockers"
+      "queue"
+      "logs"
+      "workers";
+  }
+
+  .obs-machine-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .obs-machine-facts {
+    justify-content: flex-start;
   }
 
   .setup-header {
@@ -8844,6 +9156,7 @@ select option {
 
   .inbox-hero > div:first-child,
   .review-hero-main {
+    grid-column: 1;
     align-items: center;
     justify-self: center;
     text-align: center;
@@ -8851,6 +9164,12 @@ select option {
 
   .review-actions {
     align-items: center;
+    justify-content: center;
+  }
+
+  .review-hero-actions {
+    grid-column: 1;
+    justify-self: center;
     justify-content: center;
   }
 

@@ -162,7 +162,7 @@ class DashboardIntegrationSafetyAffordanceTests(unittest.TestCase):
         (target / ".agentic" / "project_intake.json").write_text(
             json.dumps(
                 {
-                    "multi_role_automations_allowed": True,
+                    "automation_role_profile": "planner_builder_hardener_integrator",
                     "human_bridge_enabled": False,
                     "human_bridge_mode": "disabled",
                 }

@@ -18,7 +18,7 @@ docs/PROJECT_CONTEXT.md
 {{HUMAN_FILE_READS}}
 ```
 
-Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or projections.
+Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/conveyor authority.
 
 ## Mission
 
@@ -28,7 +28,7 @@ Maintain stable planning continuity for the next builder and hardener cycles. Pl
 
 - Review the current horizon, deferred-patch backlog, recent integrator outcomes, and role health.
 - If Context7 MCP is mounted, use it only for documentation-assisted scoping. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, do not halt or mark the run blocked; immediately fall back to normal web search, repo docs, package metadata, or existing knowledge and continue the sprint.
-- Update the `Architectural Decisions` section of `docs/MULTI_ROLE_PROGRESS.md` when making non-obvious design calls.
+- Record non-obvious design calls in your patch/summary so the integrator can reconcile them into typed state and generated progress projections.
 - Queue small, concrete planner-owned patch output when planning docs need to change.
 - Prefer clarifying the next builder/hardener work over broad replanning.
 - If deferred patches are stale, recommend replacement work from fresh main `HEAD`.

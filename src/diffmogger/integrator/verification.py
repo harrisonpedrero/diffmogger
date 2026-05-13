@@ -225,6 +225,72 @@ def missing_verification_config_text(output: str) -> bool:
         or re.search(r"\bmissing verification config(?:uration)?\b", lowered)
     )
 
+ENV_VAR_NAME_RE = r"[A-Z][A-Z0-9_]{1,}"
+ENV_CONTEXT_RE = r"(?:environment variable|env(?:ironment)? var(?:iable)?|process\.env|import\.meta\.env)"
+ENV_FAILURE_RE = r"(?:not\s+set|missing|required|undefined|not\s+found|must\s+be\s+set)"
+
+def package_manager_diagnostic_line(line: str) -> bool:
+    stripped = line.strip()
+    lowered = stripped.lower()
+    if "unsupported engine" in lowered:
+        return True
+    if re.match(r"^(?:npm|pnpm)\s+(?:warn|err!?|error)\s+e[a-z0-9_]+\b", lowered):
+        return True
+    if re.match(r"^yarn\s+(?:warning|error)\s+e[a-z0-9_]+\b", lowered):
+        return True
+    if re.match(r"^(?:npm|pnpm)\s+(?:warn|err!?|error)\s+(?:required|current|notsup)\b", lowered):
+        return True
+    return False
+
+def normalize_env_var_name(value: str | None) -> str:
+    if not value:
+        return ""
+    name = value.strip("`'\"[]{}():,.;")
+    if not re.fullmatch(ENV_VAR_NAME_RE, name):
+        return ""
+    return name if name == name.upper() else ""
+
+def likely_env_var_name(name: str) -> bool:
+    return "_" in name or name in {"DATABASE_URL", "NODE_ENV", "PORT", "HOST", "CI"}
+
+def extract_missing_env_var(output: str) -> str:
+    explicit_patterns = (
+        fr"\b(?:process\.env\.|import\.meta\.env\.)(?P<name>{ENV_VAR_NAME_RE})\b[^\n]{{0,100}}\b(?:is\s+)?{ENV_FAILURE_RE}\b",
+        fr"\b(?:missing|required|undefined|not\s+found|must\s+be\s+set)\b[^\n]{{0,100}}\b(?:process\.env\.|import\.meta\.env\.)(?P<name>{ENV_VAR_NAME_RE})\b",
+        fr"\b(?:missing|required|undefined|not\s+found)\b[^\n]{{0,80}}\b{ENV_CONTEXT_RE}\b[^\n]{{0,80}}\b(?P<name>{ENV_VAR_NAME_RE})\b",
+        fr"\b{ENV_CONTEXT_RE}\b[^\n]{{0,80}}\b(?P<name>{ENV_VAR_NAME_RE})\b[^\n]{{0,80}}\b(?:is\s+)?{ENV_FAILURE_RE}\b",
+    )
+    shell_patterns = (
+        fr"\b(?P<name>{ENV_VAR_NAME_RE})\b\s+(?:is\s+)?(?:not\s+set|missing|undefined|not\s+found)\b",
+        fr"\b(?P<name>{ENV_VAR_NAME_RE})\b\s+is\s+required\b",
+    )
+    leading_missing_pattern = re.compile(
+        fr"\b(?:missing|undefined|not\s+found)\b[^\n]{{0,40}}\b(?P<name>{ENV_VAR_NAME_RE})\b",
+        re.IGNORECASE,
+    )
+
+    for raw_line in output.splitlines():
+        line = ANSI_RE.sub("", raw_line).strip()
+        if not line or package_manager_diagnostic_line(line):
+            continue
+        line = re.sub(r"^(?:npm|pnpm)\s+(?:warn|warning|err!?|error)\s+", "", line, flags=re.IGNORECASE)
+        line = re.sub(r"^yarn\s+(?:warning|error)\s+", "", line, flags=re.IGNORECASE)
+        for pattern in explicit_patterns:
+            match = re.search(pattern, line, re.IGNORECASE)
+            name = normalize_env_var_name(match.group("name") if match else "")
+            if name:
+                return name
+        for pattern in shell_patterns:
+            match = re.search(pattern, line)
+            name = normalize_env_var_name(match.group("name") if match else "")
+            if name:
+                return name
+        match = leading_missing_pattern.search(line)
+        name = normalize_env_var_name(match.group("name") if match else "")
+        if name and likely_env_var_name(name):
+            return name
+    return ""
+
 def classify_failure_text(command: str, output: str) -> tuple[str, str]:
     lowered = output.lower()
     if missing_verification_config_text(output):
@@ -236,21 +302,9 @@ def classify_failure_text(command: str, output: str) -> tuple[str, str]:
             output,
             ("can't reach database", "connection refused", "econnrefused", "p1001", "postgres", "database"),
         )
-    env_var_match = re.search(
-        r"\b([A-Z][A-Z0-9_]{2,})\b[^\n]{0,100}(?:not set|missing|required|undefined|not found)",
-        output,
-    ) or re.search(
-        r"(?:missing|required|undefined|not found)[^\n]{0,100}\b([A-Z][A-Z0-9_]{2,})\b",
-        output,
-        re.IGNORECASE,
-    )
-    if env_var_match and env_var_match.group(1) != env_var_match.group(1).upper():
-        env_var_match = None
-    if env_var_match:
-        name = env_var_match.group(1)
+    name = extract_missing_env_var(output)
+    if name:
         return "missing_env_var", f"Missing required environment variable `{name}`."
-    if "database_url" in lowered:
-        return "missing_env_var", "Missing required environment variable `DATABASE_URL`."
     if any(marker in lowered for marker in ("no module named pytest", "pytest: command not found", "pytest: not found")):
         return "missing_pytest", "Missing pytest in the verification environment."
     if re.search(r"(command not found|not found:|no such file or directory|could not determine executable)", lowered):
@@ -501,7 +555,7 @@ def run_verification(
             details.append(outcome.detail())
             if not outcome.ok:
                 detail = "\n\n".join(details)
-                category, root_cause = classify_failure_text(command, detail)
+                category, root_cause = classify_failure_text(command, outcome.detail())
                 return VerificationResult(
                     ok=False,
                     checks_run=checks_run,
@@ -523,7 +577,7 @@ def run_verification(
             repair = attempt_verification_repair(target, command, result)
             if repair is None:
                 detail = "\n\n".join(details)
-                category, root_cause = classify_failure_text(command, detail)
+                category, root_cause = classify_failure_text(command, details[-1])
                 return VerificationResult(
                     ok=False,
                     checks_run=checks_run,
@@ -536,7 +590,7 @@ def run_verification(
             details.append(f"verification repair: {repair.detail}")
             if repair.final_command is None or repair.final_result is None:
                 detail = "\n\n".join(details)
-                category, root_cause = classify_failure_text(command, detail)
+                category, root_cause = classify_failure_text(command, details[-1])
                 return VerificationResult(
                     ok=False,
                     checks_run=checks_run,
@@ -552,7 +606,7 @@ def run_verification(
             )
             if repair.final_result.returncode != 0:
                 detail = "\n\n".join(details)
-                category, root_cause = classify_failure_text(repair.final_command, detail)
+                category, root_cause = classify_failure_text(repair.final_command, details[-1])
                 return VerificationResult(
                     ok=False,
                     checks_run=checks_run,

@@ -24,9 +24,9 @@ Create a concise retrofit plan, then implement the automation docs:
 
 Respect the existing stack and conventions. Do not rewrite the product just to fit the kit.
 
-Canonical live orchestration state should remain `.diffmogger/runtime/orchestration.sqlite3`; `.diffmogger/runtime/canonical_state_brief.md` is the generated state view agents read instead of inspecting SQLite manually.
+Canonical live orchestration state should remain `.diffmogger/runtime/orchestration.sqlite3`. Typed automation control, conveyor stage contracts, the current work item, repository capability manifest, validation receipts, blockers, human messages, and next actions live there; `.diffmogger/runtime/canonical_state_brief.md` is the generated state view agents read instead of inspecting SQLite manually.
 
-The first task file should honestly describe:
+The initial typed automation control state and generated task projection should honestly describe:
 
 - what exists
 - how to run it
@@ -42,4 +42,4 @@ If the repo has unclear setup, create a human request only when the owner must a
 
 The recurring automation prompt must distinguish structured human replies from freeform commands. In `file_only` mode, summary/status requests should be satisfied through the dashboard or requested local artifacts. In `local_notifier` or `discord_notifier` mode, if the human asks to be messaged, replied to, or sent a status update, the automation should use `POST http://127.0.0.1:8765/api/notify` with `event_kind: "message"` when available and should record `NOTIFIER_UNREACHABLE` in typed human-message state when unavailable.
 
-Run available validation commands if safe. Update the task file with results.
+Run available validation commands if safe. Record validation receipts in typed state and refresh the generated task projection with results.

@@ -1,11 +1,11 @@
 # Diffmogger Agentic Notifier
 
-Agentic Notifier is Diffmogger's reusable local Discord and desktop notification bridge. A target project can call a loopback HTTP API when its Codex automation needs to post progress, message the human owner, or record an inbound Discord reply. This service owns Discord credentials, channel routing, duplicate suppression, native local notifications, and writes replies back into the target project's handoff files.
+Agentic Notifier is Diffmogger's reusable local Discord and desktop notification bridge. A target project can call a loopback HTTP API when its Codex automation needs to post progress, message the human owner, or capture an inbound Discord reply. This service owns Discord credentials, channel routing, duplicate suppression, native local notifications, and compatibility fallback records for notifier activity.
 
 Target projects should not import this code. They only need:
 
 - `POST http://127.0.0.1:8765/api/notify`
-- the target Markdown paths where requests, outbox entries, and inbound replies are written
+- dashboard/SQLite human-message state for canonical requests, replies, outbound records, and resolution notes
 
 ## Install
 
@@ -106,18 +106,20 @@ References:
 - [Discord bot docs](https://docs.discord.com/developers/bots)
 - [Discord OAuth2 and permissions docs](https://docs.discord.com/developers/platform/oauth2-and-permissions)
 
-## Target Project Paths
+## Target Project Records
 
-Set `TARGET_REPO_DIR` to the absolute path of the target project. If explicit paths are left unset, the service uses these files under that repo:
+Set `TARGET_REPO_DIR` to the absolute path of the target project. Diffmogger automation should treat `.diffmogger/runtime/orchestration.sqlite3` and the dashboard Inbox as the canonical human-message state. The notifier's optional Markdown/JSONL outputs are compatibility fallback records for delivery auditing and legacy targets, not the live queue.
+
+If explicit compatibility paths are left unset, the service uses sidecar Markdown paths for targets with `.diffmogger/manifest.json`, or legacy `docs/` paths for older targets:
 
 ```text
-docs/HUMAN_INBOX.md
-docs/HUMAN_REQUESTS.md
-docs/HUMAN_OUTBOX.md
-docs/HUMAN_RESPONSES_ARCHIVE.md
+.diffmogger/state/HUMAN_INBOX.md
+.diffmogger/state/HUMAN_REQUESTS.md
+.diffmogger/state/HUMAN_OUTBOX.md
+.diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md
 ```
 
-The notifier creates these files if missing. The target automation is responsible for consuming handled inbox entries and archiving concise resolution notes.
+The notifier creates these compatibility files if missing. Target automation should record handled replies, outbound delivery failures, and resolution notes in typed dashboard/SQLite human-message state.
 
 Optional JSONL queues can also be enabled:
 
@@ -125,7 +127,7 @@ Optional JSONL queues can also be enabled:
 TARGET_QUEUE_DIR=/absolute/path/to/target-project/queue
 ```
 
-When set, the notifier appends `human_requests.jsonl`, `human_outbox.jsonl`, and `human_responses.jsonl` in that directory in addition to Markdown.
+When set, the notifier appends `human_requests.jsonl`, `human_outbox.jsonl`, and `human_responses.jsonl` in that directory in addition to compatibility Markdown.
 
 ## Run
 
@@ -141,7 +143,7 @@ Default local API:
 http://127.0.0.1:8765
 ```
 
-The Discord bot and API run in the same process. In `DRY_RUN=true`, API calls write target files and report dry-run deliveries without sending Discord or desktop notifications.
+The Discord bot and API run in the same process. In `DRY_RUN=true`, API calls write compatibility records when target paths are configured and report dry-run deliveries without sending Discord or desktop notifications.
 
 ## Health
 
@@ -248,7 +250,7 @@ Response:
 }
 ```
 
-Delivery failures are recorded in the target outbox with generic statuses such as `DISCORD_SEND_FAILED`, `LOCAL_NOTIFICATION_FAILED`, or `NOTIFIER_UNREACHABLE`. Target automations should not claim delivery unless the notifier response shows success or dry-run intent.
+Delivery failures are returned with generic statuses such as `DISCORD_SEND_FAILED`, `LOCAL_NOTIFICATION_FAILED`, or `NOTIFIER_UNREACHABLE` and mirrored to compatibility records when configured. Target automations should also record those statuses in typed human-message state, and should not claim delivery unless the notifier response shows success or dry-run intent.
 
 If `LOCAL_NOTIFY_API_TOKEN` is set, include:
 
@@ -271,13 +273,13 @@ Without a token, the API must remain bound to loopback.
 
 The bot only reads the configured messaging channel. It ignores bot messages and captures human messages only when they mention the bot or reply to a bot-authored message.
 
-Captured messages are appended to:
+Captured messages are mirrored to the compatibility inbox when target paths are configured:
 
 ```text
-docs/HUMAN_INBOX.md
+.diffmogger/state/HUMAN_INBOX.md
 ```
 
-Inbound messages are deduped by Discord message ID. The next target automation run should handle the inbox entry, remove it only after the requested action is complete or intentionally deferred, and archive a concise note.
+Inbound messages are deduped by Discord message ID. The next target automation run should handle the message through typed dashboard/SQLite human-message state, mark it resolved only after the requested action is complete or intentionally deferred, and record a concise resolution note.
 
 ## Dry-Run Tests
 
@@ -289,7 +291,7 @@ python scripts/send_test_notification.py
 python scripts/dry_run_inbound.py "@Diffmogger HR-001 DONE. Key added locally."
 ```
 
-Use `--real-send` only after Discord channels, bot permissions, and target files are verified.
+Use `--real-send` only after Discord channels, bot permissions, and target-side human-message handling are verified.
 
 ## Safety
 

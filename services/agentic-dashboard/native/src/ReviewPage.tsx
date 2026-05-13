@@ -95,6 +95,19 @@ function ReviewBadge(props: { value: unknown; tone?: string; label?: string }) {
   );
 }
 
+function reviewMarkerTitle(decision: ReviewDecision): string {
+  if (decision.mode === "outcome") return "Stable snapshot";
+  if (decision.mode === "already_reviewed") return "Review marker current";
+  return decision.title;
+}
+
+function reviewMarkerSummary(decision: ReviewDecision, freshness: ReturnType<typeof reviewFreshness>): string {
+  if (freshness === "current") return "This evidence has a matching review marker.";
+  if (freshness === "stale") return "The previous review marker no longer matches the latest snapshot.";
+  if (decision.hasHumanBlocker) return "Resolve Inbox items before recording a review marker.";
+  return "No review marker has been recorded for this snapshot.";
+}
+
 function countSummary(counts: Record<string, number> | undefined): string {
   return `${number(counts?.pass)} pass · ${number(counts?.fail)} fail · ${number(counts?.warn)} warn · ${number(counts?.pending)} pending`;
 }
@@ -265,16 +278,16 @@ const ReviewStatusCard = memo(function ReviewStatusCard(props: {
   const freshness = reviewFreshness(props.snapshot);
   const actionDisabled = props.disabled || !props.decision.primaryAction.enabled;
   return (
-    <ReviewSection title="Review status" className={`review-evidence-card review-marker-section ${props.decision.mode}`}>
+    <ReviewSection title="Review marker" className={`review-evidence-card review-marker-section ${props.decision.mode}`}>
       <div className={`review-decision-panel ${props.decision.tone}`}>
-        <strong>{props.decision.title}</strong>
+        <strong>{reviewMarkerTitle(props.decision)}</strong>
         <p>{props.decision.detail}</p>
       </div>
       <div className="review-mark-card">
         <CheckCircle2 size={18} />
         <div>
           <strong>{reviewFreshnessLabel(freshness)}</strong>
-          <span>{props.decision.summary}</span>
+          <span>{reviewMarkerSummary(props.decision, freshness)}</span>
         </div>
         <ReviewBadge value={reviewFreshnessLabel(freshness)} tone={freshness === "current" ? "good" : "warn"} />
       </div>
@@ -584,7 +597,7 @@ export function ReviewPage(props: {
   const [reviewNote, setReviewNote] = useState("");
 
   const reviewDir = useMemo(
-    () => snapshot?.bundle.review_dir ?? `${target.replace(/[\\/]+$/, "")}/target/first-review`,
+    () => snapshot?.bundle.review_dir ?? `${target.replace(/[\\/]+$/, "")}/.diffmogger/runtime/first-review`,
     [snapshot, target],
   );
   const deferredStage = useDeferredStage(
@@ -745,6 +758,7 @@ export function ReviewPage(props: {
 
   const disabled = props.loading || busy !== null;
   const selfReviewPath = markdownPath || snapshot?.bundle.markdown_path || "";
+  const latestRunSummary = snapshot?.latest_run.summary ?? decision.summary;
 
   async function copySelfReviewMarkdown() {
     const markdown = snapshot?.self_review.markdown_preview ?? "";
@@ -763,11 +777,9 @@ export function ReviewPage(props: {
       <header className={`review-hero ${decision.tone}`}>
         <div className="review-hero-main">
           <h1>Latest Run Review</h1>
-          <p>{decision.summary}</p>
+          <p>{latestRunSummary}</p>
         </div>
-        <div className="review-hero-side review-mode-summary">
-          <strong>{decision.title}</strong>
-          <p>{snapshot?.latest_run.summary ?? "Loading review evidence from the backend snapshot."}</p>
+        <div className="review-hero-actions">
           <button className="icon-text-button" disabled={disabled} onClick={() => loadReview({ refreshProject: true })}>
             {busy === "load" ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
             Refresh

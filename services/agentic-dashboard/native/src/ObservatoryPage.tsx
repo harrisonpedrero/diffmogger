@@ -25,6 +25,30 @@ type ReviewExportData = {
 
 const tabs: ObservatoryTab[] = ["Summary", "Events", "Queue", "Metrics"];
 const roleFilters = ["planner", "builder", "hardener", "integrator"] as const;
+const conveyorStages = [
+  "intake",
+  "discovery",
+  "decomposition",
+  "planning",
+  "implementation",
+  "review",
+  "validation",
+  "integration",
+  "handoff",
+  "continuation",
+];
+const stageOwner: Record<string, string> = {
+  intake: "planner",
+  discovery: "planner",
+  decomposition: "planner",
+  planning: "planner",
+  implementation: "builder",
+  review: "hardener",
+  validation: "hardener",
+  integration: "integrator",
+  handoff: "planner",
+  continuation: "conveyor",
+};
 
 type ActivityFilter = "all" | typeof roleFilters[number] | "system";
 
@@ -41,7 +65,7 @@ type ActivityEvent = {
 };
 
 function targetSubdir(target: string, leaf: string): string {
-  return `${target.replace(/[\\/]+$/, "")}/target/${leaf}`;
+  return `${target.replace(/[\\/]+$/, "")}/.diffmogger/runtime/${leaf}`;
 }
 
 function text(value: unknown, fallback = "Not recorded"): string {
@@ -62,6 +86,14 @@ function number(value: unknown): number {
   return 0;
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function list(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
 function tone(value: unknown): string {
   const raw = text(value, "info").toLowerCase();
   if (["good", "warn", "warning", "critical", "bad", "info", "quiet", "running", "next", "failed"].includes(raw)) return raw;
@@ -75,6 +107,10 @@ function roleLabel(value: unknown): string {
 
 function compactLabel(value: unknown, fallback: string): string {
   return roleLabel(text(value, fallback).replace(/_/g, " "));
+}
+
+function classToken(value: unknown, fallback = "info"): string {
+  return text(value, fallback).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || fallback;
 }
 
 function laneLabel(snapshot: ObservatorySnapshot | null, activeRun: Record<string, unknown>): string {
@@ -265,6 +301,92 @@ function RoleCard(props: {
   );
 }
 
+function stateMachine(snapshot: ObservatorySnapshot | null): Record<string, unknown> {
+  return record(snapshot?.conveyor.state_machine);
+}
+
+function stageSummary(contract: Record<string, unknown>, stage: string): string {
+  const exit = list(contract.exit_criteria).map((item) => text(item, "")).filter(Boolean);
+  const artifacts = list(contract.required_artifacts).map((item) => text(item, "")).filter(Boolean);
+  const entry = list(contract.entry_criteria).map((item) => text(item, "")).filter(Boolean);
+  return exit[0] || artifacts[0] || entry[0] || `${compactLabel(stage, stage)} stage contract.`;
+}
+
+function machineStages(machine: Record<string, unknown>) {
+  const workItem = record(machine.work_item);
+  const currentStage = text(workItem.current_stage ?? machine.current_stage, "intake").toLowerCase();
+  const currentIndex = Math.max(0, conveyorStages.indexOf(currentStage));
+  const contracts = list(machine.stage_contracts).map(record);
+  const contractByStage = new Map(contracts.map((item) => [text(item.stage, "").toLowerCase(), item]));
+  return conveyorStages.map((stage, index) => {
+    const contract = contractByStage.get(stage) ?? {};
+    const isCurrent = stage === currentStage;
+    const status = isCurrent
+      ? text(workItem.stage_status ?? machine.stage_status, "active")
+      : index < currentIndex
+        ? "complete"
+        : "queued";
+    return {
+      stage,
+      status,
+      owner: text(isCurrent ? workItem.owner_role ?? machine.owner_role : stageOwner[stage], stageOwner[stage]),
+      summary: stageSummary(contract, stage),
+      isCurrent,
+    };
+  });
+}
+
+function capabilitySummary(machine: Record<string, unknown>): string {
+  const capability = record(machine.capability_manifest);
+  const languages = record(capability.languages);
+  const primary = text(languages.primary, "");
+  const commandCount = list(capability.commands).length;
+  if (primary && commandCount) return `${primary} / ${commandCount} command${commandCount === 1 ? "" : "s"}`;
+  if (primary) return primary;
+  if (commandCount) return `${commandCount} command${commandCount === 1 ? "" : "s"}`;
+  return "Not discovered";
+}
+
+function StateMachineBelt(props: { snapshot: ObservatorySnapshot | null }) {
+  const machine = stateMachine(props.snapshot);
+  const workItem = record(machine.work_item);
+  const stages = machineStages(machine);
+  const currentStage = text(workItem.current_stage ?? machine.current_stage, "intake");
+  return (
+    <div className="obs-machine-wrap">
+      <div className="obs-machine-header">
+        <div>
+          <h3>State Machine</h3>
+          <p>{text(workItem.continuation_token, "No continuation token recorded yet.")}</p>
+        </div>
+        <div className="obs-machine-facts">
+          <CompactBadge label="Stage" value={currentStage} tone={text(workItem.stage_status ?? machine.stage_status, "info")} />
+          <CompactBadge label="Validation" value={workItem.validation_status ?? "not recorded"} tone={text(workItem.validation_status, "info")} />
+          <CompactBadge label="Capabilities" value={capabilitySummary(machine)} tone="good" />
+        </div>
+      </div>
+      <div className="obs-horizontal-scroll machine" aria-label="Typed conveyor state machine">
+        <div className="obs-machine-belt">
+          {stages.map((stage, index) => (
+            <div className="obs-machine-step" key={stage.stage}>
+              <div className={`obs-machine-card ${classToken(stage.status)} ${stage.isCurrent ? "current" : ""}`}>
+                <div className="obs-machine-card-head">
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <CompactBadge value={stage.status} tone={stage.status} />
+                </div>
+                <strong>{compactLabel(stage.stage, stage.stage)}</strong>
+                <p>{stage.summary}</p>
+                <small>{compactLabel(stage.owner, stage.owner)}</small>
+              </div>
+              {index < stages.length - 1 && <span className="obs-machine-arrow" aria-hidden="true">→</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ConveyorSection(props: {
   snapshot: ObservatorySnapshot | null;
   activeRun: Record<string, unknown>;
@@ -277,6 +399,9 @@ function ConveyorSection(props: {
   return (
     <ObsSection title="Conveyor" className={`obs-conveyor-section ${props.className ?? ""}`}>
       <div className="obs-conveyor-layout">
+        <div className="obs-lane-heading">
+          <h3>Execution Lanes</h3>
+        </div>
         <div className="obs-horizontal-scroll" aria-label="Roles">
           <div className="obs-belt">
             {roles.length ? (
@@ -295,6 +420,7 @@ function ConveyorSection(props: {
             )}
           </div>
         </div>
+        <StateMachineBelt snapshot={props.snapshot} />
         <div className="obs-conveyor-meta-row">
           {text(props.activeRun.role, "") ? (
             <div className="obs-running-banner">

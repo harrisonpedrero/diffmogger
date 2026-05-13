@@ -73,7 +73,7 @@ class TargetFiles:
     def from_settings(cls, settings: Settings) -> "TargetFiles":
         if not settings.target_repo_configured:
             raise TargetConfigError(
-                "Target project markdown paths are not configured. Set TARGET_REPO_DIR "
+                "Target project compatibility notification paths are not configured. Set TARGET_REPO_DIR "
                 "or all TARGET_HUMAN_*_PATH values."
             )
         return cls(
@@ -90,22 +90,22 @@ class TargetFiles:
         _ensure_file(
             self.paths.inbox,
             "Human Inbox",
-            "Unhandled human replies for the next target project automation run.",
+            "Compatibility mirror of unhandled human replies. Canonical handling lives in typed dashboard/SQLite state.",
         )
         _ensure_file(
             self.paths.requests,
             "Human Requests",
-            "Active human unlock requests created by automation.",
+            "Compatibility mirror of human unlock requests. Canonical handling lives in typed dashboard/SQLite state.",
         )
         _ensure_file(
             self.paths.outbox,
             "Human Outbox",
-            "Outbound human notification records sent by agentic-notifier.",
+            "Compatibility mirror of outbound notification records sent by agentic-notifier.",
         )
         _ensure_file(
             self.paths.archive,
             "Human Responses Archive",
-            "Concise resolution notes archived by target project automation.",
+            "Compatibility mirror of resolution notes. Canonical handling lives in typed dashboard/SQLite state.",
         )
 
     def append_outbound_request(
@@ -164,7 +164,7 @@ class TargetFiles:
         _append_markdown(
             self.paths.outbox,
             "Human Outbox",
-            "Outbound human notification records sent by agentic-notifier.",
+            "Compatibility mirror of outbound notification records sent by agentic-notifier.",
             entry,
         )
         _append_jsonl(
@@ -246,7 +246,7 @@ class TargetFiles:
         _ensure_file(
             path,
             "Human Requests",
-            "Active human unlock requests created by automation.",
+            "Compatibility mirror of human unlock requests. Canonical handling lives in typed dashboard/SQLite state.",
         )
         text = path.read_text(encoding="utf-8")
         pattern = re.compile(
@@ -313,12 +313,12 @@ class TargetFiles:
 
 ### Expected automation behavior
 
-The next target project automation run should handle this message, update any related request state, then remove this entry from `docs/HUMAN_INBOX.md` and archive a concise resolution note in `docs/HUMAN_RESPONSES_ARCHIVE.md`.
+The next target project automation run should handle this message through typed dashboard/SQLite human-message state, mark it resolved only after the requested action is complete or intentionally deferred, and record a concise resolution note.
 """
         _append_markdown(
             self.paths.inbox,
             "Human Inbox",
-            "Unhandled human replies for the next target project automation run.",
+            "Compatibility mirror of unhandled human replies. Canonical handling lives in typed dashboard/SQLite state.",
             entry,
         )
         _append_jsonl(
@@ -346,7 +346,7 @@ The next target project automation run should handle this message, update any re
         _ensure_file(
             path,
             "Human Inbox",
-            "Unhandled human replies for the next target project automation run.",
+            "Compatibility mirror of unhandled human replies. Canonical handling lives in typed dashboard/SQLite state.",
         )
         text = path.read_text(encoding="utf-8")
         pattern = re.compile(rf"^## INBOX-{re.escape(date_prefix)}-(\d{{3,}})", re.MULTILINE)

@@ -69,7 +69,39 @@ export type CanonicalStateSnapshot = {
   next_actions: Array<Record<string, unknown>>;
   validations: Record<string, unknown>;
   conveyor_state?: Record<string, unknown>;
+  conveyor_machine?: ConveyorMachineSnapshot | Record<string, unknown>;
+  capability_manifest?: Record<string, unknown>;
   runner_state?: Record<string, unknown>;
+};
+
+export type ConveyorMachineSnapshot = {
+  schema_version: number;
+  machine_version: number;
+  authority: "sqlite" | string;
+  current_stage: string;
+  stage_status: string;
+  owner_role: string;
+  work_item: {
+    id: string;
+    title?: string;
+    status: string;
+    current_stage: string;
+    stage_status: string;
+    owner_role: string;
+    capability_manifest_id: string;
+    capability_manifest_version: number;
+    validation_status: string;
+    risk_tier?: string;
+    continuation_token: string;
+    entered_at?: string;
+    updated_at?: string;
+  };
+  stage_contract: Record<string, unknown>;
+  stage_contracts: Array<Record<string, unknown>>;
+  capability_manifest: Record<string, unknown>;
+  stage_attempts: Array<Record<string, unknown>>;
+  validation_receipts: Array<Record<string, unknown>>;
+  policy: Record<string, unknown>;
 };
 
 export type ProjectSnapshot = {
@@ -169,6 +201,7 @@ export type ObservatorySnapshot = {
     cycles: number;
     updated_at?: string;
     roles: ObservatoryRoleCard[];
+    state_machine?: ConveyorMachineSnapshot | Record<string, unknown>;
     active_run?: Record<string, unknown>;
     decision_queue?: Array<Record<string, unknown>>;
     health?: Record<string, unknown>;

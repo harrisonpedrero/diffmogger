@@ -8,7 +8,7 @@ You are generating project-specific Codex automation files from a project intake
 
 Read the intake brief first. If values are missing, make reasonable defaults and document assumptions. Do not ask questions unless a missing value would make the workflow unsafe.
 
-Respect the intake's project mode. For `fresh_project`, generate files for a new target repo. For `existing_project`, preserve existing architecture, commands, docs, and project-specific instructions; add Diffmogger guidance as a clearly marked managed section when updating existing `AGENTS.md` or existing project-owned development docs. Generated Diffmogger-owned runtime state should live under `.diffmogger/`; canonical live orchestration state is `.diffmogger/runtime/orchestration.sqlite3`, with `.diffmogger/runtime/canonical_state_brief.md` regenerated as the bounded state view for agents.
+Respect the intake's project mode. For `fresh_project`, generate files for a new target repo. For `existing_project`, preserve existing architecture, commands, docs, and project-specific instructions; add Diffmogger guidance as a clearly marked managed section when updating existing `AGENTS.md` or existing project-owned development docs. Generated Diffmogger-owned runtime state should live under `.diffmogger/`; canonical live orchestration state is `.diffmogger/runtime/orchestration.sqlite3`, with typed automation control, conveyor stage contracts, the current work item, repository capability manifest, validation receipts, blockers, and next actions exposed through `.diffmogger/runtime/canonical_state_brief.md`.
 
 Create these files as complete Markdown drafts:
 
@@ -42,7 +42,7 @@ For existing-project integration, the first runnable demo means a meaningful int
 
 The generated `.diffmogger/state/PROJECT_CONTEXT.md` should index supplemental project context when provided, such as PDFs, research notes, design docs, CSVs, or Markdown notes. It must warn not to include secrets, credentials, paid-account exports, or private production data.
 
-The generated `.diffmogger/agentic/automation_prompt.md` is used for recurring automation. It should be durable and behavioral. It must tell Codex to read the dynamic task file and guardrails every run, follow the mode-aware progression plan, support worker agents, support the human bridge, use lock files, compact generated Markdown projections when needed, verify work, and update canonical SQLite state plus generated handoff projections.
+The generated `.diffmogger/agentic/automation_prompt.md` is used for recurring automation. It should be durable and behavioral. It must tell Codex to read the canonical state brief, generated task projection, and guardrails every run, follow the mode-aware progression plan, support worker agents, support the human bridge, use lock files, compact generated Markdown projections when needed, verify work, and update canonical SQLite state plus generated handoff projections.
 
 It must explicitly read and follow:
 
@@ -54,7 +54,7 @@ It must explicitly read and follow:
 .diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md if present
 ```
 
-It must say that the task file is dynamic and rewritten at the end of every run, but is not the runtime authority. It must say canonical runtime state lives in `.diffmogger/runtime/orchestration.sqlite3`; `.diffmogger/runtime/canonical_state_brief.md` is the generated view agents read instead of inspecting SQLite manually; `.diffmogger/runtime/automation_conveyor_state.json` is generated for compatibility. It must say the guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
+It must say that the task file is dynamic and rewritten at the end of every run, but is not the runtime authority. It must say canonical runtime state lives in `.diffmogger/runtime/orchestration.sqlite3`; typed automation control, conveyor stage contracts, the current work item, repository capability manifest, validation receipts, blockers, human messages, and next actions live there; `.diffmogger/runtime/canonical_state_brief.md` is the generated view agents read instead of inspecting SQLite manually; `.diffmogger/runtime/automation_conveyor_state.json` is generated for compatibility. It must say the guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
 
 The automation prompt must include this exact language:
 
@@ -66,7 +66,7 @@ Do not stop merely because a basic demo exists. A working baseline is not the fi
 If all listed tasks are done, inspect the project and generate the next valuable backlog yourself, staying aligned with the mission and guardrails.
 ```
 
-The task file must include:
+The generated task projection must include:
 
 - `AUTOMATION_STATUS: ACTIVE`
 - current project state
@@ -82,7 +82,7 @@ The task file must include:
 - mode-appropriate backlog or deferred/follow-up ticket section
 - continue/block/critical-stop rationale
 
-The product horizon state must include current horizon, horizon goal, advancement criteria, evidence gathered this run, advancement decision (`stay`, `advance`, or `defer`), next horizon candidate, and remaining work before advancement. The automation prompt must tell Codex to advance to the next horizon only when criteria are met and to append evidence to the horizon transition log when advancement happens. For `ticket_campaign`, the generated horizons should be bounded ticket-run phases, bootstrap must be readiness-only, normal runs should use dependency-aware `scripts/ticket_run.py . next --json` selection for one ticket per run, and prompts must not tell Codex to invent open-ended roadmap work after all tickets are done or blocked.
+Typed automation control and the generated task projection must include current horizon, horizon goal, advancement criteria, evidence gathered this run, advancement decision (`stay`, `advance`, or `defer`), next horizon candidate, and remaining work before advancement. The automation prompt must tell Codex to advance to the next horizon only when criteria are met and to append evidence to the horizon transition log when advancement happens. For `ticket_campaign`, the generated horizons should be bounded ticket-run phases, bootstrap must be readiness-only, normal runs should use dependency-aware `scripts/ticket_run.py . next --json` selection for one ticket per run, and prompts must not tell Codex to invent open-ended roadmap work after all tickets are done or blocked.
 
 The guardrails file must stay lean and include:
 
@@ -170,7 +170,7 @@ Generated guardrails must prohibit unbounded recursive agents, overlapping write
 
 If the target helper script supports write workers, keep read-only as the default mode and require an explicit write mode plus ownership scope for write-capable workers.
 
-Support two continuous automation profiles. `single_lane` is the solo continuous profile for docs, research, cleanup, reports, small apps, bounded/simple work, and non-engineering workflows. `planner_builder_hardener_integrator` is the multi-role software-engineering profile for larger work where separate planning, implementation, verification, and integration lanes add value. If `automation_role_profile` is `single_lane` or `multi_role_automations_allowed` is false, generate the single-lane profile.
+Support two continuous automation profiles. `single_lane` is the solo continuous profile for docs, research, cleanup, reports, small apps, bounded/simple work, and non-engineering workflows. `planner_builder_hardener_integrator` is the multi-role software-engineering profile for larger work where separate planning, implementation, verification, and integration lanes add value. Treat `automation_role_profile` as canonical; `multi_role_automations_allowed` is only a backward-compatible derived mirror for old intakes.
 
 Generated targets must include `.diffmogger/scripts/run_conveyor_automation.sh`, `.diffmogger/scripts/run_conveyor_automation.py`, `.diffmogger/scripts/run_observatory.py`, `.diffmogger/scripts/repair_environment.py`, and `.diffmogger/schemas/orchestration_state.schema.json` as local automation helpers/contracts. When multi-role mode is enabled, also generate `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, `.diffmogger/agentic/roles/integrator.md`, `.diffmogger/state/MULTI_ROLE_PROGRESS.md`, `.diffmogger/scripts/run_role_automation.sh`, `.diffmogger/scripts/integrate_role_outputs.py`, and `.diffmogger/scripts/list_deferred_patches.py`.
 

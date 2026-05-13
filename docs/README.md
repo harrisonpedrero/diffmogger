@@ -1,6 +1,6 @@
 # Diffmogger Docs
 
-This directory is for source-kit documentation. Generated target-state docs live in `templates/docs/` and render into `.diffmogger/state/` as human/prompt projections, authored surfaces, or exports. Canonical live orchestration state is SQLite under `.diffmogger/runtime/orchestration.sqlite3`; agents read the generated `.diffmogger/runtime/canonical_state_brief.md` view.
+This directory is for source-kit documentation. Generated target-state docs live in `templates/docs/` and render into `.diffmogger/state/` as human/prompt projections, authored surfaces, or exports. Canonical live orchestration state is typed SQLite under `.diffmogger/runtime/orchestration.sqlite3`; agents read the generated `.diffmogger/runtime/canonical_state_brief.md` view.
 
 ## Active Docs
 

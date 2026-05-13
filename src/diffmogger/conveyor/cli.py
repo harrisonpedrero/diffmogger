@@ -71,6 +71,7 @@ def main() -> int:
                     "automation_status": automation_status(target),
                     "baseline_verification": baseline_record(target),
                     "integrator_no_progress": no_progress_info(state),
+                    "state_machine": state.get("state_machine") if isinstance(state.get("state_machine"), dict) else {},
                     "ticket_campaign": {"status": ticket_state or "active", "reason": ticket_reason},
                 },
                 indent=2,

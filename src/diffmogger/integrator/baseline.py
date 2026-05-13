@@ -10,6 +10,11 @@ from .verification import (
     run_verification,
     verification_reason_for_category,
 )
+from diffmogger.runtime.blocker_review import (
+    adjudicate_baseline_blocker,
+    baseline_review_allows_progress,
+    baseline_review_requests_rerun,
+)
 
 def baseline_verification_path(target: Path) -> Path:
     return dpath(target, BASELINE_VERIFICATION_RELATIVE)
@@ -142,6 +147,15 @@ def baseline_next_action(status: str, result: VerificationResult) -> str:
         return "Route a baseline repair patch through planner/builder/hardener with verification_scope baseline_repair."
     return result.root_cause or "Inspect baseline verification output before running full-suite-required integration."
 
+def sanitize_baseline_payload(value: Any, target: Path) -> Any:
+    if isinstance(value, dict):
+        return {str(key): sanitize_baseline_payload(item, target) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_baseline_payload(item, target) for item in value]
+    if isinstance(value, str):
+        return progress_inline(value, target, limit=500)
+    return value
+
 def baseline_record_from_result(
     target: Path,
     result: VerificationResult,
@@ -157,6 +171,17 @@ def baseline_record_from_result(
     first_seen = str(previous.get("first_seen_at") or now) if previous_signature == signature else now
     root_cause = result.root_cause or root_cause_line(result.detail)
     repair_attempted = any("repair" in str(item).lower() for item in result.checks_run) or "repair" in result.detail.lower()
+    review_input = {
+        "schema_version": BASELINE_SCHEMA_VERSION,
+        "head": head_value,
+        "verification_config_hash": verification_config_hash(target),
+        "status": status,
+        "category": result.category or "",
+        "root_cause": root_cause,
+        "failure_signature": signature,
+        "checks_run": result.checks_run,
+        "detail": result.detail,
+    }
     return {
         "schema_version": BASELINE_SCHEMA_VERSION,
         "head": head_value,
@@ -169,6 +194,7 @@ def baseline_record_from_result(
         "detail": progress_inline(result.detail, target, limit=1200),
         "repair_attempted": repair_attempted,
         "next_action": baseline_next_action(status, result),
+        "blocker_review": sanitize_baseline_payload(adjudicate_baseline_blocker(review_input), target),
         "first_seen_at": first_seen,
         "last_seen_at": now,
     }
@@ -189,6 +215,7 @@ def baseline_record_is_current(target: Path, record: dict[str, Any], head_value:
         and int(record.get("schema_version") or 0) == BASELINE_SCHEMA_VERSION
         and str(record.get("head") or "") == head_value
         and str(record.get("verification_config_hash") or "") == verification_config_hash(target)
+        and not baseline_review_requests_rerun(record)
     )
 
 def run_baseline_verification(
@@ -207,7 +234,7 @@ def run_baseline_verification(
     return record
 
 def baseline_record_blocks_full_suite(record: dict[str, Any] | None) -> bool:
-    return bool(record) and str(record.get("status") or "unknown") != "passing"
+    return bool(record) and str(record.get("status") or "unknown") != "passing" and not baseline_review_allows_progress(record)
 
 def attach_baseline_fields(manifest: dict[str, Any], baseline: dict[str, Any] | None) -> None:
     if not baseline:

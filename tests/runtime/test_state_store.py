@@ -16,6 +16,7 @@ from diffmogger.conveyor.state import load_state, write_state
 from diffmogger.runtime.state_store import (
     CONVEYOR_PROJECTION_NAME,
     RUNNER_PROJECTION_NAME,
+    automation_control_state,
     canonical_state_brief_path_for_target,
     load_conveyor_state,
     load_runner_state,
@@ -36,7 +37,7 @@ class StateStoreTests(unittest.TestCase):
             state = load_conveyor_state(projection_path)
             snapshot = state_snapshot(target)
 
-            self.assertEqual(1, state["schema_version"])
+            self.assertEqual(2, state["schema_version"])
             self.assertEqual("sqlite", snapshot["authority"])
             self.assertEqual("ok", snapshot["status"])
             self.assertGreaterEqual(snapshot["counts"]["events"], 1)
@@ -45,6 +46,11 @@ class StateStoreTests(unittest.TestCase):
             projected = json.loads(projection_path.read_text(encoding="utf-8"))
             self.assertEqual("sqlite", projected["canonical_state"]["authority"])
             self.assertEqual(CONVEYOR_PROJECTION_NAME, projected["canonical_state"]["projection"])
+            self.assertEqual("sqlite", projected["state_machine"]["authority"])
+            self.assertEqual("intake", projected["state_machine"]["current_stage"])
+            self.assertEqual(10, len(projected["state_machine"]["stage_contracts"]))
+            self.assertIn("capability_manifest", snapshot)
+            self.assertTrue(snapshot["capability_manifest"]["digest"])
 
     def test_legacy_json_is_imported_once_as_compatibility_migration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -105,7 +111,234 @@ class StateStoreTests(unittest.TestCase):
             finally:
                 db.close()
             self.assertGreaterEqual(event_count, 2)
-            self.assertEqual(1, projection_count)
+            self.assertGreaterEqual(projection_count, 3)
+
+    def test_builder_role_owns_implementation_even_when_reason_mentions_integration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            projection_path = target / "target" / "automation_conveyor_state.json"
+            state = load_state(projection_path)
+            state["last_decision"] = {
+                "role": "builder",
+                "reason": "builder-first policy: last integration accepted no patches",
+                "decided_at": "2026-05-12T22:06:54+00:00",
+            }
+
+            write_state(
+                projection_path,
+                state,
+                event_type="conveyor.decision_recorded",
+                actor_role="conveyor",
+                phase="decision",
+            )
+            decision_machine = state_snapshot(target)["conveyor_machine"]
+            self.assertEqual("implementation", decision_machine["current_stage"])
+            self.assertEqual("ready", decision_machine["stage_status"])
+            self.assertEqual("builder", decision_machine["owner_role"])
+
+            state["active_role_run"] = {
+                "role": "builder",
+                "run_id": "20260512T220654Z-conveyor-builder",
+                "status": "running",
+                "reason": "builder-first policy: last integration accepted no patches",
+                "started_at": "2026-05-12T22:06:54+00:00",
+            }
+            write_state(
+                projection_path,
+                state,
+                event_type="role_run.started",
+                actor_role="builder",
+                phase="role_execution",
+            )
+            running_machine = state_snapshot(target)["conveyor_machine"]
+            latest_attempt = running_machine["stage_attempts"][0]
+
+            self.assertEqual("implementation", running_machine["current_stage"])
+            self.assertEqual("running", running_machine["stage_status"])
+            self.assertEqual("builder", running_machine["owner_role"])
+            self.assertEqual("builder", running_machine["work_item"]["workspace_id"])
+            self.assertEqual("implementation", latest_attempt["stage"])
+            self.assertEqual("builder", latest_attempt["owner_role"])
+            self.assertEqual("pass", validate_state_database(target)["status"])
+
+    def test_planner_decision_owns_planning_even_when_reason_mentions_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            projection_path = target / "target" / "automation_conveyor_state.json"
+            state = load_state(projection_path)
+            state["last_decision"] = {
+                "role": "planner",
+                "reason": "hardener completed; planner gets the next state-machine pass",
+                "decided_at": "2026-05-12T23:11:51+00:00",
+            }
+
+            write_state(
+                projection_path,
+                state,
+                event_type="conveyor.decision_recorded",
+                actor_role="conveyor",
+                phase="decision",
+            )
+            machine = state_snapshot(target)["conveyor_machine"]
+
+            self.assertEqual("planning", machine["current_stage"])
+            self.assertEqual("ready", machine["stage_status"])
+            self.assertEqual("planner", machine["owner_role"])
+            self.assertEqual("pass", validate_state_database(target)["status"])
+
+    def test_role_decision_owns_stage_even_when_reason_mentions_user(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            projection_path = target / "target" / "automation_conveyor_state.json"
+            state = load_state(projection_path)
+            state["last_decision"] = {
+                "role": "builder",
+                "reason": "builder implements user-facing error recovery",
+                "decided_at": "2026-05-12T23:30:00+00:00",
+            }
+
+            write_state(
+                projection_path,
+                state,
+                event_type="conveyor.decision_recorded",
+                actor_role="conveyor",
+                phase="decision",
+            )
+            machine = state_snapshot(target)["conveyor_machine"]
+
+            self.assertEqual("implementation", machine["current_stage"])
+            self.assertEqual("ready", machine["stage_status"])
+            self.assertEqual("builder", machine["owner_role"])
+            self.assertEqual("pass", validate_state_database(target)["status"])
+
+    def test_validation_files_materialize_as_typed_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            runtime_dir = target / "target"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            (runtime_dir / "baseline_verification.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "passing",
+                        "checks_run": ["python3 -m unittest"],
+                        "first_seen_at": "2026-05-12T10:00:00+00:00",
+                        "last_seen_at": "2026-05-12T10:02:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (runtime_dir / "integration_safety_check.json").write_text(
+                json.dumps(
+                    {
+                        "status": "pass",
+                        "command": "python3 scripts/check_integration_safety.py",
+                        "checked_at": "2026-05-12T10:03:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = state_snapshot(target)
+            machine = snapshot["conveyor_machine"]
+            receipts = machine["validation_receipts"]
+
+            self.assertEqual("passed", machine["work_item"]["validation_status"])
+            self.assertEqual(2, len(receipts))
+            self.assertEqual(
+                {"baseline_verification", "integration_safety"},
+                {receipt["kind"] for receipt in receipts},
+            )
+
+    def test_false_positive_baseline_blocker_is_superseded_with_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            runtime_dir = target / "target"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            (runtime_dir / "baseline_verification.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "blocked_environment",
+                        "category": "missing_env_var",
+                        "root_cause": "Missing required environment variable `EBADENGINE`.",
+                        "failure_signature": "verification_environment_failure:missing_env_var:abc",
+                        "checks_run": ["npm ci", "npm test"],
+                        "detail": "\n".join(
+                            [
+                                "$ npm ci",
+                                "exit=0",
+                                "npm warn EBADENGINE Unsupported engine {",
+                                "npm warn EBADENGINE   required: { node: '^20.19.0 || ^22.13.0 || >=24' }",
+                                "npm warn EBADENGINE }",
+                            ]
+                        ),
+                        "first_seen_at": "2026-05-12T10:00:00+00:00",
+                        "last_seen_at": "2026-05-12T10:02:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = state_snapshot(target)
+            machine = snapshot["conveyor_machine"]
+            receipts = machine["validation_receipts"]
+
+            self.assertEqual("warning", machine["work_item"]["validation_status"])
+            self.assertEqual("warn", receipts[0]["status"])
+            self.assertEqual([], snapshot["open_blockers"])
+
+            db = sqlite3.connect(snapshot["database"]["path"])
+            db.row_factory = sqlite3.Row
+            try:
+                row = db.execute("SELECT status, payload_json FROM blockers WHERE kind = 'baseline_verification'").fetchone()
+            finally:
+                db.close()
+            self.assertIsNotNone(row)
+            self.assertEqual("superseded", row["status"])
+            payload = json.loads(row["payload_json"])
+            review = payload["blocker_review"]
+            self.assertEqual("false_positive", review["verdict"])
+            self.assertFalse(review["is_blocker"])
+            self.assertTrue(review["rerun_recommended"])
+
+    def test_task_markdown_seeds_control_once_but_is_not_live_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            task = target / "docs" / "CODEX_AUTOMATION_TASKS.md"
+            task.parent.mkdir(parents=True)
+            task.write_text(
+                "AUTOMATION_STATUS: ACTIVE\n"
+                "\n"
+                "Last updated: initial\n"
+                "\n"
+                "## Product Horizon State\n"
+                "\n"
+                "- Current horizon: H1 Runnable baseline\n"
+                "- Advancement decision: stay\n"
+                "\n"
+                "## Best Next Milestone\n"
+                "\n"
+                "Prove typed state owns automation control.\n",
+                encoding="utf-8",
+            )
+
+            seeded = automation_control_state(target)
+            task.write_text(
+                "AUTOMATION_STATUS: CRITICAL_STOP\n"
+                "\n"
+                "## Product Horizon State\n"
+                "\n"
+                "- Current horizon: H9 Poisoned Markdown\n"
+                "- Advancement decision: advance\n",
+                encoding="utf-8",
+            )
+            loaded = automation_control_state(target)
+
+            self.assertEqual("ACTIVE", seeded["status"])
+            self.assertEqual("ACTIVE", loaded["status"])
+            self.assertEqual("H1 Runnable baseline", loaded["horizon"])
+            self.assertNotEqual("H9 Poisoned Markdown", loaded["horizon"])
 
     def test_runner_state_is_sqlite_backed_with_json_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

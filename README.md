@@ -11,7 +11,7 @@ It is not a hosted agent platform or a product-specific app. Diffmogger is built
 - A native Tauri dashboard for setup, ticket-campaign queue creation/management, Start/Stop run control, safety checks, review export, inbox messages, and activity monitoring.
 - A generated sidecar layout under `.diffmogger/` so target repos keep Diffmogger-owned prompts, canonical state, runtime files, queues, worktrees, logs, and manifests out of product-owned paths.
 - Thin target-local Python wrappers under `.diffmogger/scripts/` that import the bundled `.diffmogger/lib/diffmogger/` runtime.
-- A continuous planner/builder/hardener/integrator conveyor backed by `.diffmogger/runtime/orchestration.sqlite3` with append-only events, checkpoints, typed projections, and generated JSON/Markdown views, including `.diffmogger/runtime/canonical_state_brief.md` for Codex agents.
+- A continuous planner/builder/hardener/integrator conveyor backed by `.diffmogger/runtime/orchestration.sqlite3` with append-only events, typed stage contracts, a durable work item, repo capability manifests, validation receipts, checkpoints, and generated JSON/Markdown views, including `.diffmogger/runtime/canonical_state_brief.md` for Codex agents.
 - Stable root CLI command names while implementation lives under `src/diffmogger/`.
 - An explicit status model: `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`.
 - Optional worker agents, optional ticket campaigns, optional Context7/Playwright MCP setup, optional notifier integration, and single-lane fallback for legacy targets.
@@ -91,7 +91,7 @@ New target repos receive a sidecar namespace:
 .diffmogger/state/        generated Markdown prompt, handoff, bridge, and review projections
 .diffmogger/scripts/      target-local wrappers and shell helpers
 .diffmogger/lib/          bundled Python runtime from src/diffmogger/
-.diffmogger/runtime/      canonical SQLite state, generated JSON projections, logs, queues, locks, worker reports
+.diffmogger/runtime/      canonical SQLite state machine, generated projections, logs, queues, locks, worker reports
 .diffmogger/schemas/      JSON Schema contracts for exported/projection state
 .diffmogger/manifest.json generated ownership and path manifest
 ```
@@ -100,7 +100,7 @@ The target repo should not need the Diffmogger checkout at runtime. The native d
 
 ## Dashboard
 
-The native dashboard is the only user-facing dashboard. It lives in `services/agentic-dashboard/native/` and calls `scripts/dashboard_backend_cli.py`, which exposes allowlisted JSON commands for scaffold, diagnostics, canonical state snapshots, Start/Stop automation, safety checks, inbox messages, Observatory snapshots, review bundles, worker controls, and debug bundles.
+The native dashboard is the only user-facing dashboard. It lives in `services/agentic-dashboard/native/` and calls `scripts/dashboard_backend_cli.py`, which exposes allowlisted JSON commands for scaffold, diagnostics, typed conveyor state snapshots, Start/Stop automation, safety checks, inbox messages, Observatory snapshots, review bundles, worker controls, and debug bundles.
 
 For ticket-campaign targets, the dashboard manages a structured Ticket Queue backed by `.diffmogger/runtime/orchestration.sqlite3`. Users can seed tickets before scaffold, inspect/edit/delete tickets after scaffold, preview/apply Markdown/CSV/JSON imports, and accept review-only Codex draft candidates stored under `.diffmogger/runtime/ticket_drafts/`.
 

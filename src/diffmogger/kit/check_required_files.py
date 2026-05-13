@@ -115,6 +115,7 @@ RUNTIME_LIBRARY_REQUIRED = [
     ".diffmogger/lib/diffmogger/observatory/server.py",
     ".diffmogger/lib/diffmogger/observatory/snapshots.py",
     ".diffmogger/lib/diffmogger/runtime/__init__.py",
+    ".diffmogger/lib/diffmogger/runtime/blocker_review.py",
     ".diffmogger/lib/diffmogger/runtime/paths.py",
     ".diffmogger/lib/diffmogger/runtime/build_replay.py",
     ".diffmogger/lib/diffmogger/runtime/compact_agent_state.py",
@@ -243,6 +244,17 @@ CONVEYOR_REQUIRED_STRINGS = [
     "automation_conveyor_state.json",
     "orchestration.sqlite3",
     "conveyor.state",
+    "conveyor.machine",
+    "conveyor_work_items",
+    "conveyor_stage_contracts",
+    "conveyor_stage_attempts",
+    "capability_manifests",
+    "validation_receipts",
+    "automation_control",
+    "automation.control",
+    "escalations",
+    "task_edges",
+    "repo.capability_manifest",
     "queued role patch",
     "run_role_automation.sh",
     "run_codex_automation.sh",
@@ -353,7 +365,6 @@ DISCORD_NOTIFIER_AUTOMATION_REQUIRED_STRINGS = [
 ]
 
 MULTI_ROLE_AUTOMATION_REQUIRED_STRINGS = [
-    "Multi-role automations allowed: true",
     "Role profile: `planner_builder_hardener_integrator`",
     "Continuous conveyor",
     "target/automation_worktrees",
@@ -567,11 +578,12 @@ def inferred_multi_role_enabled(root: Path) -> bool:
         return bool(features.get("multi_role"))
 
     intake = project_intake(root)
-    intake_profile = str(intake.get("automation_role_profile") or "").strip()
+    intake_profile = str(intake.get("automation_role_profile") or "").strip().lower()
+    intake_profile = intake_profile.replace("-", "_").replace(" ", "_")
     if intake_profile == "single_lane":
         return False
     if intake_profile == "planner_builder_hardener_integrator":
-        return bool(intake.get("multi_role_automations_allowed", True))
+        return True
     if "multi_role_automations_allowed" in intake:
         return bool(intake.get("multi_role_automations_allowed"))
 
@@ -580,9 +592,13 @@ def inferred_multi_role_enabled(root: Path) -> bool:
             text = rel_path(root, rel).read_text(encoding="utf-8")
         except OSError:
             continue
-        if "Role profile: `single_lane`" in text or "Multi-role automations allowed: false" in text:
+        if "Role profile: `single_lane`" in text:
             return False
-        if "Role profile: `planner_builder_hardener_integrator`" in text or "Multi-role automations allowed: true" in text:
+        if "Role profile: `planner_builder_hardener_integrator`" in text:
+            return True
+        if "Multi-role automations allowed: false" in text:
+            return False
+        if "Multi-role automations allowed: true" in text:
             return True
     return False
 

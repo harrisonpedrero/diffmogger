@@ -2,17 +2,17 @@
 
 ## Automation Does Too Little
 
-Strengthen sprint sizing. Make sure the automation prompt contains the required adjacent-task continuation language and the task file names a substantial next milestone.
+Strengthen sprint sizing. Make sure the automation prompt contains the required adjacent-task continuation language and typed automation control state names a substantial next milestone.
 
 ## Automation Drifts
 
-Rewrite `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` around one best next milestone. Tighten scope boundaries in guardrails. Add a decision record if direction changed.
+Update typed automation control state around one best next milestone, then refresh `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` as the generated handoff projection. Tighten scope boundaries in guardrails. Add a decision record if direction changed.
 
 ## Automation Writes Docs Instead Of Product
 
 Require an integrated deliverable each run: code, tests, report, demo command, fixture, screenshot, UX improvement, or verification result.
 
-In file-only human bridge mode, summary/status requests should be satisfied locally in Markdown or app artifacts. In notifier modes, if the human asked to be messaged or sent a status update, writing a local Markdown summary is insufficient; the automation should call `POST http://127.0.0.1:8765/api/notify` when the notifier is available.
+In file-only human bridge mode, summary/status requests should be satisfied through the dashboard Inbox or an explicitly requested local artifact. In notifier modes, if the human asked to be messaged or sent a status update, writing a local Markdown summary is insufficient; the automation should call `POST http://127.0.0.1:8765/api/notify` when the notifier is available.
 
 ## Automation Keeps Asking The Human
 
@@ -20,11 +20,11 @@ Reserve human requests for manual unlocks. Tell Codex to choose safe defaults fo
 
 ## Automation Never Asks The Human
 
-Add a human-as-resource reminder to the task file. If API keys, paid services, deploys, or major product choices would unlock value, create a request.
+Add a human-as-resource reminder to typed automation control or guardrails. If API keys, paid services, deploys, or major product choices would unlock value, create a typed human request.
 
 ## Worker Outputs Pile Up
 
-Require consolidation before final summary. Move stale worker reports out of the active handoff and record accepted/rejected/deferred findings in the task file.
+Require consolidation before final summary. Move stale worker reports out of the active handoff and record accepted/rejected/deferred findings in typed runtime state.
 
 Use:
 
@@ -51,7 +51,7 @@ a managed-browser or manual visual-QA path.
 
 ## Broad Runs Skip Workers Without Explanation
 
-Require the task file to include:
+Require typed automation control state to include:
 
 ```text
 Codex CLI worker decision: USE / SKIP / UNAVAILABLE
@@ -134,7 +134,7 @@ Check:
 
 ## Context Bloat
 
-Keep active files short. Archive handled inbox items and stale tasks. Put long history in logs or archives, not in files read every run.
+Keep active projections short. Resolve handled inbox items in typed human-message state and compact stale projection history. Put long history in logs or archives, not in files read every run.
 
 Review compaction before writing:
 

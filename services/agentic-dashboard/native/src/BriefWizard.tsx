@@ -189,7 +189,7 @@ const defaultDraft: IntakeDraft = {
     "Build a local-first workspace that helps solo builders turn project goals into weekly boards, daily focus plans, and review summaries.",
   target_user: "Solo founders, engineers, and creative builders managing one to three active projects.",
   desired_first_demo:
-    "A user can create a project, capture goals, generate a weekly plan, and review progress from local Markdown files.",
+    "A user can create a project, capture goals, generate a weekly plan, and review progress from the local dashboard.",
   tech_preferences: ["Use a simple, well-supported stack.", "Prefer local-first storage and clear validation commands."],
   hard_constraints: ["Keep the generated project target-agnostic.", "Preserve existing project conventions when integrating into a repo."],
   safety_constraints: ["Do not store secrets in generated docs.", "Keep destructive operations explicit and human-approved."],
@@ -264,13 +264,17 @@ function enumValue<T extends string>(value: unknown, valid: readonly T[], fallba
 }
 
 function roleProfileValues(source: Record<string, unknown>): Pick<IntakeDraft, "multi_role_automations_allowed" | "automation_role_profile"> {
-  const rawProfile = enumValue(
-    source.automation_role_profile,
-    ["single_lane", "planner_builder_hardener_integrator"],
-    defaultDraft.automation_role_profile,
-  );
-  const rawMultiRole = boolValue(source.multi_role_automations_allowed, defaultDraft.multi_role_automations_allowed);
-  if (rawProfile === "single_lane" || !rawMultiRole) {
+  const profile =
+    source.automation_role_profile === "single_lane" ||
+    source.automation_role_profile === "planner_builder_hardener_integrator"
+      ? source.automation_role_profile
+      : "";
+  const resolvedProfile =
+    profile ||
+    (boolValue(source.multi_role_automations_allowed, defaultDraft.multi_role_automations_allowed)
+      ? "planner_builder_hardener_integrator"
+      : "single_lane");
+  if (resolvedProfile === "single_lane") {
     return { multi_role_automations_allowed: false, automation_role_profile: "single_lane" };
   }
   return {
@@ -1513,8 +1517,8 @@ export function BriefWizard(props: {
           <h2>Inbox</h2>
           <ToggleRow
             checked={draft.human_bridge_enabled}
-            label="Enable inbox files"
-            detail="Generated targets use Markdown inbox files."
+            label="Enable Inbox"
+            detail="Generated targets use dashboard-backed typed human-message state."
             onChange={(checked) => updateDraft("human_bridge_enabled", checked)}
           />
           <FormField label="Inbox mode">

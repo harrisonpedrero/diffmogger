@@ -17,6 +17,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
+from diffmogger.runtime.state_store import load_ticket_run_state, stable_json, state_snapshot, write_ticket_run_state
+
 INTEGRATOR_PATHS = [
     ROOT / "src" / "diffmogger" / "runtime" / "integrate_role_outputs.py",
 ]
@@ -38,6 +40,10 @@ def load_integrator(path: Path):
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def ticket_digest(ticket: dict[str, object]) -> str:
+    return sha256_text(stable_json(dict(ticket)))
 
 
 class RuntimeStateActionTests(unittest.TestCase):
@@ -72,6 +78,31 @@ class RuntimeStateActionTests(unittest.TestCase):
             check=True,
             stdout=subprocess.DEVNULL,
         )
+
+    def test_progress_projection_keeps_required_fast_follow_marker(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    (target / "docs").mkdir(parents=True)
+                    (target / "docs" / "CODEX_AUTOMATION_TASKS.md").write_text(
+                        "AUTOMATION_STATUS: ACTIVE\n",
+                        encoding="utf-8",
+                    )
+
+                    module.update_progress(
+                        target,
+                        run_id="integrator-smoke",
+                        verification_status="pass",
+                        committed=[],
+                        deferred_count=0,
+                        checkpoint_commit=None,
+                        cleanup_summary=[],
+                        dry_run=False,
+                    )
+
+                    progress = (target / "docs" / "MULTI_ROLE_PROGRESS.md").read_text(encoding="utf-8")
+                    self.assertIn("fast-follow replanning", progress)
 
     def add_committed_file(self, target: Path, relative: str, content: str) -> None:
         path = target / relative
@@ -124,6 +155,125 @@ class RuntimeStateActionTests(unittest.TestCase):
             "end_hash": sha256_text(end),
             "content": end,
         }
+
+    def test_runtime_state_applies_ticket_update_action(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    current = {
+                        "id": "TICKET-001",
+                        "summary": "Build the first slice",
+                        "status": "pending",
+                    }
+                    desired = {
+                        **current,
+                        "status": "done",
+                        "evidence": ["pytest passed"],
+                        "related_commits": ["abc1234"],
+                    }
+                    write_ticket_run_state(
+                        target,
+                        {"run_id": "ticket-run", "tickets": [current]},
+                        actor_role="test",
+                        event_type="ticket.run_seeded",
+                    )
+                    manifest = self.write_actions(
+                        target,
+                        [
+                            {
+                                "action": "update_ticket",
+                                "ticket_id": "TICKET-001",
+                                "start_hash": ticket_digest(current),
+                                "end_hash": ticket_digest(desired),
+                                "ticket": desired,
+                            }
+                        ],
+                    )
+
+                    results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
+                    loaded = load_ticket_run_state(target)
+
+                    self.assertEqual(manifest["runtime_state_status"], "applied")
+                    self.assertEqual(results[0]["status"], "applied")
+                    self.assertEqual("done", loaded["tickets"][0]["status"])
+                    self.assertEqual(["pytest passed"], loaded["tickets"][0]["evidence"])
+
+    def test_runtime_state_ticket_hash_conflict_defers_without_mutation(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    current = {
+                        "id": "TICKET-001",
+                        "summary": "Build the first slice",
+                        "status": "pending",
+                    }
+                    desired = {**current, "status": "done", "evidence": ["pytest passed"]}
+                    write_ticket_run_state(
+                        target,
+                        {"run_id": "ticket-run", "tickets": [current]},
+                        actor_role="test",
+                        event_type="ticket.run_seeded",
+                    )
+                    manifest = self.write_actions(
+                        target,
+                        [
+                            {
+                                "action": "update_ticket",
+                                "ticket_id": "TICKET-001",
+                                "start_hash": "not-the-current-ticket-hash",
+                                "end_hash": ticket_digest(desired),
+                                "ticket": desired,
+                            }
+                        ],
+                    )
+
+                    results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
+                    loaded = load_ticket_run_state(target)
+
+                    self.assertEqual(manifest["runtime_state_status"], "deferred")
+                    self.assertEqual(results[0]["status"], "conflict")
+                    self.assertEqual("pending", loaded["tickets"][0]["status"])
+
+    def test_runtime_state_applies_ticket_delete_action(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    first = {
+                        "id": "TICKET-001",
+                        "summary": "Remove stale ticket",
+                        "status": "pending",
+                    }
+                    second = {
+                        "id": "TICKET-002",
+                        "summary": "Keep active ticket",
+                        "status": "pending",
+                    }
+                    write_ticket_run_state(
+                        target,
+                        {"run_id": "ticket-run", "tickets": [first, second]},
+                        actor_role="test",
+                        event_type="ticket.run_seeded",
+                    )
+                    manifest = self.write_actions(
+                        target,
+                        [
+                            {
+                                "action": "delete_ticket",
+                                "ticket_id": "TICKET-001",
+                                "start_hash": ticket_digest(first),
+                            }
+                        ],
+                    )
+
+                    results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
+                    loaded = load_ticket_run_state(target)
+
+                    self.assertEqual(manifest["runtime_state_status"], "applied")
+                    self.assertEqual(results[0]["status"], "applied")
+                    self.assertEqual(["TICKET-002"], [item["id"] for item in loaded["tickets"]])
 
     def test_runtime_state_replace_file_applies_whitelisted_content(self) -> None:
         for path, module in self.modules:
@@ -752,6 +902,65 @@ Review `/tmp/example-project/target/automation_queue/builder/run/codex.raw.log` 
                     self.assertEqual("missing_env_var", result.category)
                     self.assertIn("DATABASE_URL", result.root_cause)
 
+    def test_npm_ebadengine_warning_does_not_classify_as_missing_env_var(self) -> None:
+        output = """
+$ npm ci
+exit=1
+npm warn EBADENGINE Unsupported engine {
+npm warn EBADENGINE   package: 'eslint-visitor-keys@5.0.1',
+npm warn EBADENGINE   required: { node: '^20.19.0 || ^22.13.0 || >=24' },
+npm warn EBADENGINE   current: { node: 'v23.9.0', npm: '10.9.2' }
+npm warn EBADENGINE }
+AssertionError: expected 1 received 2
+""".strip()
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                category, root_cause = module.classify_failure_text("npm ci", output)
+
+                self.assertEqual("test_assertion_failure", category)
+                self.assertIn("expected 1 received 2", root_cause)
+
+    def test_successful_ebadengine_warning_does_not_mask_later_failure(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    (target / ".agentic").mkdir(parents=True)
+                    (target / "warn_engine.py").write_text(
+                        "\n".join(
+                            [
+                                "import sys",
+                                "print('npm warn EBADENGINE Unsupported engine {', file=sys.stderr)",
+                                "print('npm warn EBADENGINE   required: { node: \\'^20.19.0 || ^22.13.0 || >=24\\' }', file=sys.stderr)",
+                            ]
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    (target / "fail_check.py").write_text(
+                        "\n".join(
+                            [
+                                "import sys",
+                                "print('AssertionError: expected 1 received 2', file=sys.stderr)",
+                                "sys.exit(1)",
+                            ]
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    (target / ".agentic" / "verification_commands.txt").write_text(
+                        "python3 warn_engine.py\npython3 fail_check.py\n",
+                        encoding="utf-8",
+                    )
+
+                    result = module.run_verification(target, {"role": "hardener", "changed_files": ["src/app.ts"]})
+
+                    self.assertFalse(result.ok)
+                    self.assertEqual("verification_failure", result.reason)
+                    self.assertEqual("test_assertion_failure", result.category)
+                    self.assertIn("expected 1 received 2", result.root_cause)
+                    self.assertIn("npm warn EBADENGINE", result.detail)
+
     def test_mark_deferred_sanitizes_detail_and_records_root_cause(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
@@ -800,6 +1009,77 @@ Review `/tmp/example-project/target/automation_queue/builder/run/codex.raw.log` 
                     self.assertEqual("missing_env_var", saved["category"])
                     self.assertIn("verification_environment_failure:missing_env_var", saved["failure_signature"])
                     self.assertNotIn("/User" + "s/example", json.dumps(saved))
+
+    def test_database_url_blocker_requires_forced_recheck_after_env_fix(self) -> None:
+        old_database_url = os.environ.pop("DATABASE_URL", None)
+        try:
+            for path, module in self.modules:
+                with self.subTest(path=path.relative_to(ROOT)):
+                    os.environ.pop("DATABASE_URL", None)
+                    with tempfile.TemporaryDirectory() as tmp:
+                        target = Path(tmp)
+                        self.init_repo(target, bridge_mode="disabled")
+                        (target / ".agentic" / "verification_commands.txt").write_text(
+                            "python3 -c 'import os, sys; "
+                            'ok = bool(os.environ.get("DATABASE_URL")); '
+                            'print("DATABASE_URL missing", file=sys.stderr) if not ok else print("ok"); '
+                            "sys.exit(0 if ok else 1)'\n",
+                            encoding="utf-8",
+                        )
+                        head_value = module.head(target)
+
+                        blocked = module.run_baseline_verification(
+                            target,
+                            head_value=head_value,
+                            dry_run=False,
+                            force=True,
+                        )
+                        review = blocked["blocker_review"]
+                        self.assertEqual("blocked_environment", blocked["status"])
+                        self.assertEqual("missing_env_var", blocked["category"])
+                        self.assertEqual("confirmed_blocker", review["verdict"])
+                        self.assertTrue(review["is_blocker"])
+                        self.assertTrue(
+                            any(item.get("kind") == "baseline_verification" for item in state_snapshot(target)["open_blockers"])
+                        )
+
+                        (target / ".env").write_text("DATABASE_URL=postgresql://placeholder.invalid/app\n", encoding="utf-8")
+                        stale = module.run_baseline_verification(
+                            target,
+                            head_value=head_value,
+                            dry_run=False,
+                            force=False,
+                        )
+                        self.assertEqual("blocked_environment", stale["status"])
+                        self.assertEqual(blocked["failure_signature"], stale["failure_signature"])
+
+                        exit_code = module.integrate(
+                            target,
+                            "database-url-recheck",
+                            dry_run=False,
+                            force_baseline=True,
+                            baseline_only=True,
+                        )
+
+                        self.assertEqual(0, exit_code)
+                        refreshed = json.loads((target / "target/baseline_verification.json").read_text(encoding="utf-8"))
+                        self.assertEqual("passing", refreshed["status"])
+                        self.assertFalse(
+                            any(item.get("kind") == "baseline_verification" for item in state_snapshot(target)["open_blockers"])
+                        )
+                        tracked = subprocess.run(
+                            ["git", "ls-files"],
+                            cwd=target,
+                            text=True,
+                            capture_output=True,
+                            check=True,
+                        ).stdout.splitlines()
+                        self.assertNotIn(".env", tracked)
+        finally:
+            if old_database_url is not None:
+                os.environ["DATABASE_URL"] = old_database_url
+            else:
+                os.environ.pop("DATABASE_URL", None)
 
     def test_local_postgres_connection_failure_is_repairable_baseline_service(self) -> None:
         for path, module in self.modules:
