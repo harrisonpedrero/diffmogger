@@ -7,6 +7,7 @@ import {
   FilePlus2,
   Pause,
   RefreshCw,
+  Scissors,
   ShieldCheck,
   Terminal,
   Trash2,
@@ -25,6 +26,7 @@ import {
 import { buildRunModel, type RunAction, type RunRoute, type RunSafetyRow } from "./runModel";
 import { TicketFields } from "./TicketFields";
 import {
+  canSplitTicket,
   defaultImportMode,
   emptyTicket,
   issueLabel,
@@ -46,6 +48,10 @@ type TicketDraftState = {
   dropped_existing_count?: number;
   renumbered_count?: number;
   dropped_dependency_count?: number;
+  quality_warning_count?: number;
+  source_ticket_id?: string;
+  source_ticket_summary?: string;
+  remap_dependency_to?: string;
   candidates: Ticket[];
 };
 
@@ -85,6 +91,23 @@ function isTicketCampaign(snapshot: ProjectSnapshot | null): boolean {
     asRecord(snapshot?.brief?.dashboard_state),
   ];
   return records.some((record) => textValue(record.automation_run_mode) === "ticket_campaign");
+}
+
+function ticketSnapshotFromProjectSnapshot(snapshot: ProjectSnapshot | null): TicketSnapshot | null {
+  const run = asRecord(snapshot?.run);
+  const state = asRecord(run.state);
+  const ticketRun = asRecord(state.ticket_run);
+  const tickets = normalizeTickets(ticketRun.tickets);
+  if (!tickets.length) return null;
+  return {
+    tickets,
+    summary: {
+      counts: asRecord(ticketRun.counts) as Record<string, number>,
+      total: typeof ticketRun.total === "number" ? ticketRun.total : tickets.length,
+    },
+    next: asRecord(ticketRun.next) as TicketSnapshot["next"],
+    validation_issues: Array.isArray(ticketRun.validation_issues) ? ticketRun.validation_issues as TicketSnapshot["validation_issues"] : [],
+  };
 }
 
 export function ticketSnapshotReloadKey(snapshot: ProjectSnapshot | null): string {
@@ -261,7 +284,7 @@ export function RunPage(props: {
   const [commandMessage, setCommandMessage] = useState<string | null>(null);
   const [logOverride, setLogOverride] = useState<Record<string, unknown> | null>(null);
   const [writeOwnership, setWriteOwnership] = useState("");
-  const [ticketSnapshot, setTicketSnapshot] = useState<TicketSnapshot | null>(null);
+  const [ticketSnapshot, setTicketSnapshot] = useState<TicketSnapshot | null>(() => ticketSnapshotFromProjectSnapshot(props.snapshot));
   const [ticketBusy, setTicketBusy] = useState<string | null>(null);
   const [ticketError, setTicketError] = useState<string | null>(null);
   const [ticketMessage, setTicketMessage] = useState<string | null>(null);
@@ -290,8 +313,11 @@ export function RunPage(props: {
   const ticketIssues = ticketSnapshot?.validation_issues ?? [];
   const ticketCounts = ticketSnapshot?.summary?.counts ?? {};
   const ticketDraftBusy = ticketBusy === "ticket.draft_from_intake";
+  const ticketSplitBusy = ticketBusy === "ticket.split_preview";
+  const ticketCandidateBusy = ticketDraftBusy || ticketSplitBusy;
   const ticketWriteBusy = ticketBusy !== null;
   const ticketDraftCandidates = ticketDraft?.candidates ?? [];
+  const ticketDraftIsSplit = ticketDraft?.generation_mode === "split";
   const selectedTicketJson = useMemo(() => {
     if (!ticketEditorId) return "";
     const ticket = ticketTickets.find((item) => item.id === ticketEditorId);
@@ -320,6 +346,8 @@ export function RunPage(props: {
       setTicketSnapshot(null);
       return;
     }
+    const embedded = ticketSnapshotFromProjectSnapshot(props.snapshot);
+    if (embedded) setTicketSnapshot(embedded);
     void loadTickets();
   }, [target, model.isScaffolded, ticketCampaign, ticketReloadKey]);
 
@@ -646,26 +674,74 @@ export function RunPage(props: {
     }
   }
 
+  async function splitTicket(ticket: Ticket) {
+    if (!target || !canSplitTicket(ticket)) {
+      setTicketMessage("Only pending tickets can be split.");
+      return;
+    }
+    setTicketBusy("ticket.split_preview");
+    setTicketError(null);
+    setTicketDraft(null);
+    setTicketDraftLogs([]);
+    setTicketMessage(`Drafting split preview for ${ticket.id}.`);
+    setTicketPendingAction(null);
+    focusTicketDraftSection();
+    const runId = `ticket-split-${ticket.id}-${Date.now()}`;
+    let unlisten: (() => void) | null = null;
+    try {
+      unlisten = await listenBackendLogs(runId, (event) => {
+        setTicketDraftLogs((current) => [...current, { ...event, capturedAt: new Date().toISOString() }].slice(-20));
+      });
+      const payload = await runBackendCommandStreamed<TicketDraftState>({
+        runId,
+        command: "ticket.split_preview",
+        target,
+        ticketId: ticket.id,
+      });
+      if (!payload.ok || !payload.data) {
+        setTicketError(payload.message ?? "Ticket split preview failed.");
+        return;
+      }
+      const candidates = normalizeTickets(payload.data.candidates ?? []);
+      setTicketDraft({
+        ...payload.data,
+        draft_id: payload.data.draft_id,
+        candidates,
+      });
+      setTicketMessage(
+        payload.data.message ??
+          `Split preview ready for ${ticket.id}: ${candidates.length} child ticket${candidates.length === 1 ? "" : "s"}.`,
+      );
+      focusTicketDraftSection();
+    } catch (error) {
+      setTicketError(error instanceof Error ? error.message : String(error));
+    } finally {
+      unlisten?.();
+      setTicketBusy(null);
+    }
+  }
+
   async function acceptTicketDraft() {
     if (!target || !ticketDraft?.draft_id || ticketDraftCandidates.length === 0) return;
-    setTicketBusy("ticket.accept_draft");
+    const command = ticketDraft.generation_mode === "split" ? "ticket.accept_split" : "ticket.accept_draft";
+    setTicketBusy(command);
     setTicketError(null);
     try {
       const payload = await runBackendCommand<TicketSnapshot>({
-        command: "ticket.accept_draft",
+        command,
         target,
         draftId: ticketDraft.draft_id,
-        importMode: "append",
+        importMode: command === "ticket.accept_draft" ? "append" : undefined,
       });
       if (!payload.ok || !payload.data) {
-        setTicketError(payload.message ?? "Could not accept the draft tickets.");
+        setTicketError(payload.message ?? "Could not accept the ticket preview.");
         return;
       }
       setTicketSnapshot(payload.data);
       setTicketDraft(null);
       setTicketDraftLogs([]);
       setTicketDraftDirection("");
-      setTicketMessage("Draft tickets added to the queue.");
+      setTicketMessage(command === "ticket.accept_split" ? "Split applied to the queue." : "Draft tickets added to the queue.");
       setTicketPendingAction(null);
       await Promise.resolve(props.onRefresh());
     } catch (error) {
@@ -820,7 +896,7 @@ export function RunPage(props: {
               <div className="ticket-section-heading">
                 <div>
                   <h3>Draft candidates</h3>
-                  <span>{ticketDraftBusy ? "Drafting" : ticketDraft ? `${ticketDraftCandidates.length} ready` : "None"}</span>
+                  <span>{ticketCandidateBusy ? (ticketSplitBusy ? "Splitting" : "Drafting") : ticketDraft ? `${ticketDraftCandidates.length} ready` : "None"}</span>
                 </div>
               </div>
 
@@ -847,21 +923,21 @@ export function RunPage(props: {
                   </QueueActionButton>
                   <QueueActionButton
                     className="secondary-action"
-                    tooltip="Append the visible draft candidates to the ticket queue."
+                    tooltip={ticketDraftIsSplit ? "Replace the selected pending ticket with the visible child tickets." : "Append the visible draft candidates to the ticket queue."}
                     onClick={acceptTicketDraft}
                     disabled={ticketWriteBusy || !ticketDraft?.draft_id || ticketDraftCandidates.length === 0}
                   >
                     <FilePlus2 size={14} />
-                    Add Draft Tickets
+                    {ticketDraftIsSplit ? "Apply Split" : "Add Draft Tickets"}
                   </QueueActionButton>
                 </div>
               </div>
 
-              {ticketDraftBusy && (
+              {ticketCandidateBusy && (
                 <div className="ticket-draft-progress" role="status" aria-live="polite">
                   <div>
                     <RefreshCw className="spin" size={15} />
-                    <strong>Drafting with Codex</strong>
+                    <strong>{ticketSplitBusy ? "Splitting with Codex" : "Drafting with Codex"}</strong>
                   </div>
                   <div className="ticket-draft-log">
                     {ticketDraftLogs.length ? (
@@ -869,14 +945,20 @@ export function RunPage(props: {
                         <code key={`${line.capturedAt}-${index}`}>[{line.stage}] {line.message}</code>
                       ))
                     ) : (
-                      <code>Starting ticket draft...</code>
+                      <code>{ticketSplitBusy ? "Starting ticket split..." : "Starting ticket draft..."}</code>
                     )}
                   </div>
                 </div>
               )}
 
-              {!ticketDraftBusy && ticketDraft && (
+              {!ticketCandidateBusy && ticketDraft && (
                 <>
+                  {ticketDraftIsSplit && (
+                    <p className="empty-copy">
+                      Replaces {ticketDraft.source_ticket_id ?? "the selected ticket"}
+                      {ticketDraft.remap_dependency_to ? `; downstream dependencies remap to ${ticketDraft.remap_dependency_to}.` : "."}
+                    </p>
+                  )}
                   {ticketDraftCandidates.length ? (
                     <div className="ticket-candidate-list">
                       {ticketDraftCandidates.map((ticket) => (
@@ -897,6 +979,7 @@ export function RunPage(props: {
                     <span>{ticketDraft.dropped_existing_count ?? 0} skipped</span>
                     <span>{ticketDraft.renumbered_count ?? 0} renumbered</span>
                     <span>{ticketDraft.dropped_dependency_count ?? 0} deps dropped</span>
+                    <span>{ticketDraft.quality_warning_count ?? 0} warnings</span>
                   </div>
                   <details className="ticket-draft-details">
                     <summary>Raw draft JSON</summary>
@@ -905,7 +988,7 @@ export function RunPage(props: {
                 </>
               )}
 
-              {!ticketDraftBusy && !ticketDraft && <p className="empty-copy">No draft candidates ready.</p>}
+              {!ticketCandidateBusy && !ticketDraft && <p className="empty-copy">No draft candidates ready.</p>}
             </section>
 
             <div className="ticket-summary-row">
@@ -950,6 +1033,14 @@ export function RunPage(props: {
                         onClick={() => editTicket(ticket)}
                       >
                         Inspect
+                      </QueueActionButton>
+                      <QueueActionButton
+                        tooltip={canSplitTicket(ticket) ? "Preview smaller replacement tickets without changing the queue." : "Only pending tickets can be split."}
+                        onClick={() => void splitTicket(ticket)}
+                        disabled={ticketWriteBusy || !canSplitTicket(ticket)}
+                      >
+                        <Scissors size={14} />
+                        Split Ticket
                       </QueueActionButton>
                       <QueueActionButton
                         className="icon-button danger"

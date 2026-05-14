@@ -168,6 +168,8 @@ type ScaffoldFailure = {
 type GeneratedIntakeResponse = {
   intake?: Record<string, unknown>;
   ticket_count?: number;
+  ticket_generation_complexity?: string;
+  ticket_generation_quality_warnings?: unknown[];
   automation_role_profile?: IntakeDraft["automation_role_profile"];
   ticket_run_file?: string;
 };
@@ -448,6 +450,14 @@ export function visibleScaffoldPreviewFiles(files: ScaffoldPreviewFile[]): Scaff
 
 function logEventKey(event: BackendLogEvent, index: number): string {
   return `${event.stage}-${event.level}-${event.message}-${index}`;
+}
+
+export function lowCortisolProgressLabel(events: BackendLogEvent[]): string {
+  const latest = events.length ? events[events.length - 1] : null;
+  const haystack = `${latest?.stage ?? ""} ${latest?.message ?? ""}`.toLowerCase();
+  if (haystack.includes("ticket")) return "Generating Tickets";
+  if (haystack.includes("intake")) return "Generating Intake";
+  return "Generating Intake";
 }
 
 function logEventsFromDetails(value: unknown, runId: string): BackendLogEvent[] {
@@ -1762,6 +1772,7 @@ export function BriefWizard(props: {
   }
 
   function renderLowCortisolMode() {
+    const progressLabel = lowCortisolProgressLabel(progressLogs);
     return (
       <main className="low-cortisol-workspace">
         <label className="low-cortisol-field">
@@ -1781,7 +1792,7 @@ export function BriefWizard(props: {
             onClick={() => void generateLowCortisolIntake()}
           >
             {lowCortisolBusy ? <Loader2 className="spin" size={22} /> : <WandSparkles size={22} />}
-            <span>{lowCortisolBusy ? "Generating Intake" : "Generate Intake"}</span>
+            <span>{lowCortisolBusy ? progressLabel : "Generate Intake"}</span>
           </button>
         </footer>
       </main>

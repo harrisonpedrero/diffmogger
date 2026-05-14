@@ -98,6 +98,200 @@ class TicketRunTests(unittest.TestCase):
                     self.assertEqual(1, summary["counts"]["pending"])
                     self.assertEqual(target / ".diffmogger" / "runtime" / "orchestration.sqlite3", ticket_path)
 
+    def test_role_worktree_load_reads_canonical_ticket_state_read_only(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp).resolve()
+                    (target / ".diffmogger").mkdir(parents=True)
+                    (target / ".diffmogger" / "manifest.json").write_text(
+                        json.dumps({"schema_version": 1, "layout": "sidecar_v1"}),
+                        encoding="utf-8",
+                    )
+                    worktree = target / ".diffmogger" / "runtime" / "automation_worktrees" / "builder" / "run-1"
+                    worktree.mkdir(parents=True)
+                    calls: list[tuple[Path, bool]] = []
+                    original_load_state = module.load_ticket_run_state
+
+                    def fake_load_state(load_target: Path, *, read_only: bool = False):
+                        calls.append((load_target.resolve(), read_only))
+                        if not read_only:
+                            raise AssertionError("role worktree ticket reads must be read-only")
+                        return {
+                            "run_id": "run-worktree",
+                            "tickets": [{"id": "T-1", "summary": "Do it", "status": "pending"}],
+                        }
+
+                    try:
+                        module.load_ticket_run_state = fake_load_state
+                        loaded, ticket_path, _text = module.load_ticket_run(worktree)
+                    finally:
+                        module.load_ticket_run_state = original_load_state
+
+                    self.assertEqual([(target, True)], calls)
+                    self.assertEqual("run-worktree", loaded["run_id"])
+                    self.assertEqual(target / ".diffmogger" / "runtime" / "orchestration.sqlite3", ticket_path)
+
+    def test_role_worktree_load_uses_readonly_snapshot_when_configured(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp).resolve()
+                    (target / ".diffmogger").mkdir(parents=True)
+                    (target / ".diffmogger" / "manifest.json").write_text(
+                        json.dumps({"schema_version": 1, "layout": "sidecar_v1"}),
+                        encoding="utf-8",
+                    )
+                    worktree = target / ".diffmogger" / "runtime" / "automation_worktrees" / "builder" / "run-1"
+                    worktree.mkdir(parents=True)
+                    snapshot_path = worktree / ".diffmogger" / "runtime" / "automation_queue" / "builder" / "run-1" / "ticket_state_snapshot.json"
+                    snapshot_path.parent.mkdir(parents=True)
+                    snapshot_path.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "data": {
+                                    "run_id": "run-snapshot",
+                                    "tickets": [{"id": "T-1", "summary": "Do it", "status": "pending"}],
+                                },
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    original_load_state = module.load_ticket_run_state
+                    old_snapshot = os.environ.get("DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT")
+                    old_direct = os.environ.pop("DIFFMOGGER_TICKET_STATE_DIRECT", None)
+
+                    def fail_load_state(*_args, **_kwargs):
+                        raise AssertionError("snapshot-backed role reads should not open canonical SQLite")
+
+                    try:
+                        os.environ["DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT"] = str(snapshot_path)
+                        module.load_ticket_run_state = fail_load_state
+                        loaded, ticket_path, _text = module.load_ticket_run(worktree)
+                    finally:
+                        module.load_ticket_run_state = original_load_state
+                        if old_snapshot is None:
+                            os.environ.pop("DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT", None)
+                        else:
+                            os.environ["DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT"] = old_snapshot
+                        if old_direct is not None:
+                            os.environ["DIFFMOGGER_TICKET_STATE_DIRECT"] = old_direct
+
+                    self.assertEqual("run-snapshot", loaded["run_id"])
+                    self.assertEqual(target / ".diffmogger" / "runtime" / "orchestration.sqlite3", ticket_path)
+
+    def test_role_worktree_write_if_valid_reads_previous_state_read_only(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp).resolve()
+                    (target / ".diffmogger").mkdir(parents=True)
+                    (target / ".diffmogger" / "manifest.json").write_text(
+                        json.dumps({"schema_version": 1, "layout": "sidecar_v1"}),
+                        encoding="utf-8",
+                    )
+                    worktree = target / ".diffmogger" / "runtime" / "automation_worktrees" / "builder" / "run-1"
+                    worktree.mkdir(parents=True)
+                    seed = {
+                        "run_id": "run-worktree",
+                        "tickets": [{"id": "T-1", "summary": "Do it", "status": "pending"}],
+                    }
+                    next_data = {
+                        "run_id": "run-worktree",
+                        "tickets": [
+                            {
+                                "id": "T-1",
+                                "summary": "Do it",
+                                "status": "candidate_done",
+                                "evidence": ["builder completed implementation"],
+                            }
+                        ],
+                    }
+                    calls: list[tuple[Path, bool]] = []
+                    original_load_state = module.load_ticket_run_state
+
+                    def fake_load_state(load_target: Path, *, read_only: bool = False):
+                        calls.append((load_target.resolve(), read_only))
+                        if not read_only:
+                            raise AssertionError("staged ticket updates must read previous state read-only")
+                        return seed
+
+                    try:
+                        module.load_ticket_run_state = fake_load_state
+                        result = module.write_if_valid(worktree, module.ticket_state_path(target), "", next_data)
+                    finally:
+                        module.load_ticket_run_state = original_load_state
+
+                    self.assertEqual([(target, True)], calls)
+                    self.assertTrue(result["staged"])
+                    actions_path = module.ticket_state_actions_path(worktree)
+                    self.assertIsNotNone(actions_path)
+                    actions = json.loads(actions_path.read_text(encoding="utf-8"))["actions"]
+                    self.assertEqual("update_ticket", actions[0]["action"])
+                    self.assertEqual("candidate_done", actions[0]["ticket"]["status"])
+
+    def test_role_worktree_write_if_valid_uses_snapshot_for_staged_actions(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp).resolve()
+                    (target / ".diffmogger").mkdir(parents=True)
+                    (target / ".diffmogger" / "manifest.json").write_text(
+                        json.dumps({"schema_version": 1, "layout": "sidecar_v1"}),
+                        encoding="utf-8",
+                    )
+                    worktree = target / ".diffmogger" / "runtime" / "automation_worktrees" / "builder" / "run-1"
+                    worktree.mkdir(parents=True)
+                    seed = {
+                        "run_id": "run-worktree",
+                        "tickets": [{"id": "T-1", "summary": "Do it", "status": "pending"}],
+                    }
+                    snapshot_path = worktree / ".diffmogger" / "runtime" / "automation_queue" / "builder" / "run-1" / "ticket_state_snapshot.json"
+                    snapshot_path.parent.mkdir(parents=True)
+                    snapshot_path.write_text(
+                        json.dumps({"schema_version": 1, "data": seed}),
+                        encoding="utf-8",
+                    )
+                    next_data = {
+                        "run_id": "run-worktree",
+                        "tickets": [
+                            {
+                                "id": "T-1",
+                                "summary": "Do it",
+                                "status": "candidate_done",
+                                "evidence": ["builder completed implementation"],
+                            }
+                        ],
+                    }
+                    original_load_state = module.load_ticket_run_state
+                    old_snapshot = os.environ.get("DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT")
+                    old_direct = os.environ.pop("DIFFMOGGER_TICKET_STATE_DIRECT", None)
+
+                    def fail_load_state(*_args, **_kwargs):
+                        raise AssertionError("snapshot-backed staged writes should not open canonical SQLite")
+
+                    try:
+                        os.environ["DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT"] = str(snapshot_path)
+                        module.load_ticket_run_state = fail_load_state
+                        result = module.write_if_valid(worktree, module.ticket_state_path(target), "", next_data)
+                    finally:
+                        module.load_ticket_run_state = original_load_state
+                        if old_snapshot is None:
+                            os.environ.pop("DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT", None)
+                        else:
+                            os.environ["DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT"] = old_snapshot
+                        if old_direct is not None:
+                            os.environ["DIFFMOGGER_TICKET_STATE_DIRECT"] = old_direct
+
+                    self.assertTrue(result["staged"])
+                    actions_path = module.ticket_state_actions_path(worktree)
+                    self.assertIsNotNone(actions_path)
+                    actions = json.loads(actions_path.read_text(encoding="utf-8"))["actions"]
+                    self.assertEqual("update_ticket", actions[0]["action"])
+                    self.assertEqual(module.ticket_digest(seed["tickets"][0]), actions[0]["start_hash"])
+                    self.assertEqual("candidate_done", actions[0]["ticket"]["status"])
+
     def test_role_worktree_update_stages_typed_ticket_action(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):

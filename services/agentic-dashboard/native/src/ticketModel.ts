@@ -320,6 +320,10 @@ export function defaultImportMode(tickets: Array<Partial<Ticket> | Record<string
   return tickets.length > 0 && tickets.every(isPlaceholderTicket) ? "replace-placeholder" : "append";
 }
 
+export function canSplitTicket(ticket: Partial<Ticket> | Record<string, unknown>): boolean {
+  return normalizeTicket(ticket).status === "pending";
+}
+
 export function localTicketIssues(tickets: Array<Partial<Ticket> | Record<string, unknown>>): TicketValidationIssue[] {
   const normalized = tickets.map((ticket) => normalizeTicket(ticket));
   const issues: TicketValidationIssue[] = [];

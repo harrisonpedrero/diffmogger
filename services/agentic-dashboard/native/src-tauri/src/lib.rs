@@ -46,6 +46,8 @@ const MUTATING_BACKEND_COMMANDS: &[&str] = &[
     "ticket.import",
     "ticket.draft_from_intake",
     "ticket.accept_draft",
+    "ticket.split_preview",
+    "ticket.accept_split",
     "inbox.send_note",
     "inbox.reply_request",
     "automation.start",
@@ -848,23 +850,37 @@ fn build_backend_args(
         }
     }
 
-    if command == "ticket.accept_draft" {
+    if command == "ticket.split_preview" {
+        let id = ticket_id.ok_or_else(|| {
+            CommandError::new(
+                "missing_ticket_id",
+                "A ticket id is required for ticket.split_preview.",
+                json!({ "command": command }),
+            )
+        })?;
+        args.push("--ticket-id".to_string());
+        args.push(id.to_string());
+    }
+
+    if matches!(command, "ticket.accept_draft" | "ticket.accept_split") {
         let id = draft_id.ok_or_else(|| {
             CommandError::new(
                 "missing_draft_id",
-                "A draft id is required for ticket.accept_draft.",
+                "A draft id is required for this ticket draft command.",
                 json!({ "command": command }),
             )
         })?;
         args.push("--draft-id".to_string());
         args.push(id.to_string());
-        if let Some(ids) = ticket_ids.filter(|value| !value.trim().is_empty()) {
-            args.push("--ticket-ids".to_string());
-            args.push(ids.to_string());
-        }
-        if let Some(mode) = import_mode.filter(|value| !value.trim().is_empty()) {
-            args.push("--mode".to_string());
-            args.push(mode.to_string());
+        if command == "ticket.accept_draft" {
+            if let Some(ids) = ticket_ids.filter(|value| !value.trim().is_empty()) {
+                args.push("--ticket-ids".to_string());
+                args.push(ids.to_string());
+            }
+            if let Some(mode) = import_mode.filter(|value| !value.trim().is_empty()) {
+                args.push("--mode".to_string());
+                args.push(mode.to_string());
+            }
         }
     }
 
@@ -1675,6 +1691,8 @@ mod tests {
         assert!(backend_command_allowed("ticket.import"));
         assert!(backend_command_allowed("ticket.draft_from_intake"));
         assert!(backend_command_allowed("ticket.accept_draft"));
+        assert!(backend_command_allowed("ticket.split_preview"));
+        assert!(backend_command_allowed("ticket.accept_split"));
     }
 
     #[test]
@@ -1714,6 +1732,73 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--direction", "Focus on onboarding setup tickets."]));
+    }
+
+    #[test]
+    fn ticket_split_forwards_ticket_and_draft_ids() {
+        let root = kit_root().expect("Diffmogger kit root should resolve during native tests");
+        let root_text = root.display().to_string();
+        let (_cwd, preview_args) = build_backend_args(
+            "ticket.split_preview",
+            Some(&root_text),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("TICKET-007"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("ticket split preview args should build");
+        let (_cwd, accept_args) = build_backend_args(
+            "ticket.accept_split",
+            Some(&root_text),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("ticket-split-1"),
+            None,
+            false,
+        )
+        .expect("ticket split accept args should build");
+
+        assert!(preview_args.windows(2).any(|pair| pair == ["--ticket-id", "TICKET-007"]));
+        assert!(accept_args.windows(2).any(|pair| pair == ["--draft-id", "ticket-split-1"]));
     }
 
     #[test]

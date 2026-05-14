@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canSplitTicket,
   defaultImportMode,
   emptyTicket,
   localTicketIssues,
@@ -22,6 +23,11 @@ describe("ticket model helpers", () => {
   it("chooses replace-placeholder only for the sample ticket", () => {
     expect(defaultImportMode([{ id: "TICKET-001", summary: PLACEHOLDER_TICKET_SUMMARY }])).toBe("replace-placeholder");
     expect(defaultImportMode([emptyTicket([])])).toBe("append");
+  });
+
+  it("only allows pending tickets to be split", () => {
+    expect(canSplitTicket({ id: "TICKET-001", status: "pending" })).toBe(true);
+    expect(canSplitTicket({ id: "TICKET-002", status: "done" })).toBe(false);
   });
 
   it("parses markdown and csv imports into tickets", () => {

@@ -20,6 +20,7 @@ from typing import BinaryIO, Any
 DEFAULT_TIMEOUT_SECONDS = 5400
 DEFAULT_TERMINATION_GRACE_SECONDS = 20
 TIMEOUT_EXIT_CODE = 124
+PROCESS_SCAN_INTERVAL_SECONDS = 1.0
 
 CHILD: subprocess.Popen[bytes] | None = None
 TERMINATE_SIGNAL: int | None = None
@@ -90,6 +91,91 @@ def child_signal(return_code: int | None) -> str | None:
     return signal_name(-return_code)
 
 
+def process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def process_table() -> list[dict[str, int]]:
+    commands = (
+        ["ps", "-axo", "pid=,ppid=,pgid=,sess="],
+        ["ps", "-eo", "pid=,ppid=,pgid=,sess="],
+        ["ps", "-axo", "pid=,ppid=,pgid=,sid="],
+        ["ps", "-eo", "pid=,ppid=,pgid=,sid="],
+    )
+    output = ""
+    for command in commands:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            output = result.stdout
+            break
+    rows: list[dict[str, int]] = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            pid, ppid, pgid, sid = (int(parts[index]) for index in range(4))
+        except ValueError:
+            continue
+        rows.append({"pid": pid, "ppid": ppid, "pgid": pgid, "sid": sid})
+    return rows
+
+
+def related_child_processes(root_pid: int, root_sid: int | None) -> list[dict[str, int]]:
+    """Return subprocesses related to the child by ancestry or session."""
+    if root_pid <= 0:
+        return []
+    rows = process_table()
+    children_by_parent: dict[int, list[dict[str, int]]] = {}
+    for row in rows:
+        children_by_parent.setdefault(row["ppid"], []).append(row)
+
+    related_by_pid: dict[int, dict[str, int]] = {}
+    stack = [root_pid]
+    while stack:
+        parent = stack.pop()
+        for child in children_by_parent.get(parent, []):
+            pid = child["pid"]
+            if pid in related_by_pid:
+                continue
+            related_by_pid[pid] = child
+            stack.append(pid)
+
+    if root_sid is not None:
+        for row in rows:
+            if row["sid"] == root_sid and row["pid"] != root_pid:
+                related_by_pid.setdefault(row["pid"], row)
+
+    self_pid = os.getpid()
+    return [row for pid, row in related_by_pid.items() if pid != self_pid]
+
+
+def remember_related_processes(
+    root_pid: int,
+    root_sid: int | None,
+    tracked_pids: set[int],
+    tracked_pgids: set[int],
+) -> list[dict[str, int]]:
+    related = related_child_processes(root_pid, root_sid)
+    current_pgid = os.getpgrp()
+    for row in related:
+        pid = row["pid"]
+        pgid = row["pgid"]
+        if pid > 0 and pid != os.getpid():
+            tracked_pids.add(pid)
+        if pgid > 0 and pgid != current_pgid:
+            tracked_pgids.add(pgid)
+    return related
+
+
 def signal_child_group(proc: subprocess.Popen[bytes], signum: int) -> None:
     try:
         os.killpg(proc.pid, signum)
@@ -121,6 +207,76 @@ def wait_after_termination(proc: subprocess.Popen[bytes], grace_seconds: int) ->
         time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
     signal_child_group(proc, signal.SIGKILL)
     return proc.wait(), True
+
+
+def terminate_related_processes(
+    *,
+    root_pid: int,
+    root_sid: int | None,
+    tracked_pids: set[int],
+    tracked_pgids: set[int],
+    grace_seconds: int,
+) -> dict[str, Any]:
+    related = remember_related_processes(root_pid, root_sid, tracked_pids, tracked_pgids)
+    current_pid = os.getpid()
+    current_pgid = os.getpgrp()
+    target_pids = {
+        pid
+        for pid in tracked_pids
+        if pid > 0 and pid != current_pid and pid != root_pid and process_alive(pid)
+    }
+    target_pgids = {pgid for pgid in tracked_pgids if pgid > 0 and pgid != current_pgid}
+    for row in related:
+        pid = row["pid"]
+        pgid = row["pgid"]
+        if pid > 0 and pid != current_pid and pid != root_pid and process_alive(pid):
+            target_pids.add(pid)
+        if pgid > 0 and pgid != current_pgid:
+            target_pgids.add(pgid)
+
+    result: dict[str, Any] = {
+        "target_pids": sorted(target_pids),
+        "target_process_group_ids": sorted(target_pgids),
+        "terminated": False,
+        "killed": False,
+        "errors": [],
+    }
+    if not target_pids and not target_pgids:
+        return result
+
+    def send_to_targets(signum: int) -> None:
+        for pgid in sorted(target_pgids):
+            try:
+                os.killpg(pgid, signum)
+            except ProcessLookupError:
+                continue
+            except OSError as exc:
+                result["errors"].append({"target": f"pgid:{pgid}", "signal": signal_name(signum), "error": str(exc)})
+        for pid in sorted(target_pids):
+            if not process_alive(pid):
+                continue
+            try:
+                pgid = os.getpgid(pid)
+            except OSError:
+                pgid = None
+            if pgid in target_pgids:
+                continue
+            try:
+                os.kill(pid, signum)
+            except ProcessLookupError:
+                continue
+            except OSError as exc:
+                result["errors"].append({"target": f"pid:{pid}", "signal": signal_name(signum), "error": str(exc)})
+
+    send_to_targets(signal.SIGTERM)
+    result["terminated"] = True
+    deadline = time.monotonic() + grace_seconds
+    while any(process_alive(pid) for pid in target_pids) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if any(process_alive(pid) for pid in target_pids):
+        send_to_targets(signal.SIGKILL)
+        result["killed"] = True
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -186,6 +342,11 @@ def main() -> int:
         "command_display": shlex.join(command_for_status(command)),
         "process_pid": None,
         "process_group_id": None,
+        "process_session_id": None,
+        "descendant_pids": [],
+        "descendant_process_group_ids": [],
+        "descendant_terminated": False,
+        "descendant_killed": False,
     }
     write_status(args.status_file, status)
 
@@ -199,6 +360,9 @@ def main() -> int:
     threads: list[threading.Thread] = []
     child_return_code: int | None = None
     exit_code = 0
+    child_session_id: int | None = None
+    tracked_descendant_pids: set[int] = set()
+    tracked_descendant_pgids: set[int] = set()
 
     try:
         try:
@@ -219,6 +383,11 @@ def main() -> int:
             status["process_group_id"] = os.getpgid(CHILD.pid)
         except OSError:
             status["process_group_id"] = CHILD.pid
+        try:
+            child_session_id = os.getsid(CHILD.pid)
+            status["process_session_id"] = child_session_id
+        except OSError:
+            child_session_id = None
         write_status(args.status_file, status)
 
         assert CHILD.stdout is not None
@@ -231,7 +400,18 @@ def main() -> int:
             thread.start()
 
         deadline = time.monotonic() + timeout_seconds if timeout_seconds else None
+        next_process_scan = 0.0
         while True:
+            now = time.monotonic()
+            if now >= next_process_scan:
+                remember_related_processes(
+                    CHILD.pid,
+                    child_session_id,
+                    tracked_descendant_pids,
+                    tracked_descendant_pgids,
+                )
+                scan_interval = 0.1 if now - started < 5 else PROCESS_SCAN_INTERVAL_SECONDS
+                next_process_scan = now + scan_interval
             child_return_code = CHILD.poll()
             if child_return_code is not None:
                 exit_code = child_return_code if child_return_code >= 0 else 128 + abs(child_return_code)
@@ -258,6 +438,21 @@ def main() -> int:
                 break
             time.sleep(0.1)
     finally:
+        child = CHILD
+        if child is not None:
+            cleanup = terminate_related_processes(
+                root_pid=child.pid,
+                root_sid=child_session_id,
+                tracked_pids=tracked_descendant_pids,
+                tracked_pgids=tracked_descendant_pgids,
+                grace_seconds=grace_seconds,
+            )
+            status["descendant_pids"] = cleanup["target_pids"]
+            status["descendant_process_group_ids"] = cleanup["target_process_group_ids"]
+            status["descendant_terminated"] = cleanup["terminated"]
+            status["descendant_killed"] = cleanup["killed"]
+            if cleanup.get("errors"):
+                status["descendant_cleanup_errors"] = cleanup["errors"]
         for thread in threads:
             thread.join(timeout=2)
         stdout_handle.close()

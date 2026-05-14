@@ -104,6 +104,44 @@ describe("RunPage", () => {
     expect(html).toContain("Create a blank pending ticket in the editor");
   });
 
+  it("renders split ticket action for pending queue tickets from snapshot state", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          brief: { intake: { automation_run_mode: "ticket_campaign" } },
+          run: {
+            state: {
+              ticket_run: {
+                total: 1,
+                counts: { pending: 1 },
+                tickets: [
+                  {
+                    id: "TICKET-001",
+                    summary: "Build broad queue and controls",
+                    status: "pending",
+                    depends_on: [],
+                    acceptance_criteria: [],
+                    verification_commands: [],
+                    evidence: [],
+                    related_commits: [],
+                    blocker: "",
+                  },
+                ],
+              },
+            },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Split Ticket");
+    expect(html).toContain("Preview smaller replacement tickets without changing the queue.");
+  });
+
   it("changes the ticket reload key when the parent snapshot advances canonical ticket state", () => {
     const first = snapshot({
       run: {

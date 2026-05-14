@@ -256,6 +256,7 @@ values = {
     "log_dir": target / rel("target/automation_logs"),
     "worktree_summary_rel": rel(f"target/automation_queue/{role}/{run_id}/summary.md"),
     "worktree_ticket_state_actions_rel": rel(f"target/automation_queue/{role}/{run_id}/ticket_state_actions.json"),
+    "worktree_ticket_state_snapshot_rel": rel(f"target/automation_queue/{role}/{run_id}/ticket_state_snapshot.json"),
     "state_brief_path": target / rel("target/canonical_state_brief.md"),
     "state_brief_rel": rel("target/canonical_state_brief.md"),
     "mcp_config_rel": rel(".codex/config.toml"),
@@ -298,6 +299,8 @@ summary_path="$queue_dir/summary.md"
 worktree_summary_path="$worktree_dir/$worktree_summary_rel"
 ticket_state_actions_path="$queue_dir/ticket_state_actions.json"
 worktree_ticket_state_actions_path="$worktree_dir/$worktree_ticket_state_actions_rel"
+ticket_state_snapshot_path="$queue_dir/ticket_state_snapshot.json"
+worktree_ticket_state_snapshot_path="$worktree_dir/$worktree_ticket_state_snapshot_rel"
 ticket_claim_path="$queue_dir/ticket_claim.json"
 ticket_claim_stderr_path="$queue_dir/ticket_claim.stderr.log"
 patch_path="$queue_dir/changes.patch"
@@ -573,6 +576,7 @@ for rel in "${runtime_state_paths[@]}"; do
   context_excludes+=(":(exclude)$rel")
 done
 context_excludes+=(":(exclude)$worktree_ticket_state_actions_rel")
+context_excludes+=(":(exclude)$worktree_ticket_state_snapshot_rel")
 
 seed_context_path() {
   local rel="$1"
@@ -597,8 +601,19 @@ for rel in "${runtime_state_paths[@]}"; do
   seed_context_path "$rel"
 done
 
+if [[ -f "$runner_script_dir/ticket_run.py" ]]; then
+  mkdir -p "$(dirname "$worktree_ticket_state_snapshot_path")"
+  if DIFFMOGGER_TICKET_STATE_DIRECT=1 python3 "$runner_script_dir/ticket_run.py" "$target_abs" snapshot --json >"$worktree_ticket_state_snapshot_path"; then
+    cp "$worktree_ticket_state_snapshot_path" "$ticket_state_snapshot_path"
+  else
+    printf 'WARN: failed to write ticket-state readonly snapshot for %s run %s; role may fall back to canonical state reads.\n' "$role" "$run_id" >&2
+    rm -f "$worktree_ticket_state_snapshot_path"
+  fi
+fi
+
 export PLAYWRIGHT_MCP_OUTPUT_DIR="${PLAYWRIGHT_MCP_OUTPUT_DIR:-$worktree_dir/$playwright_artifact_rel}"
 export DIFFMOGGER_TICKET_STATE_ACTIONS_PATH="$worktree_ticket_state_actions_path"
+export DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT="$worktree_ticket_state_snapshot_path"
 
 CODEX_ROLE_ARGS=(--add-dir "$HOME/.codex")
 toml_quote() {

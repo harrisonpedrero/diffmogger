@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from diffmogger.runtime.run_process_watchdog import terminate_related_processes
+
 from .state import *
 
 def active_role_age_seconds(active: dict[str, Any], now: datetime | None = None) -> int | None:
@@ -30,13 +32,23 @@ def watchdog_status_for_active_run(target: Path, active: dict[str, Any]) -> dict
     return data
 
 def terminate_process_tree(pid: int, grace_seconds: int) -> dict[str, Any]:
-    result: dict[str, Any] = {"pid": pid, "terminated": False, "killed": False, "signal": None}
+    result: dict[str, Any] = {
+        "pid": pid,
+        "terminated": False,
+        "killed": False,
+        "signal": None,
+        "related_process_cleanup": {},
+    }
     if pid <= 0 or pid == os.getpid() or not process_alive(pid):
         return result
     try:
         pgid = os.getpgid(pid)
     except OSError:
         pgid = None
+    try:
+        sid = os.getsid(pid)
+    except OSError:
+        sid = None
     use_group = pgid is not None and pgid != os.getpgrp()
 
     def send(signum: int) -> None:
@@ -50,11 +62,25 @@ def terminate_process_tree(pid: int, grace_seconds: int) -> dict[str, Any]:
         result["terminated"] = True
         result["signal"] = "SIGTERM"
     except ProcessLookupError:
+        result["related_process_cleanup"] = terminate_related_processes(
+            root_pid=pid,
+            root_sid=sid,
+            tracked_pids=set(),
+            tracked_pgids=set(),
+            grace_seconds=grace_seconds,
+        )
         return result
     except OSError as exc:
         result["error"] = str(exc)
         return result
 
+    result["related_process_cleanup"] = terminate_related_processes(
+        root_pid=pid,
+        root_sid=sid,
+        tracked_pids=set(),
+        tracked_pgids=set(),
+        grace_seconds=grace_seconds,
+    )
     deadline = time.monotonic() + grace_seconds
     while process_alive(pid) and time.monotonic() < deadline:
         time.sleep(0.1)

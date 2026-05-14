@@ -16,6 +16,7 @@ from diffmogger.conveyor.state import load_state, write_state
 from diffmogger.runtime.state_store import (
     CONVEYOR_PROJECTION_NAME,
     RUNNER_PROJECTION_NAME,
+    STATE_SCHEMA_VERSION,
     automation_control_state,
     canonical_state_brief_path_for_target,
     load_conveyor_state,
@@ -25,6 +26,7 @@ from diffmogger.runtime.state_store import (
     validate_state_database,
     write_canonical_state_brief,
     write_runner_state,
+    write_ticket_run_state,
 )
 
 
@@ -51,6 +53,87 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(10, len(projected["state_machine"]["stage_contracts"]))
             self.assertIn("capability_manifest", snapshot)
             self.assertTrue(snapshot["capability_manifest"]["digest"])
+            self.assertEqual(STATE_SCHEMA_VERSION, snapshot["database"]["user_version"])
+            self.assertIn("schema_migrations", snapshot["counts"])
+            self.assertIn(STATE_SCHEMA_VERSION, {item["version"] for item in snapshot["schema_migrations"]})
+            self.assertEqual("pass", snapshot["state_health_summary"]["status"])
+            self.assertTrue(all(item["ok"] for item in snapshot["invariant_results"]))
+
+    def test_older_user_version_upgrades_through_schema_migrations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            snapshot = state_snapshot(target)
+            db_path = snapshot["database"]["path"]
+
+            db = sqlite3.connect(db_path)
+            try:
+                db.execute("DROP TABLE schema_migrations")
+                db.execute("PRAGMA user_version = 3")
+                db.commit()
+            finally:
+                db.close()
+
+            upgraded = state_snapshot(target)
+            validation = validate_state_database(target)
+
+            self.assertEqual(STATE_SCHEMA_VERSION, upgraded["database"]["user_version"])
+            self.assertIn(STATE_SCHEMA_VERSION, {item["version"] for item in upgraded["schema_migrations"]})
+            self.assertEqual("pass", upgraded["state_health_summary"]["status"])
+            self.assertEqual("pass", validation["status"])
+
+    def test_invalid_event_hash_chain_fails_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            snapshot = state_snapshot(target)
+            db = sqlite3.connect(snapshot["database"]["path"])
+            try:
+                event_id = db.execute("SELECT event_id FROM events ORDER BY event_id ASC LIMIT 1").fetchone()[0]
+                db.execute("UPDATE events SET event_hash = ? WHERE event_id = ?", ("not-a-valid-hash", event_id))
+                db.commit()
+            finally:
+                db.close()
+
+            validation = validate_state_database(target)
+            hash_items = [item for item in validation["items"] if item.get("invariant") == "events.hash_chain"]
+
+            self.assertEqual("fail", validation["status"])
+            self.assertEqual("fail", validation["state_health_summary"]["status"])
+            self.assertEqual(1, len(hash_items))
+            self.assertFalse(hash_items[0]["ok"])
+            self.assertTrue(hash_items[0]["failures"])
+
+    def test_missing_required_projection_event_fails_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            snapshot = state_snapshot(target)
+            db = sqlite3.connect(snapshot["database"]["path"])
+            try:
+                db.execute(
+                    "UPDATE projections SET event_id = ? WHERE name = ?",
+                    (999999, CONVEYOR_PROJECTION_NAME),
+                )
+                db.commit()
+            finally:
+                db.close()
+
+            validation = validate_state_database(target)
+            projection_items = [
+                item for item in validation["items"] if item.get("invariant") == "projections.event_id_exists"
+            ]
+
+            self.assertEqual("fail", validation["status"])
+            self.assertEqual(1, len(projection_items))
+            self.assertFalse(projection_items[0]["ok"])
+
+    def test_state_snapshot_includes_invariant_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = state_snapshot(Path(tmp))
+            invariant_names = {item["name"] for item in snapshot["invariant_results"]}
+
+            self.assertEqual("pass", snapshot["state_health_summary"]["status"])
+            self.assertIn("events.sequence_contiguous", invariant_names)
+            self.assertIn("events.hash_chain", invariant_names)
+            self.assertIn("projections.event_id_exists", invariant_names)
 
     def test_legacy_json_is_imported_once_as_compatibility_migration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -339,6 +422,119 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual("ACTIVE", loaded["status"])
             self.assertEqual("H1 Runnable baseline", loaded["horizon"])
             self.assertNotEqual("H9 Poisoned Markdown", loaded["horizon"])
+
+    def test_ticket_progress_advances_ticket_campaign_control_from_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            agentic = target / ".agentic"
+            agentic.mkdir(parents=True)
+            (agentic / "project_intake.json").write_text(
+                json.dumps(
+                    {
+                        "project_name": "Ticket Campaign Demo",
+                        "automation_run_mode": "ticket_campaign",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            seeded = automation_control_state(target)
+            self.assertEqual("T1 Ticket-run readiness", seeded["horizon"])
+
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "ticket-campaign-demo",
+                    "tickets": [
+                        {
+                            "id": "TICKET-001",
+                            "summary": "Create the first reusable increment",
+                            "status": "done",
+                            "evidence": ["Verified locally."],
+                        },
+                        {
+                            "id": "TICKET-002",
+                            "summary": "Implement the next bounded increment",
+                            "status": "pending",
+                        },
+                    ],
+                },
+                actor_role="integrator",
+                event_type="ticket.run_reconciled",
+            )
+
+            control = automation_control_state(target)
+            self.assertEqual("T2 Ticket implementation", control["horizon"])
+            self.assertEqual("advance", control["horizon_decision"])
+            self.assertEqual("bootstrapped", control["bootstrap_status"])
+            self.assertIn("1/2 done", control["current_assessment"])
+            self.assertIn("next dependency-ready ticket", control["best_next_milestone"])
+
+            brief = write_canonical_state_brief(target)
+            markdown = Path(brief["path"]).read_text(encoding="utf-8")
+            self.assertIn("current_horizon: T2 Ticket implementation", markdown)
+            self.assertIn('counts={"done":1,"pending":1}', markdown)
+
+            db = sqlite3.connect(target / "target" / "orchestration.sqlite3")
+            try:
+                event_types = [
+                    row[0]
+                    for row in db.execute(
+                        "SELECT event_type FROM events WHERE phase = 'automation_control' ORDER BY event_id"
+                    ).fetchall()
+                ]
+            finally:
+                db.close()
+            self.assertIn("automation.control_updated", event_types)
+
+    def test_candidate_and_terminal_ticket_states_drive_later_campaign_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            agentic = target / ".agentic"
+            agentic.mkdir(parents=True)
+            (agentic / "project_intake.json").write_text(
+                json.dumps(
+                    {
+                        "project_name": "Ticket Campaign Demo",
+                        "automation_run_mode": "ticket_campaign",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "ticket-campaign-demo",
+                    "tickets": [
+                        {"id": "TICKET-001", "summary": "First increment", "status": "done"},
+                        {"id": "TICKET-002", "summary": "Candidate increment", "status": "candidate_done"},
+                        {"id": "TICKET-003", "summary": "Next increment", "status": "pending"},
+                    ],
+                },
+                actor_role="integrator",
+                event_type="ticket.run_reconciled",
+            )
+            verifying = automation_control_state(target)
+            self.assertEqual("T3 Verification and hardening", verifying["horizon"])
+            self.assertIn("candidate ticket", verifying["best_next_milestone"])
+
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "ticket-campaign-demo",
+                    "tickets": [
+                        {"id": "TICKET-001", "summary": "First increment", "status": "done"},
+                        {"id": "TICKET-002", "summary": "Second increment", "status": "done"},
+                    ],
+                },
+                actor_role="integrator",
+                event_type="ticket.run_reconciled",
+            )
+            complete = automation_control_state(target)
+            self.assertEqual("T4 Completion report and stop", complete["horizon"])
+            self.assertEqual("complete", complete["bootstrap_status"])
+            self.assertIn("completion report", complete["best_next_milestone"])
 
     def test_runner_state_is_sqlite_backed_with_json_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

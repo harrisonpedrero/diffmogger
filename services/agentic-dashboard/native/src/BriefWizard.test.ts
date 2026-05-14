@@ -4,6 +4,7 @@ import {
   applyAutomationScope,
   automationScopeForDraft,
   lowCortisolDraftFromGeneratedIntake,
+  lowCortisolProgressLabel,
   visibleScaffoldPreviewFiles,
 } from "./BriefWizard";
 
@@ -128,6 +129,16 @@ describe("Brief automation mode mapping", () => {
     expect(next.human_bridge_mode).toBe("file_only");
     expect(next.ticket_run_seed_tickets).toHaveLength(1);
     expect(next.additional_context_files).toEqual([".diffmogger/context/notes.md"]);
+  });
+
+  it("labels low cortisol two-pass generation progress", () => {
+    expect(lowCortisolProgressLabel([])).toBe("Generating Intake");
+    expect(lowCortisolProgressLabel([
+      { runId: "run", command: "brief.generate_intake", stage: "intake-generate", level: "info", message: "Generating intake." },
+    ])).toBe("Generating Intake");
+    expect(lowCortisolProgressLabel([
+      { runId: "run", command: "brief.generate_intake", stage: "ticket-generate", level: "info", message: "Generating tickets." },
+    ])).toBe("Generating Tickets");
   });
 
   it("hides preserved sidecar files from the setup review file list", () => {

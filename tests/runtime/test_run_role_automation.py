@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -164,6 +165,62 @@ class RunRoleAutomationTests(unittest.TestCase):
         codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
         return bin_dir
 
+    def write_snapshot_check_codex(self, root: Path) -> Path:
+        bin_dir = root / "bin"
+        codex = bin_dir / "codex"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ -z \"${DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT:-}\" ]]; then\n"
+            "  echo 'ticket snapshot path missing' >&2\n"
+            "  exit 72\n"
+            "fi\n"
+            "python3 - \"$DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT\" <<'PY'\n"
+            "import json\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "payload = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))\n"
+            "data = payload.get('data') if isinstance(payload.get('data'), dict) else {}\n"
+            "tickets = data.get('tickets') if isinstance(data.get('tickets'), list) else []\n"
+            "if not tickets or tickets[0].get('id') != 'TICKET-001':\n"
+            "    raise SystemExit('ticket snapshot did not contain canonical ticket')\n"
+            "PY\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
+        return bin_dir
+
+    def write_leaky_child_codex(self, root: Path) -> Path:
+        bin_dir = root / "bin"
+        codex = bin_dir / "codex"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ -z \"${FAKE_CODEX_CHILD_PID_FILE:-}\" ]]; then\n"
+            "  echo 'child pid file missing' >&2\n"
+            "  exit 73\n"
+            "fi\n"
+            "python3 - \"$FAKE_CODEX_CHILD_PID_FILE\" <<'PY' &\n"
+            "import os\n"
+            "import sys\n"
+            "import time\n"
+            "os.setpgrp()\n"
+            "with open(sys.argv[1], 'w', encoding='utf-8') as handle:\n"
+            "    handle.write(str(os.getpid()) + '\\n')\n"
+            "time.sleep(60)\n"
+            "PY\n"
+            "for _ in 1 2 3 4 5 6 7 8 9 10; do\n"
+            "  [[ -s \"$FAKE_CODEX_CHILD_PID_FILE\" ]] && break\n"
+            "  sleep 0.05\n"
+            "done\n"
+            "sleep 1.2\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
+        return bin_dir
+
     def write_deferred_hardener_manifest(self, target: Path) -> None:
         path = target / "target" / "automation_queue" / "hardener" / "run-deferred" / "manifest.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -204,7 +261,9 @@ class RunRoleAutomationTests(unittest.TestCase):
             "run_process_watchdog.py",
             "integrate_role_outputs.py",
             "DIFFMOGGER_TICKET_STATE_ACTIONS_PATH",
+            "DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT",
             "ticket_state_actions_path",
+            "ticket_state_snapshot_path",
             "runtime_state_action_count",
         ]:
             self.assertIn(marker, source)
@@ -536,6 +595,51 @@ class RunRoleAutomationTests(unittest.TestCase):
                     self.assertEqual("", changed_files)
                     self.assertEqual("", patch_text)
 
+    def test_role_worktree_exports_ticket_state_readonly_snapshot(self) -> None:
+        for path in ROLE_RUNNER_PATHS:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    target = tmp_path / "target"
+                    target.mkdir()
+                    self.seed_git_target(target)
+                    write_ticket_run_state(
+                        target,
+                        {
+                            "run_id": "run-snapshot",
+                            "tickets": [
+                                {
+                                    "id": "TICKET-001",
+                                    "summary": "Build first slice",
+                                    "status": "pending",
+                                }
+                            ],
+                        },
+                        actor_role="test",
+                        event_type="ticket.run_seeded",
+                    )
+                    fake_bin = self.write_snapshot_check_codex(tmp_path)
+
+                    env = os.environ.copy()
+                    env["CODEX_AUTOMATION_PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+                    env["CODEX_RUN_ID"] = "ticket-snapshot"
+
+                    result = subprocess.run(
+                        ["bash", str(path), "--target", str(target), "--role", "builder"],
+                        cwd=ROOT,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    queue_dir = target / "target" / "automation_queue" / "builder" / "ticket-snapshot"
+                    snapshot = json.loads((queue_dir / "ticket_state_snapshot.json").read_text(encoding="utf-8"))
+                    tickets = snapshot["data"]["tickets"]
+                    self.assertEqual("TICKET-001", tickets[0]["id"])
+                    self.assertEqual("in_progress", tickets[0]["status"])
+
     def test_role_worktree_inherits_loaded_target_env_without_copying_env_files(self) -> None:
         for index, path in enumerate(ROLE_RUNNER_PATHS):
             with self.subTest(path=path.relative_to(ROOT)):
@@ -611,6 +715,57 @@ class RunRoleAutomationTests(unittest.TestCase):
                     combined = "\n".join(text_outputs)
                     self.assertNotIn("file-secret-value", combined)
                     self.assertNotIn("shell-secret-value", combined)
+
+    def test_successful_codex_run_cleans_background_child_process_group(self) -> None:
+        for path in ROLE_RUNNER_PATHS:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    target = tmp_path / "target"
+                    target.mkdir()
+                    self.seed_git_target(target)
+                    fake_bin = self.write_leaky_child_codex(tmp_path)
+                    child_pid_file = tmp_path / "codex-child.pid"
+
+                    env = os.environ.copy()
+                    env["CODEX_AUTOMATION_PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+                    env["CODEX_RUN_ID"] = "watchdog-child-cleanup"
+                    env["FAKE_CODEX_CHILD_PID_FILE"] = str(child_pid_file)
+
+                    result = subprocess.run(
+                        ["bash", str(path), "--target", str(target), "--role", "builder"],
+                        cwd=ROOT,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        check=False,
+                    )
+
+                    try:
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+                        deadline = time.monotonic() + 3
+                        while time.monotonic() < deadline:
+                            try:
+                                os.kill(child_pid, 0)
+                            except ProcessLookupError:
+                                break
+                            time.sleep(0.05)
+                        with self.assertRaises(ProcessLookupError):
+                            os.kill(child_pid, 0)
+
+                        queue_dir = target / "target" / "automation_queue" / "builder" / "watchdog-child-cleanup"
+                        status = json.loads((queue_dir / "codex.watchdog.json").read_text(encoding="utf-8"))
+                        self.assertTrue(status["descendant_terminated"])
+                        self.assertIn(child_pid, status["descendant_pids"])
+                    finally:
+                        if child_pid_file.exists():
+                            child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+                            try:
+                                os.kill(child_pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
 
     def test_hanging_codex_is_timed_out_and_failed_manifest_is_written(self) -> None:
         for path in ROLE_RUNNER_PATHS:

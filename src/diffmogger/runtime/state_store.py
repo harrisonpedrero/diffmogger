@@ -18,13 +18,13 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from diffmogger.runtime.blocker_review import adjudicate_baseline_blocker
 from diffmogger.runtime.paths import existing_or_target_path, target_path, target_rel
 
 
-STATE_SCHEMA_VERSION = 3
+STATE_SCHEMA_VERSION = 4
 STATE_APPLICATION_ID = 0x444D4752  # DMGR
 CANONICAL_DB_RELATIVE = "target/orchestration.sqlite3"
 CONVEYOR_PROJECTION_RELATIVE = "target/automation_conveyor_state.json"
@@ -92,6 +92,7 @@ ORCHESTRATION_TABLES = (
     "validation_receipts",
     "escalations",
     "task_edges",
+    "schema_migrations",
     "compatibility_migrations",
 )
 
@@ -189,6 +190,12 @@ HUMAN_REQUEST_ACTIVE_STATUSES = {"active", "awaiting_user", "awaiting_human", "p
 HUMAN_ARCHIVE_STATUSES = {"resolved", "handled", "consumed", "archived", "done", "closed", "skipped"}
 HUMAN_NOTE_ACTIVE_STATUSES = {"unhandled", "queued", "failed", "pending", "open"}
 TICKET_ITEM_STATUSES = {"pending", "in_progress", "candidate_done", "done", "blocked"}
+TICKET_CAMPAIGN_HORIZONS = (
+    "T1 Ticket-run readiness",
+    "T2 Ticket implementation",
+    "T3 Verification and hardening",
+    "T4 Completion report and stop",
+)
 
 
 def utc_now() -> str:
@@ -610,7 +617,94 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def connect_readonly(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
+
+
+def sqlite_user_version(conn: sqlite3.Connection) -> int:
+    try:
+        row = conn.execute("PRAGMA user_version").fetchone()
+    except sqlite3.Error:
+        return 0
+    if row is None:
+        return 0
+    try:
+        return int(row[0] or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def create_schema_migrations_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL,
+            checksum TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'applied',
+            details_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+
+
+def migrate_schema_to_4(conn: sqlite3.Connection) -> None:
+    """Introduce an explicit schema migration ledger.
+
+    Earlier schema versions already created the current typed runtime tables
+    idempotently from ``ensure_schema``. Version 4 makes that evolution
+    auditable with a durable migration registry.
+    """
+
+    create_schema_migrations_table(conn)
+
+
+SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    4: migrate_schema_to_4,
+}
+
+
+def apply_schema_migrations(conn: sqlite3.Connection, *, starting_version: int) -> None:
+    if starting_version > STATE_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"SQLite state schema version {starting_version} is newer than supported version {STATE_SCHEMA_VERSION}."
+        )
+    for version in sorted(version for version in SCHEMA_MIGRATIONS if starting_version < version <= STATE_SCHEMA_VERSION):
+        migration = SCHEMA_MIGRATIONS[version]
+        checksum = sha256_text(f"{version}:{migration.__name__}:{migration.__doc__ or ''}")
+        details = stable_json({"from_version": starting_version, "to_version": version})
+        conn.commit()
+        conn.execute("BEGIN")
+        try:
+            migration(conn)
+            conn.execute(
+                """
+                INSERT INTO schema_migrations(version, name, applied_at, checksum, status, details_json)
+                VALUES(?, ?, ?, ?, 'applied', ?)
+                ON CONFLICT(version) DO UPDATE SET
+                    name=excluded.name,
+                    applied_at=excluded.applied_at,
+                    checksum=excluded.checksum,
+                    status=excluded.status,
+                    details_json=excluded.details_json
+                """,
+                (version, migration.__name__, utc_now(), checksum, details),
+            )
+            conn.execute(f"PRAGMA user_version = {version}")
+        except Exception:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+        starting_version = version
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
+    starting_version = sqlite_user_version(conn)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS meta (
@@ -965,6 +1059,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(parent_task_id, child_task_id, relation)
         );
 
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL,
+            checksum TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'applied',
+            details_json TEXT NOT NULL DEFAULT '{}'
+        );
+
         CREATE TABLE IF NOT EXISTS compatibility_migrations (
             source_path TEXT PRIMARY KEY,
             source_sha256 TEXT NOT NULL,
@@ -973,8 +1076,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    conn.commit()
+    apply_schema_migrations(conn, starting_version=starting_version)
+    current_version = sqlite_user_version(conn)
+    if current_version != STATE_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"SQLite state schema migration stopped at version {current_version}; expected {STATE_SCHEMA_VERSION}."
+        )
     now = utc_now()
-    conn.execute(f"PRAGMA user_version = {STATE_SCHEMA_VERSION}")
     conn.execute(
         "INSERT INTO meta(key, value, updated_at) VALUES(?, ?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
@@ -2720,6 +2829,217 @@ def write_automation_control_state(
             return control
 
 
+def _control_project_payload(control: Mapping[str, Any]) -> dict[str, Any]:
+    payload = control.get("payload") if isinstance(control.get("payload"), Mapping) else {}
+    nested = payload.get("payload") if isinstance(payload.get("payload"), Mapping) else {}
+    if nested:
+        return dict(nested)
+    project_keys = {"project_name", "automation_run_mode", "role_profile"}
+    return {key: payload[key] for key in project_keys if key in payload}
+
+
+def _target_setup_payload(target: Path) -> dict[str, Any]:
+    intake = read_json_file(existing_or_target_path(target, ".agentic/project_intake.json"))
+    dashboard = read_json_file(existing_or_target_path(target, ".agentic/dashboard_state.json"))
+    return {**intake, **dashboard}
+
+
+def _control_run_mode(target: Path, control: Mapping[str, Any]) -> str:
+    project_payload = _control_project_payload(control)
+    for source in (project_payload, _target_setup_payload(target)):
+        mode = str(source.get("automation_run_mode") or "").strip()
+        if mode:
+            return mode
+    return ""
+
+
+def _is_ticket_campaign_control(target: Path, control: Mapping[str, Any]) -> bool:
+    if _control_run_mode(target, control) == "ticket_campaign":
+        return True
+    horizon = str(control.get("horizon") or "").strip()
+    return any(horizon.startswith(prefix) for prefix in TICKET_CAMPAIGN_HORIZONS)
+
+
+def _project_name_for_control(target: Path, control: Mapping[str, Any]) -> str:
+    for source in (_control_project_payload(control), _target_setup_payload(target)):
+        name = str(source.get("project_name") or "").strip()
+        if name:
+            return name
+    return target.name or "target"
+
+
+def _ticket_status_counts(tickets: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {status: 0 for status in TICKET_ITEM_STATUSES}
+    for item in tickets:
+        status = str(item.get("status") or "pending").strip().lower()
+        status = status if status in TICKET_ITEM_STATUSES else "pending"
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _ticket_count_phrase(count: int, noun: str) -> str:
+    suffix = "" if count == 1 else "s"
+    return f"{count} {noun}{suffix}"
+
+
+def _first_ticket_summary(tickets: list[dict[str, Any]], statuses: set[str]) -> str:
+    for item in tickets:
+        status = str(item.get("status") or "pending").strip().lower()
+        if status in statuses:
+            summary = _brief_text(item.get("summary") or item.get("id") or "", limit=90)
+            if summary:
+                return summary
+    return ""
+
+
+def _derive_ticket_campaign_control_updates(
+    target: Path,
+    control: Mapping[str, Any],
+    ticket_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    tickets = [dict(item) for item in ticket_data.get("tickets", []) if isinstance(item, Mapping)]
+    counts = _ticket_status_counts(tickets)
+    total = len(tickets)
+    done = int(counts.get("done", 0))
+    pending = int(counts.get("pending", 0))
+    in_progress = int(counts.get("in_progress", 0))
+    candidate_done = int(counts.get("candidate_done", 0))
+    blocked = int(counts.get("blocked", 0))
+    active_or_completed = done + in_progress + candidate_done
+    all_done = total > 0 and done == total
+    all_remaining_blocked = total > 0 and done + blocked == total and blocked > 0
+    project_name = _project_name_for_control(target, control)
+
+    status = _normalize_status(control.get("status"))
+    if all_remaining_blocked and not all_done and status != "CRITICAL_STOP":
+        status = "ACTIVE_WITH_PENDING_USER_INPUT"
+    elif status not in {"CRITICAL_STOP", "BLOCKED_ON_USER", "BLOCKED_ON_ENVIRONMENT"}:
+        status = "ACTIVE"
+
+    if total == 0:
+        horizon = "T1 Ticket-run readiness"
+        bootstrap_status = "pending"
+        assessment = "Ticket campaign readiness is pending; the canonical ticket queue is empty."
+        milestone = f"Populate or confirm the dashboard-backed ticket queue for `{project_name}`."
+        suggested = "Add the bounded ticket scope, confirm ticket-run status and next selection, then start one-ticket campaign runs."
+    elif all_done:
+        horizon = "T4 Completion report and stop"
+        bootstrap_status = "complete"
+        assessment = f"Ticket campaign has all {total} ticket(s) done; completion reporting can finalize the run."
+        milestone = "Finalize the ticket campaign completion report and stop launching new ticket work."
+        suggested = "Run the ticket-run halt/finalize flow, review the local report, and leave remote push or PR creation manual."
+    elif all_remaining_blocked:
+        horizon = "T4 Completion report and stop"
+        bootstrap_status = "bootstrapped"
+        assessment = f"Ticket campaign has {done}/{total} ticket(s) done and {blocked} blocked; no runnable tickets remain."
+        milestone = "Triage blocked tickets and record the human or environment action needed to resume."
+        suggested = "Review blocked ticket details, resolve or update blockers, then rerun ticket selection before launching more work."
+    elif candidate_done > 0:
+        horizon = "T3 Verification and hardening"
+        bootstrap_status = "bootstrapped"
+        candidate_summary = _first_ticket_summary(tickets, {"candidate_done"})
+        target_text = f": {candidate_summary}" if candidate_summary else ""
+        assessment = (
+            f"Ticket campaign verification is active; {done}/{total} done, "
+            f"{candidate_done} candidate, {pending} pending."
+        )
+        milestone = f"Verify and harden {_ticket_count_phrase(candidate_done, 'candidate ticket')}{target_text}."
+        suggested = "Run the hardener/integrator verification path for candidate tickets, reconcile accepted evidence, then continue one-ticket implementation."
+    elif active_or_completed > 0 or blocked > 0:
+        horizon = "T2 Ticket implementation"
+        bootstrap_status = "bootstrapped"
+        active_summary = _first_ticket_summary(tickets, {"in_progress"})
+        active_text = f": {active_summary}" if active_summary else ""
+        assessment = (
+            f"Ticket campaign implementation is underway; {done}/{total} done, "
+            f"{in_progress} in progress, {pending} pending, {blocked} blocked."
+        )
+        if in_progress:
+            milestone = f"Finish the active ticket{active_text} and record candidate evidence."
+            suggested = "Complete the in-progress ticket, mark it candidate_done with evidence or record a typed blocker, then hand it to verification."
+        else:
+            milestone = f"Implement the next dependency-ready ticket for `{project_name}`."
+            suggested = "Use ticket-run next selection, act on one dependency-ready pending ticket, and record candidate evidence or a blocker."
+    else:
+        horizon = "T1 Ticket-run readiness"
+        bootstrap_status = "pending"
+        assessment = f"Ticket campaign queue has {total} pending ticket(s), but no implementation ticket has started yet."
+        milestone = f"Complete readiness-only ticket bootstrap for `{project_name}` and confirm one-ticket runs can start."
+        suggested = "Confirm ticket-run status and next selection, setup docs, checks, and readiness evidence without implementing tickets."
+
+    previous_horizon = str(control.get("horizon") or "").strip()
+    horizon_decision = "advance" if previous_horizon and previous_horizon != horizon else "stay"
+    if all_remaining_blocked and not all_done:
+        horizon_decision = "defer"
+
+    return {
+        "status": status,
+        "last_updated": utc_now(),
+        "horizon": horizon,
+        "horizon_decision": horizon_decision,
+        "current_assessment": assessment,
+        "best_next_milestone": milestone,
+        "suggested_next_task": suggested,
+        "bootstrap_status": bootstrap_status,
+        "payload": {
+            **_control_project_payload(control),
+            "automation_run_mode": "ticket_campaign",
+            "project_name": project_name,
+        },
+    }
+
+
+def _sync_ticket_campaign_automation_control_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    ticket_data: Mapping[str, Any],
+    *,
+    actor_role: str,
+    causation_id: int,
+) -> dict[str, Any] | None:
+    control = ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
+    if not _is_ticket_campaign_control(target, control):
+        return None
+    updates = _derive_ticket_campaign_control_updates(target, control, ticket_data)
+    comparable_keys = (
+        "status",
+        "horizon",
+        "horizon_decision",
+        "current_assessment",
+        "best_next_milestone",
+        "suggested_next_task",
+        "bootstrap_status",
+    )
+    if all(str(control.get(key) or "") == str(updates.get(key) or "") for key in comparable_keys):
+        return control
+
+    merged = {**control, **updates}
+    if isinstance(control.get("worker"), Mapping):
+        merged["worker"] = control["worker"]
+    event_id = append_event(
+        conn,
+        StateEvent(
+            stream_id=AUTOMATION_CONTROL_STREAM_ID,
+            event_type="automation.control_updated",
+            actor_role=actor_role or "runtime",
+            phase="automation_control",
+            status=_normalize_status(merged.get("status")),
+            task_id=AUTOMATION_CONTROL_TASK_ID,
+            causation_id=causation_id,
+            payload={"updates": updates, "source": "ticket_run_reconciler"},
+        ),
+    )
+    control = _upsert_automation_control_conn(conn, merged, event_id=event_id)
+    checkpoint_stream(
+        conn,
+        stream_id=AUTOMATION_CONTROL_STREAM_ID,
+        kind="automation_control",
+        state=control,
+        event_id=event_id,
+    )
+    return control
+
+
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -3106,9 +3426,13 @@ def normalize_ticket_run_data(data: Mapping[str, Any] | None) -> dict[str, Any]:
     return normalized
 
 
-def load_ticket_run_state(target: Path) -> dict[str, Any] | None:
+def load_ticket_run_state(target: Path, *, read_only: bool = False) -> dict[str, Any] | None:
     target = target.expanduser().resolve()
-    with closing(connect(database_path_for_target(target))) as conn:
+    db_path = database_path_for_target(target)
+    if read_only and not db_path.exists():
+        return None
+    connector = connect_readonly if read_only else connect
+    with closing(connector(db_path)) as conn:
         projected = load_projection(conn, TICKET_RUN_PROJECTION_NAME)
         if projected:
             return normalize_ticket_run_data(projected)
@@ -3247,6 +3571,13 @@ def write_ticket_run_state(
                     ),
                 )
             replace_projection(conn, name=TICKET_RUN_PROJECTION_NAME, payload=normalized, event_id=event_id)
+            _sync_ticket_campaign_automation_control_conn(
+                conn,
+                target,
+                normalized,
+                actor_role=actor_role,
+                causation_id=event_id,
+            )
         return normalized
 
 
@@ -3321,6 +3652,377 @@ def pending_next_actions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         "FROM next_actions ORDER BY priority ASC, updated_at DESC LIMIT 20"
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def schema_migration_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT version, name, applied_at, checksum, status, details_json
+        FROM schema_migrations
+        ORDER BY version ASC
+        """
+    ).fetchall()
+    migrations: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        details = _json_cell(item.pop("details_json", "{}"), {})
+        item["details"] = details if isinstance(details, dict) else {}
+        migrations.append(item)
+    return migrations
+
+
+def _invariant_result(
+    name: str,
+    ok: bool,
+    detail: str,
+    *,
+    failures: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "status": "pass" if ok else "fail",
+        "ok": bool(ok),
+        "detail": detail,
+        "failures": (failures or [])[:20],
+    }
+
+
+def _event_hash_material(row: sqlite3.Row, payload_sha: str) -> str:
+    return stable_json(
+        {
+            "stream_id": str(row["stream_id"]),
+            "sequence": int(row["sequence"]),
+            "occurred_at": str(row["occurred_at"]),
+            "event_type": str(row["event_type"]),
+            "actor_role": str(row["actor_role"]),
+            "actor_id": str(row["actor_id"]),
+            "phase": str(row["phase"]),
+            "status": str(row["status"]),
+            "task_id": str(row["task_id"]),
+            "run_id": str(row["run_id"]),
+            "causation_id": row["causation_id"],
+            "correlation_id": str(row["correlation_id"]),
+            "payload_sha256": payload_sha,
+            "prev_hash": str(row["prev_hash"] or ""),
+        }
+    )
+
+
+def _validate_event_sequences(conn: sqlite3.Connection) -> dict[str, Any]:
+    rows = conn.execute(
+        "SELECT event_id, stream_id, sequence FROM events ORDER BY stream_id ASC, sequence ASC"
+    ).fetchall()
+    failures: list[dict[str, Any]] = []
+    expected_by_stream: dict[str, int] = {}
+    for row in rows:
+        stream_id = str(row["stream_id"])
+        expected = expected_by_stream.get(stream_id, 0) + 1
+        sequence = int(row["sequence"])
+        if sequence != expected:
+            failures.append(
+                {
+                    "stream_id": stream_id,
+                    "event_id": int(row["event_id"]),
+                    "expected_sequence": expected,
+                    "actual_sequence": sequence,
+                }
+            )
+        expected_by_stream[stream_id] = sequence
+    stream_rows = conn.execute(
+        """
+        SELECT s.stream_id, s.current_sequence, COALESCE(MAX(e.sequence), 0) AS max_sequence
+        FROM streams s
+        LEFT JOIN events e ON e.stream_id = s.stream_id
+        GROUP BY s.stream_id, s.current_sequence
+        ORDER BY s.stream_id
+        """
+    ).fetchall()
+    for row in stream_rows:
+        current_sequence = int(row["current_sequence"])
+        max_sequence = int(row["max_sequence"])
+        if current_sequence != max_sequence:
+            failures.append(
+                {
+                    "stream_id": str(row["stream_id"]),
+                    "expected_current_sequence": max_sequence,
+                    "actual_current_sequence": current_sequence,
+                }
+            )
+    return _invariant_result(
+        "events.sequence_contiguous",
+        not failures,
+        "Event sequences are contiguous per stream."
+        if not failures
+        else f"Event sequence gaps or stream cursor mismatches found: {len(failures)}.",
+        failures=failures,
+    )
+
+
+def _validate_event_hash_chain(conn: sqlite3.Connection) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT event_id, stream_id, sequence, occurred_at, event_type, actor_role, actor_id,
+               phase, status, task_id, run_id, causation_id, correlation_id,
+               payload_json, payload_sha256, prev_hash, event_hash
+        FROM events
+        ORDER BY stream_id ASC, sequence ASC
+        """
+    ).fetchall()
+    failures: list[dict[str, Any]] = []
+    previous_hash_by_stream: dict[str, str] = {}
+    for row in rows:
+        stream_id = str(row["stream_id"])
+        event_id = int(row["event_id"])
+        payload_sha = sha256_text(str(row["payload_json"] or ""))
+        stored_payload_sha = str(row["payload_sha256"] or "")
+        if stored_payload_sha != payload_sha:
+            failures.append(
+                {
+                    "stream_id": stream_id,
+                    "event_id": event_id,
+                    "field": "payload_sha256",
+                    "expected": payload_sha,
+                    "actual": stored_payload_sha,
+                }
+            )
+        expected_prev_hash = previous_hash_by_stream.get(stream_id, "")
+        actual_prev_hash = str(row["prev_hash"] or "")
+        if actual_prev_hash != expected_prev_hash:
+            failures.append(
+                {
+                    "stream_id": stream_id,
+                    "event_id": event_id,
+                    "field": "prev_hash",
+                    "expected": expected_prev_hash,
+                    "actual": actual_prev_hash,
+                }
+            )
+        expected_event_hash = sha256_text(_event_hash_material(row, payload_sha))
+        actual_event_hash = str(row["event_hash"] or "")
+        if actual_event_hash != expected_event_hash:
+            failures.append(
+                {
+                    "stream_id": stream_id,
+                    "event_id": event_id,
+                    "field": "event_hash",
+                    "expected": expected_event_hash,
+                    "actual": actual_event_hash,
+                }
+            )
+        previous_hash_by_stream[stream_id] = actual_event_hash
+    return _invariant_result(
+        "events.hash_chain",
+        not failures,
+        "Event payload hashes, prev_hash links, and event_hash values are valid."
+        if not failures
+        else f"Event hash-chain violations found: {len(failures)}.",
+        failures=failures,
+    )
+
+
+def _validate_projection_event_refs(conn: sqlite3.Connection) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT p.name, p.event_id
+        FROM projections p
+        LEFT JOIN events e ON e.event_id = p.event_id
+        WHERE p.event_id IS NOT NULL AND e.event_id IS NULL
+        ORDER BY p.name
+        """
+    ).fetchall()
+    failures = [{"projection": str(row["name"]), "event_id": int(row["event_id"])} for row in rows]
+    return _invariant_result(
+        "projections.event_id_exists",
+        not failures,
+        "Projection event references all point at existing events."
+        if not failures
+        else f"Projection event references are missing events: {len(failures)}.",
+        failures=failures,
+    )
+
+
+def _expected_owner_roles_for_stage(stage: str) -> set[str]:
+    expected = STAGE_TO_OWNER_ROLE.get(stage)
+    roles = {expected} if expected else set()
+    if stage == "implementation":
+        roles.add("single_lane")
+    if stage == "handoff":
+        roles.add("conveyor")
+    return roles
+
+
+def _validate_current_work_item_owner(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT work_item_id, current_stage, owner_role
+        FROM conveyor_work_items
+        WHERE work_item_id = ?
+        """,
+        (CONVEYOR_WORK_ITEM_ID,),
+    ).fetchone()
+    if row is None:
+        return _invariant_result(
+            "conveyor.current_stage_owner",
+            False,
+            "Default conveyor work item is missing.",
+            failures=[{"work_item_id": CONVEYOR_WORK_ITEM_ID}],
+        )
+    stage = str(row["current_stage"] or "")
+    owner_role = str(row["owner_role"] or "")
+    expected_roles = _expected_owner_roles_for_stage(stage)
+    ok = bool(expected_roles) and owner_role in expected_roles
+    return _invariant_result(
+        "conveyor.current_stage_owner",
+        ok,
+        f"Current conveyor stage {stage} is owned by {owner_role}."
+        if ok
+        else f"Current conveyor stage {stage} has owner {owner_role}; expected one of {sorted(expected_roles)}.",
+        failures=[]
+        if ok
+        else [
+            {
+                "work_item_id": str(row["work_item_id"]),
+                "current_stage": stage,
+                "owner_role": owner_role,
+                "expected_owner_roles": sorted(expected_roles),
+            }
+        ],
+    )
+
+
+def _has_actionable_payload(payload_json: Any) -> bool:
+    payload = _json_cell(payload_json, {})
+    if not isinstance(payload, dict) or not payload:
+        return False
+    for key in ("summary", "reason", "detail", "recommended_action", "next_action", "question", "context"):
+        if str(payload.get(key) or "").strip():
+            return True
+    return bool(payload)
+
+
+def _validate_open_blockers_and_escalations(conn: sqlite3.Connection) -> dict[str, Any]:
+    failures: list[dict[str, Any]] = []
+    blocker_rows = conn.execute(
+        """
+        SELECT blocker_id, kind, status, summary, resume_token, payload_json
+        FROM blockers
+        WHERE status NOT IN ('closed', 'resolved', 'superseded')
+        ORDER BY updated_at DESC
+        """
+    ).fetchall()
+    for row in blocker_rows:
+        has_context = bool(str(row["resume_token"] or "").strip()) or bool(str(row["summary"] or "").strip())
+        has_context = has_context or _has_actionable_payload(row["payload_json"])
+        if not has_context:
+            failures.append(
+                {
+                    "table": "blockers",
+                    "id": str(row["blocker_id"]),
+                    "kind": str(row["kind"]),
+                    "status": str(row["status"]),
+                }
+            )
+    escalation_rows = conn.execute(
+        """
+        SELECT escalation_id, kind, status, question, options_json, resume_token, payload_json
+        FROM escalations
+        WHERE status NOT IN ('closed', 'resolved', 'superseded')
+        ORDER BY updated_at DESC
+        """
+    ).fetchall()
+    for row in escalation_rows:
+        options = _json_cell(row["options_json"], [])
+        has_options = isinstance(options, list) and bool(options)
+        has_context = (
+            bool(str(row["resume_token"] or "").strip())
+            or bool(str(row["question"] or "").strip())
+            or has_options
+            or _has_actionable_payload(row["payload_json"])
+        )
+        if not has_context:
+            failures.append(
+                {
+                    "table": "escalations",
+                    "id": str(row["escalation_id"]),
+                    "kind": str(row["kind"]),
+                    "status": str(row["status"]),
+                }
+            )
+    return _invariant_result(
+        "open_items.actionable_context",
+        not failures,
+        "Open blockers and escalations have resume tokens or actionable context."
+        if not failures
+        else f"Open blockers/escalations without actionable context found: {len(failures)}.",
+        failures=failures,
+    )
+
+
+def _validation_receipt_has_reason(payload_json: Any) -> bool:
+    payload = _json_cell(payload_json, {})
+    if not isinstance(payload, dict):
+        return False
+    for key in ("reason", "explicit_reason", "summary", "detail", "root_cause", "failure_reason"):
+        if str(payload.get(key) or "").strip():
+            return True
+    record = payload.get("record")
+    if isinstance(record, dict):
+        return any(str(record.get(key) or "").strip() for key in ("detail", "root_cause", "reason", "summary"))
+    return False
+
+
+def _validate_terminal_validation_receipts(conn: sqlite3.Connection) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT receipt_id, status, started_at, finished_at, payload_json
+        FROM validation_receipts
+        WHERE lower(status) IN ('pass', 'passed', 'fail', 'failed')
+        ORDER BY receipt_id
+        """
+    ).fetchall()
+    failures: list[dict[str, Any]] = []
+    for row in rows:
+        has_timestamps = bool(str(row["started_at"] or "").strip()) and bool(str(row["finished_at"] or "").strip())
+        if not has_timestamps and not _validation_receipt_has_reason(row["payload_json"]):
+            failures.append(
+                {
+                    "receipt_id": str(row["receipt_id"]),
+                    "status": str(row["status"]),
+                    "started_at": str(row["started_at"] or ""),
+                    "finished_at": str(row["finished_at"] or ""),
+                }
+            )
+    return _invariant_result(
+        "validation_receipts.terminal_evidence",
+        not failures,
+        "Terminal validation receipts have timestamps or an explicit reason."
+        if not failures
+        else f"Terminal validation receipts without timestamps or explicit reason found: {len(failures)}.",
+        failures=failures,
+    )
+
+
+def state_invariant_results(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    return [
+        _validate_event_sequences(conn),
+        _validate_event_hash_chain(conn),
+        _validate_projection_event_refs(conn),
+        _validate_current_work_item_owner(conn),
+        _validate_open_blockers_and_escalations(conn),
+        _validate_terminal_validation_receipts(conn),
+    ]
+
+
+def state_health_summary(invariant_results: list[dict[str, Any]]) -> dict[str, Any]:
+    failed = [item for item in invariant_results if not item.get("ok")]
+    return {
+        "status": "pass" if not failed else "fail",
+        "checked_at": utc_now(),
+        "passed": len(invariant_results) - len(failed),
+        "failed": len(failed),
+        "invariant_count": len(invariant_results),
+        "failed_invariants": [str(item.get("name") or "unknown") for item in failed],
+    }
 
 
 def validation_summary(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -3463,14 +4165,19 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "payload_sha256": automation_projection_row["payload_sha256"] if automation_projection_row else "",
             "event_id": automation_projection_row["event_id"] if automation_projection_row else None,
         }
+        schema_migrations = schema_migration_rows(conn)
+        invariant_results = state_invariant_results(conn)
+        health_summary = state_health_summary(invariant_results)
+        base_ready = counts.get("events", 0) >= 1 and bool(projection_row)
         return {
             "schema_version": STATE_SCHEMA_VERSION,
             "authority": "sqlite",
-            "status": "ok" if counts.get("events", 0) >= 1 and projection_row else "initializing",
+            "status": "ok" if base_ready and health_summary["status"] == "pass" else "invalid" if base_ready else "initializing",
             "database": {
                 "path": str(db_path),
                 "exists": db_path.exists(),
                 "sqlite_version": sqlite3.sqlite_version,
+                "user_version": sqlite_user_version(conn),
                 "journal_mode": journal_mode(conn),
                 "integrity_check": sqlite_integrity(conn),
                 "application_id": STATE_APPLICATION_ID,
@@ -3496,6 +4203,9 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
                 ],
             },
             "counts": counts,
+            "schema_migrations": schema_migrations,
+            "invariant_results": invariant_results,
+            "state_health_summary": health_summary,
             "last_event": dict(last_event) if last_event else {},
             "last_checkpoint": dict(checkpoint) if checkpoint else {},
             "recent_events": recent_events(conn, limit=event_limit),
@@ -3736,6 +4446,7 @@ def validate_state_database(target: Path) -> dict[str, Any]:
     expected_stage = ROLE_TO_CONVEYOR_STAGE.get(inferred_role, ("", ""))[0]
     actual_stage = str(work_item.get("current_stage") or machine.get("current_stage") or "")
     role_stage_matches = not expected_stage or actual_stage == expected_stage
+    invariant_results = snapshot.get("invariant_results") if isinstance(snapshot.get("invariant_results"), list) else []
     items = [
         {
             "ok": snapshot["database"]["exists"],
@@ -3776,8 +4487,20 @@ def validate_state_database(target: Path) -> dict[str, Any]:
             else "Repository capability manifest is missing.",
         },
     ]
+    for result in invariant_results:
+        if not isinstance(result, dict):
+            continue
+        items.append(
+            {
+                "ok": bool(result.get("ok")),
+                "detail": f"Invariant {result.get('name')}: {result.get('detail')}",
+                "invariant": result.get("name"),
+                "failures": result.get("failures") if isinstance(result.get("failures"), list) else [],
+            }
+        )
     return {
         "status": "pass" if all(item["ok"] for item in items) else "fail",
         "items": items,
+        "state_health_summary": snapshot.get("state_health_summary", {}),
         "snapshot": snapshot,
     }

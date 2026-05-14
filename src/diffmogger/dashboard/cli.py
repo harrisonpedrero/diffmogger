@@ -40,11 +40,13 @@ from .commands.run_control import (
 from .commands.state import command_state_brief, command_state_snapshot, command_state_validate
 from .commands.tickets import (
     command_ticket_accept_draft,
+    command_ticket_accept_split,
     command_ticket_add,
     command_ticket_delete,
     command_ticket_draft_from_intake,
     command_ticket_import,
     command_ticket_load,
+    command_ticket_split_preview,
     command_ticket_update,
 )
 from .commands.workers import command_worker_run_integrator, command_worker_run_read_only, command_worker_run_write
@@ -84,6 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
         "ticket.import": command_ticket_import,
         "ticket.draft_from_intake": command_ticket_draft_from_intake,
         "ticket.accept_draft": command_ticket_accept_draft,
+        "ticket.split_preview": command_ticket_split_preview,
+        "ticket.accept_split": command_ticket_accept_split,
         "safety.run_check": command_safety_run_check,
         "worker.run_read_only": command_worker_run_read_only,
         "worker.run_write": command_worker_run_write,
@@ -151,14 +155,18 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument("--input-json", default="", help="JSON import payload")
             subparser.add_argument("--input-text", default="", help="Markdown or CSV import payload")
             subparser.add_argument("--preview", action="store_true", help="Preview import without writing")
-        if name in {"ticket.draft_from_intake", "ticket.accept_draft"}:
+        if name in {"ticket.draft_from_intake", "ticket.accept_draft", "ticket.split_preview", "ticket.accept_split"}:
             subparser.add_argument("--ticket-file", default="", help=argparse.SUPPRESS)
         if name == "ticket.draft_from_intake":
             subparser.add_argument("--direction", default="", help="Optional guidance for Codex ticket drafting")
+        if name == "ticket.split_preview":
+            subparser.add_argument("--ticket-id", required=True, help="Pending ticket id to split")
         if name == "ticket.accept_draft":
             subparser.add_argument("--draft-id", required=True, help="Stored draft id")
             subparser.add_argument("--ticket-ids", default="", help="Comma-separated candidate ticket ids to accept")
             subparser.add_argument("--mode", dest="import_mode", choices=["append", "replace-placeholder", "replace-all"], default="", help="Import write mode")
+        if name == "ticket.accept_split":
+            subparser.add_argument("--draft-id", required=True, help="Stored split preview draft id")
     return parser
 
 def main(argv: list[str] | None = None) -> int:

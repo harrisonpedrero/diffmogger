@@ -9,6 +9,14 @@ from ..target import *
 
 from .context import merge_context_files
 from .diagnostics import run_subprocess
+from ..ticket_generation import (
+    build_ticket_generation_snapshot,
+    normalize_ticket_complexity,
+    project_snapshot_prompt_block,
+    ticket_count_guidance,
+    ticket_quality_warnings,
+    ticket_sizing_policy_prompt,
+)
 from diffmogger.runtime import ticket_run
 
 DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS = 120
@@ -47,6 +55,9 @@ LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "meaningful_deliverable": "A runnable, verified increment toward the described project.",
     "beyond_mvp": "Continue through the remaining dashboard ticket queue in small, reviewable increments.",
     "assumptions": ["Generated from a short low-cortisol build description; ask through the dashboard when a decision is ambiguous."],
+    "ticket_generation_complexity": "small",
+    "ticket_generation_decomposition_brief": "Create a dependency-safe first demo in small, reviewable tickets.",
+    "ticket_generation_quality_warnings": [],
     "additional_context_files": [],
     "overwrite_existing_scaffold_files": False,
 }
@@ -130,7 +141,13 @@ def _target_default_project_mode(target: Path) -> str:
     return "existing_project" if visible else "fresh_project"
 
 
-def _normalize_low_cortisol_intake(target: Path, generated: Any, description: str) -> dict[str, Any]:
+def _normalize_low_cortisol_intake(
+    target: Path,
+    generated: Any,
+    description: str,
+    *,
+    require_tickets: bool = True,
+) -> dict[str, Any]:
     if not isinstance(generated, dict):
         raise BackendError(
             "Codex intake generation must return a JSON object.",
@@ -151,6 +168,8 @@ def _normalize_low_cortisol_intake(target: Path, generated: Any, description: st
         "automation_role_profile",
         "meaningful_deliverable",
         "beyond_mvp",
+        "ticket_generation_complexity",
+        "ticket_generation_decomposition_brief",
     ]
     for key in text_fields:
         payload[key] = _string_value(payload.get(key), str(LOW_CORTISOL_DEFAULT_INTAKE[key]))
@@ -204,6 +223,10 @@ def _normalize_low_cortisol_intake(target: Path, generated: Any, description: st
     payload["ticket_run_file"] = ""
     payload["ticket_completion_notify"] = _bool_value(payload.get("ticket_completion_notify"), True)
     payload["overwrite_existing_scaffold_files"] = False
+    payload["ticket_generation_complexity"] = normalize_ticket_complexity(payload.get("ticket_generation_complexity"))
+    payload["ticket_generation_quality_warnings"] = [
+        item for item in payload.get("ticket_generation_quality_warnings", []) if isinstance(item, dict)
+    ] if isinstance(payload.get("ticket_generation_quality_warnings"), list) else []
 
     seed_source = payload.get("ticket_run_seed_tickets")
     if not isinstance(seed_source, list):
@@ -211,6 +234,9 @@ def _normalize_low_cortisol_intake(target: Path, generated: Any, description: st
     if not isinstance(seed_source, list):
         seed_source = []
     tickets = ticket_run.normalized_tickets([item for item in seed_source if isinstance(item, dict)])
+    if not require_tickets:
+        payload["ticket_run_seed_tickets"] = []
+        return payload
     if not tickets:
         raise BackendError(
             "Codex did not return any ticket_run_seed_tickets.",
@@ -222,21 +248,22 @@ def _normalize_low_cortisol_intake(target: Path, generated: Any, description: st
     return payload
 
 
-def _low_cortisol_prompt(target: Path, description: str) -> str:
-    detected = detect_target_context(target)
+def _low_cortisol_intake_prompt(target: Path, description: str) -> str:
+    snapshot = build_ticket_generation_snapshot(target, include_intake=True)
     current_intake = load_intake(target)
     current_draft = load_dashboard_state(target).get("brief_draft_intake") or {}
+    intake_fields = [key for key in LOW_CORTISOL_DEFAULT_INTAKE.keys() if key != "ticket_run_seed_tickets"]
     return "\n".join(
         [
-            "Generate a Diffmogger project intake from a short build request.",
+            "Generate a normalized Diffmogger project intake from a short build request.",
             "Return JSON only: one object with Diffmogger intake fields.",
+            "Do not return final seed tickets in this pass; set ticket_run_seed_tickets to an empty array if you include the field.",
             "",
             "Hard requirements:",
             "- Set automation_run_mode to ticket_campaign.",
             "- Leave ticket_run_file empty; ticket scope is stored in the dashboard-backed SQLite ticket queue.",
-            "- Include ticket_run_seed_tickets with incremental tickets that build the project in dependency-safe steps.",
-            "- Use pending status for every ticket. Ticket ids must be TICKET-001, TICKET-002, and so on.",
-            "- Each ticket must include id, summary, status, depends_on, acceptance_criteria, verification_commands, evidence, related_commits, and blocker.",
+            "- Classify ticket_generation_complexity as one of tiny, small, medium, or large.",
+            "- Add ticket_generation_decomposition_brief with a concise first-demo decomposition plan, not ticket objects.",
             "- Decide automation_role_profile from complexity: single_lane for simple docs, research, cleanup, small static apps, or one-surface prototypes; planner_builder_hardener_integrator for larger multi-component software work.",
             "- Treat automation_role_profile as canonical. multi_role_automations_allowed is a backward-compatible derived mirror only.",
             "- Set optional_mcp_servers to an empty array. Context7 and Playwright MCPs are disabled by default.",
@@ -244,11 +271,13 @@ def _low_cortisol_prompt(target: Path, description: str) -> str:
             "- Keep the intake reusable and target-project agnostic. Do not include secrets.",
             "- Keep assumptions concise and explicit.",
             "",
-            "Fields to return:",
-            json.dumps(list(LOW_CORTISOL_DEFAULT_INTAKE.keys()), indent=2),
+            ticket_sizing_policy_prompt(),
             "",
-            "Target context JSON:",
-            json.dumps(detected, indent=2, sort_keys=True, default=json_default),
+            "Fields to return:",
+            json.dumps(intake_fields, indent=2),
+            "",
+            "Bounded target project snapshot JSON:",
+            project_snapshot_prompt_block(snapshot),
             "",
             "Current intake JSON, if any:",
             json.dumps(current_intake, indent=2, sort_keys=True, default=json_default),
@@ -260,6 +289,49 @@ def _low_cortisol_prompt(target: Path, description: str) -> str:
             description.strip(),
         ]
     )
+
+
+def _low_cortisol_ticket_prompt(target: Path, description: str, intake: dict[str, Any]) -> str:
+    complexity = normalize_ticket_complexity(intake.get("ticket_generation_complexity"))
+    return "\n".join(
+        [
+            "Generate Diffmogger ticket_run_seed_tickets for the normalized intake.",
+            "Return JSON only: one object with ticket_run_seed_tickets and optional quality_notes.",
+            "Do not include prose outside JSON. Do not modify files.",
+            "",
+            ticket_sizing_policy_prompt(complexity),
+            "",
+            "Ticket requirements:",
+            f"- {ticket_count_guidance(complexity)}",
+            "- Use pending status for every ticket.",
+            "- Ticket ids must be TICKET-001, TICKET-002, and so on.",
+            "- Each ticket must include id, summary, status, depends_on, acceptance_criteria, verification_commands, evidence, related_commits, and blocker.",
+            "- Dependencies must point only to earlier seed ticket ids when a real dependency exists.",
+            "- Each summary and acceptance list must identify the component, surface, workflow, or artifact being changed.",
+            "- Keep every ticket generic and target-project agnostic; do not include secrets.",
+            "- For very large projects, generate only the first-demo path and leave later ideas in beyond_mvp or assumptions.",
+            "",
+            "Normalized intake JSON:",
+            json.dumps(intake, indent=2, sort_keys=True, default=json_default),
+            "",
+            "Original build request:",
+            description.strip(),
+        ]
+    )
+
+
+def _extract_seed_tickets_payload(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        seed_source = raw
+    elif isinstance(raw, dict):
+        seed_source = raw.get("ticket_run_seed_tickets")
+        if not isinstance(seed_source, list):
+            seed_source = raw.get("tickets")
+    else:
+        seed_source = []
+    if not isinstance(seed_source, list):
+        seed_source = []
+    return [item for item in seed_source if isinstance(item, dict)]
 
 
 def _intake_codex_timeout_seconds() -> int:
@@ -344,22 +416,47 @@ def command_brief_generate_intake(args: argparse.Namespace) -> dict[str, Any]:
             error_type="missing_build_description",
             details={"target": str(target)},
         )
-    prompt = _low_cortisol_prompt(target, description)
-    stream_event(args, "intake-generate", "Starting Codex intake generation.")
+    intake_prompt = _low_cortisol_intake_prompt(target, description)
+    stream_event(args, "intake-generate", "Generating intake.")
     with tempfile.TemporaryDirectory(prefix="diffmogger-intake-") as tmp:
-        result = _run_codex_intake_generation(
-            prompt,
+        intake_result = _run_codex_intake_generation(
+            intake_prompt,
             cwd=Path(tmp),
             timeout_seconds=_intake_codex_timeout_seconds(),
         )
-    if result.returncode != 0:
+    if intake_result.returncode != 0:
         raise BackendError(
             "Codex intake generation failed.",
             error_type="intake_generation_failed",
-            details={"exit_code": result.returncode, "stdout": result.stdout[-2000:], "stderr": result.stderr[-2000:]},
+            details={"exit_code": intake_result.returncode, "stdout": intake_result.stdout[-2000:], "stderr": intake_result.stderr[-2000:]},
         )
-    raw = _extract_json_payload(result.stdout, label="intake")
-    intake = _normalize_low_cortisol_intake(target, raw, description)
+    raw_intake = _extract_json_payload(intake_result.stdout, label="intake")
+    intake = _normalize_low_cortisol_intake(target, raw_intake, description, require_tickets=False)
+
+    ticket_prompt = _low_cortisol_ticket_prompt(target, description, intake)
+    stream_event(args, "ticket-generate", "Generating tickets.")
+    with tempfile.TemporaryDirectory(prefix="diffmogger-tickets-") as tmp:
+        ticket_result = _run_codex_intake_generation(
+            ticket_prompt,
+            cwd=Path(tmp),
+            timeout_seconds=_intake_codex_timeout_seconds(),
+        )
+    if ticket_result.returncode != 0:
+        raise BackendError(
+            "Codex ticket generation failed.",
+            error_type="ticket_generation_failed",
+            details={"exit_code": ticket_result.returncode, "stdout": ticket_result.stdout[-2000:], "stderr": ticket_result.stderr[-2000:]},
+        )
+    raw_tickets = _extract_json_payload(ticket_result.stdout, label="ticket seed")
+    seed_tickets = ticket_run.normalized_tickets(_extract_seed_tickets_payload(raw_tickets))
+    if not seed_tickets:
+        raise BackendError(
+            "Codex did not return any ticket_run_seed_tickets.",
+            error_type="intake_generation_no_tickets",
+            details={"project_name": intake["project_name"]},
+        )
+    intake["ticket_run_seed_tickets"] = seed_tickets
+    intake["ticket_generation_quality_warnings"] = ticket_quality_warnings(seed_tickets)
     state_path = write_dashboard_state_from_intake(target, intake, last_action="low_cortisol_intake_generated")
     write_dashboard_action_state(target, last_action="low_cortisol_intake_generated")
     return {
@@ -367,6 +464,8 @@ def command_brief_generate_intake(args: argparse.Namespace) -> dict[str, Any]:
         "dashboard_state_path": str(state_path),
         "intake": intake,
         "ticket_count": len(intake["ticket_run_seed_tickets"]),
+        "ticket_generation_complexity": intake["ticket_generation_complexity"],
+        "ticket_generation_quality_warnings": intake["ticket_generation_quality_warnings"],
         "automation_role_profile": intake["automation_role_profile"],
         "ticket_run_file": intake["ticket_run_file"],
     }

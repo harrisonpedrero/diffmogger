@@ -3,6 +3,12 @@ from __future__ import annotations
 from ..errors import *
 from ..jsonio import *
 from ..target import *
+from ..ticket_generation import (
+    build_ticket_generation_snapshot,
+    project_snapshot_prompt_block,
+    ticket_quality_warnings,
+    ticket_sizing_policy_prompt,
+)
 
 from diffmogger.runtime import ticket_run
 
@@ -305,6 +311,7 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
     current_ids = {str(item.get("id") or "").strip() for item in current_tickets if str(item.get("id") or "").strip()}
     next_ticket_id = _next_available_ticket_id(set(current_ids))
     direction = _draft_direction(args)
+    snapshot = build_ticket_generation_snapshot(target, ticket_data=data)
     direction_block = (
         [
             "User-provided draft direction:",
@@ -318,19 +325,31 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
     )
     prompt = "\n".join(
         [
-            "Draft additional Diffmogger ticket-campaign tickets from this project intake.",
+            "Draft additional Diffmogger ticket-campaign tickets from this project intake and bounded project snapshot.",
             "Return JSON only: an array of ticket objects.",
             "Each ticket must include id, summary, depends_on, status, acceptance_criteria, verification_commands, evidence, related_commits, and blocker.",
             "Use status pending. Do not modify files.",
+            "",
+            ticket_sizing_policy_prompt(),
+            "",
             "Append-only rules:",
             "- Propose only genuinely new follow-up tickets.",
             "- Do not repeat, rewrite, replace, or reset any current ticket.",
             f"- Use fresh ticket IDs starting at {next_ticket_id} or later.",
             "- Dependencies may point to current tickets or to newly proposed tickets.",
             "",
+            "Grounding requirements:",
+            "- Ground every candidate in observed project structure, current capabilities, current ticket state, or recent completion evidence.",
+            "- Do not invent unrelated product scope from the intake alone.",
+            "- Mention the component, surface, workflow, or artifact being extended in the summary or acceptance criteria.",
+            "- Prefer small dependency-safe tickets that move the existing target forward.",
+            "",
             *direction_block,
             "Project intake JSON:",
             json.dumps(intake, indent=2, sort_keys=True, default=json_default),
+            "",
+            "Bounded project snapshot JSON:",
+            project_snapshot_prompt_block(snapshot),
             "",
             "Current ticket-run JSON:",
             json.dumps(data, indent=2, sort_keys=True, default=json_default),
@@ -370,6 +389,7 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
     candidate_text = json.dumps(raw_candidates)
     raw_imported = ticket_run.parse_import_tickets(candidate_text, "json")
     candidates, draft_meta = _append_only_draft_candidates(data, raw_imported)
+    quality_warnings = ticket_quality_warnings(candidates)
     stream_event(args, "ticket-draft", f"Prepared {len(candidates)} append-only draft ticket candidate(s).")
     draft_id = datetime.now(timezone.utc).strftime("ticket-draft-%Y%m%d-%H%M%S")
     message = (
@@ -385,6 +405,8 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
         "generation_mode": "append",
         "message": message,
         **draft_meta,
+        "quality_warning_count": len(quality_warnings),
+        "quality_warnings": quality_warnings,
         "candidates": candidates,
     }
     draft_path = _draft_path(target, draft_id)
@@ -398,6 +420,217 @@ def command_ticket_draft_from_intake(args: argparse.Namespace) -> dict[str, Any]
         "generation_mode": "append",
         "message": message,
         **draft_meta,
+        "quality_warning_count": len(quality_warnings),
+        "quality_warnings": quality_warnings,
+        "candidates": candidates,
+    }
+
+
+def _find_ticket(data: dict[str, Any], ticket_id: str) -> dict[str, Any] | None:
+    for item in ticket_run.tickets(data):
+        if str(item.get("id") or "").strip() == ticket_id:
+            return item
+    return None
+
+
+def _child_split_candidates(
+    data: dict[str, Any],
+    source: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    source_id = str(source.get("id") or "").strip()
+    existing_ids = {
+        str(item.get("id") or "").strip()
+        for item in ticket_run.tickets(data)
+        if str(item.get("id") or "").strip() and str(item.get("id") or "").strip() != source_id
+    }
+    source_dependencies = [
+        dependency_id
+        for dependency_id in ticket_run.ticket_dependency_ids(source)
+        if dependency_id in existing_ids and dependency_id != source_id
+    ]
+    used_ids = set(existing_ids)
+    children: list[dict[str, Any]] = []
+    renumbered_count = 0
+    dropped_dependency_count = 0
+
+    for candidate in candidates:
+        child = ticket_run.normalize_ticket(candidate)
+        original_id = str(child.get("id") or "").strip()
+        if not original_id or original_id == source_id or original_id in used_ids:
+            child["id"] = _next_available_ticket_id(used_ids)
+            renumbered_count += 1
+        used_ids.add(str(child.get("id") or "").strip())
+        child["status"] = "pending"
+        child["evidence"] = []
+        child["related_commits"] = []
+        child["blocker"] = ""
+
+        dependencies: list[str] = []
+
+        def add_dependency(dependency_id: str) -> None:
+            if dependency_id and dependency_id != child["id"] and dependency_id not in dependencies:
+                dependencies.append(dependency_id)
+
+        if not children:
+            for dependency_id in source_dependencies:
+                add_dependency(dependency_id)
+
+        for dependency_id in ticket_run.ticket_dependency_ids(child):
+            if dependency_id == source_id:
+                if children:
+                    add_dependency(str(children[-1].get("id") or ""))
+                else:
+                    for source_dependency in source_dependencies:
+                        add_dependency(source_dependency)
+            elif dependency_id in existing_ids or any(dependency_id == str(item.get("id") or "") for item in children):
+                add_dependency(dependency_id)
+            else:
+                dropped_dependency_count += 1
+
+        if children:
+            add_dependency(str(children[-1].get("id") or ""))
+
+        child["depends_on"] = dependencies
+        children.append(child)
+
+    return children, {
+        "renumbered_count": renumbered_count,
+        "dropped_dependency_count": dropped_dependency_count,
+    }
+
+
+def command_ticket_split_preview(args: argparse.Namespace) -> dict[str, Any]:
+    target = resolve_target(args.target)
+    data, path, text = _load_ticket_state(target, args)
+    source_id = str(args.ticket_id or "").strip()
+    source = _find_ticket(data, source_id)
+    if source is None:
+        raise BackendError(
+            "Ticket id not found.",
+            exit_code=2,
+            error_type="ticket_not_found",
+            details={"ticket_id": source_id},
+        )
+    if str(source.get("status") or "").strip().lower() != "pending":
+        raise BackendError(
+            "Only pending tickets can be split from Run Control.",
+            exit_code=2,
+            error_type="ticket_split_not_pending",
+            details={"ticket_id": source_id, "status": source.get("status")},
+        )
+
+    intake = load_intake(target) or load_dashboard_state(target).get("brief_draft_intake") or {}
+    snapshot = build_ticket_generation_snapshot(target, ticket_data=data)
+    prompt = "\n".join(
+        [
+            "Split one pending Diffmogger ticket into smaller replacement child tickets.",
+            "Return JSON only: an array of replacement ticket objects.",
+            "This is preview-only. Do not modify files.",
+            "Each child ticket must include id, summary, depends_on, status, acceptance_criteria, verification_commands, evidence, related_commits, and blocker.",
+            "",
+            ticket_sizing_policy_prompt(),
+            "",
+            "Split rules:",
+            "- Return at least two child tickets and usually no more than five.",
+            "- Each child must be one reviewable local patch with one primary deliverable.",
+            "- Child tickets should preserve the original ticket's dependencies as appropriate.",
+            "- Dependencies may point to existing tickets or earlier child tickets only.",
+            "- Do not include the original ticket as a child ticket.",
+            "- Use pending status for every child ticket.",
+            "- Mention the component, surface, workflow, or artifact being changed in each summary or acceptance criteria.",
+            "",
+            "Project intake JSON:",
+            json.dumps(intake, indent=2, sort_keys=True, default=json_default),
+            "",
+            "Bounded project snapshot JSON:",
+            project_snapshot_prompt_block(snapshot),
+            "",
+            "Current ticket-run JSON:",
+            json.dumps(data, indent=2, sort_keys=True, default=json_default),
+            "",
+            "Ticket to split JSON:",
+            json.dumps(source, indent=2, sort_keys=True, default=json_default),
+        ]
+    )
+
+    before_status = _git_status(target)
+    before_ticket = json.dumps(data, sort_keys=True, default=json_default)
+    if path != ticket_run.ticket_state_path(target) and text:
+        before_ticket = text
+    stream_event(args, "ticket-split", f"Starting Codex split preview for {source_id}.")
+    result = subprocess.run(
+        ["codex", "exec", "--full-auto", "--skip-git-repo-check", prompt],
+        cwd=target,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    after_status = _git_status(target)
+    after_data = ticket_run.load_ticket_run(target)[0] if path == ticket_run.ticket_state_path(target) else data
+    after_ticket = json.dumps(after_data, sort_keys=True, default=json_default)
+    if path != ticket_run.ticket_state_path(target) and path.exists():
+        after_ticket = path.read_text(encoding="utf-8")
+    if after_status != before_status or after_ticket != before_ticket:
+        raise BackendError(
+            "Codex ticket splitting unexpectedly modified the target.",
+            error_type="ticket_split_mutated_target",
+            details={"before_status": before_status, "after_status": after_status, "ticket_file": str(path)},
+        )
+    if result.returncode != 0:
+        raise BackendError(
+            "Codex ticket splitting failed.",
+            error_type="ticket_split_failed",
+            details={"exit_code": result.returncode, "stdout": result.stdout[-2000:], "stderr": result.stderr[-2000:]},
+        )
+
+    raw_candidates = _extract_json_payload(result.stdout)
+    raw_imported = ticket_run.parse_import_tickets(json.dumps(raw_candidates), "json")
+    candidates, split_meta = _child_split_candidates(data, source, raw_imported)
+    if len(candidates) < 2:
+        raise BackendError(
+            "Ticket split preview must include at least two child tickets.",
+            exit_code=2,
+            error_type="ticket_split_too_few_children",
+            details={"ticket_id": source_id, "candidate_count": len(candidates)},
+        )
+    quality_warnings = ticket_quality_warnings(candidates)
+    final_child_id = str(candidates[-1].get("id") or "")
+    draft_id = datetime.now(timezone.utc).strftime("ticket-split-%Y%m%d-%H%M%S")
+    message = f"Split preview ready: replace {source_id} with {len(candidates)} child tickets."
+    payload = {
+        "schema_version": 1,
+        "draft_id": draft_id,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ticket_file": str(path),
+        "generation_mode": "split",
+        "source_ticket_id": source_id,
+        "source_ticket_summary": str(source.get("summary") or ""),
+        "remap_dependency_to": final_child_id,
+        "message": message,
+        **split_meta,
+        "quality_warning_count": len(quality_warnings),
+        "quality_warnings": quality_warnings,
+        "candidates": candidates,
+    }
+    draft_path = _draft_path(target, draft_id)
+    write_json_file(draft_path, payload)
+    write_dashboard_action_state(target, last_action="ticket_split_preview_created")
+    stream_event(args, "ticket-split", message)
+    return {
+        "target": target_metadata(target),
+        "draft_id": draft_id,
+        "draft_path": str(draft_path),
+        "candidate_count": len(candidates),
+        "generation_mode": "split",
+        "source_ticket_id": source_id,
+        "source_ticket_summary": str(source.get("summary") or ""),
+        "remap_dependency_to": final_child_id,
+        "message": message,
+        **split_meta,
+        "quality_warning_count": len(quality_warnings),
+        "quality_warnings": quality_warnings,
         "candidates": candidates,
     }
 
@@ -423,4 +656,108 @@ def command_ticket_accept_draft(args: argparse.Namespace) -> dict[str, Any]:
     next_data = ticket_run.data_with_imported_tickets(data, candidates, mode)
     result = _write_result(target, path, text, next_data)
     result.update({"draft_id": draft_id, "accepted_count": len(candidates), "mode": mode})
+    return result
+
+
+def command_ticket_accept_split(args: argparse.Namespace) -> dict[str, Any]:
+    target = resolve_target(args.target)
+    data, path, text = _load_ticket_state(target, args)
+    draft_id = str(args.draft_id or "").strip()
+    draft_path = _draft_path(target, draft_id)
+    draft = read_json_file(draft_path)
+    if str(draft.get("generation_mode") or "") != "split":
+        raise BackendError(
+            "Draft is not a split preview.",
+            exit_code=2,
+            error_type="ticket_split_invalid_draft",
+            details={"draft_id": draft_id},
+        )
+    source_id = str(draft.get("source_ticket_id") or "").strip()
+    source = _find_ticket(data, source_id)
+    if source is None:
+        raise BackendError(
+            "Ticket id not found.",
+            exit_code=2,
+            error_type="ticket_not_found",
+            details={"ticket_id": source_id},
+        )
+    if str(source.get("status") or "").strip().lower() != "pending":
+        raise BackendError(
+            "Only pending tickets can be split from Run Control.",
+            exit_code=2,
+            error_type="ticket_split_not_pending",
+            details={"ticket_id": source_id, "status": source.get("status")},
+        )
+    candidates = [ticket_run.normalize_ticket(item) for item in draft.get("candidates", []) if isinstance(item, dict)]
+    if len(candidates) < 2:
+        raise BackendError(
+            "Ticket split preview has no child tickets to accept.",
+            exit_code=2,
+            error_type="ticket_split_empty",
+            details={"draft_id": draft_id},
+        )
+
+    child_ids = [str(item.get("id") or "").strip() for item in candidates]
+    if len(set(child_ids)) != len(child_ids) or any(not item for item in child_ids):
+        raise BackendError(
+            "Ticket split preview has invalid child ids.",
+            exit_code=2,
+            error_type="ticket_split_invalid_children",
+            details={"draft_id": draft_id, "child_ids": child_ids},
+        )
+    existing_ids = {
+        str(item.get("id") or "").strip()
+        for item in ticket_run.tickets(data)
+        if str(item.get("id") or "").strip() and str(item.get("id") or "").strip() != source_id
+    }
+    conflicts = sorted(set(child_ids) & existing_ids)
+    if conflicts:
+        raise BackendError(
+            "Ticket split preview child ids now conflict with the queue.",
+            exit_code=2,
+            error_type="ticket_split_child_conflict",
+            details={"draft_id": draft_id, "conflicts": conflicts},
+        )
+
+    final_child_id = str(draft.get("remap_dependency_to") or child_ids[-1]).strip()
+    if final_child_id not in child_ids:
+        final_child_id = child_ids[-1]
+
+    next_items: list[dict[str, Any]] = []
+    replaced = False
+    for item in ticket_run.tickets(data):
+        ticket_id = str(item.get("id") or "").strip()
+        if ticket_id == source_id:
+            next_items.extend(candidates)
+            replaced = True
+            continue
+        replacement = dict(item)
+        dependencies: list[str] = []
+        for dependency_id in ticket_run.ticket_dependency_ids(replacement):
+            mapped = final_child_id if dependency_id == source_id else dependency_id
+            if mapped and mapped not in dependencies:
+                dependencies.append(mapped)
+        replacement["depends_on"] = dependencies
+        next_items.append(replacement)
+
+    if not replaced:
+        raise BackendError(
+            "Ticket id not found.",
+            exit_code=2,
+            error_type="ticket_not_found",
+            details={"ticket_id": source_id},
+        )
+
+    next_data = dict(data)
+    next_data["tickets"] = next_items
+    result = _write_result(target, path, text, next_data)
+    result.update(
+        {
+            "draft_id": draft_id,
+            "accepted_count": len(candidates),
+            "source_ticket_id": source_id,
+            "remapped_dependency_to": final_child_id,
+            "mode": "split",
+        }
+    )
     return result

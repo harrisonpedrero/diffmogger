@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import argparse
+import contextlib
 import importlib.util
+import io
 import os
 import subprocess
 import sys
@@ -694,12 +696,24 @@ class DashboardBackendCliTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
+            prompts: list[str] = []
 
             def fake_intake_generation(prompt, **_kwargs):
-                return subprocess.CompletedProcess(
-                    ["codex", "exec", prompt],
-                    0,
-                    stdout=json.dumps(
+                prompts.append(prompt)
+                if "Generate Diffmogger ticket_run_seed_tickets" in prompt:
+                    stdout = json.dumps(
+                        {
+                            "ticket_run_seed_tickets": [
+                                {
+                                    "id": "TICKET-001",
+                                    "summary": "Create the first planning flow",
+                                    "status": "pending",
+                                }
+                            ]
+                        }
+                    )
+                else:
+                    stdout = json.dumps(
                         {
                             "project_name": "Gentle Intake",
                             "project_mode": "fresh_project",
@@ -710,15 +724,21 @@ class DashboardBackendCliTests(unittest.TestCase):
                             "optional_mcp_servers": ["context7", "playwright"],
                             "automation_run_mode": "continuous_improvement",
                             "automation_role_profile": "planner_builder_hardener_integrator",
+                            "ticket_generation_complexity": "tiny",
+                            "ticket_generation_decomposition_brief": "First normalize the app shell, then add the planning flow.",
                             "ticket_run_seed_tickets": [
                                 {
-                                    "id": "TICKET-001",
-                                    "summary": "Create the first planning flow",
+                                    "id": "TICKET-999",
+                                    "summary": "This pass should not be used",
                                     "status": "pending",
                                 }
                             ],
                         }
-                    ),
+                    )
+                return subprocess.CompletedProcess(
+                    ["codex", "exec", prompt],
+                    0,
+                    stdout=stdout,
                     stderr="",
                 )
 
@@ -734,9 +754,60 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertTrue(intake["multi_role_automations_allowed"])
             self.assertEqual("planner_builder_hardener_integrator", intake["automation_role_profile"])
             self.assertEqual(1, payload["ticket_count"])
+            self.assertEqual("tiny", payload["ticket_generation_complexity"])
+            self.assertEqual(["TICKET-001"], [ticket["id"] for ticket in intake["ticket_run_seed_tickets"]])
+            self.assertEqual(2, len(prompts))
+            self.assertIn("Do not return final seed tickets", prompts[0])
+            self.assertIn("Ticket sizing policy", prompts[0])
+            self.assertIn("tiny: 2-3 tickets", prompts[1])
             dashboard_state = json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
             self.assertEqual("low_cortisol_intake_generated", dashboard_state["last_action"])
             self.assertEqual("Gentle Intake", dashboard_state["brief_draft_intake"]["project_name"])
+
+    def test_brief_generate_intake_streams_two_pass_progress(self) -> None:
+        from diffmogger.dashboard.commands import brief as brief_commands
+
+        def fake_generation(prompt, **_kwargs):
+            if "Generate Diffmogger ticket_run_seed_tickets" in prompt:
+                stdout = json.dumps(
+                    {
+                        "ticket_run_seed_tickets": [
+                            {
+                                "id": "TICKET-001",
+                                "summary": "Create the first local workflow",
+                                "status": "pending",
+                            },
+                            {
+                                "id": "TICKET-002",
+                                "summary": "Add the first verification command",
+                                "status": "pending",
+                                "depends_on": ["TICKET-001"],
+                            },
+                        ]
+                    }
+                )
+            else:
+                stdout = json.dumps(
+                    {
+                        "project_name": "Two Pass Intake",
+                        "product_goal": "Build a small local workflow.",
+                        "target_user": "Maintainers",
+                        "desired_first_demo": "A workflow runs locally.",
+                        "ticket_generation_complexity": "tiny",
+                    }
+                )
+            return subprocess.CompletedProcess(["codex", "exec", prompt], 0, stdout=stdout, stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(brief_commands, "_run_codex_intake_generation", side_effect=fake_generation):
+            args = argparse.Namespace(target=tmp, body="Build a small local workflow.", stream_jsonl=True)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                payload = brief_commands.command_brief_generate_intake(args)
+
+        events = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
+        self.assertEqual(["intake-generate", "ticket-generate"], [event["stage"] for event in events])
+        self.assertEqual(["Generating intake.", "Generating tickets."], [event["message"] for event in events])
+        self.assertEqual(2, payload["ticket_count"])
 
     def test_brief_generate_intake_runs_codex_without_plugins(self) -> None:
         from diffmogger.dashboard.commands import brief as brief_commands
@@ -768,6 +839,30 @@ class DashboardBackendCliTests(unittest.TestCase):
         self.assertIn("plugins", command)
         self.assertTrue(kwargs["start_new_session"])
         self.assertEqual(42, seen["timeout"])
+
+    def test_ticket_generation_policy_ranges_and_quality_gate(self) -> None:
+        from diffmogger.dashboard.ticket_generation import ticket_count_range, ticket_quality_warnings, ticket_sizing_policy_prompt
+
+        self.assertEqual((2, 3), ticket_count_range("tiny"))
+        self.assertEqual((4, 6), ticket_count_range("small"))
+        self.assertEqual((7, 12), ticket_count_range("medium"))
+        self.assertEqual((12, 18), ticket_count_range("large"))
+        self.assertIn("one reviewable local patch", ticket_sizing_policy_prompt("large"))
+        self.assertIn("12-18 initial first-demo tickets", ticket_sizing_policy_prompt("large"))
+
+        warnings = ticket_quality_warnings(
+            [
+                {
+                    "id": "TICKET-001",
+                    "summary": "Build backend and frontend and visualizer controls",
+                    "acceptance_criteria": ["one", "two", "three", "four", "five", "six"],
+                    "verification_commands": ["test", "lint", "build", "smoke"],
+                }
+            ]
+        )
+        self.assertIn("broad_conjunction_summary", {item["type"] for item in warnings})
+        self.assertIn("too_many_acceptance_criteria", {item["type"] for item in warnings})
+        self.assertIn("too_many_verification_commands", {item["type"] for item in warnings})
 
     def test_context_import_copies_files_and_updates_project_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as source_tmp:
@@ -1228,6 +1323,11 @@ class DashboardBackendCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self.scaffold_ticket_target(target)
+            (target / "README.md").write_text("# Ticket test target\n\nReusable local workflow.\n", encoding="utf-8")
+            (target / "package.json").write_text(
+                json.dumps({"scripts": {"test": "vitest run"}, "dependencies": {"react": "latest"}}),
+                encoding="utf-8",
+            )
             captured_prompts: list[str] = []
 
             def fake_run(cmd, **_kwargs):
@@ -1263,6 +1363,11 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertIn("User-provided draft direction:", captured_prompts[0])
             self.assertIn("Focus on onboarding setup tickets and skip reporting polish.", captured_prompts[0])
             self.assertIn("preserving the append-only rules", captured_prompts[0])
+            self.assertIn("Ticket sizing policy", captured_prompts[0])
+            self.assertIn("Bounded project snapshot JSON:", captured_prompts[0])
+            self.assertIn("README.md", captured_prompts[0])
+            self.assertIn("vitest run", captured_prompts[0])
+            self.assertIn("Ground every candidate in observed project structure", captured_prompts[0])
 
     def test_ticket_draft_from_intake_returns_empty_append_draft_when_nothing_new(self) -> None:
         from diffmogger.dashboard.commands import tickets as ticket_commands
@@ -1302,6 +1407,95 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual(0, draft["candidate_count"])
             self.assertEqual(2, draft["dropped_existing_count"])
             self.assertEqual("No new draft tickets were found.", draft["message"])
+
+    def test_ticket_split_preview_and_accept_replaces_pending_ticket(self) -> None:
+        from diffmogger.dashboard.commands import tickets as ticket_commands
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_ticket_target(target)
+            prompts: list[str] = []
+
+            def fake_run(cmd, **_kwargs):
+                if cmd[:2] == ["git", "status"]:
+                    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+                if cmd[:2] == ["codex", "exec"]:
+                    prompts.append(cmd[-1])
+                    return subprocess.CompletedProcess(
+                        cmd,
+                        0,
+                        stdout=json.dumps(
+                            [
+                                {
+                                    "id": "TICKET-001",
+                                    "summary": "Create queue storage",
+                                    "status": "pending",
+                                    "acceptance_criteria": ["Queue storage is initialized"],
+                                    "verification_commands": ["python3 -m unittest"],
+                                },
+                                {
+                                    "id": "TICKET-004",
+                                    "summary": "Render queue list",
+                                    "status": "pending",
+                                    "depends_on": ["TICKET-001"],
+                                    "acceptance_criteria": ["Queue list reads from storage"],
+                                    "verification_commands": ["python3 -m unittest"],
+                                },
+                            ]
+                        ),
+                        stderr="",
+                    )
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            args = argparse.Namespace(target=str(target), stream_jsonl=False, ticket_file="", ticket_id="TICKET-001")
+            with mock.patch.object(ticket_commands.subprocess, "run", side_effect=fake_run):
+                preview = ticket_commands.command_ticket_split_preview(args)
+
+            self.assertEqual("split", preview["generation_mode"])
+            self.assertEqual(2, preview["candidate_count"])
+            self.assertEqual("TICKET-001", preview["source_ticket_id"])
+            self.assertEqual(["TICKET-003", "TICKET-004"], [ticket["id"] for ticket in preview["candidates"]])
+            self.assertEqual(["TICKET-003"], preview["candidates"][1]["depends_on"])
+            self.assertIn("Split one pending Diffmogger ticket", prompts[0])
+            self.assertIn("Ticket sizing policy", prompts[0])
+            self.assertIn("Bounded project snapshot JSON:", prompts[0])
+
+            before_accept = self.run_cli("ticket.load", "--target", tmp)[1]["data"]["tickets"]
+            self.assertFalse(any(ticket["id"] == "TICKET-003" for ticket in before_accept))
+
+            accept_result, accept_payload = self.run_cli(
+                "ticket.accept_split",
+                "--target",
+                tmp,
+                "--draft-id",
+                preview["draft_id"],
+            )
+
+            self.assertEqual(0, accept_result.returncode)
+            tickets_by_id = {ticket["id"]: ticket for ticket in accept_payload["data"]["tickets"]}
+            self.assertNotIn("TICKET-001", tickets_by_id)
+            self.assertIn("TICKET-003", tickets_by_id)
+            self.assertIn("TICKET-004", tickets_by_id)
+            self.assertEqual(["TICKET-004"], tickets_by_id["TICKET-002"]["depends_on"])
+            self.assertEqual(["TICKET-003"], tickets_by_id["TICKET-004"]["depends_on"])
+
+    def test_ticket_split_preview_rejects_done_ticket(self) -> None:
+        from diffmogger.dashboard.commands import tickets as ticket_commands
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_ticket_target(target)
+            state = load_ticket_run_state(target)
+            assert isinstance(state, dict)
+            state["tickets"][0]["status"] = "done"
+            state["tickets"][0]["evidence"] = ["Already verified"]
+            write_ticket_run_state(target, state, actor_role="test", event_type="ticket.done")
+
+            args = argparse.Namespace(target=str(target), stream_jsonl=False, ticket_file="", ticket_id="TICKET-001")
+            with self.assertRaises(Exception) as raised:
+                ticket_commands.command_ticket_split_preview(args)
+
+            self.assertIn("Only pending tickets can be split", str(raised.exception))
 
     def test_safety_run_check_records_target_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

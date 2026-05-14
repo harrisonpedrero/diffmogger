@@ -70,6 +70,8 @@ New generated targets keep Diffmogger-owned state under `.diffmogger/` and ignor
 
 SQLite is the authority for live orchestration. The conveyor writes an ordered event stream before replacing current-state projections, then materializes the typed state machine: the current work item, stage contract, stage attempts, repository capability manifest, validation receipts, blockers, and next actions. It checkpoints the active stream at semantic boundaries such as initialization, decisions, role starts, role recovery, and role completion. Dashboard commands query the database directly through `state.snapshot` and `state.validate`.
 
+Schema evolution is explicit: `PRAGMA user_version` must match the Diffmogger state schema version, applied migrations are recorded in `schema_migrations`, and `state.validate` reports invariant checks for event sequencing/hash links, projection event references, conveyor stage ownership, actionable blockers/escalations, and terminal validation receipt evidence.
+
 Generated Markdown and JSON remain useful, but they are views: prompt inputs, authored import/export surfaces, migration aids, handoff packets, or compatibility surfaces. If a projection disagrees with `.diffmogger/runtime/canonical_state_brief.md` or `.diffmogger/runtime/orchestration.sqlite3`, rebuild or inspect through the dashboard/API instead of treating the projection as truth.
 
 Remaining compatibility boundaries are deliberately narrow: old `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` files may be imported once to seed typed automation control state when no SQLite record exists. New targets do not generate human queue Markdown or `TICKET_RUN.md`; if old targets already contain those files, helpers may import them into typed SQLite state.

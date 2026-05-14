@@ -205,6 +205,35 @@ def read_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def ticket_state_readonly_snapshot_path() -> Path | None:
+    configured = os.getenv("DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT", "").strip()
+    if not configured:
+        return None
+    return Path(configured).expanduser().resolve()
+
+
+def read_ticket_state_readonly_snapshot() -> dict[str, Any] | None:
+    path = ticket_state_readonly_snapshot_path()
+    if path is None:
+        return None
+    payload = read_json(path)
+    if not payload:
+        return None
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(data, dict):
+        return None
+    if not isinstance(data.get("tickets"), list):
+        return None
+    return data
+
+
+def load_ticket_run_state_for_staged_role(target: Path) -> dict[str, Any] | None:
+    snapshot = read_ticket_state_readonly_snapshot()
+    if snapshot is not None:
+        return snapshot
+    return load_ticket_run_state(target, read_only=True)
+
+
 def project_intake(target: Path) -> dict[str, Any]:
     return read_json(existing_or_target_path(target, ".agentic/project_intake.json"))
 
@@ -270,7 +299,7 @@ def load_ticket_run(target: Path, ticket_file: Path | None = None) -> tuple[dict
             )
         return data, ticket_state_path(target), text
 
-    state = load_ticket_run_state(target)
+    state = load_ticket_run_state_for_staged_role(target) if stage_actions else load_ticket_run_state(target)
     if state:
         return state, ticket_state_path(target), ""
 
@@ -1187,7 +1216,7 @@ def write_if_valid(
     source_path = "" if path == state_path else str(path)
     staged_actions_path = ticket_state_actions_path(target)
     if staged_actions_path is not None and should_stage_ticket_actions(target):
-        previous = load_ticket_run_state(canonical_target) or empty_ticket_run(canonical_target)
+        previous = load_ticket_run_state_for_staged_role(canonical_target) or empty_ticket_run(canonical_target)
         actions = staged_ticket_actions(previous, data)
         append_ticket_state_actions(staged_actions_path, actions)
         return {
@@ -1223,6 +1252,23 @@ def command_status(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(f"{summary['status']}: {summary['counts'].get('done', 0)}/{summary['total']} done")
+    return 0
+
+
+def command_snapshot(args: argparse.Namespace) -> int:
+    target = Path(args.target).expanduser().resolve()
+    data, path, _text = load_ticket_run(target, Path(args.ticket_file).resolve() if args.ticket_file else None)
+    canonical_target = resolve_ticket_target(target)
+    payload = {
+        "schema_version": 1,
+        "ticket_file": str(path),
+        "ticket_store": str(ticket_state_path(canonical_target)),
+        "data": data,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(str(path))
     return 0
 
 
@@ -1449,6 +1495,10 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="Summarize the ticket campaign.")
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=command_status)
+
+    snapshot = subparsers.add_parser("snapshot", help="Write a readonly ticket-state snapshot.")
+    snapshot.add_argument("--json", action="store_true")
+    snapshot.set_defaults(func=command_snapshot)
 
     list_parser = subparsers.add_parser("list", help="List tickets and validation state.")
     list_parser.add_argument("--json", action="store_true")
