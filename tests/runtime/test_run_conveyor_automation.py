@@ -10,6 +10,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,7 +18,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
-from diffmogger.runtime.state_store import write_ticket_run_state
+from diffmogger.runtime.state_store import (
+    acquire_resource_lease,
+    connect,
+    database_path_for_target,
+    latest_scheduler_decision_conn,
+    record_human_message,
+    scheduler_candidates_read_model,
+    state_snapshot,
+    write_canonical_state_brief,
+    write_ticket_run_state,
+)
 CONVEYOR_PATHS = [
     ROOT / "src" / "diffmogger" / "runtime" / "run_conveyor_automation.py",
 ]
@@ -454,6 +465,243 @@ class ConveyorDecisionTests(unittest.TestCase):
             actor_role="test",
             event_type="ticket.run_seeded",
         )
+
+    def context_node_id(self, target: Path, path: str) -> str:
+        snapshot = state_snapshot(target)
+        pack = snapshot.get("context_pack_preview") if isinstance(snapshot.get("context_pack_preview"), dict) else {}
+        for item in pack.get("items", []) if isinstance(pack.get("items"), list) else []:
+            if isinstance(item, dict) and item.get("path") == path:
+                return str(item.get("node_id") or "")
+        self.fail(f"context node not found for {path}")
+
+    def codebase_graph_snapshot_count(self, target: Path) -> int:
+        with closing(connect(database_path_for_target(target))) as conn:
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM graph_snapshots WHERE graph_namespace = 'codebase'"
+                ).fetchone()["count"]
+            )
+
+    def test_graph_scheduler_selects_ready_ticket_with_free_lease(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, "src/auth.py", "def login():\n    return True\n")
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-active",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "pending", "summary": "Update src/auth.py login flow"}
+                          ]
+                        }
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+                    snapshot = state_snapshot(target)
+
+                    self.assertEqual("builder", role)
+                    self.assertIn("graph-aware scheduler selected ready ticket", reason)
+                    self.assertFalse(stop)
+                    self.assertFalse(snapshot["scheduler_fallback_used"])
+                    self.assertEqual("implement_ready_ticket", snapshot["selected_candidate"]["action_kind"])
+                    self.assertEqual("T-1", snapshot["selected_candidate"]["public_task_id"])
+                    self.assertEqual(snapshot["selected_candidate"], snapshot["selected_scheduler_candidate"])
+                    self.assertTrue(snapshot["selected_candidate"]["required_leases"])
+                    self.assertEqual(snapshot["selected_candidate"]["required_leases"], snapshot["selected_candidate"]["suggested_leases"])
+                    self.assertEqual([], snapshot["selected_candidate"]["acquired_leases"])
+                    self.assertTrue(snapshot["selected_candidate"]["candidate_id"].startswith("scheduler-candidate:"))
+                    self.assertTrue(all(item.get("candidate_id") for item in snapshot["scheduling_candidates"]))
+                    self.assertTrue(snapshot["graph_signals_used"]["graph_can_select"])
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        latest = latest_scheduler_decision_conn(conn)
+                        read_model = scheduler_candidates_read_model(conn)
+                    self.assertEqual(latest["decision_id"], read_model["decision_id"])
+                    self.assertEqual(snapshot["selected_candidate"]["candidate_id"], latest["selected_candidate"]["candidate_id"])
+                    before_count = self.codebase_graph_snapshot_count(target)
+                    self.write_text(target, "src/new_after_decision.py", "VALUE = 1\n")
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        reread = latest_scheduler_decision_conn(conn)
+                    self.assertEqual(latest["decision_id"], reread["decision_id"])
+                    self.assertEqual(before_count, self.codebase_graph_snapshot_count(target))
+
+                    brief = write_canonical_state_brief(target)
+                    markdown = Path(brief["path"]).read_text(encoding="utf-8")
+                    self.assertIn("## Scheduler Decision", markdown)
+                    self.assertIn("selected_candidate", markdown)
+                    self.assertIn("T-1", markdown)
+                    self.assertIn("context:", markdown)
+                    self.assertIn("suggested_lease", markdown)
+
+    def test_graph_scheduler_skips_task_with_conflicting_lease(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, "src/auth.py", "VALUE = 1\n")
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-active",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "pending", "summary": "Update src/auth.py"}
+                          ]
+                        }
+                        """,
+                    )
+                    auth_node_id = self.context_node_id(target, "src/auth.py")
+                    acquire_resource_lease(
+                        target,
+                        task_id="OTHER",
+                        owner_role="builder",
+                        run_id="run-other",
+                        scope_kind="file",
+                        scope_node_id=auth_node_id,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+                    snapshot = state_snapshot(target)
+                    queue = module.conveyor_decision_queue(target, self.conveyor_state(module), role, reason, 2)
+
+                    self.assertEqual("builder", role)
+                    self.assertFalse(stop)
+                    self.assertTrue(snapshot["scheduler_fallback_used"])
+                    self.assertTrue(snapshot["lease_conflicts_considered"])
+                    self.assertEqual(snapshot["skipped_candidates"], snapshot["skipped_scheduler_candidates"])
+                    self.assertTrue(
+                        any(
+                            item.get("public_task_id") == "T-1"
+                            and "resource lease conflict" in str(item.get("skipped_reason"))
+                            for item in snapshot["skipped_candidates"]
+                        ),
+                        snapshot["skipped_candidates"],
+                    )
+                    self.assertTrue(any(item["state"] == "skipped" and "resource lease conflict" in item["reason"] for item in queue))
+
+    def test_graph_scheduler_queued_patch_outranks_normal_builder_work(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, "src/auth.py", "VALUE = 1\n")
+                    self.write_manifest(target, role="builder", run_id="run-queued", status="queued")
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-active",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "pending", "summary": "Update src/auth.py"}
+                          ]
+                        }
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+                    snapshot = state_snapshot(target)
+
+                    self.assertEqual("integrator", role)
+                    self.assertIn("queued role patch", reason)
+                    self.assertFalse(stop)
+                    self.assertEqual("integrate_queued_patch", snapshot["selected_candidate"]["action_kind"])
+                    self.assertEqual("integrate_queued_patch", snapshot["selected_scheduler_candidate"]["action_kind"])
+                    self.assertFalse(snapshot["scheduler_fallback_used"])
+                    self.assertEqual("integrator", snapshot["legacy_result"]["role"])
+                    self.assertTrue(
+                        any("outranks graph-normal work" in str(item.get("skipped_reason")) for item in snapshot["skipped_candidates"])
+                    )
+
+    def test_graph_scheduler_baseline_preflight_outranks_normal_builder_work(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, ".agentic/verification_commands.txt", "python3 -m pytest\n")
+                    self.write_text(target, "src/auth.py", "VALUE = 1\n")
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-active",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "pending", "summary": "Update src/auth.py"}
+                          ]
+                        }
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+                    snapshot = state_snapshot(target)
+
+                    self.assertEqual("integrator", role)
+                    self.assertIn("baseline verification ledger", reason)
+                    self.assertFalse(stop)
+                    self.assertEqual("baseline_preflight", snapshot["selected_candidate"]["action_kind"])
+                    self.assertFalse(snapshot["scheduler_fallback_used"])
+                    self.assertEqual("baseline_preflight", snapshot["legacy_result"]["action_kind"])
+
+    def test_graph_scheduler_human_messages_outrank_normal_builder_work(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_text(target, "src/auth.py", "VALUE = 1\n")
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "campaign-active",
+                          "halt_when_complete": true,
+                          "tickets": [
+                            {"id": "T-1", "status": "pending", "summary": "Update src/auth.py"}
+                          ]
+                        }
+                        """,
+                    )
+                    record_human_message(
+                        target,
+                        kind="note",
+                        body="Please clarify whether auth should support recovery codes.",
+                        actor_role="test",
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+                    snapshot = state_snapshot(target)
+
+                    self.assertEqual("planner", role)
+                    self.assertIn("human message", reason)
+                    self.assertFalse(stop)
+                    self.assertEqual("human_triage", snapshot["selected_candidate"]["action_kind"])
+                    self.assertFalse(snapshot["scheduler_fallback_used"])
+
+    def test_graph_scheduler_fallback_preserves_current_behavior_without_ready_task(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+                    snapshot = state_snapshot(target)
+
+                    self.assertEqual("builder", role)
+                    self.assertIn("builder-first policy", reason)
+                    self.assertFalse(stop)
+                    self.assertTrue(snapshot["scheduler_fallback_used"])
+                    self.assertEqual("normal_builder_work", snapshot["selected_candidate"]["action_kind"])
 
     def test_ticket_campaign_complete_stops_conveyor(self) -> None:
         for path, module in self.modules:

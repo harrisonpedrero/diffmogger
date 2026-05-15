@@ -4885,6 +4885,7 @@ textarea:focus-visible {
   grid-template-areas:
     "controls controls controls controls readiness readiness readiness readiness process process process process"
     "safety safety safety safety safety safety machine machine machine machine machine machine"
+    "graph graph graph graph graph graph graph graph graph graph graph graph"
     "blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers"
     "queue queue queue queue queue queue queue queue queue queue queue queue"
     "logs logs logs logs logs logs logs logs workers workers workers workers";
@@ -4909,6 +4910,10 @@ textarea:focus-visible {
 
 .run-state-machine-panel {
   grid-area: machine;
+}
+
+.run-control-layout > .graph-insights-panel {
+  grid-area: graph;
 }
 
 .run-control-layout > .run-ticket-panel {
@@ -4954,6 +4959,10 @@ textarea:focus-visible {
   align-content: start;
 }
 
+.graph-insights-panel {
+  overflow: hidden;
+}
+
 .run-state-machine-panel .panel-heading-row {
   align-items: start;
   min-width: 0;
@@ -4969,6 +4978,187 @@ textarea:focus-visible {
   overflow: hidden;
   color: var(--text-muted);
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-insights-panel .panel-heading-row {
+  margin-bottom: 12px;
+}
+
+.graph-status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 3px 9px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.graph-status-pill.good {
+  border-color: rgba(94, 214, 154, 0.4);
+  color: var(--color-good);
+}
+
+.graph-status-pill.warn {
+  border-color: rgba(240, 179, 82, 0.45);
+  color: var(--color-warn);
+}
+
+.graph-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.graph-summary-block,
+.graph-section,
+.graph-warning-card {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--color-panel-alt);
+  padding: 10px;
+}
+
+.graph-summary-block h3,
+.graph-section h3,
+.graph-warning-card h3 {
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.graph-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.graph-stat {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 7px;
+  background: var(--color-panel);
+}
+
+.graph-stat span,
+.graph-item-main span,
+.graph-item-meta span,
+.graph-selected-candidate span {
+  display: block;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-stat strong,
+.graph-item-main strong,
+.graph-selected-candidate strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-stat.good strong {
+  color: var(--color-good);
+}
+
+.graph-stat.warn strong {
+  color: var(--color-warn);
+}
+
+.graph-stat.critical strong {
+  color: var(--color-critical);
+}
+
+.graph-warning-card {
+  margin-top: 10px;
+  border-color: rgba(240, 179, 82, 0.35);
+}
+
+.graph-insights-sections {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.graph-item-list {
+  display: grid;
+  gap: 6px;
+}
+
+.graph-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--color-panel);
+}
+
+.graph-item.warn {
+  border-color: rgba(240, 179, 82, 0.35);
+}
+
+.graph-item.critical {
+  border-color: rgba(255, 103, 117, 0.45);
+}
+
+.graph-item.good {
+  border-color: rgba(94, 214, 154, 0.35);
+}
+
+.graph-item-meta {
+  min-width: 70px;
+  text-align: right;
+}
+
+.graph-item-meta em {
+  display: block;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.graph-item p {
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-selected-candidate {
+  border: 1px solid rgba(94, 214, 154, 0.35);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  padding: 8px;
+  background: var(--color-panel);
+}
+
+.graph-selected-candidate p {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -8878,6 +9068,7 @@ select option {
       "process"
       "safety"
       "machine"
+      "graph"
       "blockers"
       "queue"
       "logs"
@@ -8953,10 +9144,21 @@ select option {
       "readiness"
       "process"
       "safety"
+      "machine"
+      "graph"
       "blockers"
       "queue"
       "logs"
       "workers";
+  }
+
+  .graph-summary-strip,
+  .graph-insights-sections {
+    grid-template-columns: 1fr;
+  }
+
+  .graph-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .run-status-facts,

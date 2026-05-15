@@ -23,6 +23,7 @@ import {
   runBackendCommandStreamed,
   selectTicketImportFile,
 } from "./api/backend";
+import { GraphInsightsPanel } from "./GraphInsights";
 import { buildRunModel, type RunAction, type RunRoute, type RunSafetyRow } from "./runModel";
 import { TicketFields } from "./TicketFields";
 import {
@@ -859,6 +860,8 @@ export function RunPage(props: {
         <RunSafetyMatrix rows={model.safety} busy={isBusy} onRun={runAction} />
 
         <RunStateMachinePanel model={model} />
+
+        <GraphInsightsPanel snapshot={props.snapshot} />
 
         {ticketCampaign && (
           <article className="panel ticket-queue-panel run-ticket-panel">

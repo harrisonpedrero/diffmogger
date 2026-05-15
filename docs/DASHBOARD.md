@@ -46,7 +46,7 @@ The dashboard frontend should call backend commands instead of reading arbitrary
 - Brief: `brief.load`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`.
 - Context: `context.import`.
 - Run and automation: `run.load`, `run.load_log`, `automation.start`, `automation.stop`.
-- State: `state.snapshot`, `state.validate`; these expose the SQLite-backed conveyor work item, current stage, stage contract, capability manifest, next actions, validation receipts, and event history.
+- State: `state.snapshot`, `state.validate`; these expose the SQLite-backed conveyor work item, current stage, stage contract, capability manifest, graph summaries, context-pack previews, leases, scheduler candidates, next actions, validation receipts, and event history.
 - Tickets: `ticket.load`, `ticket.add`, `ticket.update`, `ticket.delete`, `ticket.import`, `ticket.draft_from_intake`, `ticket.accept_draft`.
 - Safety: `safety.run_check`.
 - Workers: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`.
@@ -111,7 +111,7 @@ After scaffold/bootstrap and required-file validation, the Run page can start or
 - **Start** launches `.diffmogger/scripts/run_conveyor_automation.sh` in a detached local process.
 - **Stop** terminates the recorded runner process group.
 
-Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Runner and conveyor state are canonical in `.diffmogger/runtime/orchestration.sqlite3`; the Run page surfaces the typed state machine current stage, owner, validation status, capability manifest, continuation token, and queued next actions. `.diffmogger/runtime/canonical_state_brief.md` is the generated agent-facing view, and `.diffmogger/runtime/automation_runner.json` plus `.diffmogger/runtime/automation_conveyor_state.json` are generated compatibility projections.
+Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Runner and conveyor state are canonical in `.diffmogger/runtime/orchestration.sqlite3`; the Run page surfaces the typed state machine current stage, owner, validation status, capability manifest, continuation token, and queued next actions. It also shows the graph-derived Codebase Graph summary, Task Graph summary, Impact View, context-pack reasons, active leases, lease conflicts, stale graph warnings, and scheduler candidates from the allowlisted `state.snapshot` payload. `.diffmogger/runtime/canonical_state_brief.md` is the generated agent-facing view, and `.diffmogger/runtime/automation_runner.json` plus `.diffmogger/runtime/automation_conveyor_state.json` are generated compatibility projections.
 
 For scaffolded ticket-campaign targets, the Run page exposes the ticket authoring file through a structured **Ticket Queue** panel. It shows status counts, the next selected ticket, placeholder/dependency validation, and lets users inspect, edit, delete, add, preview/apply Markdown/CSV/JSON imports, draft from intake with Codex, and accept candidates. Draft candidates are stored under `.diffmogger/runtime/ticket_drafts/` and are not applied until accepted.
 

@@ -71,6 +71,21 @@ export type CanonicalStateSnapshot = {
   conveyor_state?: Record<string, unknown>;
   conveyor_machine?: ConveyorMachineSnapshot | Record<string, unknown>;
   capability_manifest?: Record<string, unknown>;
+  codebase_graph_summary?: Record<string, unknown>;
+  task_graph_summary?: Record<string, unknown>;
+  impact_graph_summary?: Record<string, unknown>;
+  active_task_code_impacts?: Array<Record<string, unknown>>;
+  context_pack_preview?: Record<string, unknown>;
+  top_impacted_nodes?: Array<Record<string, unknown>>;
+  stale_context_warning?: string;
+  stale_graph_warnings?: Array<Record<string, unknown>>;
+  active_leases?: Array<Record<string, unknown>>;
+  conflicting_leases?: Array<Record<string, unknown>>;
+  lease_suggestions_for_next_action?: Array<Record<string, unknown>>;
+  scheduling_candidates?: Array<Record<string, unknown>>;
+  selected_candidate?: Record<string, unknown>;
+  skipped_candidates?: Array<Record<string, unknown>>;
+  scheduler_fallback_used?: boolean;
   runner_state?: Record<string, unknown>;
 };
 

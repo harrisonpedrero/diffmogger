@@ -11,7 +11,41 @@
     "projection",
     "contract",
     "counts",
-    "recent_events"
+    "recent_events",
+    "codebase_graph_summary",
+    "latest_graph_snapshot",
+    "graph_refresh_mode",
+    "graph_refresh_reason",
+    "graph_inventory_digest",
+    "graph_inventory_changed",
+    "graph_inventory_added_count",
+    "graph_inventory_deleted_count",
+    "graph_inventory_structural_count",
+    "stale_node_count",
+    "indexed_file_count",
+    "command_node_count",
+    "test_node_count",
+    "task_graph_summary",
+    "ready_task_nodes",
+    "blocked_task_nodes",
+    "dependency_cycles",
+    "impact_graph_summary",
+    "active_task_code_impacts",
+    "context_pack_preview",
+    "top_impacted_nodes",
+    "stale_context_warning",
+    "stale_graph_warnings",
+    "active_leases",
+    "conflicting_leases",
+    "lease_suggestions_for_next_action",
+    "scheduling_candidates",
+    "selected_candidate",
+    "skipped_candidates",
+    "selected_scheduler_candidate",
+    "skipped_scheduler_candidates",
+    "scheduler_fallback_used",
+    "graph_signals_used",
+    "lease_conflicts_considered"
   ],
   "properties": {
     "schema_version": {
@@ -31,6 +65,7 @@
         "path": {"type": "string"},
         "exists": {"type": "boolean"},
         "sqlite_version": {"type": "string"},
+        "user_version": {"type": "integer"},
         "journal_mode": {"type": "string"},
         "integrity_check": {"type": "string"},
         "application_id": {"type": "integer"}
@@ -86,6 +121,53 @@
     "counts": {
       "type": "object",
       "additionalProperties": {"type": "integer"}
+    },
+    "schema_migrations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["version", "name", "applied_at", "status"],
+        "properties": {
+          "version": {"type": "integer"},
+          "name": {"type": "string"},
+          "applied_at": {"type": "string"},
+          "checksum": {"type": "string"},
+          "status": {"type": "string"},
+          "details": {"type": "object", "additionalProperties": true}
+        },
+        "additionalProperties": true
+      }
+    },
+    "invariant_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "ok", "detail"],
+        "properties": {
+          "name": {"type": "string"},
+          "status": {"type": "string"},
+          "ok": {"type": "boolean"},
+          "detail": {"type": "string"},
+          "failures": {
+            "type": "array",
+            "items": {"type": "object", "additionalProperties": true}
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "state_health_summary": {
+      "type": "object",
+      "required": ["status", "passed", "failed", "invariant_count"],
+      "properties": {
+        "status": {"type": "string"},
+        "checked_at": {"type": "string"},
+        "passed": {"type": "integer"},
+        "failed": {"type": "integer"},
+        "invariant_count": {"type": "integer"},
+        "failed_invariants": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
     },
     "last_event": {
       "type": "object",
@@ -213,6 +295,181 @@
         "languages": {"type": "object", "additionalProperties": true},
         "commands": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
       },
+      "additionalProperties": true
+    },
+    "codebase_graph_summary": {
+      "type": "object",
+      "required": ["schema_version", "graph_namespace", "exists", "stale_node_count", "indexed_file_count", "command_node_count", "test_node_count"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "graph_namespace": {"const": "codebase"},
+        "exists": {"type": "boolean"},
+        "latest_snapshot_id": {"type": "string"},
+        "latest_graph_snapshot": {"type": "object", "additionalProperties": true},
+        "stale_node_count": {"type": "integer"},
+        "indexed_file_count": {"type": "integer"},
+        "command_node_count": {"type": "integer"},
+        "test_node_count": {"type": "integer"},
+        "graph_refresh_mode": {"type": "string"},
+        "graph_refresh_reason": {"type": "string"},
+        "graph_inventory_digest": {"type": "string"},
+        "graph_inventory_changed": {"type": "boolean"},
+        "graph_inventory_added_count": {"type": "integer"},
+        "graph_inventory_deleted_count": {"type": "integer"},
+        "graph_inventory_structural_count": {"type": "integer"},
+        "indexed_path_count": {"type": "integer"},
+        "indexed_paths_truncated": {"type": "boolean"},
+        "indexed_path_sample": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "node_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "edge_counts": {"type": "object", "additionalProperties": {"type": "integer"}}
+      },
+      "additionalProperties": true
+    },
+    "latest_graph_snapshot": {
+      "type": "object",
+      "properties": {
+        "snapshot_id": {"type": "string"},
+        "graph_namespace": {"const": "codebase"},
+        "generated_at": {"type": "string"},
+        "head_commit": {"type": "string"},
+        "dirty_tracked_file_count": {"type": "integer"},
+        "dirty_tracked_files_digest": {"type": "string"},
+        "indexed_file_count": {"type": "integer"},
+        "directory_node_count": {"type": "integer"},
+        "command_node_count": {"type": "integer"},
+        "test_node_count": {"type": "integer"},
+        "stale_node_count": {"type": "integer"},
+        "digest": {"type": "string"},
+        "graph_inventory_digest": {"type": "string"},
+        "indexed_path_count": {"type": "integer"},
+        "indexed_paths_truncated": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "graph_refresh_mode": {"type": "string"},
+    "graph_refresh_reason": {"type": "string"},
+    "graph_inventory_digest": {"type": "string"},
+    "graph_inventory_changed": {"type": "boolean"},
+    "graph_inventory_added_count": {"type": "integer"},
+    "graph_inventory_deleted_count": {"type": "integer"},
+    "graph_inventory_structural_count": {"type": "integer"},
+    "stale_node_count": {"type": "integer"},
+    "indexed_file_count": {"type": "integer"},
+    "command_node_count": {"type": "integer"},
+    "test_node_count": {"type": "integer"},
+    "task_graph_summary": {
+      "type": "object",
+      "required": ["schema_version", "graph_namespace", "exists", "ready_task_count", "blocked_task_count", "dependency_cycle_count"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "graph_namespace": {"const": "task"},
+        "exists": {"type": "boolean"},
+        "latest_snapshot_id": {"type": "string"},
+        "latest_graph_snapshot": {"type": "object", "additionalProperties": true},
+        "node_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "edge_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "ready_task_count": {"type": "integer"},
+        "blocked_task_count": {"type": "integer"},
+        "dependency_cycle_count": {"type": "integer"}
+      },
+      "additionalProperties": true
+    },
+    "ready_task_nodes": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "blocked_task_nodes": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "dependency_cycles": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "impact_graph_summary": {
+      "type": "object",
+      "required": ["schema_version", "graph_namespace", "exists", "stale_node_count"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "graph_namespace": {"const": "impact"},
+        "exists": {"type": "boolean"},
+        "latest_snapshot_id": {"type": "string"},
+        "latest_graph_snapshot": {"type": "object", "additionalProperties": true},
+        "node_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "edge_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "stale_node_count": {"type": "integer"}
+      },
+      "additionalProperties": true
+    },
+    "active_task_code_impacts": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "context_pack_preview": {
+      "type": "object",
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "graph_namespace": {"const": "impact"},
+        "bounded": {"type": "boolean"},
+        "max_items": {"type": "integer"},
+        "item_count": {"type": "integer"},
+        "items": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "stale_context_warning": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "top_impacted_nodes": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "stale_context_warning": {"type": "string"},
+    "stale_graph_warnings": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "active_leases": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "conflicting_leases": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "lease_suggestions_for_next_action": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "scheduling_candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "selected_candidate": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "skipped_candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "selected_scheduler_candidate": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "skipped_scheduler_candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "scheduler_fallback_used": {"type": "boolean"},
+    "graph_signals_used": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "lease_conflicts_considered": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "legacy_result": {
+      "type": "object",
       "additionalProperties": true
     },
     "runner_state": {

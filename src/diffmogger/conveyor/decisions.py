@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import closing
+
 from .baseline import automation_status, baseline_preflight_needed, baseline_repair_route
 from .locks import lock_is_active
 from .progress import (
@@ -19,10 +21,12 @@ from .queue_state import (
     target_role_profile,
     unhandled_human_message_count,
 )
+from .scheduler import choose_next_graph_aware
 from .state import *
 from .tickets import candidate_done_hardener_catchup_reason, ticket_campaign_terminal, unverified_candidate_done_cluster_info
+from diffmogger.runtime.state_store import connect, database_path_for_target, latest_scheduler_decision_conn
 
-def choose_next(
+def _choose_next_legacy(
     target: Path,
     state: dict[str, Any],
     no_progress_threshold: int = DEFAULT_NO_PROGRESS_THRESHOLD,
@@ -151,6 +155,14 @@ def choose_next(
         return "builder", "planner completed; builder gets the next implementation pass", False
     return "builder", "builder lane is next runnable work", False
 
+def choose_next(
+    target: Path,
+    state: dict[str, Any],
+    no_progress_threshold: int = DEFAULT_NO_PROGRESS_THRESHOLD,
+) -> tuple[str | None, str, bool]:
+    legacy_result = _choose_next_legacy(target, state, no_progress_threshold)
+    return choose_next_graph_aware(target, state, legacy_result)
+
 def conveyor_decision_queue(
     target: Path,
     state: dict[str, Any],
@@ -164,9 +176,10 @@ def conveyor_decision_queue(
 
     def add(role: str | None, state_name: str, reason: str) -> None:
         key = role or "idle"
-        if key in seen:
+        seen_key = f"{key}:{state_name}" if state_name == "skipped" else key
+        if seen_key in seen:
             return
-        seen.add(key)
+        seen.add(seen_key)
         entries.append(
             {
                 "role": key,
@@ -296,6 +309,35 @@ def conveyor_decision_queue(
         add("builder", "planned", "planner completed; builder gets the next implementation pass")
     else:
         add("builder", "planned", "builder lane is the default momentum lane")
+
+    try:
+        with closing(connect(database_path_for_target(target))) as conn:
+            scheduler_decision = latest_scheduler_decision_conn(conn)
+    except Exception:
+        scheduler_decision = {}
+    skipped_candidates = (
+        scheduler_decision.get("skipped_candidates")
+        if isinstance(scheduler_decision.get("skipped_candidates"), list)
+        else []
+    )
+    for candidate in skipped_candidates[:3]:
+        if not isinstance(candidate, dict):
+            continue
+        role = str(candidate.get("role") or "idle")
+        task_label = str(candidate.get("public_task_id") or candidate.get("task_id") or candidate.get("action_kind") or "candidate")
+        skipped_reason = str(candidate.get("skipped_reason") or "not selected")
+        context = candidate.get("context_pack_preview") if isinstance(candidate.get("context_pack_preview"), dict) else {}
+        context_count = context.get("item_count")
+        lease_count = len(candidate.get("required_leases") if isinstance(candidate.get("required_leases"), list) else [])
+        add(
+            role,
+            "skipped",
+            (
+                f"graph scheduler skipped {task_label}: {skipped_reason}; "
+                f"context_items={context_count if context_count is not None else 'unknown'}; "
+                f"required_leases={lease_count}"
+            ),
+        )
 
     add("hardener", "standby", "hardener verifies recently changed work when integration or builder output exists")
     add("builder", "standby", "builder can create the next implementation patch when planning is fresh")

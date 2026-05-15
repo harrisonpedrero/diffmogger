@@ -1276,7 +1276,7 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests.runtime.test_state_store tests.runtime.test_run_observatory tests.dashboard.test_dashboard_backend_cli tests.dashboard.test_dashboard_env_loading tests.kit.test_native_rebuild_guardrails tests.kit.test_starter_kit_manifest tests.runtime.test_run_conveyor_automation tests.runtime.test_run_role_automation tests.runtime.test_load_automation_env tests.runtime.test_repair_environment tests.runtime.test_integrate_role_outputs tests.runtime.test_list_deferred_patches tests.runtime.test_ticket_run tests.kit.test_check_integration_safety tests.kit.test_check_required_files tests.runtime.test_summarize_worker_outputs
+python3 -m unittest tests.runtime.test_state_store tests.runtime.test_codebase_graph tests.runtime.test_run_observatory tests.dashboard.test_dashboard_backend_cli tests.dashboard.test_dashboard_env_loading tests.kit.test_native_rebuild_guardrails tests.kit.test_starter_kit_manifest tests.runtime.test_run_conveyor_automation tests.runtime.test_run_role_automation tests.runtime.test_load_automation_env tests.runtime.test_repair_environment tests.runtime.test_integrate_role_outputs tests.runtime.test_list_deferred_patches tests.runtime.test_ticket_run tests.kit.test_check_integration_safety tests.kit.test_check_required_files tests.runtime.test_summarize_worker_outputs
 
 python3 scripts/check_integration_safety.py >/tmp/Diffmogger-integration-safety.log
 

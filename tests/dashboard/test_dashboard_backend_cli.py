@@ -92,6 +92,24 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual("sqlite", state["conveyor_machine"]["authority"])
             self.assertEqual("intake", state["conveyor_machine"]["current_stage"])
             self.assertTrue(state["capability_manifest"]["digest"])
+            for key in [
+                "codebase_graph_summary",
+                "task_graph_summary",
+                "active_task_code_impacts",
+                "context_pack_preview",
+                "active_leases",
+                "conflicting_leases",
+                "stale_graph_warnings",
+                "scheduling_candidates",
+            ]:
+                self.assertIn(key, state)
+            self.assertIsInstance(state["stale_graph_warnings"], list)
+
+    def test_graph_dashboard_uses_existing_state_snapshot_allowlist(self) -> None:
+        native_lib = (ROOT / "services/agentic-dashboard/native/src-tauri/src/lib.rs").read_text(encoding="utf-8")
+
+        self.assertIn('"state.snapshot"', native_lib)
+        self.assertNotIn('"graph.snapshot"', native_lib)
 
     def test_state_brief_command_writes_agent_readable_view(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -21,10 +21,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from diffmogger.runtime.blocker_review import adjudicate_baseline_blocker
+from diffmogger.runtime import codebase_graph
 from diffmogger.runtime.paths import existing_or_target_path, target_path, target_rel
 
 
-STATE_SCHEMA_VERSION = 4
+STATE_SCHEMA_VERSION = 6
 STATE_APPLICATION_ID = 0x444D4752  # DMGR
 CANONICAL_DB_RELATIVE = "target/orchestration.sqlite3"
 CONVEYOR_PROJECTION_RELATIVE = "target/automation_conveyor_state.json"
@@ -36,6 +37,53 @@ CONVEYOR_MACHINE_PROJECTION_NAME = "conveyor.machine"
 BLOCKER_REVIEW_PROJECTION_NAME = "blocker.review"
 CAPABILITY_PROJECTION_NAME = "repo.capability_manifest"
 CAPABILITY_MANIFEST_ID = "capability:repo"
+CODEBASE_GRAPH_NAMESPACE = "codebase"
+CODEBASE_GRAPH_SCAN_LIMIT = 5000
+TASK_GRAPH_NAMESPACE = "task"
+TASK_GRAPH_NODE_KINDS = (
+    "ticket",
+    "work_item",
+    "run",
+    "blocker",
+    "approval",
+    "validation_plan",
+    "recovery_playbook",
+    "worker_assignment",
+)
+TASK_GRAPH_EDGE_KINDS = (
+    "depends_on",
+    "blocks",
+    "supersedes",
+    "duplicates",
+    "validates",
+    "repairs",
+    "spawned_by",
+)
+TASK_DONE_STATUSES = {"done", "resolved", "closed", "complete", "completed", "superseded"}
+TASK_PENDING_STATUSES = {"pending", "open", "active", "in_progress", "running", "waiting", "blocked"}
+TASK_BLOCKED_STATUSES = {"blocked", "blocked_on_user", "blocked_on_environment"}
+IMPACT_GRAPH_NAMESPACE = "impact"
+IMPACT_GRAPH_EDGE_KINDS = (
+    "likely_touches",
+    "touched_by",
+    "read_by",
+    "owns_lease_for",
+    "conflicts_with",
+    "requires_validation",
+    "requires_human_approval",
+    "relevant_context_for",
+)
+IMPACT_CONTEXT_PACK_LIMIT = 12
+IMPACT_CONTEXT_SECRET_BASENAMES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    ".npmrc",
+    ".pypirc",
+}
+RESOURCE_LEASE_SCOPE_KINDS = {"file", "directory", "module", "command", "repo"}
+RESOURCE_LEASE_STATUSES = {"active", "released", "expired", "superseded"}
 AUTOMATION_CONTROL_ID = "automation-control:default"
 AUTOMATION_CONTROL_STREAM_ID = "stream:automation-control"
 AUTOMATION_CONTROL_TASK_ID = "task:automation-control"
@@ -89,6 +137,13 @@ ORCHESTRATION_TABLES = (
     "conveyor_stage_contracts",
     "conveyor_stage_attempts",
     "capability_manifests",
+    "graph_snapshots",
+    "graph_nodes",
+    "graph_edges",
+    "graph_node_facts",
+    "graph_edge_facts",
+    "resource_leases",
+    "scheduler_candidates",
     "validation_receipts",
     "escalations",
     "task_edges",
@@ -150,6 +205,63 @@ CAPABILITY_SCAN_IGNORED_DIRS = {
     ".next",
     ".turbo",
     "vendor",
+}
+
+LOCKFILE_NAMES = {
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
+    "Cargo.lock",
+    "poetry.lock",
+    "uv.lock",
+    "requirements.txt",
+    "go.sum",
+    "Gemfile.lock",
+    "composer.lock",
+}
+
+GRAPH_FILE_NODE_KINDS = {"file", "test_file", "config_file", "doc_file", "lockfile"}
+CODEBASE_GRAPH_PARTIAL_REINDEX_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+
+CONFIG_FILE_NAMES = {
+    ".babelrc",
+    ".env.example",
+    ".eslintrc",
+    ".eslintrc.cjs",
+    ".eslintrc.js",
+    ".eslintrc.json",
+    ".gitignore",
+    ".prettierrc",
+    ".prettierrc.json",
+    ".python-version",
+    ".ruby-version",
+    ".tool-versions",
+    "Cargo.toml",
+    "Dockerfile",
+    "Gemfile",
+    "Makefile",
+    "Pipfile",
+    "bunfig.toml",
+    "compose.yaml",
+    "docker-compose.yml",
+    "go.mod",
+    "jest.config.js",
+    "jest.config.ts",
+    "mypy.ini",
+    "package.json",
+    "playwright.config.js",
+    "playwright.config.ts",
+    "pyproject.toml",
+    "pytest.ini",
+    "ruff.toml",
+    "setup.cfg",
+    "setup.py",
+    "tox.ini",
+    "tsconfig.json",
+    "vite.config.js",
+    "vite.config.ts",
 }
 
 LANGUAGE_BY_EXTENSION = {
@@ -445,15 +557,56 @@ def file_digest(path: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def scan_repo_files(target: Path, *, limit: int = 5000) -> list[Path]:
+def _gitignore_directory_patterns(target: Path) -> set[str]:
+    patterns: set[str] = set()
+    for raw in read_optional_text(target / ".gitignore", limit=80_000).splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        if any(token in line for token in ("*", "?", "[")):
+            continue
+        directory_pattern = line.endswith("/")
+        pattern = line.strip("/").lstrip("/")
+        if not pattern:
+            continue
+        if directory_pattern or "/" in pattern or "." not in Path(pattern).name:
+            patterns.add(pattern)
+    return patterns
+
+
+def _ignored_repo_directory(rel: Path, ignored_patterns: set[str]) -> bool:
+    name = rel.name
+    if name in CAPABILITY_SCAN_IGNORED_DIRS or name.startswith(".cache"):
+        return True
+    rel_text = rel.as_posix().strip("/")
+    for pattern in ignored_patterns:
+        if "/" in pattern:
+            if rel_text == pattern or rel_text.startswith(pattern.rstrip("/") + "/"):
+                return True
+        elif name == pattern:
+            return True
+    return False
+
+
+def scan_repo_paths(target: Path, *, limit: int = CODEBASE_GRAPH_SCAN_LIMIT) -> tuple[list[Path], list[Path], bool]:
+    directories: list[Path] = []
     files: list[Path] = []
+    ignored_patterns = _gitignore_directory_patterns(target)
+    truncated = False
     for root, dirnames, filenames in os.walk(target):
         root_path = Path(root)
-        dirnames[:] = [
-            name
-            for name in sorted(dirnames)
-            if name not in CAPABILITY_SCAN_IGNORED_DIRS and not name.startswith(".cache")
-        ]
+        try:
+            root_rel = root_path.relative_to(target)
+        except ValueError:
+            continue
+        kept_dirnames: list[str] = []
+        for name in sorted(dirnames):
+            rel = (root_rel / name) if root_rel != Path(".") else Path(name)
+            if _ignored_repo_directory(rel, ignored_patterns):
+                continue
+            kept_dirnames.append(name)
+            directories.append(root_path / name)
+        dirnames[:] = kept_dirnames
         for filename in sorted(filenames):
             path = root_path / filename
             try:
@@ -464,7 +617,13 @@ def scan_repo_files(target: Path, *, limit: int = 5000) -> list[Path]:
                 continue
             files.append(path)
             if len(files) >= limit:
-                return files
+                truncated = True
+                return directories, files, truncated
+    return directories, files, truncated
+
+
+def scan_repo_files(target: Path, *, limit: int = 5000) -> list[Path]:
+    _, files, _ = scan_repo_paths(target, limit=limit)
     return files
 
 
@@ -498,22 +657,10 @@ def discover_repo_capabilities(target: Path) -> dict[str, Any]:
             language_counts[language] = language_counts.get(language, 0) + 1
 
     markers = {rel: target / rel for rel in rel_files}
-    lockfile_names = {
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "Cargo.lock",
-        "poetry.lock",
-        "uv.lock",
-        "requirements.txt",
-        "go.sum",
-        "Gemfile.lock",
-        "composer.lock",
-    }
     lockfiles = [
         {"path": rel, "sha256": file_digest(path)}
         for rel, path in sorted(markers.items())
-        if Path(rel).name in lockfile_names
+        if Path(rel).name in LOCKFILE_NAMES
     ]
 
     ci_files = [
@@ -653,6 +800,143 @@ def create_schema_migrations_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def create_codebase_graph_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS graph_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            graph_namespace TEXT NOT NULL,
+            repo_root TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            head_commit TEXT NOT NULL DEFAULT '',
+            dirty_tracked_file_count INTEGER NOT NULL DEFAULT 0,
+            dirty_tracked_files_digest TEXT NOT NULL DEFAULT '',
+            indexed_file_count INTEGER NOT NULL DEFAULT 0,
+            directory_node_count INTEGER NOT NULL DEFAULT 0,
+            command_node_count INTEGER NOT NULL DEFAULT 0,
+            test_node_count INTEGER NOT NULL DEFAULT 0,
+            stale_node_count INTEGER NOT NULL DEFAULT 0,
+            digest TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_graph_snapshots_namespace
+            ON graph_snapshots(graph_namespace, generated_at);
+
+        CREATE TABLE IF NOT EXISTS graph_nodes (
+            snapshot_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            graph_namespace TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            path TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL DEFAULT '',
+            digest TEXT NOT NULL DEFAULT '',
+            is_stale INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(snapshot_id, node_id),
+            FOREIGN KEY(snapshot_id) REFERENCES graph_snapshots(snapshot_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_graph_nodes_kind
+            ON graph_nodes(graph_namespace, kind, path);
+
+        CREATE TABLE IF NOT EXISTS graph_edges (
+            snapshot_id TEXT NOT NULL,
+            edge_id TEXT NOT NULL,
+            graph_namespace TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            from_node_id TEXT NOT NULL,
+            to_node_id TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(snapshot_id, edge_id),
+            FOREIGN KEY(snapshot_id) REFERENCES graph_snapshots(snapshot_id) ON DELETE CASCADE,
+            FOREIGN KEY(snapshot_id, from_node_id) REFERENCES graph_nodes(snapshot_id, node_id) ON DELETE CASCADE,
+            FOREIGN KEY(snapshot_id, to_node_id) REFERENCES graph_nodes(snapshot_id, node_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_graph_edges_kind
+            ON graph_edges(graph_namespace, kind);
+        CREATE INDEX IF NOT EXISTS idx_graph_edges_from
+            ON graph_edges(snapshot_id, from_node_id);
+        CREATE INDEX IF NOT EXISTS idx_graph_edges_to
+            ON graph_edges(snapshot_id, to_node_id);
+
+        CREATE TABLE IF NOT EXISTS graph_node_facts (
+            snapshot_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            graph_namespace TEXT NOT NULL,
+            fact_key TEXT NOT NULL,
+            fact_value TEXT NOT NULL DEFAULT '',
+            value_type TEXT NOT NULL DEFAULT 'text',
+            source TEXT NOT NULL DEFAULT 'indexer',
+            confidence REAL NOT NULL DEFAULT 1.0,
+            PRIMARY KEY(snapshot_id, node_id, fact_key),
+            FOREIGN KEY(snapshot_id, node_id) REFERENCES graph_nodes(snapshot_id, node_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS graph_edge_facts (
+            snapshot_id TEXT NOT NULL,
+            edge_id TEXT NOT NULL,
+            graph_namespace TEXT NOT NULL,
+            fact_key TEXT NOT NULL,
+            fact_value TEXT NOT NULL DEFAULT '',
+            value_type TEXT NOT NULL DEFAULT 'text',
+            source TEXT NOT NULL DEFAULT 'indexer',
+            confidence REAL NOT NULL DEFAULT 1.0,
+            PRIMARY KEY(snapshot_id, edge_id, fact_key),
+            FOREIGN KEY(snapshot_id, edge_id) REFERENCES graph_edges(snapshot_id, edge_id) ON DELETE CASCADE
+        );
+        """
+    )
+
+
+def create_resource_leases_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS resource_leases (
+            lease_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL DEFAULT '',
+            owner_role TEXT NOT NULL DEFAULT '',
+            run_id TEXT NOT NULL DEFAULT '',
+            scope_kind TEXT NOT NULL,
+            scope_node_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            acquired_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL DEFAULT '',
+            released_at TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_resource_leases_status
+            ON resource_leases(status, expires_at);
+        CREATE INDEX IF NOT EXISTS idx_resource_leases_scope
+            ON resource_leases(scope_kind, scope_node_id, status);
+        CREATE INDEX IF NOT EXISTS idx_resource_leases_task
+            ON resource_leases(task_id, status);
+        """
+    )
+
+
+def create_scheduler_candidates_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS scheduler_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL DEFAULT '',
+            action_kind TEXT NOT NULL DEFAULT '',
+            score REAL NOT NULL DEFAULT 0,
+            state TEXT NOT NULL DEFAULT 'ready',
+            skipped_reason TEXT NOT NULL DEFAULT '',
+            stop INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_scheduler_candidates_decision
+            ON scheduler_candidates(decision_id, state, score);
+        CREATE INDEX IF NOT EXISTS idx_scheduler_candidates_generated
+            ON scheduler_candidates(generated_at);
+        """
+    )
+
+
 def migrate_schema_to_4(conn: sqlite3.Connection) -> None:
     """Introduce an explicit schema migration ledger.
 
@@ -664,8 +948,23 @@ def migrate_schema_to_4(conn: sqlite3.Connection) -> None:
     create_schema_migrations_table(conn)
 
 
+def migrate_schema_to_5(conn: sqlite3.Connection) -> None:
+    """Add durable codebase graph snapshots, nodes, edges, and facts."""
+
+    create_codebase_graph_tables(conn)
+
+
+def migrate_schema_to_6(conn: sqlite3.Connection) -> None:
+    """Add typed resource leases and scheduler candidates."""
+
+    create_resource_leases_table(conn)
+    create_scheduler_candidates_table(conn)
+
+
 SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: migrate_schema_to_4,
+    5: migrate_schema_to_5,
+    6: migrate_schema_to_6,
 }
 
 
@@ -1076,6 +1375,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    create_codebase_graph_tables(conn)
+    create_resource_leases_table(conn)
+    create_scheduler_candidates_table(conn)
     conn.commit()
     apply_schema_migrations(conn, starting_version=starting_version)
     current_version = sqlite_user_version(conn)
@@ -1419,6 +1721,3841 @@ def latest_capability_manifest(conn: sqlite3.Connection) -> dict[str, Any]:
         return {}
     payload = _json_cell(row["payload_json"], {})
     return payload if isinstance(payload, dict) else {}
+
+
+def build_codebase_graph(target: Path, capability: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    return codebase_graph.build_codebase_graph(target, capability=capability)
+
+
+def _latest_codebase_graph_snapshot_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT *
+        FROM graph_snapshots
+        WHERE graph_namespace = ?
+        ORDER BY generated_at DESC, rowid DESC
+        LIMIT 1
+        """,
+        (CODEBASE_GRAPH_NAMESPACE,),
+    ).fetchone()
+
+
+def _insert_codebase_graph_conn(conn: sqlite3.Connection, graph: Mapping[str, Any]) -> None:
+    snapshot_id = str(graph["snapshot_id"])
+    with conn:
+        conn.execute("DELETE FROM graph_snapshots WHERE snapshot_id = ?", (snapshot_id,))
+        conn.execute(
+            """
+            INSERT INTO graph_snapshots(
+                snapshot_id, graph_namespace, repo_root, generated_at, head_commit,
+                dirty_tracked_file_count, dirty_tracked_files_digest, indexed_file_count,
+                directory_node_count, command_node_count, test_node_count, stale_node_count,
+                digest, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                CODEBASE_GRAPH_NAMESPACE,
+                str(graph.get("repo_root") or ""),
+                str(graph.get("generated_at") or utc_now()),
+                str(graph.get("head_commit") or ""),
+                int(graph.get("dirty_tracked_file_count") or 0),
+                str(graph.get("dirty_tracked_files_digest") or ""),
+                int(graph.get("indexed_file_count") or 0),
+                int(graph.get("directory_node_count") or 0),
+                int(graph.get("command_node_count") or 0),
+                int(graph.get("test_node_count") or 0),
+                int(graph.get("stale_node_count") or 0),
+                str(graph.get("digest") or ""),
+                stable_json(graph.get("payload") if isinstance(graph.get("payload"), Mapping) else {}),
+            ),
+        )
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, Mapping):
+                continue
+            conn.execute(
+                """
+                INSERT INTO graph_nodes(
+                    snapshot_id, node_id, graph_namespace, kind, path, name, digest, is_stale, metadata_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    str(node.get("node_id") or ""),
+                    CODEBASE_GRAPH_NAMESPACE,
+                    str(node.get("kind") or ""),
+                    str(node.get("path") or ""),
+                    str(node.get("name") or ""),
+                    str(node.get("digest") or ""),
+                    int(node.get("is_stale") or 0),
+                    stable_json(node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}),
+                ),
+            )
+            for fact in node.get("facts") or []:
+                if not isinstance(fact, Mapping):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO graph_node_facts(
+                        snapshot_id, node_id, graph_namespace, fact_key, fact_value, value_type, source, confidence
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        str(node.get("node_id") or ""),
+                        CODEBASE_GRAPH_NAMESPACE,
+                        str(fact.get("fact_key") or ""),
+                        str(fact.get("fact_value") or ""),
+                        str(fact.get("value_type") or "text"),
+                        str(fact.get("source") or "indexer"),
+                        float(fact.get("confidence") if fact.get("confidence") is not None else 1.0),
+                    ),
+                )
+        for edge in graph.get("edges") or []:
+            if not isinstance(edge, Mapping):
+                continue
+            conn.execute(
+                """
+                INSERT INTO graph_edges(
+                    snapshot_id, edge_id, graph_namespace, kind, from_node_id, to_node_id, metadata_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    str(edge.get("edge_id") or ""),
+                    CODEBASE_GRAPH_NAMESPACE,
+                    str(edge.get("kind") or ""),
+                    str(edge.get("from_node_id") or ""),
+                    str(edge.get("to_node_id") or ""),
+                    stable_json(edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {}),
+                ),
+            )
+            for fact in edge.get("facts") or []:
+                if not isinstance(fact, Mapping):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO graph_edge_facts(
+                        snapshot_id, edge_id, graph_namespace, fact_key, fact_value, value_type, source, confidence
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        str(edge.get("edge_id") or ""),
+                        CODEBASE_GRAPH_NAMESPACE,
+                        str(fact.get("fact_key") or ""),
+                        str(fact.get("fact_value") or ""),
+                        str(fact.get("value_type") or "text"),
+                        str(fact.get("source") or "indexer"),
+                        float(fact.get("confidence") if fact.get("confidence") is not None else 1.0),
+                    ),
+                )
+
+
+def _codebase_graph_payload_inventory_fields(inventory: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "graph_inventory_digest": str(inventory.get("graph_inventory_digest") or ""),
+        "indexed_path_count": int(inventory.get("indexed_path_count") or 0),
+        "indexed_paths_truncated": bool(inventory.get("indexed_paths_truncated")),
+        "indexed_path_sample": list(inventory.get("indexed_path_sample") or [])[:24],
+    }
+
+
+def _merge_codebase_graph_snapshot_payload_conn(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    updates: Mapping[str, Any],
+) -> None:
+    payload = _json_cell(row["payload_json"], {})
+    if not isinstance(payload, dict):
+        payload = {}
+    merged = {**payload, **dict(updates)}
+    if stable_json(merged) == stable_json(payload):
+        return
+    with conn:
+        conn.execute(
+            "UPDATE graph_snapshots SET payload_json = ? WHERE snapshot_id = ?",
+            (stable_json(merged), str(row["snapshot_id"])),
+        )
+
+
+def refresh_codebase_graph_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    capability: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    graph = build_codebase_graph(target, capability=capability)
+    latest = _latest_codebase_graph_snapshot_row(conn)
+    if latest is not None and str(latest["digest"]) == str(graph["digest"]):
+        payload = graph.get("payload") if isinstance(graph.get("payload"), Mapping) else {}
+        _merge_codebase_graph_snapshot_payload_conn(conn, latest, payload)
+        refresh_codebase_graph_staleness_conn(conn, target, snapshot_id=str(latest["snapshot_id"]))
+        return codebase_graph_summary(conn)
+    _insert_codebase_graph_conn(conn, graph)
+    return codebase_graph_summary(conn)
+
+
+def refresh_codebase_graph(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    with closing(connect(database_path_for_target(target))) as conn:
+        capability = refresh_capability_manifest_conn(conn, target)
+        return refresh_codebase_graph_conn(conn, target, capability=capability)
+
+
+def refresh_codebase_graph_staleness_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    snapshot_id: str | None = None,
+) -> int:
+    row = _latest_codebase_graph_snapshot_row(conn) if snapshot_id is None else conn.execute(
+        "SELECT * FROM graph_snapshots WHERE snapshot_id = ? AND graph_namespace = ?",
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchone()
+    if row is None:
+        return 0
+    resolved_snapshot_id = str(row["snapshot_id"])
+    file_rows = conn.execute(
+        """
+        SELECT node_id, path, digest, is_stale
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+          AND path <> ''
+        """,
+        (resolved_snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    stale_count = 0
+    changed = False
+    with conn:
+        for node in file_rows:
+            path = target / str(node["path"])
+            current_digest = file_digest(path)
+            is_stale = 1 if not current_digest or current_digest != str(node["digest"] or "") else 0
+            stale_count += is_stale
+            if is_stale != int(node["is_stale"] or 0):
+                changed = True
+                conn.execute(
+                    "UPDATE graph_nodes SET is_stale = ? WHERE snapshot_id = ? AND node_id = ?",
+                    (is_stale, resolved_snapshot_id, str(node["node_id"])),
+                )
+        if changed or stale_count != int(row["stale_node_count"] or 0):
+            conn.execute(
+                "UPDATE graph_snapshots SET stale_node_count = ? WHERE snapshot_id = ?",
+                (stale_count, resolved_snapshot_id),
+            )
+    return stale_count
+
+
+def _graph_counts(conn: sqlite3.Connection, snapshot_id: str, column: str, table: str) -> dict[str, int]:
+    rows = conn.execute(
+        f"SELECT {column} AS kind, COUNT(*) AS count FROM {table} WHERE snapshot_id = ? GROUP BY {column} ORDER BY {column}",
+        (snapshot_id,),
+    ).fetchall()
+    return {str(row["kind"]): int(row["count"]) for row in rows}
+
+
+def codebase_graph_summary(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        return {
+            "schema_version": 1,
+            "graph_namespace": CODEBASE_GRAPH_NAMESPACE,
+            "exists": False,
+            "latest_snapshot_id": "",
+            "latest_graph_snapshot": {},
+            "stale_node_count": 0,
+            "indexed_file_count": 0,
+            "command_node_count": 0,
+            "test_node_count": 0,
+            "graph_refresh_mode": "",
+            "graph_refresh_reason": "",
+            "graph_inventory_digest": "",
+            "graph_inventory_changed": False,
+            "graph_inventory_added_count": 0,
+            "graph_inventory_deleted_count": 0,
+            "graph_inventory_structural_count": 0,
+            "indexed_path_count": 0,
+            "indexed_paths_truncated": False,
+            "indexed_path_sample": [],
+            "node_counts": {},
+            "edge_counts": {},
+        }
+    snapshot_id = str(row["snapshot_id"])
+    payload = _json_cell(row["payload_json"], {})
+    if not isinstance(payload, dict):
+        payload = {}
+    stale_row = conn.execute(
+        "SELECT COUNT(*) AS count FROM graph_nodes WHERE snapshot_id = ? AND is_stale = 1",
+        (snapshot_id,),
+    ).fetchone()
+    stale_count = int(stale_row["count"] if stale_row else 0)
+    if stale_count != int(row["stale_node_count"] or 0):
+        with conn:
+            conn.execute(
+                "UPDATE graph_snapshots SET stale_node_count = ? WHERE snapshot_id = ?",
+                (stale_count, snapshot_id),
+            )
+    node_counts = _graph_counts(conn, snapshot_id, "kind", "graph_nodes")
+    edge_counts = _graph_counts(conn, snapshot_id, "kind", "graph_edges")
+    latest = {
+        "snapshot_id": snapshot_id,
+        "graph_namespace": str(row["graph_namespace"]),
+        "generated_at": str(row["generated_at"]),
+        "head_commit": str(row["head_commit"] or ""),
+        "dirty_tracked_file_count": int(row["dirty_tracked_file_count"] or 0),
+        "dirty_tracked_files_digest": str(row["dirty_tracked_files_digest"] or ""),
+        "indexed_file_count": int(row["indexed_file_count"] or 0),
+        "directory_node_count": int(row["directory_node_count"] or 0),
+        "command_node_count": int(row["command_node_count"] or 0),
+        "test_node_count": int(row["test_node_count"] or 0),
+        "stale_node_count": stale_count,
+        "digest": str(row["digest"] or ""),
+        "graph_inventory_digest": str(payload.get("graph_inventory_digest") or ""),
+        "indexed_path_count": int(payload.get("indexed_path_count") or 0),
+        "indexed_paths_truncated": bool(payload.get("indexed_paths_truncated")),
+    }
+    return {
+        "schema_version": 1,
+        "graph_namespace": CODEBASE_GRAPH_NAMESPACE,
+        "exists": True,
+        "latest_snapshot_id": snapshot_id,
+        "latest_graph_snapshot": latest,
+        "stale_node_count": stale_count,
+        "indexed_file_count": int(row["indexed_file_count"] or 0),
+        "command_node_count": int(row["command_node_count"] or 0),
+        "test_node_count": int(row["test_node_count"] or 0),
+        "graph_refresh_mode": str(payload.get("graph_refresh_mode") or ""),
+        "graph_refresh_reason": str(payload.get("graph_refresh_reason") or ""),
+        "graph_inventory_digest": str(payload.get("graph_inventory_digest") or ""),
+        "graph_inventory_changed": bool(payload.get("graph_inventory_changed")),
+        "graph_inventory_added_count": int(payload.get("graph_inventory_added_count") or 0),
+        "graph_inventory_deleted_count": int(payload.get("graph_inventory_deleted_count") or 0),
+        "graph_inventory_structural_count": int(payload.get("graph_inventory_structural_count") or 0),
+        "indexed_path_count": int(payload.get("indexed_path_count") or 0),
+        "indexed_paths_truncated": bool(payload.get("indexed_paths_truncated")),
+        "indexed_path_sample": list(payload.get("indexed_path_sample") or [])[:24],
+        "node_counts": node_counts,
+        "edge_counts": edge_counts,
+    }
+
+
+def _upsert_graph_node_conn(conn: sqlite3.Connection, snapshot_id: str, node: Mapping[str, Any]) -> None:
+    node_id = str(node.get("node_id") or "")
+    if not node_id:
+        return
+    conn.execute(
+        """
+        INSERT INTO graph_nodes(
+            snapshot_id, node_id, graph_namespace, kind, path, name, digest, is_stale, metadata_json
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(snapshot_id, node_id) DO UPDATE SET
+            graph_namespace=excluded.graph_namespace,
+            kind=excluded.kind,
+            path=excluded.path,
+            name=excluded.name,
+            digest=excluded.digest,
+            is_stale=excluded.is_stale,
+            metadata_json=excluded.metadata_json
+        """,
+        (
+            snapshot_id,
+            node_id,
+            CODEBASE_GRAPH_NAMESPACE,
+            str(node.get("kind") or ""),
+            str(node.get("path") or ""),
+            str(node.get("name") or ""),
+            str(node.get("digest") or ""),
+            int(node.get("is_stale") or 0),
+            stable_json(node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}),
+        ),
+    )
+    conn.execute("DELETE FROM graph_node_facts WHERE snapshot_id = ? AND node_id = ?", (snapshot_id, node_id))
+    for fact in node.get("facts") or []:
+        if not isinstance(fact, Mapping):
+            continue
+        conn.execute(
+            """
+            INSERT INTO graph_node_facts(
+                snapshot_id, node_id, graph_namespace, fact_key, fact_value, value_type, source, confidence
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                node_id,
+                CODEBASE_GRAPH_NAMESPACE,
+                str(fact.get("fact_key") or ""),
+                str(fact.get("fact_value") or ""),
+                str(fact.get("value_type") or "text"),
+                str(fact.get("source") or "indexer"),
+                float(fact.get("confidence") if fact.get("confidence") is not None else 1.0),
+            ),
+        )
+
+
+def _upsert_graph_edge_conn(conn: sqlite3.Connection, snapshot_id: str, edge: Mapping[str, Any]) -> None:
+    edge_id = str(edge.get("edge_id") or "")
+    if not edge_id:
+        return
+    conn.execute(
+        """
+        INSERT INTO graph_edges(
+            snapshot_id, edge_id, graph_namespace, kind, from_node_id, to_node_id, metadata_json
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(snapshot_id, edge_id) DO UPDATE SET
+            graph_namespace=excluded.graph_namespace,
+            kind=excluded.kind,
+            from_node_id=excluded.from_node_id,
+            to_node_id=excluded.to_node_id,
+            metadata_json=excluded.metadata_json
+        """,
+        (
+            snapshot_id,
+            edge_id,
+            CODEBASE_GRAPH_NAMESPACE,
+            str(edge.get("kind") or ""),
+            str(edge.get("from_node_id") or ""),
+            str(edge.get("to_node_id") or ""),
+            stable_json(edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {}),
+        ),
+    )
+    conn.execute("DELETE FROM graph_edge_facts WHERE snapshot_id = ? AND edge_id = ?", (snapshot_id, edge_id))
+    for fact in edge.get("facts") or []:
+        if not isinstance(fact, Mapping):
+            continue
+        conn.execute(
+            """
+            INSERT INTO graph_edge_facts(
+                snapshot_id, edge_id, graph_namespace, fact_key, fact_value, value_type, source, confidence
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                edge_id,
+                CODEBASE_GRAPH_NAMESPACE,
+                str(fact.get("fact_key") or ""),
+                str(fact.get("fact_value") or ""),
+                str(fact.get("value_type") or "text"),
+                str(fact.get("source") or "indexer"),
+                float(fact.get("confidence") if fact.get("confidence") is not None else 1.0),
+            ),
+        )
+
+
+def _file_node_map_for_snapshot(conn: sqlite3.Connection, snapshot_id: str) -> dict[str, str]:
+    rows = conn.execute(
+        """
+        SELECT path, node_id
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+          AND path <> ''
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    return {str(row["path"]): str(row["node_id"]) for row in rows}
+
+
+def refresh_codebase_graph_changed_file_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    rel_path: str | Path,
+    *,
+    capability: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        return refresh_codebase_graph_conn(conn, target, capability=capability)
+    snapshot_id = str(row["snapshot_id"])
+    rel = normalize_path_for_brief(Path(str(rel_path).replace("\\", "/")).as_posix())
+    node_row = conn.execute(
+        """
+        SELECT node_id
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND path = ?
+          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE, rel),
+    ).fetchone()
+    if node_row is None:
+        return refresh_codebase_graph_conn(conn, target, capability=capability)
+
+    file_node_by_rel = _file_node_map_for_snapshot(conn, snapshot_id)
+    file_node = codebase_graph.file_node_for_path(target, rel)
+    if str(file_node.get("node_id") or "") != str(node_row["node_id"]):
+        return refresh_codebase_graph_conn(conn, target, capability=capability)
+    fragment = codebase_graph.dependency_fragment_for_file(
+        target,
+        rel,
+        file_node_by_rel,
+        source_file_node_id=str(node_row["node_id"]),
+    )
+
+    edge_rows = conn.execute(
+        """
+        SELECT edge_id, metadata_json
+        FROM graph_edges
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind IN ('imports', 'references', 'defines_module', 'resolved_to')
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    delete_edge_ids: list[str] = []
+    for edge_row in edge_rows:
+        metadata = _json_cell(edge_row["metadata_json"], {})
+        if isinstance(metadata, dict) and str(metadata.get("source_path") or "") == rel:
+            delete_edge_ids.append(str(edge_row["edge_id"]))
+
+    with conn:
+        _upsert_graph_node_conn(conn, snapshot_id, file_node)
+        if delete_edge_ids:
+            conn.executemany(
+                "DELETE FROM graph_edge_facts WHERE snapshot_id = ? AND edge_id = ?",
+                [(snapshot_id, edge_id) for edge_id in delete_edge_ids],
+            )
+            conn.executemany(
+                "DELETE FROM graph_edges WHERE snapshot_id = ? AND edge_id = ?",
+                [(snapshot_id, edge_id) for edge_id in delete_edge_ids],
+            )
+        for node in fragment["nodes"]:
+            _upsert_graph_node_conn(conn, snapshot_id, node)
+        for edge in fragment["edges"]:
+            _upsert_graph_edge_conn(conn, snapshot_id, edge)
+        stale_count = refresh_codebase_graph_staleness_conn(conn, target, snapshot_id=snapshot_id)
+        payload = _json_cell(row["payload_json"], {})
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["partial_reindex"] = {
+            "path": rel,
+            "updated_at": utc_now(),
+            "edge_count": len(fragment["edges"]),
+            "deleted_edge_count": len(delete_edge_ids),
+        }
+        inventory = codebase_graph.build_graph_inventory(target, limit=CODEBASE_GRAPH_SCAN_LIMIT)
+        payload.update(_codebase_graph_payload_inventory_fields(inventory))
+        payload["command_signature_digest"] = codebase_graph.codebase_command_signature_digest(
+            target,
+            capability=capability,
+        )
+        payload["node_counts"] = _graph_counts(conn, snapshot_id, "kind", "graph_nodes")
+        payload["edge_counts"] = _graph_counts(conn, snapshot_id, "kind", "graph_edges")
+        head_commit, dirty_count, dirty_digest = _current_codebase_graph_git_inputs(target)
+        partial_digest = sha256_text(
+            stable_json(
+                {
+                    "snapshot_id": snapshot_id,
+                    "previous_digest": str(row["digest"] or ""),
+                    "path": rel,
+                    "file_digest": str(file_node.get("digest") or ""),
+                    "edge_ids": sorted(str(edge.get("edge_id") or "") for edge in fragment["edges"]),
+                }
+            )
+        )
+        conn.execute(
+            """
+            UPDATE graph_snapshots
+            SET stale_node_count = ?,
+                digest = ?,
+                generated_at = ?,
+                head_commit = ?,
+                dirty_tracked_file_count = ?,
+                dirty_tracked_files_digest = ?,
+                payload_json = ?
+            WHERE snapshot_id = ?
+            """,
+            (stale_count, partial_digest, utc_now(), head_commit, dirty_count, dirty_digest, stable_json(payload), snapshot_id),
+        )
+    return codebase_graph_summary(conn)
+
+
+def refresh_codebase_graph_changed_file(target: Path, rel_path: str | Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    with closing(connect(database_path_for_target(target))) as conn:
+        capability = refresh_capability_manifest_conn(conn, target)
+        return refresh_codebase_graph_changed_file_conn(conn, target, rel_path, capability=capability)
+
+
+@dataclass
+class CodebaseGraphRefreshDecision:
+    mode: str
+    reason: str
+    inventory: dict[str, Any] = field(default_factory=dict)
+    inventory_changed: bool = False
+    added_count: int = 0
+    deleted_count: int = 0
+    structural_count: int = 0
+    changed_paths: list[str] = field(default_factory=list)
+    partial_paths: list[str] = field(default_factory=list)
+
+
+def _current_codebase_graph_git_inputs(target: Path) -> tuple[str, int, str]:
+    head_commit = codebase_graph.git_value(target, "rev-parse", "--verify", "HEAD")
+    status_porcelain = codebase_graph.git_value(target, "status", "--porcelain=v1", "--untracked-files=no")
+    dirty_lines = sorted(line for line in status_porcelain.splitlines() if line.strip())
+    dirty_digest = sha256_text("\n".join(dirty_lines)) if dirty_lines else ""
+    return head_commit, len(dirty_lines), dirty_digest
+
+
+def _inventory_record_key(record: Mapping[str, Any]) -> tuple[str, str]:
+    return (str(record.get("path_kind") or ""), str(record.get("path") or ""))
+
+
+def _snapshot_codebase_inventory_records_conn(conn: sqlite3.Connection, snapshot_id: str) -> list[dict[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT kind, path
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND (
+              kind = 'directory'
+              OR kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+          )
+          AND path <> ''
+        ORDER BY kind, path
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    records: list[dict[str, str]] = []
+    for row in rows:
+        path = str(row["path"] or "")
+        kind = str(row["kind"] or "")
+        rel = Path(path)
+        if kind == "directory":
+            records.append(
+                {
+                    "path": path,
+                    "path_kind": "directory",
+                    "kind": "directory",
+                    "extension": "",
+                    "parent": rel.parent.as_posix() if path != "." and rel.parent.as_posix() != "." else "",
+                }
+            )
+        else:
+            records.append(
+                {
+                    "path": path,
+                    "path_kind": "file",
+                    "kind": kind,
+                    "extension": rel.suffix.lower(),
+                    "parent": rel.parent.as_posix() if rel.parent.as_posix() != "." else ".",
+                }
+            )
+    return sorted(records, key=lambda item: (item["path_kind"], item["path"], item["kind"]))
+
+
+def _codebase_graph_inventory_diff(
+    current_inventory: Mapping[str, Any],
+    snapshot_records: list[dict[str, str]],
+    *,
+    stored_digest: str = "",
+) -> dict[str, Any]:
+    current_records = [
+        dict(item)
+        for item in current_inventory.get("records", [])
+        if isinstance(item, Mapping)
+    ]
+    current_by_key = {_inventory_record_key(item): item for item in current_records}
+    snapshot_by_key = {_inventory_record_key(item): item for item in snapshot_records}
+    current_keys = set(current_by_key)
+    snapshot_keys = set(snapshot_by_key)
+    added = sorted(current_keys - snapshot_keys)
+    deleted = sorted(snapshot_keys - current_keys)
+    changed = sorted(
+        key
+        for key in current_keys & snapshot_keys
+        if stable_json(current_by_key[key]) != stable_json(snapshot_by_key[key])
+    )
+    current_digest = str(current_inventory.get("graph_inventory_digest") or "")
+    snapshot_digest = stored_digest or codebase_graph.graph_inventory_digest(snapshot_records)
+    structural_count = len(added) + len(deleted) + len(changed)
+    return {
+        "graph_inventory_digest": current_digest,
+        "snapshot_inventory_digest": snapshot_digest,
+        "inventory_changed": current_digest != snapshot_digest or structural_count > 0,
+        "added_count": len(added),
+        "deleted_count": len(deleted),
+        "structural_count": structural_count,
+        "added": added,
+        "deleted": deleted,
+        "changed": changed,
+    }
+
+
+def _codebase_graph_file_changes_conn(conn: sqlite3.Connection, target: Path, snapshot_id: str) -> list[dict[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT path, kind, digest
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+          AND path <> ''
+        ORDER BY path
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    changes: list[dict[str, str]] = []
+    for row in rows:
+        rel = str(row["path"] or "")
+        current_digest = file_digest(target / rel)
+        if current_digest and current_digest != str(row["digest"] or ""):
+            changes.append(
+                {
+                    "path": rel,
+                    "kind": str(row["kind"] or ""),
+                    "extension": Path(rel).suffix.lower(),
+                    "current_digest": current_digest,
+                    "snapshot_digest": str(row["digest"] or ""),
+                }
+            )
+    return changes
+
+
+def _codebase_graph_change_requires_full_refresh(change: Mapping[str, Any]) -> bool:
+    path = Path(str(change.get("path") or ""))
+    kind = str(change.get("kind") or "")
+    return kind in {"config_file", "lockfile"} or path.name in {"package.json", ".gitignore"}
+
+
+def _codebase_graph_change_can_partial_reindex(change: Mapping[str, Any]) -> bool:
+    if _codebase_graph_change_requires_full_refresh(change):
+        return False
+    return str(change.get("extension") or "").lower() in CODEBASE_GRAPH_PARTIAL_REINDEX_EXTENSIONS
+
+
+def _snapshot_codebase_command_signature_conn(conn: sqlite3.Connection, snapshot_id: str) -> list[dict[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT name, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind = 'command'
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    signature: list[dict[str, str]] = []
+    for row in rows:
+        metadata = _json_cell(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        signature.append(
+            {
+                "command": str(row["name"] or ""),
+                "kind": str(metadata.get("command_kind") or ""),
+                "source": str(metadata.get("source") or ""),
+                "origin": str(metadata.get("origin") or ""),
+                "script": str(metadata.get("script") or ""),
+                "script_digest": str(metadata.get("script_digest") or ""),
+            }
+        )
+    return sorted(signature, key=lambda item: (item["source"], item["command"], item["kind"], item["origin"]))
+
+
+def _codebase_graph_refresh_decision_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    capability: Mapping[str, Any] | None = None,
+    latest: sqlite3.Row | None = None,
+) -> CodebaseGraphRefreshDecision:
+    latest = latest if latest is not None else _latest_codebase_graph_snapshot_row(conn)
+    inventory = codebase_graph.build_graph_inventory(target, limit=CODEBASE_GRAPH_SCAN_LIMIT)
+    if latest is None:
+        return CodebaseGraphRefreshDecision(
+            mode="full",
+            reason="codebase graph snapshot is missing",
+            inventory=dict(inventory),
+            inventory_changed=True,
+            added_count=int(inventory.get("indexed_path_count") or 0),
+            structural_count=int(inventory.get("indexed_path_count") or 0),
+        )
+
+    snapshot_id = str(latest["snapshot_id"])
+    payload = _json_cell(latest["payload_json"], {})
+    if not isinstance(payload, dict):
+        payload = {}
+    snapshot_records = _snapshot_codebase_inventory_records_conn(conn, snapshot_id)
+    diff = _codebase_graph_inventory_diff(
+        inventory,
+        snapshot_records,
+        stored_digest=str(payload.get("graph_inventory_digest") or ""),
+    )
+    if int(diff["structural_count"]):
+        if int(diff["added_count"]) and int(diff["deleted_count"]):
+            reason = "indexable paths were added and deleted"
+        elif int(diff["added_count"]):
+            reason = "new indexable paths were added"
+        elif int(diff["deleted_count"]):
+            reason = "indexed paths were deleted"
+        else:
+            reason = "indexed path metadata changed"
+        return CodebaseGraphRefreshDecision(
+            mode="full",
+            reason=reason,
+            inventory=dict(inventory),
+            inventory_changed=bool(diff["inventory_changed"]),
+            added_count=int(diff["added_count"]),
+            deleted_count=int(diff["deleted_count"]),
+            structural_count=int(diff["structural_count"]),
+        )
+
+    current_command_digest = codebase_graph.codebase_command_signature_digest(target, capability=capability)
+    snapshot_command_digest = str(payload.get("command_signature_digest") or "")
+    if not snapshot_command_digest:
+        snapshot_command_digest = sha256_text(stable_json(_snapshot_codebase_command_signature_conn(conn, snapshot_id)))
+    if current_command_digest != snapshot_command_digest:
+        return CodebaseGraphRefreshDecision(
+            mode="full",
+            reason="capability command inputs changed",
+            inventory=dict(inventory),
+            inventory_changed=bool(diff["inventory_changed"]),
+            added_count=int(diff["added_count"]),
+            deleted_count=int(diff["deleted_count"]),
+            structural_count=int(diff["structural_count"]),
+        )
+
+    head_commit, dirty_count, dirty_digest = _current_codebase_graph_git_inputs(target)
+    if str(latest["head_commit"] or "") != head_commit:
+        return CodebaseGraphRefreshDecision(
+            mode="full",
+            reason="repository HEAD changed",
+            inventory=dict(inventory),
+            inventory_changed=bool(diff["inventory_changed"]),
+        )
+
+    file_changes = _codebase_graph_file_changes_conn(conn, target, snapshot_id)
+    changed_paths = [str(item["path"]) for item in file_changes]
+    if any(_codebase_graph_change_requires_full_refresh(item) for item in file_changes):
+        return CodebaseGraphRefreshDecision(
+            mode="full",
+            reason="package, config, lockfile, or ignore file changed",
+            inventory=dict(inventory),
+            inventory_changed=bool(diff["inventory_changed"]),
+            changed_paths=changed_paths,
+        )
+    if file_changes and all(_codebase_graph_change_can_partial_reindex(item) for item in file_changes):
+        return CodebaseGraphRefreshDecision(
+            mode="partial",
+            reason="known source files changed",
+            inventory=dict(inventory),
+            inventory_changed=bool(diff["inventory_changed"]),
+            changed_paths=changed_paths,
+            partial_paths=changed_paths,
+        )
+
+    if int(latest["dirty_tracked_file_count"] or 0) != dirty_count or str(latest["dirty_tracked_files_digest"] or "") != dirty_digest:
+        return CodebaseGraphRefreshDecision(
+            mode="full",
+            reason="dirty tracked file state changed",
+            inventory=dict(inventory),
+            inventory_changed=bool(diff["inventory_changed"]),
+            changed_paths=changed_paths,
+        )
+
+    return CodebaseGraphRefreshDecision(
+        mode="staleness",
+        reason="no structural graph refresh needed",
+        inventory=dict(inventory),
+        inventory_changed=bool(diff["inventory_changed"]),
+        added_count=int(diff["added_count"]),
+        deleted_count=int(diff["deleted_count"]),
+        structural_count=int(diff["structural_count"]),
+        changed_paths=changed_paths,
+    )
+
+
+def _codebase_graph_refresh_metadata(decision: CodebaseGraphRefreshDecision) -> dict[str, Any]:
+    return {
+        "graph_refresh_mode": decision.mode,
+        "graph_refresh_reason": decision.reason,
+        "graph_inventory_digest": str(decision.inventory.get("graph_inventory_digest") or ""),
+        "graph_inventory_changed": bool(decision.inventory_changed),
+        "graph_inventory_added_count": int(decision.added_count),
+        "graph_inventory_deleted_count": int(decision.deleted_count),
+        "graph_inventory_structural_count": int(decision.structural_count),
+        "indexed_path_count": int(decision.inventory.get("indexed_path_count") or 0),
+        "indexed_paths_truncated": bool(decision.inventory.get("indexed_paths_truncated")),
+        "indexed_path_sample": list(decision.inventory.get("indexed_path_sample") or [])[:24],
+    }
+
+
+def _with_codebase_graph_refresh_metadata(
+    summary: Mapping[str, Any],
+    decision: CodebaseGraphRefreshDecision,
+) -> dict[str, Any]:
+    enriched = dict(summary)
+    metadata = _codebase_graph_refresh_metadata(decision)
+    enriched.update(metadata)
+    latest = enriched.get("latest_graph_snapshot") if isinstance(enriched.get("latest_graph_snapshot"), dict) else {}
+    if latest:
+        latest = dict(latest)
+        latest.update(
+            {
+                "graph_inventory_digest": metadata["graph_inventory_digest"],
+                "indexed_path_count": metadata["indexed_path_count"],
+                "indexed_paths_truncated": metadata["indexed_paths_truncated"],
+            }
+        )
+        enriched["latest_graph_snapshot"] = latest
+    return enriched
+
+
+def ensure_codebase_graph_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    capability: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    latest = _latest_codebase_graph_snapshot_row(conn)
+    effective_capability = capability if capability is not None else latest_capability_manifest(conn)
+    if not effective_capability:
+        effective_capability = refresh_capability_manifest_conn(conn, target)
+    decision = _codebase_graph_refresh_decision_conn(conn, target, capability=effective_capability, latest=latest)
+    if latest is None:
+        return _with_codebase_graph_refresh_metadata(
+            refresh_codebase_graph_conn(conn, target, capability=effective_capability),
+            decision,
+        )
+    if decision.mode == "full":
+        return _with_codebase_graph_refresh_metadata(
+            refresh_codebase_graph_conn(conn, target, capability=effective_capability),
+            decision,
+        )
+    if decision.mode == "partial":
+        summary: dict[str, Any] = {}
+        for rel_path in decision.partial_paths:
+            summary = refresh_codebase_graph_changed_file_conn(
+                conn,
+                target,
+                rel_path,
+                capability=effective_capability,
+            )
+        return _with_codebase_graph_refresh_metadata(summary or codebase_graph_summary(conn), decision)
+    inventory_payload = _codebase_graph_payload_inventory_fields(decision.inventory)
+    inventory_payload["command_signature_digest"] = codebase_graph.codebase_command_signature_digest(
+        target,
+        capability=effective_capability,
+    )
+    _merge_codebase_graph_snapshot_payload_conn(conn, latest, inventory_payload)
+    refresh_codebase_graph_staleness_conn(conn, target, snapshot_id=str(latest["snapshot_id"]))
+    return _with_codebase_graph_refresh_metadata(codebase_graph_summary(conn), decision)
+
+
+def _task_graph_node_id(kind: str, key: str) -> str:
+    return f"graph-node:{TASK_GRAPH_NAMESPACE}:{kind}:{sha256_text(str(key))[:24]}"
+
+
+def _task_graph_edge_id(kind: str, from_node_id: str, to_node_id: str, key: str = "") -> str:
+    digest = sha256_text(stable_json({"kind": kind, "from": from_node_id, "to": to_node_id, "key": key}))
+    return f"graph-edge:{TASK_GRAPH_NAMESPACE}:{kind}:{digest[:24]}"
+
+
+def _task_graph_fact(
+    key: str,
+    value: Any,
+    *,
+    value_type: str = "text",
+    source: str = "task_graph_mirror",
+    confidence: float = 1.0,
+) -> dict[str, Any]:
+    return {
+        "fact_key": key,
+        "fact_value": stable_json(value) if isinstance(value, (dict, list, tuple)) else str(value),
+        "value_type": value_type,
+        "source": source,
+        "confidence": confidence,
+    }
+
+
+def _task_text_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, Mapping):
+        for key in ("id", "ticket_id", "work_item_id", "node_id"):
+            text = str(value.get(key) or "").strip()
+            if text:
+                return [text]
+        return []
+    if isinstance(value, (list, tuple, set)):
+        items: list[str] = []
+        for item in value:
+            items.extend(_task_text_values(item))
+        return items
+    text = str(value).strip()
+    if not text:
+        return []
+    if "," in text:
+        return [part.strip() for part in text.split(",") if part.strip()]
+    return [text]
+
+
+def _task_status_done(status: Any) -> bool:
+    return str(status or "").strip().lower() in TASK_DONE_STATUSES
+
+
+def _task_status_pending(status: Any) -> bool:
+    normalized = str(status or "").strip().lower()
+    return not normalized or normalized in TASK_PENDING_STATUSES or normalized in TASK_BLOCKED_STATUSES
+
+
+def _task_graph_node(
+    kind: str,
+    key: str,
+    *,
+    name: str = "",
+    path: str = "",
+    status: str = "",
+    metadata: Mapping[str, Any] | None = None,
+    facts: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    node_metadata = dict(metadata or {})
+    if status:
+        node_metadata["status"] = status
+    return {
+        "node_id": _task_graph_node_id(kind, key),
+        "kind": kind,
+        "path": path,
+        "name": name or key,
+        "digest": sha256_text(stable_json({"kind": kind, "key": key, "metadata": node_metadata})),
+        "is_stale": 0,
+        "metadata": node_metadata,
+        "facts": list(facts or []),
+    }
+
+
+def _task_graph_edge(
+    kind: str,
+    from_node_id: str,
+    to_node_id: str,
+    *,
+    key: str = "",
+    metadata: Mapping[str, Any] | None = None,
+    facts: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    edge_metadata = dict(metadata or {})
+    return {
+        "edge_id": _task_graph_edge_id(kind, from_node_id, to_node_id, key),
+        "kind": kind,
+        "from_node_id": from_node_id,
+        "to_node_id": to_node_id,
+        "metadata": edge_metadata,
+        "facts": list(facts or []),
+    }
+
+
+def _add_task_graph_node(nodes: dict[str, dict[str, Any]], node: Mapping[str, Any]) -> dict[str, Any]:
+    node_id = str(node.get("node_id") or "")
+    if not node_id:
+        return {}
+    existing = nodes.get(node_id)
+    if existing is None:
+        nodes[node_id] = dict(node)
+        return nodes[node_id]
+    metadata = dict(existing.get("metadata") if isinstance(existing.get("metadata"), Mapping) else {})
+    incoming_metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+    metadata.update(incoming_metadata)
+    existing["metadata"] = metadata
+    existing["digest"] = sha256_text(stable_json({"node_id": node_id, "metadata": metadata}))
+    return existing
+
+
+def _add_task_graph_edge(edges: dict[str, dict[str, Any]], edge: Mapping[str, Any]) -> None:
+    edge_id = str(edge.get("edge_id") or "")
+    if edge_id:
+        edges[edge_id] = dict(edge)
+
+
+def _ticket_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    payload = _json_cell(row["payload_json"], {})
+    ticket = dict(payload) if isinstance(payload, dict) else {}
+    ticket.update(
+        {
+            "id": str(row["ticket_id"]),
+            "summary": str(row["summary"] or ""),
+            "status": str(row["status"] or "pending"),
+            "blocker": str(row["blocker"] or ""),
+            "position": int(row["position"] or 0),
+            "run_id": str(row["run_id"] or ""),
+        }
+    )
+    return ticket
+
+
+def _task_graph_ticket_nodes(
+    conn: sqlite3.Connection,
+    nodes: dict[str, dict[str, Any]],
+    edges: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    run = conn.execute("SELECT * FROM ticket_runs ORDER BY updated_at DESC LIMIT 1").fetchone()
+    if run is None:
+        return {}
+    run_id = str(run["run_id"] or "ticket-run")
+    run_node = _task_graph_node(
+        "run",
+        f"ticket-run:{run_id}",
+        name=run_id,
+        status=str(run["status"] or ""),
+        metadata={
+            "run_id": run_id,
+            "source": "ticket_runs",
+            "halt_when_complete": bool(run["halt_when_complete"]),
+            "notify_on_complete": bool(run["notify_on_complete"]),
+            "ticket_file": str(run["ticket_file"] or ""),
+            "report_path": str(run["report_path"] or ""),
+            "updated_at": str(run["updated_at"] or ""),
+        },
+        facts=[
+            _task_graph_fact("source", "ticket_runs"),
+            _task_graph_fact("status", str(run["status"] or "")),
+        ],
+    )
+    run_node = _add_task_graph_node(nodes, run_node)
+
+    rows = conn.execute(
+        "SELECT * FROM ticket_items WHERE run_id = ? ORDER BY position ASC, ticket_id ASC",
+        (run_id,),
+    ).fetchall()
+    ticket_nodes: dict[str, dict[str, Any]] = {}
+    ticket_payloads: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        ticket = _ticket_payload_from_row(row)
+        ticket_id = str(ticket.get("id") or "").strip()
+        if not ticket_id:
+            continue
+        status = str(ticket.get("status") or "pending").strip().lower()
+        summary = _brief_text(ticket.get("summary"), limit=180)
+        node = _task_graph_node(
+            "ticket",
+            ticket_id,
+            name=ticket_id,
+            status=status,
+            metadata={
+                "ticket_id": ticket_id,
+                "run_id": run_id,
+                "position": int(ticket.get("position") or 0),
+                "summary": summary,
+                "status": status,
+                "blocker": _brief_text(ticket.get("blocker"), limit=180),
+                "source": "ticket_items",
+            },
+            facts=[
+                _task_graph_fact("source", "ticket_items"),
+                _task_graph_fact("ticket_id", ticket_id),
+                _task_graph_fact("status", status),
+            ],
+        )
+        node = _add_task_graph_node(nodes, node)
+        ticket_nodes[ticket_id] = node
+        ticket_payloads[ticket_id] = ticket
+        if run_node:
+            _add_task_graph_edge(
+                edges,
+                _task_graph_edge(
+                    "spawned_by",
+                    str(node["node_id"]),
+                    str(run_node["node_id"]),
+                    key=f"ticket-run:{run_id}:{ticket_id}",
+                    metadata={"source": "ticket_items", "ticket_id": ticket_id, "run_id": run_id},
+                    facts=[_task_graph_fact("source", "ticket_items")],
+                ),
+            )
+
+    for ticket_id, ticket in ticket_payloads.items():
+        source_node = ticket_nodes[ticket_id]
+        for dependency in _task_text_values(ticket.get("depends_on")):
+            target_node = ticket_nodes.get(dependency)
+            if target_node is None:
+                target_node = _task_graph_node(
+                    "ticket",
+                    f"unresolved:{dependency}",
+                    name=dependency,
+                    status="unknown",
+                    metadata={
+                        "ticket_id": dependency,
+                        "status": "unknown",
+                        "source": "unresolved_dependency",
+                    },
+                    facts=[
+                        _task_graph_fact("source", "unresolved_dependency", confidence=0.5),
+                        _task_graph_fact("ticket_id", dependency, confidence=0.5),
+                    ],
+                )
+                target_node = _add_task_graph_node(nodes, target_node)
+                ticket_nodes[dependency] = target_node
+            _add_task_graph_edge(
+                edges,
+                _task_graph_edge(
+                    "depends_on",
+                    str(source_node["node_id"]),
+                    str(target_node["node_id"]),
+                    key=f"{ticket_id}:{dependency}",
+                    metadata={
+                        "source": "ticket_items.depends_on",
+                        "ticket_id": ticket_id,
+                        "dependency": dependency,
+                    },
+                    facts=[
+                        _task_graph_fact("source", "ticket_items.depends_on"),
+                        _task_graph_fact("dependency", dependency),
+                    ],
+                ),
+            )
+
+        for relation_kind, payload_key in (("supersedes", "supersedes"), ("duplicates", "duplicates")):
+            for related in _task_text_values(ticket.get(payload_key)):
+                related_node = ticket_nodes.get(related)
+                if related_node is None:
+                    continue
+                _add_task_graph_edge(
+                    edges,
+                    _task_graph_edge(
+                        relation_kind,
+                        str(source_node["node_id"]),
+                        str(related_node["node_id"]),
+                        key=f"{ticket_id}:{payload_key}:{related}",
+                        metadata={"source": f"ticket_items.{payload_key}", "ticket_id": ticket_id, "target": related},
+                        facts=[_task_graph_fact("source", f"ticket_items.{payload_key}")],
+                    ),
+                )
+
+        blocker_text = str(ticket.get("blocker") or "").strip()
+        if blocker_text:
+            blocker_key = f"ticket:{ticket_id}:blocker:{sha256_text(blocker_text)[:12]}"
+            blocker_node = _task_graph_node(
+                "blocker",
+                blocker_key,
+                name=f"{ticket_id} blocker",
+                status="pending" if str(ticket.get("status") or "").lower() == "blocked" else "open",
+                metadata={
+                    "ticket_id": ticket_id,
+                    "summary": _brief_text(blocker_text, limit=180),
+                    "source": "ticket_items.blocker",
+                },
+                facts=[
+                    _task_graph_fact("source", "ticket_items.blocker"),
+                    _task_graph_fact("ticket_id", ticket_id),
+                ],
+            )
+            blocker_node = _add_task_graph_node(nodes, blocker_node)
+            _add_task_graph_edge(
+                edges,
+                _task_graph_edge(
+                    "blocks",
+                    str(blocker_node["node_id"]),
+                    str(source_node["node_id"]),
+                    key=f"ticket-blocker:{ticket_id}",
+                    metadata={"source": "ticket_items.blocker", "ticket_id": ticket_id},
+                    facts=[_task_graph_fact("source", "ticket_items.blocker")],
+                ),
+            )
+    return ticket_nodes
+
+
+def _task_graph_conveyor_nodes(
+    conn: sqlite3.Connection,
+    nodes: dict[str, dict[str, Any]],
+    edges: dict[str, dict[str, Any]],
+    ticket_nodes: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    work_row = conn.execute(
+        "SELECT * FROM conveyor_work_items WHERE work_item_id = ?",
+        (CONVEYOR_WORK_ITEM_ID,),
+    ).fetchone()
+    work_node: dict[str, Any] = {}
+    if work_row is not None:
+        work_node = _task_graph_node(
+            "work_item",
+            str(work_row["work_item_id"]),
+            name=str(work_row["title"] or work_row["work_item_id"]),
+            status=str(work_row["status"] or ""),
+            metadata={
+                "work_item_id": str(work_row["work_item_id"]),
+                "title": str(work_row["title"] or ""),
+                "status": str(work_row["status"] or ""),
+                "current_stage": str(work_row["current_stage"] or ""),
+                "stage_status": str(work_row["stage_status"] or ""),
+                "owner_role": str(work_row["owner_role"] or ""),
+                "dependency_state": str(work_row["dependency_state"] or ""),
+                "validation_status": str(work_row["validation_status"] or ""),
+                "risk_tier": str(work_row["risk_tier"] or ""),
+                "source": "conveyor_work_items",
+            },
+            facts=[
+                _task_graph_fact("source", "conveyor_work_items"),
+                _task_graph_fact("status", str(work_row["status"] or "")),
+            ],
+        )
+        work_node = _add_task_graph_node(nodes, work_node)
+        validation_plan_node = _task_graph_node(
+            "validation_plan",
+            f"work-item:{work_row['work_item_id']}:validation-plan",
+            name=f"{work_row['work_item_id']} validation plan",
+            status=str(work_row["validation_status"] or "not_recorded"),
+            metadata={
+                "work_item_id": str(work_row["work_item_id"]),
+                "status": str(work_row["validation_status"] or "not_recorded"),
+                "source": "conveyor_work_items.validation_status",
+            },
+            facts=[_task_graph_fact("source", "conveyor_work_items.validation_status")],
+        )
+        validation_plan_node = _add_task_graph_node(nodes, validation_plan_node)
+        _add_task_graph_edge(
+            edges,
+            _task_graph_edge(
+                "validates",
+                str(validation_plan_node["node_id"]),
+                str(work_node["node_id"]),
+                key=f"validation-plan:{work_row['work_item_id']}",
+                metadata={"source": "conveyor_work_items.validation_status"},
+                facts=[_task_graph_fact("source", "conveyor_work_items.validation_status")],
+            ),
+        )
+
+    for row in conn.execute(
+        """
+        SELECT *
+        FROM runs
+        ORDER BY COALESCE(NULLIF(finished_at, ''), started_at) DESC, run_id ASC
+        LIMIT 50
+        """
+    ).fetchall():
+        run_node = _task_graph_node(
+            "run",
+            f"run:{row['run_id']}",
+            name=str(row["run_id"]),
+            status=str(row["status"] or ""),
+            metadata={
+                "run_id": str(row["run_id"]),
+                "task_id": str(row["task_id"] or ""),
+                "stream_id": str(row["stream_id"] or ""),
+                "phase": str(row["phase"] or ""),
+                "owner_role": str(row["owner_role"] or ""),
+                "status": str(row["status"] or ""),
+                "source": "runs",
+            },
+            facts=[
+                _task_graph_fact("source", "runs"),
+                _task_graph_fact("status", str(row["status"] or "")),
+            ],
+        )
+        run_node = _add_task_graph_node(nodes, run_node)
+        if work_node and str(row["task_id"] or "") == CONVEYOR_TASK_ID:
+            _add_task_graph_edge(
+                edges,
+                _task_graph_edge(
+                    "spawned_by",
+                    str(run_node["node_id"]),
+                    str(work_node["node_id"]),
+                    key=f"run:{row['run_id']}:work-item",
+                    metadata={"source": "runs", "task_id": str(row["task_id"] or "")},
+                    facts=[_task_graph_fact("source", "runs")],
+                ),
+            )
+        owner_role = str(row["owner_role"] or "").strip()
+        if owner_role:
+            assignment_node = _task_graph_node(
+                "worker_assignment",
+                f"{row['run_id']}:{owner_role}",
+                name=owner_role,
+                status=str(row["status"] or ""),
+                metadata={
+                    "run_id": str(row["run_id"]),
+                    "owner_role": owner_role,
+                    "status": str(row["status"] or ""),
+                    "source": "runs.owner_role",
+                },
+                facts=[_task_graph_fact("source", "runs.owner_role")],
+            )
+            assignment_node = _add_task_graph_node(nodes, assignment_node)
+            _add_task_graph_edge(
+                edges,
+                _task_graph_edge(
+                    "spawned_by",
+                    str(assignment_node["node_id"]),
+                    str(run_node["node_id"]),
+                    key=f"assignment:{row['run_id']}:{owner_role}",
+                    metadata={"source": "runs.owner_role"},
+                    facts=[_task_graph_fact("source", "runs.owner_role")],
+                ),
+            )
+
+    ticket_by_id = {
+        str((node.get("metadata") or {}).get("ticket_id") or ""): node
+        for node in ticket_nodes.values()
+        if isinstance(node.get("metadata"), Mapping)
+    }
+    for row in conn.execute(
+        "SELECT * FROM blockers ORDER BY updated_at DESC, blocker_id ASC LIMIT 50"
+    ).fetchall():
+        status = str(row["status"] or "")
+        blocker_node = _task_graph_node(
+            "blocker",
+            str(row["blocker_id"]),
+            name=str(row["kind"] or row["blocker_id"]),
+            status=status,
+            metadata={
+                "blocker_id": str(row["blocker_id"]),
+                "task_id": str(row["task_id"] or ""),
+                "kind": str(row["kind"] or ""),
+                "status": status,
+                "summary": _brief_text(row["summary"], limit=180),
+                "source": "blockers",
+            },
+            facts=[
+                _task_graph_fact("source", "blockers"),
+                _task_graph_fact("status", status),
+            ],
+        )
+        blocker_node = _add_task_graph_node(nodes, blocker_node)
+        task_id = str(row["task_id"] or "")
+        target_node = ticket_by_id.get(task_id)
+        if target_node is None and work_node and task_id in {CONVEYOR_TASK_ID, CONVEYOR_WORK_ITEM_ID, ""}:
+            target_node = work_node
+        if target_node:
+            _add_task_graph_edge(
+                edges,
+                _task_graph_edge(
+                    "blocks",
+                    str(blocker_node["node_id"]),
+                    str(target_node["node_id"]),
+                    key=f"blocker:{row['blocker_id']}:{target_node['node_id']}",
+                    metadata={"source": "blockers", "task_id": task_id},
+                    facts=[_task_graph_fact("source", "blockers")],
+                ),
+            )
+        if not _task_status_done(status):
+            playbook_node = _task_graph_node(
+                "recovery_playbook",
+                f"blocker:{row['blocker_id']}:recovery",
+                name=f"{row['blocker_id']} recovery",
+                status="planned",
+                metadata={
+                    "blocker_id": str(row["blocker_id"]),
+                    "status": "planned",
+                    "source": "blockers",
+                },
+                facts=[_task_graph_fact("source", "blockers")],
+            )
+            playbook_node = _add_task_graph_node(nodes, playbook_node)
+            _add_task_graph_edge(
+                edges,
+                _task_graph_edge(
+                    "repairs",
+                    str(playbook_node["node_id"]),
+                    str(blocker_node["node_id"]),
+                    key=f"recovery:{row['blocker_id']}",
+                    metadata={"source": "blockers"},
+                    facts=[_task_graph_fact("source", "blockers")],
+                ),
+            )
+
+    for row in conn.execute(
+        "SELECT * FROM escalations ORDER BY updated_at DESC, escalation_id ASC LIMIT 50"
+    ).fetchall():
+        approval_node = _task_graph_node(
+            "approval",
+            str(row["escalation_id"]),
+            name=str(row["kind"] or row["escalation_id"]),
+            status=str(row["status"] or ""),
+            metadata={
+                "approval_id": str(row["escalation_id"]),
+                "work_item_id": str(row["work_item_id"] or ""),
+                "kind": str(row["kind"] or ""),
+                "status": str(row["status"] or ""),
+                "summary": _brief_text(row["question"], limit=180),
+                "source": "escalations",
+            },
+            facts=[
+                _task_graph_fact("source", "escalations"),
+                _task_graph_fact("status", str(row["status"] or "")),
+            ],
+        )
+        approval_node = _add_task_graph_node(nodes, approval_node)
+        if work_node and str(row["work_item_id"] or "") == str((work_node.get("metadata") or {}).get("work_item_id") or ""):
+            _add_task_graph_edge(
+                edges,
+                _task_graph_edge(
+                    "blocks",
+                    str(approval_node["node_id"]),
+                    str(work_node["node_id"]),
+                    key=f"approval:{row['escalation_id']}",
+                    metadata={"source": "escalations", "work_item_id": str(row["work_item_id"] or "")},
+                    facts=[_task_graph_fact("source", "escalations")],
+                ),
+            )
+    return work_node
+
+
+def build_task_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str, Any]:
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: dict[str, dict[str, Any]] = {}
+    ticket_nodes = _task_graph_ticket_nodes(conn, nodes, edges)
+    _task_graph_conveyor_nodes(conn, nodes, edges, ticket_nodes)
+    node_list = sorted(nodes.values(), key=lambda item: (str(item.get("kind") or ""), str(item.get("name") or "")))
+    edge_list = sorted(edges.values(), key=lambda item: (str(item.get("kind") or ""), str(item.get("edge_id") or "")))
+    node_counts: dict[str, int] = {}
+    for node in node_list:
+        kind = str(node.get("kind") or "")
+        node_counts[kind] = node_counts.get(kind, 0) + 1
+    edge_counts: dict[str, int] = {}
+    for edge in edge_list:
+        kind = str(edge.get("kind") or "")
+        edge_counts[kind] = edge_counts.get(kind, 0) + 1
+    digest = sha256_text(
+        stable_json(
+            {
+                "namespace": TASK_GRAPH_NAMESPACE,
+                "nodes": [
+                    {
+                        "node_id": node.get("node_id"),
+                        "kind": node.get("kind"),
+                        "name": node.get("name"),
+                        "metadata": node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {},
+                    }
+                    for node in node_list
+                ],
+                "edges": [
+                    {
+                        "edge_id": edge.get("edge_id"),
+                        "kind": edge.get("kind"),
+                        "from_node_id": edge.get("from_node_id"),
+                        "to_node_id": edge.get("to_node_id"),
+                        "metadata": edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {},
+                    }
+                    for edge in edge_list
+                ],
+            }
+        )
+    )
+    return {
+        "schema_version": 1,
+        "snapshot_id": f"graph-snapshot:{TASK_GRAPH_NAMESPACE}:{digest[:24]}",
+        "graph_namespace": TASK_GRAPH_NAMESPACE,
+        "repo_root": str(target),
+        "generated_at": utc_now(),
+        "digest": digest,
+        "nodes": node_list,
+        "edges": edge_list,
+        "payload": {
+            "schema_version": 1,
+            "graph_namespace": TASK_GRAPH_NAMESPACE,
+            "node_kinds": list(TASK_GRAPH_NODE_KINDS),
+            "edge_kinds": list(TASK_GRAPH_EDGE_KINDS),
+            "node_counts": node_counts,
+            "edge_counts": edge_counts,
+        },
+    }
+
+
+def _latest_task_graph_snapshot_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT *
+        FROM graph_snapshots
+        WHERE graph_namespace = ?
+        ORDER BY generated_at DESC, rowid DESC
+        LIMIT 1
+        """,
+        (TASK_GRAPH_NAMESPACE,),
+    ).fetchone()
+
+
+def _insert_task_graph_conn(conn: sqlite3.Connection, graph: Mapping[str, Any]) -> None:
+    snapshot_id = str(graph["snapshot_id"])
+    with conn:
+        conn.execute("DELETE FROM graph_snapshots WHERE snapshot_id = ?", (snapshot_id,))
+        conn.execute(
+            """
+            INSERT INTO graph_snapshots(
+                snapshot_id, graph_namespace, repo_root, generated_at, head_commit,
+                dirty_tracked_file_count, dirty_tracked_files_digest, indexed_file_count,
+                directory_node_count, command_node_count, test_node_count, stale_node_count,
+                digest, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                TASK_GRAPH_NAMESPACE,
+                str(graph.get("repo_root") or ""),
+                str(graph.get("generated_at") or utc_now()),
+                "",
+                0,
+                "",
+                0,
+                0,
+                0,
+                0,
+                0,
+                str(graph.get("digest") or ""),
+                stable_json(graph.get("payload") if isinstance(graph.get("payload"), Mapping) else {}),
+            ),
+        )
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, Mapping):
+                continue
+            node_id = str(node.get("node_id") or "")
+            conn.execute(
+                """
+                INSERT INTO graph_nodes(
+                    snapshot_id, node_id, graph_namespace, kind, path, name, digest, is_stale, metadata_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    node_id,
+                    TASK_GRAPH_NAMESPACE,
+                    str(node.get("kind") or ""),
+                    str(node.get("path") or ""),
+                    str(node.get("name") or ""),
+                    str(node.get("digest") or ""),
+                    int(node.get("is_stale") or 0),
+                    stable_json(node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}),
+                ),
+            )
+            for fact in node.get("facts") or []:
+                if not isinstance(fact, Mapping):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO graph_node_facts(
+                        snapshot_id, node_id, graph_namespace, fact_key, fact_value, value_type, source, confidence
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        node_id,
+                        TASK_GRAPH_NAMESPACE,
+                        str(fact.get("fact_key") or ""),
+                        str(fact.get("fact_value") or ""),
+                        str(fact.get("value_type") or "text"),
+                        str(fact.get("source") or "task_graph_mirror"),
+                        float(fact.get("confidence") if fact.get("confidence") is not None else 1.0),
+                    ),
+                )
+        for edge in graph.get("edges") or []:
+            if not isinstance(edge, Mapping):
+                continue
+            edge_id = str(edge.get("edge_id") or "")
+            conn.execute(
+                """
+                INSERT INTO graph_edges(
+                    snapshot_id, edge_id, graph_namespace, kind, from_node_id, to_node_id, metadata_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    edge_id,
+                    TASK_GRAPH_NAMESPACE,
+                    str(edge.get("kind") or ""),
+                    str(edge.get("from_node_id") or ""),
+                    str(edge.get("to_node_id") or ""),
+                    stable_json(edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {}),
+                ),
+            )
+            for fact in edge.get("facts") or []:
+                if not isinstance(fact, Mapping):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO graph_edge_facts(
+                        snapshot_id, edge_id, graph_namespace, fact_key, fact_value, value_type, source, confidence
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        edge_id,
+                        TASK_GRAPH_NAMESPACE,
+                        str(fact.get("fact_key") or ""),
+                        str(fact.get("fact_value") or ""),
+                        str(fact.get("value_type") or "text"),
+                        str(fact.get("source") or "task_graph_mirror"),
+                        float(fact.get("confidence") if fact.get("confidence") is not None else 1.0),
+                    ),
+                )
+
+
+def refresh_task_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str, Any]:
+    graph = build_task_graph_conn(conn, target)
+    latest = _latest_task_graph_snapshot_row(conn)
+    if latest is not None and str(latest["digest"]) == str(graph["digest"]):
+        return task_graph_summary(conn)
+    _insert_task_graph_conn(conn, graph)
+    return task_graph_summary(conn)
+
+
+def _task_graph_node_public_id(node: Mapping[str, Any]) -> str:
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+    for key in ("ticket_id", "work_item_id", "run_id", "blocker_id", "approval_id"):
+        text = str(metadata.get(key) or "").strip()
+        if text:
+            return text
+    return str(node.get("name") or node.get("node_id") or "")
+
+
+def _task_graph_node_brief(node: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+    return {
+        "node_id": str(node.get("node_id") or ""),
+        "kind": str(node.get("kind") or ""),
+        "id": _task_graph_node_public_id(node),
+        "name": str(node.get("name") or ""),
+        "status": str(metadata.get("status") or ""),
+        "summary": _brief_text(metadata.get("summary") or metadata.get("title") or "", limit=140),
+    }
+
+
+def _task_graph_dependency_cycles(nodes: Mapping[str, Mapping[str, Any]], depends_on: Mapping[str, list[str]]) -> list[dict[str, Any]]:
+    visiting: list[str] = []
+    visited: set[str] = set()
+    cycle_keys: set[tuple[str, ...]] = set()
+    cycles: list[dict[str, Any]] = []
+
+    def canonical(ids: list[str]) -> tuple[str, ...]:
+        if not ids:
+            return ()
+        rotations = [tuple(ids[index:] + ids[:index]) for index in range(len(ids))]
+        return min(rotations)
+
+    def visit(node_id: str) -> None:
+        if node_id in visiting:
+            index = visiting.index(node_id)
+            ids = visiting[index:]
+            key = canonical(ids)
+            if key and key not in cycle_keys:
+                cycle_keys.add(key)
+                cycle_ids = list(key)
+                cycles.append(
+                    {
+                        "node_ids": cycle_ids,
+                        "labels": [_task_graph_node_public_id(nodes.get(item, {"node_id": item})) for item in cycle_ids],
+                        "length": len(cycle_ids),
+                    }
+                )
+            return
+        if node_id in visited:
+            return
+        visiting.append(node_id)
+        for dependency_id in depends_on.get(node_id, []):
+            visit(dependency_id)
+        visiting.pop()
+        visited.add(node_id)
+
+    for node_id in sorted(depends_on):
+        visit(node_id)
+    return cycles[:20]
+
+
+def task_graph_read_model(conn: sqlite3.Connection, *, snapshot_id: str | None = None) -> dict[str, Any]:
+    row = _latest_task_graph_snapshot_row(conn) if snapshot_id is None else conn.execute(
+        "SELECT * FROM graph_snapshots WHERE snapshot_id = ? AND graph_namespace = ?",
+        (snapshot_id, TASK_GRAPH_NAMESPACE),
+    ).fetchone()
+    if row is None:
+        return {"ready_task_nodes": [], "blocked_task_nodes": [], "dependency_cycles": []}
+    resolved_snapshot_id = str(row["snapshot_id"])
+    node_rows = conn.execute(
+        """
+        SELECT node_id, kind, path, name, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ? AND graph_namespace = ?
+        """,
+        (resolved_snapshot_id, TASK_GRAPH_NAMESPACE),
+    ).fetchall()
+    edge_rows = conn.execute(
+        """
+        SELECT kind, from_node_id, to_node_id, metadata_json
+        FROM graph_edges
+        WHERE snapshot_id = ? AND graph_namespace = ?
+        """,
+        (resolved_snapshot_id, TASK_GRAPH_NAMESPACE),
+    ).fetchall()
+    nodes: dict[str, dict[str, Any]] = {}
+    for node_row in node_rows:
+        metadata = _json_cell(node_row["metadata_json"], {})
+        nodes[str(node_row["node_id"])] = {
+            "node_id": str(node_row["node_id"]),
+            "kind": str(node_row["kind"] or ""),
+            "path": str(node_row["path"] or ""),
+            "name": str(node_row["name"] or ""),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+    depends_on: dict[str, list[str]] = {}
+    blocks_target: dict[str, list[str]] = {}
+    for edge_row in edge_rows:
+        kind = str(edge_row["kind"] or "")
+        from_node_id = str(edge_row["from_node_id"] or "")
+        to_node_id = str(edge_row["to_node_id"] or "")
+        if kind == "depends_on":
+            depends_on.setdefault(from_node_id, []).append(to_node_id)
+        elif kind == "blocks":
+            blocks_target.setdefault(to_node_id, []).append(from_node_id)
+
+    ready: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    for node_id in sorted(nodes):
+        node = nodes[node_id]
+        kind = str(node.get("kind") or "")
+        if kind not in {"ticket", "work_item"}:
+            continue
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+        status = str(metadata.get("status") or "").strip().lower()
+        if _task_status_done(status):
+            continue
+        blocked_reasons: list[dict[str, Any]] = []
+        if status in TASK_BLOCKED_STATUSES:
+            blocked_reasons.append({"kind": "status", "status": status})
+        for dependency_id in depends_on.get(node_id, []):
+            dependency = nodes.get(dependency_id, {"node_id": dependency_id, "kind": "unknown", "metadata": {}})
+            dependency_metadata = dependency.get("metadata") if isinstance(dependency.get("metadata"), Mapping) else {}
+            dependency_status = str(dependency_metadata.get("status") or "").strip().lower()
+            if not _task_status_done(dependency_status):
+                blocked_reasons.append(
+                    {
+                        "kind": "dependency",
+                        "status": dependency_status or "unknown",
+                        "dependency": _task_graph_node_brief(dependency),
+                    }
+                )
+        for blocker_id in blocks_target.get(node_id, []):
+            blocker = nodes.get(blocker_id, {"node_id": blocker_id, "kind": "blocker", "metadata": {}})
+            blocker_metadata = blocker.get("metadata") if isinstance(blocker.get("metadata"), Mapping) else {}
+            blocker_status = str(blocker_metadata.get("status") or "").strip().lower()
+            if _task_status_pending(blocker_status) and not _task_status_done(blocker_status):
+                blocked_reasons.append(
+                    {
+                        "kind": str(blocker.get("kind") or "blocker"),
+                        "status": blocker_status or "pending",
+                        "blocker": _task_graph_node_brief(blocker),
+                    }
+                )
+        brief = _task_graph_node_brief(node)
+        if blocked_reasons:
+            brief["blocked_reasons"] = blocked_reasons[:5]
+            blocked.append(brief)
+        else:
+            brief["ready_reason"] = "dependencies_resolved"
+            ready.append(brief)
+
+    cycles = _task_graph_dependency_cycles(nodes, depends_on)
+    return {
+        "ready_task_nodes": ready[:20],
+        "blocked_task_nodes": blocked[:20],
+        "dependency_cycles": cycles,
+    }
+
+
+def task_graph_summary(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = _latest_task_graph_snapshot_row(conn)
+    if row is None:
+        return {
+            "schema_version": 1,
+            "graph_namespace": TASK_GRAPH_NAMESPACE,
+            "exists": False,
+            "latest_snapshot_id": "",
+            "latest_graph_snapshot": {},
+            "node_counts": {},
+            "edge_counts": {},
+            "ready_task_count": 0,
+            "blocked_task_count": 0,
+            "dependency_cycle_count": 0,
+        }
+    snapshot_id = str(row["snapshot_id"])
+    node_counts = _graph_counts(conn, snapshot_id, "kind", "graph_nodes")
+    edge_counts = _graph_counts(conn, snapshot_id, "kind", "graph_edges")
+    read_model = task_graph_read_model(conn, snapshot_id=snapshot_id)
+    latest = {
+        "snapshot_id": snapshot_id,
+        "graph_namespace": str(row["graph_namespace"]),
+        "generated_at": str(row["generated_at"] or ""),
+        "digest": str(row["digest"] or ""),
+        "node_count": sum(node_counts.values()),
+        "edge_count": sum(edge_counts.values()),
+        "ticket_node_count": int(node_counts.get("ticket", 0)),
+        "work_item_node_count": int(node_counts.get("work_item", 0)),
+        "ready_task_count": len(read_model["ready_task_nodes"]),
+        "blocked_task_count": len(read_model["blocked_task_nodes"]),
+        "dependency_cycle_count": len(read_model["dependency_cycles"]),
+    }
+    return {
+        "schema_version": 1,
+        "graph_namespace": TASK_GRAPH_NAMESPACE,
+        "exists": True,
+        "latest_snapshot_id": snapshot_id,
+        "latest_graph_snapshot": latest,
+        "node_counts": node_counts,
+        "edge_counts": edge_counts,
+        "ready_task_count": len(read_model["ready_task_nodes"]),
+        "blocked_task_count": len(read_model["blocked_task_nodes"]),
+        "dependency_cycle_count": len(read_model["dependency_cycles"]),
+    }
+
+
+def _impact_graph_node_id(kind: str, key: str) -> str:
+    return f"graph-node:{IMPACT_GRAPH_NAMESPACE}:{kind}:{sha256_text(str(key))[:24]}"
+
+
+def _impact_graph_edge_id(kind: str, from_node_id: str, to_node_id: str, key: str = "") -> str:
+    digest = sha256_text(stable_json({"kind": kind, "from": from_node_id, "to": to_node_id, "key": key}))
+    return f"graph-edge:{IMPACT_GRAPH_NAMESPACE}:{kind}:{digest[:24]}"
+
+
+def _impact_graph_fact(
+    key: str,
+    value: Any,
+    *,
+    value_type: str = "text",
+    source: str = "impact_inference",
+    confidence: float = 1.0,
+) -> dict[str, Any]:
+    return {
+        "fact_key": key,
+        "fact_value": stable_json(value) if isinstance(value, (dict, list, tuple)) else str(value),
+        "value_type": value_type,
+        "source": source,
+        "confidence": confidence,
+    }
+
+
+def _impact_graph_edge(
+    kind: str,
+    from_node_id: str,
+    to_node_id: str,
+    *,
+    confidence: float,
+    reason: str,
+    source: str,
+    key: str = "",
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_confidence = max(0.0, min(1.0, float(confidence)))
+    edge_metadata = dict(metadata or {})
+    edge_metadata.update(
+        {
+            "confidence": round(normalized_confidence, 4),
+            "reason": _brief_text(reason, limit=180),
+            "source": source,
+        }
+    )
+    return {
+        "edge_id": _impact_graph_edge_id(kind, from_node_id, to_node_id, key),
+        "kind": kind,
+        "from_node_id": from_node_id,
+        "to_node_id": to_node_id,
+        "metadata": edge_metadata,
+        "facts": [
+            _impact_graph_fact("source", source, source=source, confidence=normalized_confidence),
+            _impact_graph_fact("confidence", f"{normalized_confidence:.4f}", value_type="number", source=source, confidence=normalized_confidence),
+            _impact_graph_fact("reason", edge_metadata["reason"], source=source, confidence=normalized_confidence),
+        ],
+    }
+
+
+def _impact_copy_graph_node(row: sqlite3.Row, *, source_namespace: str, source_snapshot_id: str) -> dict[str, Any]:
+    metadata = _json_cell(row["metadata_json"], {})
+    node_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    node_metadata.update(
+        {
+            "source_graph_namespace": source_namespace,
+            "source_snapshot_id": source_snapshot_id,
+        }
+    )
+    return {
+        "node_id": str(row["node_id"]),
+        "kind": str(row["kind"] or ""),
+        "path": str(row["path"] or ""),
+        "name": str(row["name"] or ""),
+        "digest": str(row["digest"] or ""),
+        "is_stale": int(row["is_stale"] or 0),
+        "metadata": node_metadata,
+        "facts": [
+            _impact_graph_fact("source_graph_namespace", source_namespace),
+            _impact_graph_fact("source_snapshot_id", source_snapshot_id),
+        ],
+    }
+
+
+def _impact_add_node(nodes: dict[str, dict[str, Any]], node: Mapping[str, Any]) -> dict[str, Any]:
+    node_id = str(node.get("node_id") or "")
+    if not node_id:
+        return {}
+    existing = nodes.get(node_id)
+    if existing is None:
+        nodes[node_id] = dict(node)
+        return nodes[node_id]
+    existing_stale = int(existing.get("is_stale") or 0)
+    incoming_stale = int(node.get("is_stale") or 0)
+    existing["is_stale"] = 1 if existing_stale or incoming_stale else 0
+    metadata = dict(existing.get("metadata") if isinstance(existing.get("metadata"), Mapping) else {})
+    incoming_metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+    metadata.update(incoming_metadata)
+    existing["metadata"] = metadata
+    return existing
+
+
+def _impact_add_edge(edges: dict[str, dict[str, Any]], edge: Mapping[str, Any]) -> None:
+    edge_id = str(edge.get("edge_id") or "")
+    if not edge_id:
+        return
+    current = edges.get(edge_id)
+    if current is None:
+        edges[edge_id] = dict(edge)
+        return
+    current_metadata = current.get("metadata") if isinstance(current.get("metadata"), Mapping) else {}
+    next_metadata = edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {}
+    if float(next_metadata.get("confidence") or 0) > float(current_metadata.get("confidence") or 0):
+        edges[edge_id] = dict(edge)
+
+
+def _impact_terms(value: Any) -> set[str]:
+    text = str(value or "").lower()
+    stopwords = {
+        "add",
+        "and",
+        "are",
+        "bug",
+        "build",
+        "change",
+        "code",
+        "file",
+        "fix",
+        "for",
+        "from",
+        "into",
+        "new",
+        "node",
+        "repo",
+        "task",
+        "test",
+        "the",
+        "this",
+        "ticket",
+        "update",
+        "with",
+        "work",
+    }
+    terms = {item for item in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", text) if item not in stopwords}
+    expanded: set[str] = set()
+    for term in terms:
+        expanded.add(term.replace("-", "_"))
+        expanded.add(term.replace("_", "-"))
+        expanded.add(term)
+    return expanded
+
+
+def _impact_path_mentions(value: Any) -> set[str]:
+    text = str(value or "")
+    mentions: set[str] = set()
+    pattern = r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_.@/-]+(?:/[A-Za-z0-9_.@-]+)+|[A-Za-z0-9_.@/-]+\.[A-Za-z0-9]{1,12})(?![A-Za-z0-9_./-])"
+    for raw in re.findall(pattern, text):
+        candidate = normalize_path_for_brief(raw.strip("`'\"()[]{}:,;"))
+        if candidate and not candidate.startswith("http"):
+            mentions.add(candidate)
+    return mentions
+
+
+def _impact_node_text(node: Mapping[str, Any]) -> str:
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+    parts = [
+        node.get("name"),
+        metadata.get("summary"),
+        metadata.get("title"),
+        metadata.get("ticket_id"),
+        metadata.get("work_item_id"),
+        metadata.get("blocker"),
+    ]
+    return " ".join(str(part or "") for part in parts)
+
+
+def _impact_code_segments(node: Mapping[str, Any]) -> set[str]:
+    path = str(node.get("path") or "")
+    name = str(node.get("name") or "")
+    text = f"{path} {name}".lower()
+    segments = {item for item in re.split(r"[^a-z0-9]+", text) if len(item) >= 3}
+    for part in Path(path).parts:
+        stem = Path(part).stem.lower()
+        if len(stem) >= 3:
+            segments.add(stem)
+    return segments
+
+
+def _impact_code_category(kind: str) -> str:
+    if kind == "test_file":
+        return "tests"
+    if kind in {"config_file", "lockfile"}:
+        return "configs"
+    if kind == "doc_file":
+        return "docs"
+    if kind == "command":
+        return "commands"
+    if kind == "artifact":
+        return "artifacts"
+    return "files"
+
+
+def _impact_context_path_allowed(path_value: Any) -> bool:
+    path = str(path_value or "").strip()
+    if not path:
+        return True
+    name = Path(path).name.lower()
+    if name in IMPACT_CONTEXT_SECRET_BASENAMES:
+        return False
+    if name.startswith(".env.") and name != ".env.example":
+        return False
+    suffixes = {".pem", ".key", ".p12", ".pfx"}
+    if Path(path).suffix.lower() in suffixes:
+        return False
+    lowered = path.lower()
+    secret_tokens = ("/secrets/", "/credentials/", "id_rsa", "private_key")
+    return not any(token in lowered for token in secret_tokens)
+
+
+def _impact_candidate(
+    nodes: dict[str, dict[str, Any]],
+    edges: dict[str, dict[str, Any]],
+    task_node: Mapping[str, Any],
+    target_node: Mapping[str, Any],
+    *,
+    edge_kind: str = "likely_touches",
+    confidence: float,
+    reason: str,
+    source: str,
+) -> None:
+    task = _impact_add_node(nodes, task_node)
+    target = _impact_add_node(nodes, target_node)
+    if not task or not target:
+        return
+    confidence = max(0.0, min(1.0, confidence))
+    task_public_id = _task_graph_node_public_id(task)
+    metadata = {
+        "task_id": task_public_id,
+        "target_kind": str(target.get("kind") or ""),
+        "target_path": str(target.get("path") or ""),
+        "target_name": str(target.get("name") or ""),
+    }
+    _impact_add_edge(
+        edges,
+        _impact_graph_edge(
+            edge_kind,
+            str(task["node_id"]),
+            str(target["node_id"]),
+            confidence=confidence,
+            reason=reason,
+            source=source,
+            key=f"{edge_kind}:{task['node_id']}:{target['node_id']}",
+            metadata=metadata,
+        ),
+    )
+    if edge_kind == "likely_touches":
+        reverse_metadata = dict(metadata)
+        reverse_metadata["task_id"] = task_public_id
+        for reverse_kind in ("touched_by", "relevant_context_for"):
+            _impact_add_edge(
+                edges,
+                _impact_graph_edge(
+                    reverse_kind,
+                    str(target["node_id"]),
+                    str(task["node_id"]),
+                    confidence=confidence,
+                    reason=reason,
+                    source=source,
+                    key=f"{reverse_kind}:{target['node_id']}:{task['node_id']}",
+                    metadata=reverse_metadata,
+                ),
+            )
+
+
+def _impact_score_path_mentions(task_text: str, code_node: Mapping[str, Any]) -> tuple[float, str]:
+    path = normalize_path_for_brief(str(code_node.get("path") or ""))
+    if not path:
+        return 0.0, ""
+    for mention in sorted(_impact_path_mentions(task_text), key=len, reverse=True):
+        if path == mention or path.endswith("/" + mention) or mention.endswith("/" + path):
+            return 0.98, f"path mention `{mention}`"
+    return 0.0, ""
+
+
+def _impact_score_keywords(task_terms: set[str], code_node: Mapping[str, Any]) -> tuple[float, str]:
+    if not task_terms:
+        return 0.0, ""
+    segments = _impact_code_segments(code_node)
+    matches: list[str] = []
+    for term in task_terms:
+        if term in segments:
+            matches.append(term)
+            continue
+        if len(term) >= 4 and any(term in segment or segment in term for segment in segments if len(segment) >= 4):
+            matches.append(term)
+    if not matches:
+        return 0.0, ""
+    kind = str(code_node.get("kind") or "")
+    base = 0.36 + min(0.32, 0.12 * len(set(matches)))
+    if kind in {"file", "test_file"}:
+        base += 0.08
+    elif kind in {"config_file", "doc_file", "lockfile"}:
+        base += 0.02
+    return min(0.86, base), "keyword match: " + ", ".join(sorted(set(matches))[:4])
+
+
+def _impact_score_command(task_text: str, task_terms: set[str], code_node: Mapping[str, Any], *, has_test_candidate: bool) -> tuple[float, str]:
+    if str(code_node.get("kind") or "") != "command":
+        return 0.0, ""
+    metadata = code_node.get("metadata") if isinstance(code_node.get("metadata"), Mapping) else {}
+    command_text = f"{code_node.get('name') or ''} {metadata.get('command') or ''}".lower()
+    command_terms = _impact_terms(command_text)
+    matches = sorted(term for term in task_terms if term in command_terms)
+    validation_words = {"verify", "validation", "smoke", "test", "lint", "build", "check"}
+    if matches:
+        return 0.72, "command keyword match: " + ", ".join(matches[:4])
+    if has_test_candidate and any(word in command_text for word in ("test", "pytest", "vitest", "jest", "node --test")):
+        return 0.6, "validation command for impacted tests"
+    if any(word in task_text.lower() for word in validation_words) and any(word in command_text for word in validation_words):
+        return 0.58, "validation command relevance"
+    return 0.0, ""
+
+
+def _latest_impact_graph_snapshot_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT *
+        FROM graph_snapshots
+        WHERE graph_namespace = ?
+        ORDER BY generated_at DESC, rowid DESC
+        LIMIT 1
+        """,
+        (IMPACT_GRAPH_NAMESPACE,),
+    ).fetchone()
+
+
+def build_impact_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str, Any]:
+    codebase_row = _latest_codebase_graph_snapshot_row(conn)
+    task_row = _latest_task_graph_snapshot_row(conn)
+    if codebase_row is None or task_row is None:
+        digest = sha256_text(stable_json({"namespace": IMPACT_GRAPH_NAMESPACE, "codebase": bool(codebase_row), "task": bool(task_row)}))
+        return {
+            "schema_version": 1,
+            "snapshot_id": f"graph-snapshot:{IMPACT_GRAPH_NAMESPACE}:{digest[:24]}",
+            "graph_namespace": IMPACT_GRAPH_NAMESPACE,
+            "repo_root": str(target),
+            "generated_at": utc_now(),
+            "digest": digest,
+            "nodes": [],
+            "edges": [],
+            "payload": {
+                "schema_version": 1,
+                "graph_namespace": IMPACT_GRAPH_NAMESPACE,
+                "edge_kinds": list(IMPACT_GRAPH_EDGE_KINDS),
+                "node_counts": {},
+                "edge_counts": {},
+            },
+        }
+
+    codebase_snapshot_id = str(codebase_row["snapshot_id"])
+    task_snapshot_id = str(task_row["snapshot_id"])
+    code_rows = conn.execute(
+        """
+        SELECT node_id, kind, path, name, digest, is_stale, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ? AND graph_namespace = ?
+          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile', 'command')
+        """,
+        (codebase_snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    task_rows = conn.execute(
+        """
+        SELECT node_id, kind, path, name, digest, is_stale, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ? AND graph_namespace = ?
+          AND kind IN ('ticket', 'work_item', 'blocker', 'approval')
+        """,
+        (task_snapshot_id, TASK_GRAPH_NAMESPACE),
+    ).fetchall()
+    code_nodes = [
+        _impact_copy_graph_node(row, source_namespace=CODEBASE_GRAPH_NAMESPACE, source_snapshot_id=codebase_snapshot_id)
+        for row in code_rows
+        if _impact_context_path_allowed(row["path"])
+    ]
+    task_nodes = [
+        _impact_copy_graph_node(row, source_namespace=TASK_GRAPH_NAMESPACE, source_snapshot_id=task_snapshot_id)
+        for row in task_rows
+    ]
+    code_by_id = {str(node["node_id"]): node for node in code_nodes}
+    test_edges: dict[str, list[str]] = {}
+    for row in conn.execute(
+        """
+        SELECT from_node_id, to_node_id
+        FROM graph_edges
+        WHERE snapshot_id = ? AND graph_namespace = ? AND kind = 'likely_tests'
+        """,
+        (codebase_snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall():
+        test_id = str(row["from_node_id"])
+        source_id = str(row["to_node_id"])
+        if test_id in code_by_id and source_id in code_by_id:
+            test_edges.setdefault(source_id, []).append(test_id)
+
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: dict[str, dict[str, Any]] = {}
+    primary_candidate_ids_by_task: dict[str, list[tuple[str, float, str]]] = {}
+    for task_node in task_nodes:
+        task_kind = str(task_node.get("kind") or "")
+        if task_kind not in {"ticket", "work_item"}:
+            continue
+        task_text = _impact_node_text(task_node)
+        task_terms = _impact_terms(task_text)
+        primary_candidates: list[tuple[str, float, str]] = []
+        for code_node in code_nodes:
+            kind = str(code_node.get("kind") or "")
+            if kind == "command":
+                continue
+            path_confidence, path_reason = _impact_score_path_mentions(task_text, code_node)
+            keyword_confidence, keyword_reason = _impact_score_keywords(task_terms, code_node)
+            confidence = path_confidence
+            reason = path_reason
+            source = "path_mention" if path_confidence else "keyword_path_match"
+            if keyword_confidence > confidence:
+                confidence = keyword_confidence
+                reason = keyword_reason
+            if confidence <= 0:
+                continue
+            _impact_candidate(
+                nodes,
+                edges,
+                task_node,
+                code_node,
+                confidence=confidence,
+                reason=reason,
+                source=source,
+            )
+            primary_candidates.append((str(code_node["node_id"]), confidence, reason))
+        primary_candidate_ids_by_task[str(task_node["node_id"])] = primary_candidates
+
+    for task_node in task_nodes:
+        task_id = str(task_node.get("node_id") or "")
+        primary_candidates = primary_candidate_ids_by_task.get(task_id, [])
+        has_test_candidate = any(str(code_by_id.get(node_id, {}).get("kind") or "") == "test_file" for node_id, _confidence, _reason in primary_candidates)
+        for source_node_id, confidence, _reason in primary_candidates:
+            for test_node_id in test_edges.get(source_node_id, []):
+                test_node = code_by_id[test_node_id]
+                _impact_candidate(
+                    nodes,
+                    edges,
+                    task_node,
+                    test_node,
+                    confidence=max(0.2, confidence - 0.1),
+                    reason=f"test proximity for `{code_by_id[source_node_id].get('path') or code_by_id[source_node_id].get('name')}`",
+                    source="test_proximity",
+                )
+                has_test_candidate = True
+        task_text = _impact_node_text(task_node)
+        task_terms = _impact_terms(task_text)
+        for code_node in code_nodes:
+            command_confidence, command_reason = _impact_score_command(task_text, task_terms, code_node, has_test_candidate=has_test_candidate)
+            if command_confidence <= 0:
+                continue
+            _impact_candidate(
+                nodes,
+                edges,
+                task_node,
+                code_node,
+                edge_kind="requires_validation",
+                confidence=command_confidence,
+                reason=command_reason,
+                source="command_relevance",
+            )
+
+    artifact_rows = conn.execute(
+        "SELECT artifact_id, task_id, run_id, kind, path, digest, created_at, payload_json FROM artifacts ORDER BY created_at DESC LIMIT 50"
+    ).fetchall()
+    for row in artifact_rows:
+        path = str(row["path"] or "")
+        if not _impact_context_path_allowed(path):
+            continue
+        artifact_node = {
+            "node_id": _impact_graph_node_id("artifact", str(row["artifact_id"])),
+            "kind": "artifact",
+            "path": normalize_path_for_brief(path),
+            "name": str(row["artifact_id"]),
+            "digest": str(row["digest"] or ""),
+            "is_stale": 0,
+            "metadata": {
+                "artifact_id": str(row["artifact_id"]),
+                "task_id": str(row["task_id"] or ""),
+                "run_id": str(row["run_id"] or ""),
+                "kind": str(row["kind"] or ""),
+                "created_at": str(row["created_at"] or ""),
+                "source_graph_namespace": IMPACT_GRAPH_NAMESPACE,
+            },
+            "facts": [_impact_graph_fact("source", "artifacts")],
+        }
+        artifact_terms = _impact_terms(path)
+        for task_node in task_nodes:
+            task_terms = _impact_terms(_impact_node_text(task_node))
+            if artifact_terms and task_terms.intersection(artifact_terms):
+                _impact_candidate(
+                    nodes,
+                    edges,
+                    task_node,
+                    artifact_node,
+                    confidence=0.44,
+                    reason="previous artifact path matches task keywords",
+                    source="artifact_relevance",
+                )
+
+    touched_by_target: dict[str, list[str]] = {}
+    active_task_ids = {
+        str(node.get("node_id") or "")
+        for node in task_nodes
+        if str((node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}).get("status") or "").lower()
+        not in TASK_DONE_STATUSES
+    }
+    for edge in list(edges.values()):
+        if str(edge.get("kind") or "") != "likely_touches":
+            continue
+        from_id = str(edge.get("from_node_id") or "")
+        to_id = str(edge.get("to_node_id") or "")
+        if from_id in active_task_ids:
+            touched_by_target.setdefault(to_id, []).append(from_id)
+    task_by_id = {str(node.get("node_id") or ""): node for node in task_nodes}
+    for target_id, task_ids in touched_by_target.items():
+        unique_task_ids = sorted(set(task_ids))
+        if len(unique_task_ids) < 2:
+            continue
+        target_node = code_by_id.get(target_id) or nodes.get(target_id)
+        if not target_node:
+            continue
+        for index, first_id in enumerate(unique_task_ids):
+            for second_id in unique_task_ids[index + 1 :]:
+                if first_id not in task_by_id or second_id not in task_by_id:
+                    continue
+                reason = f"both tasks may touch `{target_node.get('path') or target_node.get('name')}`"
+                _impact_candidate(
+                    nodes,
+                    edges,
+                    task_by_id[first_id],
+                    task_by_id[second_id],
+                    edge_kind="conflicts_with",
+                    confidence=0.5,
+                    reason=reason,
+                    source="shared_likely_touch",
+                )
+                _impact_candidate(
+                    nodes,
+                    edges,
+                    task_by_id[second_id],
+                    task_by_id[first_id],
+                    edge_kind="conflicts_with",
+                    confidence=0.5,
+                    reason=reason,
+                    source="shared_likely_touch",
+                )
+
+    node_list = sorted(nodes.values(), key=lambda item: (str(item.get("kind") or ""), str(item.get("path") or ""), str(item.get("name") or "")))
+    edge_list = sorted(edges.values(), key=lambda item: (str(item.get("kind") or ""), str(item.get("edge_id") or "")))
+    node_counts: dict[str, int] = {}
+    for node in node_list:
+        kind = str(node.get("kind") or "")
+        node_counts[kind] = node_counts.get(kind, 0) + 1
+    edge_counts: dict[str, int] = {}
+    for edge in edge_list:
+        kind = str(edge.get("kind") or "")
+        edge_counts[kind] = edge_counts.get(kind, 0) + 1
+    digest = sha256_text(
+        stable_json(
+            {
+                "namespace": IMPACT_GRAPH_NAMESPACE,
+                "codebase_snapshot": codebase_snapshot_id,
+                "task_snapshot": task_snapshot_id,
+                "nodes": [
+                    {
+                        "node_id": node.get("node_id"),
+                        "kind": node.get("kind"),
+                        "path": node.get("path"),
+                        "name": node.get("name"),
+                        "is_stale": int(node.get("is_stale") or 0),
+                        "metadata": node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {},
+                    }
+                    for node in node_list
+                ],
+                "edges": [
+                    {
+                        "edge_id": edge.get("edge_id"),
+                        "kind": edge.get("kind"),
+                        "from_node_id": edge.get("from_node_id"),
+                        "to_node_id": edge.get("to_node_id"),
+                        "metadata": edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {},
+                    }
+                    for edge in edge_list
+                ],
+            }
+        )
+    )
+    return {
+        "schema_version": 1,
+        "snapshot_id": f"graph-snapshot:{IMPACT_GRAPH_NAMESPACE}:{digest[:24]}",
+        "graph_namespace": IMPACT_GRAPH_NAMESPACE,
+        "repo_root": str(target),
+        "generated_at": utc_now(),
+        "digest": digest,
+        "nodes": node_list,
+        "edges": edge_list,
+        "payload": {
+            "schema_version": 1,
+            "graph_namespace": IMPACT_GRAPH_NAMESPACE,
+            "edge_kinds": list(IMPACT_GRAPH_EDGE_KINDS),
+            "codebase_snapshot_id": codebase_snapshot_id,
+            "task_snapshot_id": task_snapshot_id,
+            "node_counts": node_counts,
+            "edge_counts": edge_counts,
+        },
+    }
+
+
+def _insert_impact_graph_conn(conn: sqlite3.Connection, graph: Mapping[str, Any]) -> None:
+    snapshot_id = str(graph["snapshot_id"])
+    with conn:
+        conn.execute("DELETE FROM graph_snapshots WHERE snapshot_id = ?", (snapshot_id,))
+        conn.execute(
+            """
+            INSERT INTO graph_snapshots(
+                snapshot_id, graph_namespace, repo_root, generated_at, head_commit,
+                dirty_tracked_file_count, dirty_tracked_files_digest, indexed_file_count,
+                directory_node_count, command_node_count, test_node_count, stale_node_count,
+                digest, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                IMPACT_GRAPH_NAMESPACE,
+                str(graph.get("repo_root") or ""),
+                str(graph.get("generated_at") or utc_now()),
+                "",
+                0,
+                "",
+                0,
+                0,
+                0,
+                0,
+                sum(1 for node in graph.get("nodes") or [] if isinstance(node, Mapping) and int(node.get("is_stale") or 0)),
+                str(graph.get("digest") or ""),
+                stable_json(graph.get("payload") if isinstance(graph.get("payload"), Mapping) else {}),
+            ),
+        )
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, Mapping):
+                continue
+            node_id = str(node.get("node_id") or "")
+            conn.execute(
+                """
+                INSERT INTO graph_nodes(
+                    snapshot_id, node_id, graph_namespace, kind, path, name, digest, is_stale, metadata_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    node_id,
+                    IMPACT_GRAPH_NAMESPACE,
+                    str(node.get("kind") or ""),
+                    str(node.get("path") or ""),
+                    str(node.get("name") or ""),
+                    str(node.get("digest") or ""),
+                    int(node.get("is_stale") or 0),
+                    stable_json(node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}),
+                ),
+            )
+            for fact in node.get("facts") or []:
+                if not isinstance(fact, Mapping):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO graph_node_facts(
+                        snapshot_id, node_id, graph_namespace, fact_key, fact_value, value_type, source, confidence
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        node_id,
+                        IMPACT_GRAPH_NAMESPACE,
+                        str(fact.get("fact_key") or ""),
+                        str(fact.get("fact_value") or ""),
+                        str(fact.get("value_type") or "text"),
+                        str(fact.get("source") or "impact_inference"),
+                        float(fact.get("confidence") if fact.get("confidence") is not None else 1.0),
+                    ),
+                )
+        for edge in graph.get("edges") or []:
+            if not isinstance(edge, Mapping):
+                continue
+            edge_id = str(edge.get("edge_id") or "")
+            conn.execute(
+                """
+                INSERT INTO graph_edges(
+                    snapshot_id, edge_id, graph_namespace, kind, from_node_id, to_node_id, metadata_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    edge_id,
+                    IMPACT_GRAPH_NAMESPACE,
+                    str(edge.get("kind") or ""),
+                    str(edge.get("from_node_id") or ""),
+                    str(edge.get("to_node_id") or ""),
+                    stable_json(edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {}),
+                ),
+            )
+            for fact in edge.get("facts") or []:
+                if not isinstance(fact, Mapping):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO graph_edge_facts(
+                        snapshot_id, edge_id, graph_namespace, fact_key, fact_value, value_type, source, confidence
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        edge_id,
+                        IMPACT_GRAPH_NAMESPACE,
+                        str(fact.get("fact_key") or ""),
+                        str(fact.get("fact_value") or ""),
+                        str(fact.get("value_type") or "text"),
+                        str(fact.get("source") or "impact_inference"),
+                        float(fact.get("confidence") if fact.get("confidence") is not None else 1.0),
+                    ),
+                )
+
+
+def refresh_impact_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str, Any]:
+    graph = build_impact_graph_conn(conn, target)
+    latest = _latest_impact_graph_snapshot_row(conn)
+    if latest is not None and str(latest["digest"]) == str(graph["digest"]):
+        return impact_graph_summary(conn)
+    _insert_impact_graph_conn(conn, graph)
+    return impact_graph_summary(conn)
+
+
+def impact_graph_summary(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = _latest_impact_graph_snapshot_row(conn)
+    if row is None:
+        return {
+            "schema_version": 1,
+            "graph_namespace": IMPACT_GRAPH_NAMESPACE,
+            "exists": False,
+            "latest_snapshot_id": "",
+            "latest_graph_snapshot": {},
+            "node_counts": {},
+            "edge_counts": {},
+            "stale_node_count": 0,
+        }
+    snapshot_id = str(row["snapshot_id"])
+    node_counts = _graph_counts(conn, snapshot_id, "kind", "graph_nodes")
+    edge_counts = _graph_counts(conn, snapshot_id, "kind", "graph_edges")
+    latest = {
+        "snapshot_id": snapshot_id,
+        "graph_namespace": str(row["graph_namespace"]),
+        "generated_at": str(row["generated_at"] or ""),
+        "digest": str(row["digest"] or ""),
+        "node_count": sum(node_counts.values()),
+        "edge_count": sum(edge_counts.values()),
+        "stale_node_count": int(row["stale_node_count"] or 0),
+    }
+    return {
+        "schema_version": 1,
+        "graph_namespace": IMPACT_GRAPH_NAMESPACE,
+        "exists": True,
+        "latest_snapshot_id": snapshot_id,
+        "latest_graph_snapshot": latest,
+        "node_counts": node_counts,
+        "edge_counts": edge_counts,
+        "stale_node_count": int(row["stale_node_count"] or 0),
+    }
+
+
+def _context_pack_item_from_node(node: Mapping[str, Any], edge_metadata: Mapping[str, Any]) -> dict[str, Any]:
+    kind = str(node.get("kind") or "")
+    path = str(node.get("path") or "")
+    return {
+        "node_id": str(node.get("node_id") or ""),
+        "kind": kind,
+        "category": _impact_code_category(kind),
+        "path": path,
+        "name": str(node.get("name") or ""),
+        "confidence": round(float(edge_metadata.get("confidence") or 0), 4),
+        "reason": _brief_text(edge_metadata.get("reason") or "", limit=180),
+        "is_stale": bool(int(node.get("is_stale") or 0)),
+        "raw_contents_included": False,
+    }
+
+
+def _context_pack_selected_task(
+    nodes: Mapping[str, Mapping[str, Any]],
+    *,
+    ticket_id: str = "",
+    work_item_id: str = "",
+    task_node_id: str = "",
+) -> dict[str, Any]:
+    if task_node_id and task_node_id in nodes:
+        return dict(nodes[task_node_id])
+    candidates = [node for node in nodes.values() if str(node.get("kind") or "") in {"ticket", "work_item"}]
+    if ticket_id:
+        for node in candidates:
+            metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+            if str(metadata.get("ticket_id") or "") == ticket_id:
+                return dict(node)
+    if work_item_id:
+        for node in candidates:
+            metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+            if str(metadata.get("work_item_id") or "") == work_item_id:
+                return dict(node)
+    not_done = [
+        node
+        for node in candidates
+        if not _task_status_done((node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}).get("status"))
+    ]
+    ordered = sorted(
+        not_done or candidates,
+        key=lambda node: (
+            0 if str(node.get("kind") or "") == "ticket" else 1,
+            int((node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}).get("position") or 9999),
+            str(node.get("name") or ""),
+        ),
+    )
+    return dict(ordered[0]) if ordered else {}
+
+
+def _context_pack_policy_note(items: list[dict[str, Any]], skipped_secret_count: int) -> list[str]:
+    notes = ["raw source contents are omitted by default"]
+    if skipped_secret_count:
+        notes.append(f"{skipped_secret_count} secret-like path(s) were excluded")
+    if any(item.get("is_stale") for item in items):
+        notes.append("one or more graph nodes are stale; refresh or inspect changed files before relying on the pack")
+    return notes
+
+
+def _load_impact_snapshot_nodes_edges(conn: sqlite3.Connection, snapshot_id: str) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    node_rows = conn.execute(
+        """
+        SELECT node_id, kind, path, name, digest, is_stale, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ? AND graph_namespace = ?
+        """,
+        (snapshot_id, IMPACT_GRAPH_NAMESPACE),
+    ).fetchall()
+    nodes: dict[str, dict[str, Any]] = {}
+    for row in node_rows:
+        metadata = _json_cell(row["metadata_json"], {})
+        nodes[str(row["node_id"])] = {
+            "node_id": str(row["node_id"]),
+            "kind": str(row["kind"] or ""),
+            "path": str(row["path"] or ""),
+            "name": str(row["name"] or ""),
+            "digest": str(row["digest"] or ""),
+            "is_stale": int(row["is_stale"] or 0),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+    edge_rows = conn.execute(
+        """
+        SELECT edge_id, kind, from_node_id, to_node_id, metadata_json
+        FROM graph_edges
+        WHERE snapshot_id = ? AND graph_namespace = ?
+        """,
+        (snapshot_id, IMPACT_GRAPH_NAMESPACE),
+    ).fetchall()
+    edges = []
+    for row in edge_rows:
+        metadata = _json_cell(row["metadata_json"], {})
+        edges.append(
+            {
+                "edge_id": str(row["edge_id"]),
+                "kind": str(row["kind"] or ""),
+                "from_node_id": str(row["from_node_id"] or ""),
+                "to_node_id": str(row["to_node_id"] or ""),
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            }
+        )
+    return nodes, edges
+
+
+def _record_context_pack_read_receipts_conn(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: str,
+    task_node_id: str,
+    items: list[dict[str, Any]],
+    actor_role: str = "",
+    run_id: str = "",
+    reason: str = "",
+) -> int:
+    if not task_node_id:
+        return 0
+    now = utc_now()
+    records: list[dict[str, Any]] = []
+    for item in items:
+        if item.get("category") not in {"files", "tests", "configs", "docs"}:
+            continue
+        node_id = str(item.get("node_id") or "")
+        if not node_id:
+            continue
+        edge = _impact_graph_edge(
+            "read_by",
+            node_id,
+            task_node_id,
+            confidence=float(item.get("confidence") or 0),
+            reason=reason or str(item.get("reason") or "context pack included node"),
+            source="context_pack_read_receipt",
+            key=f"read:{node_id}:{task_node_id}:{actor_role}:{run_id}:{now}",
+            metadata={
+                "actor_role": actor_role,
+                "run_id": run_id,
+                "read_at": now,
+                "context_pack_reason": str(item.get("reason") or ""),
+            },
+        )
+        records.append(edge)
+    with conn:
+        for edge in records:
+            edge_id = str(edge.get("edge_id") or "")
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO graph_edges(
+                    snapshot_id, edge_id, graph_namespace, kind, from_node_id, to_node_id, metadata_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    edge_id,
+                    IMPACT_GRAPH_NAMESPACE,
+                    "read_by",
+                    str(edge.get("from_node_id") or ""),
+                    str(edge.get("to_node_id") or ""),
+                    stable_json(edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {}),
+                ),
+            )
+            for fact in edge.get("facts") or []:
+                if not isinstance(fact, Mapping):
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO graph_edge_facts(
+                        snapshot_id, edge_id, graph_namespace, fact_key, fact_value, value_type, source, confidence
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        edge_id,
+                        IMPACT_GRAPH_NAMESPACE,
+                        str(fact.get("fact_key") or ""),
+                        str(fact.get("fact_value") or ""),
+                        str(fact.get("value_type") or "text"),
+                        str(fact.get("source") or "context_pack_read_receipt"),
+                        float(fact.get("confidence") if fact.get("confidence") is not None else 1.0),
+                    ),
+                )
+    return len(records)
+
+
+def build_context_pack_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    ticket_id: str = "",
+    work_item_id: str = "",
+    task_node_id: str = "",
+    query: str = "",
+    max_items: int = IMPACT_CONTEXT_PACK_LIMIT,
+    actor_role: str = "",
+    run_id: str = "",
+    reason: str = "",
+    record_read_receipt: bool = False,
+) -> dict[str, Any]:
+    impact_row = _latest_impact_graph_snapshot_row(conn)
+    if impact_row is None:
+        refresh_impact_graph_conn(conn, target)
+        impact_row = _latest_impact_graph_snapshot_row(conn)
+    if impact_row is None:
+        return {
+            "schema_version": 1,
+            "graph_namespace": IMPACT_GRAPH_NAMESPACE,
+            "items": [],
+            "files": [],
+            "tests": [],
+            "configs": [],
+            "docs": [],
+            "commands": [],
+            "artifacts": [],
+            "stale_context_warning": "",
+            "policy_notes": ["raw source contents are omitted by default"],
+        }
+    snapshot_id = str(impact_row["snapshot_id"])
+    nodes, edges = _load_impact_snapshot_nodes_edges(conn, snapshot_id)
+    selected_task = _context_pack_selected_task(
+        nodes,
+        ticket_id=str(ticket_id or "").strip(),
+        work_item_id=str(work_item_id or "").strip(),
+        task_node_id=str(task_node_id or "").strip(),
+    )
+    selected_task_id = str(selected_task.get("node_id") or "")
+    item_by_node: dict[str, dict[str, Any]] = {}
+    skipped_secret_count = 0
+    if query and not selected_task_id:
+        terms = _impact_terms(query)
+        mentions = _impact_path_mentions(query)
+        for node in nodes.values():
+            if str(node.get("kind") or "") not in {"file", "test_file", "config_file", "doc_file", "lockfile", "command", "artifact"}:
+                continue
+            path = str(node.get("path") or "")
+            if not _impact_context_path_allowed(path):
+                skipped_secret_count += 1
+                continue
+            confidence = 0.0
+            reason = ""
+            if path and any(path == mention or path.endswith("/" + mention) for mention in mentions):
+                confidence = 0.96
+                reason = "freeform path mention"
+            else:
+                keyword_confidence, keyword_reason = _impact_score_keywords(terms, node)
+                confidence = keyword_confidence
+                reason = keyword_reason
+            if confidence > 0:
+                item_by_node[str(node["node_id"])] = _context_pack_item_from_node(node, {"confidence": confidence, "reason": reason})
+    else:
+        for edge in edges:
+            kind = str(edge.get("kind") or "")
+            metadata = edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {}
+            if kind in {"likely_touches", "requires_validation", "requires_human_approval"}:
+                if selected_task_id and str(edge.get("from_node_id") or "") != selected_task_id:
+                    continue
+                target_id = str(edge.get("to_node_id") or "")
+            elif kind == "relevant_context_for":
+                if selected_task_id and str(edge.get("to_node_id") or "") != selected_task_id:
+                    continue
+                target_id = str(edge.get("from_node_id") or "")
+            else:
+                continue
+            node = nodes.get(target_id)
+            if not node:
+                continue
+            path = str(node.get("path") or "")
+            if not _impact_context_path_allowed(path):
+                skipped_secret_count += 1
+                continue
+            item = _context_pack_item_from_node(node, metadata)
+            if kind == "requires_validation":
+                item["category"] = "commands"
+            current = item_by_node.get(target_id)
+            if current is None or float(item.get("confidence") or 0) > float(current.get("confidence") or 0):
+                item_by_node[target_id] = item
+
+    category_priority = {"files": 0, "tests": 1, "configs": 2, "commands": 3, "docs": 4, "artifacts": 5}
+    items = sorted(
+        item_by_node.values(),
+        key=lambda item: (
+            -float(item.get("confidence") or 0),
+            category_priority.get(str(item.get("category") or ""), 99),
+            str(item.get("path") or item.get("name") or ""),
+        ),
+    )[: max(1, int(max_items or IMPACT_CONTEXT_PACK_LIMIT))]
+    read_receipt_count = 0
+    if record_read_receipt and selected_task_id:
+        read_receipt_count = _record_context_pack_read_receipts_conn(
+            conn,
+            snapshot_id=snapshot_id,
+            task_node_id=selected_task_id,
+            items=items,
+            actor_role=actor_role,
+            run_id=run_id,
+            reason=reason,
+        )
+    by_category: dict[str, list[dict[str, Any]]] = {
+        "files": [],
+        "tests": [],
+        "configs": [],
+        "docs": [],
+        "commands": [],
+        "artifacts": [],
+    }
+    for item in items:
+        category = str(item.get("category") or "files")
+        if category in by_category:
+            by_category[category].append(item)
+    stale_items = [item for item in items if item.get("is_stale")]
+    selected_task_brief = _task_graph_node_brief(selected_task) if selected_task else {}
+    return {
+        "schema_version": 1,
+        "graph_namespace": IMPACT_GRAPH_NAMESPACE,
+        "impact_snapshot_id": snapshot_id,
+        "selected_task": selected_task_brief,
+        "query": _brief_text(query, limit=180),
+        "bounded": True,
+        "max_items": max_items,
+        "item_count": len(items),
+        "items": items,
+        **by_category,
+        "stale_context_warning": "Relevant context includes stale file graph nodes." if stale_items else "",
+        "policy_notes": _context_pack_policy_note(items, skipped_secret_count),
+        "read_receipts_recorded": read_receipt_count,
+    }
+
+
+def impact_graph_read_model(conn: sqlite3.Connection, target: Path) -> dict[str, Any]:
+    impact_summary = impact_graph_summary(conn)
+    context_pack = build_context_pack_conn(conn, target, max_items=IMPACT_CONTEXT_PACK_LIMIT)
+    row = _latest_impact_graph_snapshot_row(conn)
+    if row is None:
+        return {
+            "impact_graph_summary": impact_summary,
+            "active_task_code_impacts": [],
+            "context_pack_preview": context_pack,
+            "top_impacted_nodes": [],
+            "stale_context_warning": "",
+        }
+    snapshot_id = str(row["snapshot_id"])
+    nodes, edges = _load_impact_snapshot_nodes_edges(conn, snapshot_id)
+    impacted: dict[str, dict[str, Any]] = {}
+    active_impacts: list[dict[str, Any]] = []
+    for edge in edges:
+        kind = str(edge.get("kind") or "")
+        if kind not in {"likely_touches", "requires_validation"}:
+            continue
+        source = nodes.get(str(edge.get("from_node_id") or ""))
+        target_node = nodes.get(str(edge.get("to_node_id") or ""))
+        if not source or not target_node:
+            continue
+        metadata = edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {}
+        item = _context_pack_item_from_node(target_node, metadata)
+        task_brief = _task_graph_node_brief(source)
+        impact = {
+            "task": task_brief,
+            "edge_kind": kind,
+            "node": item,
+            "confidence": item["confidence"],
+            "reason": item["reason"],
+        }
+        active_impacts.append(impact)
+        target_id = str(target_node.get("node_id") or "")
+        current = impacted.get(target_id)
+        if current is None:
+            impacted[target_id] = {
+                **item,
+                "impact_count": 1,
+                "max_confidence": item["confidence"],
+            }
+        else:
+            current["impact_count"] = int(current.get("impact_count") or 0) + 1
+            current["max_confidence"] = max(float(current.get("max_confidence") or 0), item["confidence"])
+    active_impacts = sorted(
+        active_impacts,
+        key=lambda item: (-float(item.get("confidence") or 0), str(((item.get("node") or {}).get("path") or ""))),
+    )[:20]
+    top_impacted = sorted(
+        impacted.values(),
+        key=lambda item: (-int(item.get("impact_count") or 0), -float(item.get("max_confidence") or 0), str(item.get("path") or "")),
+    )[:20]
+    stale_warning = context_pack.get("stale_context_warning") or (
+        "Impact graph includes stale codebase nodes." if any(item.get("is_stale") for item in top_impacted) else ""
+    )
+    return {
+        "impact_graph_summary": impact_summary,
+        "active_task_code_impacts": active_impacts,
+        "context_pack_preview": context_pack,
+        "top_impacted_nodes": top_impacted,
+        "stale_context_warning": stale_warning,
+    }
+
+
+def _parse_state_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _lease_id(
+    *,
+    task_id: str,
+    owner_role: str,
+    run_id: str,
+    scope_kind: str,
+    scope_node_id: str,
+    acquired_at: str,
+) -> str:
+    digest = sha256_text(
+        stable_json(
+            {
+                "task_id": task_id,
+                "owner_role": owner_role,
+                "run_id": run_id,
+                "scope_kind": scope_kind,
+                "scope_node_id": scope_node_id,
+                "acquired_at": acquired_at,
+            }
+        )
+    )
+    return f"resource-lease:{digest[:24]}"
+
+
+def _latest_graph_node_row(
+    conn: sqlite3.Connection,
+    node_id: str,
+    *,
+    namespaces: tuple[str, ...] = (IMPACT_GRAPH_NAMESPACE, CODEBASE_GRAPH_NAMESPACE, TASK_GRAPH_NAMESPACE),
+) -> sqlite3.Row | None:
+    for namespace in namespaces:
+        row = conn.execute(
+            """
+            SELECT node.*
+            FROM graph_nodes node
+            JOIN graph_snapshots snapshot
+              ON snapshot.snapshot_id = node.snapshot_id
+            WHERE node.node_id = ?
+              AND node.graph_namespace = ?
+            ORDER BY snapshot.generated_at DESC, snapshot.rowid DESC
+            LIMIT 1
+            """,
+            (node_id, namespace),
+        ).fetchone()
+        if row is not None:
+            return row
+    return None
+
+
+def _lease_scope_descriptor_conn(conn: sqlite3.Connection, scope_kind: str, scope_node_id: str) -> dict[str, Any]:
+    scope_kind = str(scope_kind or "").strip().lower()
+    scope_node_id = str(scope_node_id or "").strip()
+    if scope_kind == "repo":
+        row = conn.execute(
+            """
+            SELECT node.*
+            FROM graph_nodes node
+            JOIN graph_snapshots snapshot
+              ON snapshot.snapshot_id = node.snapshot_id
+            WHERE node.graph_namespace = ?
+              AND node.kind = 'repo'
+            ORDER BY snapshot.generated_at DESC, snapshot.rowid DESC
+            LIMIT 1
+            """,
+            (CODEBASE_GRAPH_NAMESPACE,),
+        ).fetchone()
+        if row is not None:
+            return {
+                "scope_kind": "repo",
+                "scope_node_id": str(row["node_id"]),
+                "kind": str(row["kind"] or "repo"),
+                "path": ".",
+                "name": str(row["name"] or "repo"),
+                "metadata": _json_cell(row["metadata_json"], {}),
+            }
+        return {"scope_kind": "repo", "scope_node_id": scope_node_id, "kind": "repo", "path": ".", "name": "repo", "metadata": {}}
+    row = _latest_graph_node_row(conn, scope_node_id)
+    if row is None:
+        return {
+            "scope_kind": scope_kind,
+            "scope_node_id": scope_node_id,
+            "kind": scope_kind,
+            "path": "",
+            "name": scope_node_id,
+            "metadata": {},
+        }
+    metadata = _json_cell(row["metadata_json"], {})
+    return {
+        "scope_kind": scope_kind,
+        "scope_node_id": scope_node_id,
+        "kind": str(row["kind"] or scope_kind),
+        "path": normalize_path_for_brief(str(row["path"] or "")),
+        "name": str(row["name"] or ""),
+        "metadata": metadata if isinstance(metadata, dict) else {},
+    }
+
+
+def _lease_scope_from_row(conn: sqlite3.Connection, row: Mapping[str, Any]) -> dict[str, Any]:
+    return _lease_scope_descriptor_conn(conn, str(row.get("scope_kind") or ""), str(row.get("scope_node_id") or ""))
+
+
+def _path_under(path: str, directory: str) -> bool:
+    path = normalize_path_for_brief(path)
+    directory = normalize_path_for_brief(directory)
+    if directory in {"", "."}:
+        return bool(path)
+    return path == directory or path.startswith(directory.rstrip("/") + "/")
+
+
+def _lease_scopes_overlap(first: Mapping[str, Any], second: Mapping[str, Any]) -> tuple[bool, str]:
+    first_kind = str(first.get("scope_kind") or "").lower()
+    second_kind = str(second.get("scope_kind") or "").lower()
+    first_node = str(first.get("scope_node_id") or "")
+    second_node = str(second.get("scope_node_id") or "")
+    first_path = normalize_path_for_brief(str(first.get("path") or ""))
+    second_path = normalize_path_for_brief(str(second.get("path") or ""))
+    if first_kind == "repo" or second_kind == "repo":
+        return True, "repo lease overlaps all scopes"
+    if first_node and first_node == second_node:
+        return True, "same graph node"
+    if first_kind == "module" and second_kind == "module" and first_node == second_node:
+        return True, "same module node"
+    if first_kind == "command" or second_kind == "command":
+        return (first_kind == second_kind and first_node == second_node), "same command node"
+    if first_kind == "file" and second_kind == "file" and first_path and first_path == second_path:
+        return True, "same file path"
+    if first_kind == "directory" and second_kind == "directory" and first_path and second_path:
+        if _path_under(first_path, second_path) or _path_under(second_path, first_path):
+            return True, "overlapping directories"
+    if first_kind == "directory" and second_kind == "file" and second_path and _path_under(second_path, first_path):
+        return True, "file under leased directory"
+    if first_kind == "file" and second_kind == "directory" and first_path and _path_under(first_path, second_path):
+        return True, "directory contains leased file"
+    return False, ""
+
+
+def _lease_row_to_dict(conn: sqlite3.Connection, row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    payload = _json_cell(item.pop("payload_json", "{}"), {})
+    item["payload"] = payload if isinstance(payload, dict) else {}
+    item["scope"] = _lease_scope_from_row(conn, item)
+    return item
+
+
+def expire_stale_leases_conn(conn: sqlite3.Connection, *, now: str | None = None) -> int:
+    now_text = now or utc_now()
+    now_dt = _parse_state_datetime(now_text)
+    rows = conn.execute(
+        "SELECT lease_id, expires_at FROM resource_leases WHERE status = 'active' AND expires_at <> ''"
+    ).fetchall()
+    expired_ids: list[str] = []
+    for row in rows:
+        expires_dt = _parse_state_datetime(row["expires_at"])
+        if expires_dt is not None and now_dt is not None and expires_dt <= now_dt:
+            expired_ids.append(str(row["lease_id"]))
+    if expired_ids:
+        with conn:
+            conn.executemany(
+                "UPDATE resource_leases SET status = 'expired', released_at = ? WHERE lease_id = ? AND status = 'active'",
+                [(now_text, lease_id) for lease_id in expired_ids],
+            )
+    return len(expired_ids)
+
+
+def expire_stale_leases(target: Path, *, now: str | None = None) -> int:
+    target = target.expanduser().resolve()
+    with closing(connect(database_path_for_target(target))) as conn:
+        return expire_stale_leases_conn(conn, now=now)
+
+
+def active_resource_leases_conn(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM resource_leases
+        WHERE status = 'active'
+        ORDER BY acquired_at ASC, lease_id ASC
+        """
+    ).fetchall()
+    return [_lease_row_to_dict(conn, row) for row in rows]
+
+
+def list_conflicting_leases_conn(
+    conn: sqlite3.Connection,
+    *,
+    scope_kind: str,
+    scope_node_id: str,
+    task_id: str = "",
+    owner_role: str = "",
+    run_id: str = "",
+) -> list[dict[str, Any]]:
+    candidate = _lease_scope_descriptor_conn(conn, scope_kind, scope_node_id)
+    candidate.update(
+        {
+            "scope_kind": str(scope_kind or "").strip().lower(),
+            "scope_node_id": str(scope_node_id or "").strip(),
+            "task_id": str(task_id or ""),
+            "owner_role": str(owner_role or ""),
+            "run_id": str(run_id or ""),
+        }
+    )
+    conflicts: list[dict[str, Any]] = []
+    for lease in active_resource_leases_conn(conn):
+        if task_id and str(lease.get("task_id") or "") == str(task_id):
+            continue
+        overlaps, reason = _lease_scopes_overlap(candidate, lease.get("scope") if isinstance(lease.get("scope"), Mapping) else {})
+        if overlaps:
+            conflicts.append(
+                {
+                    "lease": lease,
+                    "candidate": {
+                        "task_id": str(task_id or ""),
+                        "owner_role": str(owner_role or ""),
+                        "run_id": str(run_id or ""),
+                        "scope_kind": candidate["scope_kind"],
+                        "scope_node_id": candidate["scope_node_id"],
+                        "scope": {key: candidate.get(key) for key in ("kind", "path", "name")},
+                    },
+                    "reason": reason,
+                }
+            )
+    return conflicts
+
+
+def list_conflicting_leases(
+    target: Path,
+    *,
+    scope_kind: str,
+    scope_node_id: str,
+    task_id: str = "",
+    owner_role: str = "",
+    run_id: str = "",
+) -> list[dict[str, Any]]:
+    target = target.expanduser().resolve()
+    with closing(connect(database_path_for_target(target))) as conn:
+        expire_stale_leases_conn(conn)
+        return list_conflicting_leases_conn(
+            conn,
+            scope_kind=scope_kind,
+            scope_node_id=scope_node_id,
+            task_id=task_id,
+            owner_role=owner_role,
+            run_id=run_id,
+        )
+
+
+def acquire_resource_lease_conn(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    owner_role: str,
+    run_id: str = "",
+    scope_kind: str,
+    scope_node_id: str,
+    expires_at: str = "",
+    payload: Mapping[str, Any] | None = None,
+    allow_conflicts: bool = False,
+) -> dict[str, Any]:
+    scope_kind = str(scope_kind or "").strip().lower()
+    if scope_kind not in RESOURCE_LEASE_SCOPE_KINDS:
+        raise ValueError(f"unsupported resource lease scope_kind: {scope_kind}")
+    task_id = str(task_id or "").strip()
+    scope_node_id = str(scope_node_id or "").strip()
+    if not scope_node_id:
+        raise ValueError("resource lease scope_node_id is required")
+    expire_stale_leases_conn(conn)
+    conflicts = list_conflicting_leases_conn(
+        conn,
+        scope_kind=scope_kind,
+        scope_node_id=scope_node_id,
+        task_id=task_id,
+        owner_role=owner_role,
+        run_id=run_id,
+    )
+    if conflicts and not allow_conflicts:
+        return {"acquired": False, "lease": {}, "conflicts": conflicts}
+    acquired_at = utc_now()
+    lease_id = _lease_id(
+        task_id=task_id,
+        owner_role=str(owner_role or ""),
+        run_id=str(run_id or ""),
+        scope_kind=scope_kind,
+        scope_node_id=scope_node_id,
+        acquired_at=acquired_at,
+    )
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO resource_leases(
+                lease_id, task_id, owner_role, run_id, scope_kind, scope_node_id,
+                status, acquired_at, expires_at, released_at, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, 'active', ?, ?, '', ?)
+            """,
+            (
+                lease_id,
+                task_id,
+                str(owner_role or ""),
+                str(run_id or ""),
+                scope_kind,
+                scope_node_id,
+                acquired_at,
+                str(expires_at or ""),
+                stable_json(payload if isinstance(payload, Mapping) else {}),
+            ),
+        )
+    row = conn.execute("SELECT * FROM resource_leases WHERE lease_id = ?", (lease_id,)).fetchone()
+    lease = _lease_row_to_dict(conn, row) if row is not None else {}
+    return {"acquired": True, "lease": lease, "conflicts": conflicts}
+
+
+def acquire_resource_lease(
+    target: Path,
+    *,
+    task_id: str,
+    owner_role: str,
+    run_id: str = "",
+    scope_kind: str,
+    scope_node_id: str,
+    expires_at: str = "",
+    payload: Mapping[str, Any] | None = None,
+    allow_conflicts: bool = False,
+) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    with closing(connect(database_path_for_target(target))) as conn:
+        return acquire_resource_lease_conn(
+            conn,
+            task_id=task_id,
+            owner_role=owner_role,
+            run_id=run_id,
+            scope_kind=scope_kind,
+            scope_node_id=scope_node_id,
+            expires_at=expires_at,
+            payload=payload,
+            allow_conflicts=allow_conflicts,
+        )
+
+
+def release_resource_lease_conn(
+    conn: sqlite3.Connection,
+    *,
+    lease_id: str,
+    released_at: str | None = None,
+    status: str = "released",
+) -> dict[str, Any]:
+    status = str(status or "released").strip().lower()
+    if status not in {"released", "superseded", "expired"}:
+        raise ValueError(f"unsupported release status: {status}")
+    released_at = released_at or utc_now()
+    with conn:
+        conn.execute(
+            "UPDATE resource_leases SET status = ?, released_at = ? WHERE lease_id = ? AND status = 'active'",
+            (status, released_at, str(lease_id or "")),
+        )
+    row = conn.execute("SELECT * FROM resource_leases WHERE lease_id = ?", (str(lease_id or ""),)).fetchone()
+    return {"released": bool(row and str(row["status"]) == status), "lease": _lease_row_to_dict(conn, row) if row else {}}
+
+
+def release_resource_lease(target: Path, lease_id: str, *, released_at: str | None = None) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    with closing(connect(database_path_for_target(target))) as conn:
+        return release_resource_lease_conn(conn, lease_id=lease_id, released_at=released_at)
+
+
+def current_conflicting_resource_leases_conn(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    leases = active_resource_leases_conn(conn)
+    conflicts: list[dict[str, Any]] = []
+    for index, first in enumerate(leases):
+        first_scope = first.get("scope") if isinstance(first.get("scope"), Mapping) else {}
+        for second in leases[index + 1 :]:
+            if str(first.get("task_id") or "") and str(first.get("task_id") or "") == str(second.get("task_id") or ""):
+                continue
+            second_scope = second.get("scope") if isinstance(second.get("scope"), Mapping) else {}
+            overlaps, reason = _lease_scopes_overlap(first_scope, second_scope)
+            if overlaps:
+                conflicts.append({"lease": first, "conflicting_lease": second, "reason": reason})
+    return conflicts
+
+
+def _directory_node_for_path_conn(conn: sqlite3.Connection, directory_path: str) -> dict[str, Any]:
+    row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        return {}
+    graph_snapshot_id = str(row["snapshot_id"])
+    normalized = normalize_path_for_brief(directory_path) or "."
+    node = conn.execute(
+        """
+        SELECT node_id, kind, path, name, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind = 'directory'
+          AND path = ?
+        """,
+        (graph_snapshot_id, CODEBASE_GRAPH_NAMESPACE, normalized),
+    ).fetchone()
+    if node is None:
+        return {}
+    metadata = _json_cell(node["metadata_json"], {})
+    return {
+        "node_id": str(node["node_id"]),
+        "kind": str(node["kind"] or "directory"),
+        "path": str(node["path"] or ""),
+        "name": str(node["name"] or ""),
+        "metadata": metadata if isinstance(metadata, dict) else {},
+    }
+
+
+def _repo_node_id_conn(conn: sqlite3.Connection) -> str:
+    row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        return ""
+    node = conn.execute(
+        """
+        SELECT node_id
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind = 'repo'
+        LIMIT 1
+        """,
+        (str(row["snapshot_id"]), CODEBASE_GRAPH_NAMESPACE),
+    ).fetchone()
+    return str(node["node_id"]) if node else ""
+
+
+def lease_suggestions_for_next_action_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    ticket_id: str = "",
+    work_item_id: str = "",
+    task_node_id: str = "",
+    query: str = "",
+    max_suggestions: int = 8,
+) -> list[dict[str, Any]]:
+    context_pack = build_context_pack_conn(
+        conn,
+        target,
+        ticket_id=ticket_id,
+        work_item_id=work_item_id,
+        task_node_id=task_node_id,
+        query=query,
+        max_items=IMPACT_CONTEXT_PACK_LIMIT,
+    )
+    selected_task = context_pack.get("selected_task") if isinstance(context_pack.get("selected_task"), dict) else {}
+    task_id = str(selected_task.get("node_id") or selected_task.get("id") or "")
+    items = context_pack.get("items") if isinstance(context_pack.get("items"), list) else []
+    file_like = [
+        item
+        for item in items
+        if isinstance(item, dict)
+        and str(item.get("category") or "") in {"files", "tests", "configs", "docs"}
+        and str(item.get("node_id") or "")
+        and str(item.get("path") or "")
+    ]
+    suggestions: list[dict[str, Any]] = []
+    by_directory: dict[str, list[dict[str, Any]]] = {}
+    for item in file_like:
+        parent = Path(str(item.get("path") or "")).parent.as_posix()
+        by_directory.setdefault(parent if parent != "." else ".", []).append(item)
+    for directory, group in sorted(by_directory.items(), key=lambda pair: (-len(pair[1]), pair[0])):
+        if len(group) < 3:
+            continue
+        directory_node = _directory_node_for_path_conn(conn, directory)
+        if not directory_node:
+            continue
+        confidence = max(float(item.get("confidence") or 0) for item in group)
+        suggestion = {
+            "scope_kind": "directory",
+            "scope_node_id": directory_node["node_id"],
+            "path": directory_node.get("path") or directory,
+            "task_id": task_id,
+            "recommended": True,
+            "caution": False,
+            "confidence": round(confidence, 4),
+            "reason": f"{len(group)} relevant context files under `{directory}`",
+        }
+        suggestion["conflicts"] = list_conflicting_leases_conn(
+            conn,
+            scope_kind="directory",
+            scope_node_id=str(suggestion["scope_node_id"]),
+            task_id=task_id,
+        )
+        suggestions.append(suggestion)
+
+    covered_dirs = {
+        str(suggestion.get("path") or "")
+        for suggestion in suggestions
+        if suggestion.get("scope_kind") == "directory" and suggestion.get("recommended")
+    }
+    for item in file_like:
+        path = str(item.get("path") or "")
+        if any(_path_under(path, directory) for directory in covered_dirs):
+            continue
+        suggestion = {
+            "scope_kind": "file",
+            "scope_node_id": str(item.get("node_id") or ""),
+            "path": path,
+            "task_id": task_id,
+            "recommended": True,
+            "caution": False,
+            "confidence": round(float(item.get("confidence") or 0), 4),
+            "reason": _brief_text(item.get("reason") or "likely touched by next task", limit=180),
+        }
+        suggestion["conflicts"] = list_conflicting_leases_conn(
+            conn,
+            scope_kind="file",
+            scope_node_id=str(suggestion["scope_node_id"]),
+            task_id=task_id,
+        )
+        suggestions.append(suggestion)
+
+    for item in items:
+        if not isinstance(item, dict) or str(item.get("category") or "") != "commands":
+            continue
+        suggestion = {
+            "scope_kind": "command",
+            "scope_node_id": str(item.get("node_id") or ""),
+            "path": str(item.get("path") or ""),
+            "name": str(item.get("name") or ""),
+            "task_id": task_id,
+            "recommended": True,
+            "caution": False,
+            "confidence": round(float(item.get("confidence") or 0), 4),
+            "reason": _brief_text(item.get("reason") or "validation command relevant to next task", limit=180),
+        }
+        suggestion["conflicts"] = list_conflicting_leases_conn(
+            conn,
+            scope_kind="command",
+            scope_node_id=str(suggestion["scope_node_id"]),
+            task_id=task_id,
+        )
+        suggestions.append(suggestion)
+
+    if not suggestions:
+        repo_node_id = _repo_node_id_conn(conn)
+        suggestions.append(
+            {
+                "scope_kind": "repo",
+                "scope_node_id": repo_node_id,
+                "task_id": task_id,
+                "recommended": False,
+                "caution": True,
+                "confidence": 0.0,
+                "reason": "No confident impact surface found; review manually before considering a broad repo lease.",
+                "conflicts": [],
+            }
+        )
+    suggestions = sorted(
+        suggestions,
+        key=lambda item: (
+            0 if item.get("recommended") else 1,
+            0 if item.get("scope_kind") == "directory" else 1,
+            -float(item.get("confidence") or 0),
+            str(item.get("path") or item.get("name") or ""),
+        ),
+    )
+    return suggestions[: max(1, int(max_suggestions or 8))]
+
+
+def _scheduler_candidate_id(decision_id: str, index: int, candidate: Mapping[str, Any]) -> str:
+    digest = sha256_text(
+        stable_json(
+            {
+                "decision_id": decision_id,
+                "index": index,
+                "source": candidate.get("source"),
+                "role": candidate.get("role"),
+                "task_id": candidate.get("task_id"),
+                "public_task_id": candidate.get("public_task_id"),
+                "action_kind": candidate.get("action_kind"),
+                "state": candidate.get("state"),
+                "skipped_reason": candidate.get("skipped_reason"),
+            }
+        )
+    )
+    return f"scheduler-candidate:{digest[:24]}"
+
+
+def _scheduler_candidate_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    payload = _json_cell(row["payload_json"], {})
+    item = dict(payload) if isinstance(payload, dict) else {}
+    item.update(
+        {
+            "candidate_id": str(row["candidate_id"]),
+            "decision_id": str(row["decision_id"]),
+            "generated_at": str(row["generated_at"]),
+            "role": str(row["role"] or item.get("role") or ""),
+            "task_id": str(row["task_id"] or item.get("task_id") or ""),
+            "action_kind": str(row["action_kind"] or item.get("action_kind") or ""),
+            "score": float(row["score"] or 0),
+            "state": str(row["state"] or item.get("state") or ""),
+            "skipped_reason": str(row["skipped_reason"] or item.get("skipped_reason") or ""),
+            "stop": bool(row["stop"]),
+        }
+    )
+    return item
+
+
+def write_scheduler_decision_conn(
+    conn: sqlite3.Connection,
+    *,
+    candidates: list[Mapping[str, Any]],
+    selected_candidate: Mapping[str, Any] | None = None,
+    fallback_used: bool = False,
+    graph_signals_used: Mapping[str, Any] | None = None,
+    lease_conflicts_considered: list[Mapping[str, Any]] | None = None,
+    legacy_result: Mapping[str, Any] | None = None,
+    decision_id: str = "",
+    generated_at: str = "",
+) -> dict[str, Any]:
+    generated_at = generated_at or utc_now()
+    decision_id = decision_id or f"scheduler-decision:{sha256_text(generated_at + stable_json(candidates))[:24]}"
+    selected_task_id = str((selected_candidate or {}).get("task_id") or "")
+    graph_signals = dict(graph_signals_used or {})
+    lease_conflicts = [dict(item) for item in (lease_conflicts_considered or []) if isinstance(item, Mapping)]
+    legacy_payload = dict(legacy_result or {})
+    rows: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates):
+        item = dict(candidate)
+        state = str(item.get("state") or "")
+        if not state:
+            state = "selected" if selected_task_id and str(item.get("task_id") or "") == selected_task_id else "ready"
+        item["state"] = state
+        item["selected"] = state == "selected"
+        item.setdefault("scheduler_fallback_used", fallback_used)
+        item.setdefault("fallback_used", fallback_used)
+        item.setdefault("decision_id", decision_id)
+        item.setdefault("generated_at", generated_at)
+        item.setdefault("graph_signals_used", graph_signals)
+        item.setdefault("lease_conflicts_considered", lease_conflicts)
+        item.setdefault("legacy_result", legacy_payload)
+        item["candidate_id"] = str(item.get("candidate_id") or _scheduler_candidate_id(decision_id, index, item))
+        rows.append(item)
+    with conn:
+        for item in rows:
+            conn.execute(
+                """
+                INSERT INTO scheduler_candidates(
+                    candidate_id, decision_id, generated_at, role, task_id, action_kind,
+                    score, state, skipped_reason, stop, payload_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(candidate_id) DO UPDATE SET
+                    decision_id=excluded.decision_id,
+                    generated_at=excluded.generated_at,
+                    role=excluded.role,
+                    task_id=excluded.task_id,
+                    action_kind=excluded.action_kind,
+                    score=excluded.score,
+                    state=excluded.state,
+                    skipped_reason=excluded.skipped_reason,
+                    stop=excluded.stop,
+                    payload_json=excluded.payload_json
+                """,
+                (
+                    str(item["candidate_id"]),
+                    decision_id,
+                    generated_at,
+                    str(item.get("role") or ""),
+                    str(item.get("task_id") or ""),
+                    str(item.get("action_kind") or ""),
+                    float(item.get("score") or 0),
+                    str(item.get("state") or "ready"),
+                    str(item.get("skipped_reason") or ""),
+                    1 if bool(item.get("stop")) else 0,
+                    stable_json(item),
+                ),
+            )
+    return latest_scheduler_decision_conn(conn, decision_id=decision_id)
+
+
+def latest_scheduler_decision_conn(conn: sqlite3.Connection, *, decision_id: str = "") -> dict[str, Any]:
+    if not decision_id:
+        row = conn.execute(
+            """
+            SELECT decision_id
+            FROM scheduler_candidates
+            ORDER BY generated_at DESC, rowid DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return {
+                "decision_id": "",
+                "generated_at": "",
+                "scheduling_candidates": [],
+                "selected_candidate": {},
+                "selected_scheduler_candidate": {},
+                "skipped_candidates": [],
+                "skipped_scheduler_candidates": [],
+                "scheduler_fallback_used": False,
+                "fallback_used": False,
+                "graph_signals_used": {},
+                "lease_conflicts_considered": [],
+                "legacy_result": {},
+            }
+        decision_id = str(row["decision_id"])
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM scheduler_candidates
+        WHERE decision_id = ?
+        ORDER BY
+            CASE state WHEN 'selected' THEN 0 WHEN 'ready' THEN 1 WHEN 'skipped' THEN 2 ELSE 3 END,
+            score DESC,
+            candidate_id ASC
+        """,
+        (decision_id,),
+    ).fetchall()
+    candidates = [_scheduler_candidate_row_to_dict(row) for row in rows]
+    selected = next((item for item in candidates if str(item.get("state") or "") == "selected"), {})
+    skipped = [item for item in candidates if str(item.get("state") or "") == "skipped"]
+    fallback_used = any(bool(item.get("scheduler_fallback_used")) for item in candidates)
+    generated_at = str(candidates[0].get("generated_at") or "") if candidates else ""
+    graph_signals = next(
+        (item.get("graph_signals_used") for item in candidates if isinstance(item.get("graph_signals_used"), dict)),
+        {},
+    )
+    lease_conflicts = next(
+        (
+            item.get("lease_conflicts_considered")
+            for item in candidates
+            if isinstance(item.get("lease_conflicts_considered"), list)
+        ),
+        [],
+    )
+    legacy_payload = next(
+        (item.get("legacy_result") for item in candidates if isinstance(item.get("legacy_result"), dict)),
+        {},
+    )
+    return {
+        "decision_id": decision_id,
+        "generated_at": generated_at,
+        "scheduling_candidates": candidates,
+        "selected_candidate": selected,
+        "selected_scheduler_candidate": selected,
+        "skipped_candidates": skipped,
+        "skipped_scheduler_candidates": skipped,
+        "scheduler_fallback_used": fallback_used,
+        "fallback_used": fallback_used,
+        "graph_signals_used": graph_signals if isinstance(graph_signals, dict) else {},
+        "lease_conflicts_considered": lease_conflicts if isinstance(lease_conflicts, list) else [],
+        "legacy_result": legacy_payload if isinstance(legacy_payload, dict) else {},
+    }
+
+
+def scheduler_candidates_read_model(conn: sqlite3.Connection) -> dict[str, Any]:
+    return latest_scheduler_decision_conn(conn)
 
 
 def infer_conveyor_stage(state: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -3578,6 +7715,9 @@ def write_ticket_run_state(
                 actor_role=actor_role,
                 causation_id=event_id,
             )
+            refresh_task_graph_conn(conn, target)
+            if _latest_codebase_graph_snapshot_row(conn) is not None:
+                refresh_impact_graph_conn(conn, target)
         return normalized
 
 
@@ -4082,6 +8222,7 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         automation_control = ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
         state = normalize_conveyor_state({**state, "status": automation_control.get("status") or state.get("status") or "ACTIVE"})
         capability = refresh_capability_manifest_conn(conn, target, actor_role="dashboard", append_event_first=True)
+        codebase_graph = ensure_codebase_graph_conn(conn, target, capability=capability)
         machine = apply_conveyor_machine_read_models(
             conn,
             target,
@@ -4091,6 +8232,15 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         )
         state = normalize_conveyor_state({**state, "state_machine": machine})
         replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=None)
+        task_graph = refresh_task_graph_conn(conn, target)
+        task_graph_readiness = task_graph_read_model(conn)
+        impact_graph = refresh_impact_graph_conn(conn, target)
+        impact_read_model = impact_graph_read_model(conn, target)
+        expire_stale_leases_conn(conn)
+        active_leases = active_resource_leases_conn(conn)
+        conflicting_leases = current_conflicting_resource_leases_conn(conn)
+        lease_suggestions = lease_suggestions_for_next_action_conn(conn, target)
+        scheduler_decision = latest_scheduler_decision_conn(conn)
         last_event = conn.execute(
             """
             SELECT event_id, stream_id, sequence, occurred_at, event_type, actor_role,
@@ -4169,6 +8319,29 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         invariant_results = state_invariant_results(conn)
         health_summary = state_health_summary(invariant_results)
         base_ready = counts.get("events", 0) >= 1 and bool(projection_row)
+        stale_context_warning = str(impact_read_model.get("stale_context_warning") or "")
+        stale_graph_warnings: list[dict[str, Any]] = []
+        stale_node_count = int(codebase_graph.get("stale_node_count") or 0) if isinstance(codebase_graph, dict) else 0
+        if stale_node_count:
+            stale_graph_warnings.append(
+                {
+                    "kind": "codebase_stale_nodes",
+                    "severity": "warn",
+                    "count": stale_node_count,
+                    "source": "codebase_graph",
+                    "message": f"{stale_node_count} indexed codebase node{' is' if stale_node_count == 1 else 's are'} stale.",
+                }
+            )
+        if stale_context_warning:
+            stale_graph_warnings.append(
+                {
+                    "kind": "stale_context",
+                    "severity": "warn",
+                    "count": 0,
+                    "source": "impact_graph",
+                    "message": stale_context_warning,
+                }
+            )
         return {
             "schema_version": STATE_SCHEMA_VERSION,
             "authority": "sqlite",
@@ -4216,6 +8389,43 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "conveyor_machine": machine,
             "automation_control": automation_control,
             "capability_manifest": capability,
+            "codebase_graph_summary": codebase_graph,
+            "latest_graph_snapshot": codebase_graph.get("latest_graph_snapshot") if isinstance(codebase_graph, dict) else {},
+            "graph_refresh_mode": str(codebase_graph.get("graph_refresh_mode") or "") if isinstance(codebase_graph, dict) else "",
+            "graph_refresh_reason": str(codebase_graph.get("graph_refresh_reason") or "") if isinstance(codebase_graph, dict) else "",
+            "graph_inventory_digest": str(codebase_graph.get("graph_inventory_digest") or "") if isinstance(codebase_graph, dict) else "",
+            "graph_inventory_changed": bool(codebase_graph.get("graph_inventory_changed")) if isinstance(codebase_graph, dict) else False,
+            "graph_inventory_added_count": int(codebase_graph.get("graph_inventory_added_count") or 0) if isinstance(codebase_graph, dict) else 0,
+            "graph_inventory_deleted_count": int(codebase_graph.get("graph_inventory_deleted_count") or 0) if isinstance(codebase_graph, dict) else 0,
+            "graph_inventory_structural_count": int(codebase_graph.get("graph_inventory_structural_count") or 0) if isinstance(codebase_graph, dict) else 0,
+            "stale_node_count": stale_node_count,
+            "indexed_file_count": int(codebase_graph.get("indexed_file_count") or 0) if isinstance(codebase_graph, dict) else 0,
+            "command_node_count": int(codebase_graph.get("command_node_count") or 0) if isinstance(codebase_graph, dict) else 0,
+            "test_node_count": int(codebase_graph.get("test_node_count") or 0) if isinstance(codebase_graph, dict) else 0,
+            "task_graph_summary": task_graph,
+            "ready_task_nodes": task_graph_readiness.get("ready_task_nodes", []),
+            "blocked_task_nodes": task_graph_readiness.get("blocked_task_nodes", []),
+            "dependency_cycles": task_graph_readiness.get("dependency_cycles", []),
+            "impact_graph_summary": impact_graph,
+            "active_task_code_impacts": impact_read_model.get("active_task_code_impacts", []),
+            "context_pack_preview": impact_read_model.get("context_pack_preview", {}),
+            "top_impacted_nodes": impact_read_model.get("top_impacted_nodes", []),
+            "stale_context_warning": stale_context_warning,
+            "stale_graph_warnings": stale_graph_warnings,
+            "active_leases": active_leases,
+            "conflicting_leases": conflicting_leases,
+            "lease_suggestions_for_next_action": lease_suggestions,
+            "scheduling_candidates": scheduler_decision.get("scheduling_candidates", []),
+            "selected_candidate": scheduler_decision.get("selected_candidate", {}),
+            "skipped_candidates": scheduler_decision.get("skipped_candidates", []),
+            "selected_scheduler_candidate": scheduler_decision.get("selected_scheduler_candidate")
+            or scheduler_decision.get("selected_candidate", {}),
+            "skipped_scheduler_candidates": scheduler_decision.get("skipped_scheduler_candidates")
+            or scheduler_decision.get("skipped_candidates", []),
+            "scheduler_fallback_used": bool(scheduler_decision.get("scheduler_fallback_used")),
+            "graph_signals_used": scheduler_decision.get("graph_signals_used", {}),
+            "lease_conflicts_considered": scheduler_decision.get("lease_conflicts_considered", []),
+            "legacy_result": scheduler_decision.get("legacy_result", {}),
             "runner_state": runner_state,
             "human_messages": human_state,
             "ticket_run": ticket_state,
@@ -4278,6 +8488,26 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
     machine_work_item = conveyor_machine.get("work_item") if isinstance(conveyor_machine.get("work_item"), dict) else {}
     capability_manifest = snapshot.get("capability_manifest") if isinstance(snapshot.get("capability_manifest"), dict) else {}
     capability_languages = capability_manifest.get("languages") if isinstance(capability_manifest.get("languages"), dict) else {}
+    graph_summary = snapshot.get("codebase_graph_summary") if isinstance(snapshot.get("codebase_graph_summary"), dict) else {}
+    latest_graph = snapshot.get("latest_graph_snapshot") if isinstance(snapshot.get("latest_graph_snapshot"), dict) else {}
+    impact_summary = snapshot.get("impact_graph_summary") if isinstance(snapshot.get("impact_graph_summary"), dict) else {}
+    impact_latest = impact_summary.get("latest_graph_snapshot") if isinstance(impact_summary.get("latest_graph_snapshot"), dict) else {}
+    context_pack = snapshot.get("context_pack_preview") if isinstance(snapshot.get("context_pack_preview"), dict) else {}
+    stale_context_warning = str(snapshot.get("stale_context_warning") or context_pack.get("stale_context_warning") or "")
+    selected_scheduler = (
+        snapshot.get("selected_scheduler_candidate")
+        if isinstance(snapshot.get("selected_scheduler_candidate"), dict)
+        else snapshot.get("selected_candidate")
+        if isinstance(snapshot.get("selected_candidate"), dict)
+        else {}
+    )
+    skipped_scheduler = (
+        snapshot.get("skipped_scheduler_candidates")
+        if isinstance(snapshot.get("skipped_scheduler_candidates"), list)
+        else snapshot.get("skipped_candidates")
+        if isinstance(snapshot.get("skipped_candidates"), list)
+        else []
+    )
     runner_state = snapshot.get("runner_state") if isinstance(snapshot.get("runner_state"), dict) else {}
     automation_control = snapshot.get("automation_control") if isinstance(snapshot.get("automation_control"), dict) else {}
     human_state = snapshot.get("human_messages") if isinstance(snapshot.get("human_messages"), dict) else {}
@@ -4327,6 +8557,8 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         "",
         f"- conveyor_stage: {_format_key_values({'stage': machine_work_item.get('current_stage') or conveyor_machine.get('current_stage'), 'stage_status': machine_work_item.get('stage_status') or conveyor_machine.get('stage_status'), 'owner': machine_work_item.get('owner_role') or conveyor_machine.get('owner_role'), 'validation': machine_work_item.get('validation_status'), 'continuation': machine_work_item.get('continuation_token')})}",
         f"- repo_capabilities: {_format_key_values({'primary_language': capability_languages.get('primary'), 'manifest_version': capability_manifest.get('version'), 'digest': _brief_sha(capability_manifest.get('digest')), 'commands': len(capability_manifest.get('commands') if isinstance(capability_manifest.get('commands'), list) else [])})}",
+        f"- codebase_graph: {_format_key_values({'namespace': graph_summary.get('graph_namespace'), 'digest': _brief_sha(latest_graph.get('digest')), 'files': graph_summary.get('indexed_file_count'), 'commands': graph_summary.get('command_node_count'), 'tests': graph_summary.get('test_node_count'), 'stale': graph_summary.get('stale_node_count')})}",
+        f"- impact_graph: {_format_key_values({'namespace': impact_summary.get('graph_namespace'), 'digest': _brief_sha(impact_latest.get('digest')), 'edges': impact_latest.get('edge_count'), 'stale': impact_summary.get('stale_node_count')})}",
         f"- conveyor_cycles: {int(conveyor_state.get('cycles') or 0)}",
         f"- last_decision: {_format_key_values({'role': last_decision.get('role') or 'idle', 'reason': last_decision.get('reason'), 'decided_at': last_decision.get('decided_at')})}",
         f"- active_role: {_format_key_values({'role': active_role.get('role'), 'run_id': active_role.get('run_id'), 'status': active_role.get('status'), 'started_at': active_role.get('started_at'), 'reason': active_role.get('reason')})}",
@@ -4335,9 +8567,90 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         f"- human_messages: {_format_key_values({'pending_requests': human_counts.get('pending_requests'), 'queued_notes': human_counts.get('queued_notes'), 'failed_notes': human_counts.get('failed_notes'), 'outbound_records': human_counts.get('outbound_records')})}",
         f"- ticket_run: {_format_key_values({'status': ticket_state.get('status'), 'run_id': ticket_state.get('run_id'), 'total': ticket_state.get('total'), 'counts': stable_json(ticket_state.get('counts')) if isinstance(ticket_state.get('counts'), dict) else ''})}",
         "",
-        "## Queued Decisions",
+        "## Graph Context For Next Action",
         "",
     ]
+    selected_task = context_pack.get("selected_task") if isinstance(context_pack.get("selected_task"), dict) else {}
+    lines.append(
+        f"- selected_task: {_format_key_values({'kind': selected_task.get('kind'), 'id': selected_task.get('id'), 'status': selected_task.get('status'), 'summary': selected_task.get('summary')})}"
+    )
+    if stale_context_warning:
+        lines.append(f"- stale_warning: {_brief_text(stale_context_warning)}")
+    policy_notes = context_pack.get("policy_notes") if isinstance(context_pack.get("policy_notes"), list) else []
+    if policy_notes:
+        lines.append(f"- policy: {_brief_text('; '.join(str(item) for item in policy_notes), limit=220)}")
+    context_items = context_pack.get("items") if isinstance(context_pack.get("items"), list) else []
+    if context_items:
+        for item in context_items[:BRIEF_ITEM_LIMIT]:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("path") or item.get("name") or item.get("node_id")
+            lines.append(
+                f"- {str(item.get('category') or item.get('kind') or 'context')}: `{_brief_text(label, limit=140)}` confidence={float(item.get('confidence') or 0):.2f} reason={_brief_text(item.get('reason'), limit=160)} stale={_brief_bool(item.get('is_stale'))}"
+            )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "## Scheduler Decision",
+        "",
+    ])
+    if selected_scheduler:
+        selected_context = (
+            selected_scheduler.get("context_pack_preview")
+            if isinstance(selected_scheduler.get("context_pack_preview"), dict)
+            else {}
+        )
+        selected_context_items = (
+            selected_context.get("items") if isinstance(selected_context.get("items"), list) else []
+        )
+        selected_leases = (
+            selected_scheduler.get("required_leases")
+            if isinstance(selected_scheduler.get("required_leases"), list)
+            else []
+        )
+        selected_reasons = selected_scheduler.get("reasons") if isinstance(selected_scheduler.get("reasons"), list) else []
+        lines.append(
+            f"- selected_candidate: {_format_key_values({'id': selected_scheduler.get('candidate_id'), 'role': selected_scheduler.get('role'), 'task': selected_scheduler.get('public_task_id') or selected_scheduler.get('task_id'), 'action': selected_scheduler.get('action_kind'), 'score': selected_scheduler.get('score')})}"
+        )
+        if selected_reasons:
+            lines.append(f"- selected_reasons: {_brief_text('; '.join(str(item) for item in selected_reasons[:3]), limit=260)}")
+        if selected_context.get("stale_context_warning"):
+            lines.append(f"- stale_context_warning: {_brief_text(selected_context.get('stale_context_warning'))}")
+        if selected_context_items:
+            for item in selected_context_items[:4]:
+                if not isinstance(item, dict):
+                    continue
+                label = item.get("path") or item.get("name") or item.get("category")
+                lines.append(
+                    f"- context: `{_brief_text(label, limit=120)}` confidence={float(item.get('confidence') or 0):.2f} reason={_brief_text(item.get('reason'), limit=140)}"
+                )
+        if selected_leases:
+            for lease in selected_leases[:4]:
+                if not isinstance(lease, dict):
+                    continue
+                label = lease.get("path") or lease.get("name") or lease.get("scope_node_id")
+                lines.append(
+                    f"- suggested_lease: {_format_key_values({'scope': lease.get('scope_kind'), 'target': label, 'recommended': _brief_bool(lease.get('recommended')), 'conflicts': lease.get('conflict_count'), 'reason': lease.get('reason')})}"
+                )
+        else:
+            lines.append("- suggested_lease: none")
+    else:
+        lines.append("- selected_candidate: none")
+    if skipped_scheduler:
+        for candidate in skipped_scheduler[:BRIEF_ITEM_LIMIT]:
+            if not isinstance(candidate, dict):
+                continue
+            lines.append(
+                f"- skipped_candidate: {_format_key_values({'id': candidate.get('candidate_id'), 'role': candidate.get('role'), 'task': candidate.get('public_task_id') or candidate.get('task_id'), 'action': candidate.get('action_kind'), 'reason': candidate.get('skipped_reason')})}"
+            )
+    else:
+        lines.append("- skipped_candidate: none")
+    lines.extend([
+        "",
+        "## Queued Decisions",
+        "",
+    ])
     if decision_queue:
         for item in decision_queue[:BRIEF_ITEM_LIMIT]:
             if not isinstance(item, dict):
@@ -4485,6 +8798,12 @@ def validate_state_database(target: Path) -> dict[str, Any]:
             "detail": "Repository capability manifest is current in SQLite."
             if bool((snapshot.get("capability_manifest") or {}).get("digest"))
             else "Repository capability manifest is missing.",
+        },
+        {
+            "ok": bool((snapshot.get("codebase_graph_summary") or {}).get("exists")),
+            "detail": "Codebase graph snapshot is available in SQLite."
+            if bool((snapshot.get("codebase_graph_summary") or {}).get("exists"))
+            else "Codebase graph snapshot is missing.",
         },
     ]
     for result in invariant_results:

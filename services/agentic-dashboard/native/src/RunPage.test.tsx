@@ -280,6 +280,55 @@ describe("RunPage", () => {
     expect(html).toContain("Implement the selected work item.");
   });
 
+  it("renders graph insight surfaces from canonical state", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            state: {
+              codebase_graph_summary: {
+                exists: true,
+                indexed_file_count: 3,
+                command_node_count: 1,
+                test_node_count: 1,
+                stale_node_count: 0,
+              },
+              task_graph_summary: {
+                exists: true,
+                ready_task_count: 1,
+                blocked_task_count: 0,
+                dependency_cycle_count: 0,
+                node_counts: { ticket: 1 },
+              },
+              context_pack_preview: {
+                items: [
+                  {
+                    node_id: "file:src/auth.ts",
+                    kind: "file",
+                    category: "files",
+                    path: "src/auth.ts",
+                    confidence: 0.9,
+                    reason: "path mention in ticket summary",
+                  },
+                ],
+              },
+            },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Graph Insights");
+    expect(html).toContain("Codebase Graph");
+    expect(html).toContain("Task Graph");
+    expect(html).toContain("Why these files?");
+    expect(html).toContain("path mention in ticket summary");
+  });
+
   it("renders a recheck action for baseline blockers", () => {
     const html = renderToStaticMarkup(
       <RunPage
