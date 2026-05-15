@@ -37,7 +37,7 @@ Improve reliability, tests, validation, docs, safety, or automation clarity with
 - Use deferred-patch information to harden around repeated failure modes.
 - Keep changes scoped and easy for the integrator to apply.
 - Record checks run in your final summary.
-- In `ticket_campaign` mode, run `python3 .diffmogger/scripts/ticket_run.py . next --json` before changing ticket state. Verify only one ticket or one coherent builder-slice cluster in a normal run.
+- In campaign mode, run `python3 .diffmogger/scripts/ticket_run.py . next --json` before changing ticket state. Verify only one ticket or one coherent builder-slice cluster in a normal run.
 - For a post-builder hardener pass, focus on the most recent accepted builder patch. Use the latest applied builder manifest, summary, `changed_files`, `runtime_state_changed_files`, and ticket evidence when available to infer which `candidate_done` ticket(s) that patch produced.
 - Prefer hardening only the ticket(s) marked `candidate_done` by that builder patch. If multiple `candidate_done` tickets came from the same builder patch, harden that coherent cluster together.
 - For catch-up work created before hardener scheduling was fixed, pick the oldest `candidate_done` ticket or coherent builder-slice cluster that lacks hardener/final verification evidence.

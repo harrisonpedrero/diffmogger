@@ -422,7 +422,6 @@ def update_info_exclude(target: Path, *, dry_run: bool) -> None:
         "/scripts/list_deferred_patches.py",
         "/scripts/release_codex_lock.sh",
         "/scripts/repair_environment.py",
-        "/scripts/run_codex_automation.sh",
         "/scripts/run_conveyor_automation.py",
         "/scripts/run_conveyor_automation.sh",
         "/scripts/run_observatory.py",

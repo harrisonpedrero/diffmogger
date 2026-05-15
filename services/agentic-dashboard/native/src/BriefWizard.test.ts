@@ -36,7 +36,7 @@ function draft(overrides: Partial<IntakeDraft> = {}): IntakeDraft {
     automation_checkpoint_commits: true,
     multi_role_allow_remotes: false,
     optional_mcp_servers: [],
-    automation_run_mode: "continuous_improvement",
+    campaign_mode: "ongoing",
     ticket_run_file: "",
     ticket_run_seed_tickets: [],
     ticket_completion_notify: true,
@@ -57,14 +57,17 @@ describe("Brief automation mode mapping", () => {
     expect(next.automation_role_profile).toBe("planner_builder_hardener_integrator");
   });
 
-  it("keeps single-lane drafts single-role", () => {
+  it("maps legacy single-lane drafts back to the conveyor", () => {
     const next = draft({
       multi_role_automations_allowed: false,
-      automation_role_profile: "single_lane",
     });
 
-    expect(next.multi_role_automations_allowed).toBe(false);
-    expect(next.automation_role_profile).toBe("single_lane");
+    const generated = lowCortisolDraftFromGeneratedIntake(
+      { automation_role_profile: "single_lane", multi_role_automations_allowed: false },
+      next,
+    );
+    expect(generated.multi_role_automations_allowed).toBe(true);
+    expect(generated.automation_role_profile).toBe("planner_builder_hardener_integrator");
   });
 
   it("treats automation_role_profile as canonical over the legacy boolean", () => {
@@ -80,19 +83,19 @@ describe("Brief automation mode mapping", () => {
     expect(next.multi_role_automations_allowed).toBe(true);
   });
 
-  it("maps build scope between boundless build and ticket campaign", () => {
-    const ticket = applyAutomationScope(draft(), "ticket_campaign");
-    const boundless = applyAutomationScope(ticket, "boundless_build");
+  it("maps campaign scope between ongoing and bounded", () => {
+    const ticket = applyAutomationScope(draft(), "bounded");
+    const ongoing = applyAutomationScope(ticket, "ongoing");
 
-    expect(ticket.automation_run_mode).toBe("ticket_campaign");
-    expect(automationScopeForDraft(ticket)).toBe("ticket_campaign");
-    expect(boundless.automation_run_mode).toBe("continuous_improvement");
-    expect(automationScopeForDraft(boundless)).toBe("boundless_build");
+    expect(ticket.campaign_mode).toBe("bounded");
+    expect(automationScopeForDraft(ticket)).toBe("bounded");
+    expect(ongoing.campaign_mode).toBe("ongoing");
+    expect(automationScopeForDraft(ongoing)).toBe("ongoing");
   });
 
   it("carries seed tickets in ticket-campaign drafts", () => {
     const ticket = draft({
-      automation_run_mode: "ticket_campaign",
+      campaign_mode: "bounded",
       ticket_run_seed_tickets: [{ id: "TICKET-001", summary: "Inspect queue", status: "pending", depends_on: [], acceptance_criteria: [], verification_commands: [], evidence: [], related_commits: [], blocker: "" }],
     });
 
@@ -109,7 +112,7 @@ describe("Brief automation mode mapping", () => {
         desired_first_demo: "A user can add a plan.",
         human_bridge_mode: "local_notifier",
         optional_mcp_servers: ["context7", "playwright"],
-        automation_run_mode: "continuous_improvement",
+        campaign_mode: "ongoing",
         automation_role_profile: "single_lane",
         ticket_run_seed_tickets: [
           {
@@ -123,7 +126,7 @@ describe("Brief automation mode mapping", () => {
       "Target",
     );
 
-    expect(next.automation_run_mode).toBe("ticket_campaign");
+    expect(next.campaign_mode).toBe("bounded");
     expect(next.ticket_run_file).toBe("");
     expect(next.optional_mcp_servers).toEqual([]);
     expect(next.human_bridge_mode).toBe("file_only");

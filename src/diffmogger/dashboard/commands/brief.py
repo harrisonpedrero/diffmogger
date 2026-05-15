@@ -13,25 +13,30 @@ from ..ticket_generation import (
     build_ticket_generation_snapshot,
     normalize_ticket_complexity,
     project_snapshot_prompt_block,
-    ticket_count_guidance,
+    ticket_coverage_guidance,
+    ticket_generation_quality_gate,
     ticket_quality_warnings,
     ticket_sizing_policy_prompt,
+    ticket_scope_groups_from_intake,
 )
 from diffmogger.runtime import ticket_run
 
-DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS = 120
+DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS = 180
+DEFAULT_TICKET_CODEX_TIMEOUT_SECONDS = 420
+DEFAULT_TICKET_REFINEMENT_CODEX_TIMEOUT_SECONDS = 420
+LOW_CORTISOL_FALLBACK_MAX_TICKETS = 120
 
 LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "project_name": "New Project",
     "project_mode": "fresh_project",
     "product_goal": "Build a useful local-first project from the user's short build description.",
     "target_user": "The people described in the build request.",
-    "desired_first_demo": "A runnable first demo that proves the core workflow.",
+    "desired_first_demo": "A runnable milestone that proves the core workflow.",
     "tech_preferences": ["Use the existing target stack when one is detected.", "Prefer a simple, well-supported local-first stack."],
     "hard_constraints": ["Keep the implementation local, reviewable, and easy to validate."],
     "safety_constraints": ["Do not store secrets in generated docs or code.", "Do not push, deploy, purchase, or modify production data without direct human instruction."],
     "automation_must_never_do": ["Never push to remotes without direct human instruction.", "Never modify credentials, production data, or paid services."],
-    "external_services": ["None required for the first demo."],
+    "external_services": ["None required for local execution."],
     "env_access_policy": "project_commands_only",
     "verification_commands": ["Run the project test suite.", "Run lint/typecheck/build commands when present."],
     "human_bridge_enabled": True,
@@ -43,12 +48,12 @@ LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "write_worker_agents_allowed": False,
     "max_write_worker_count": 0,
     "write_worker_guidance": "Keep write workers disabled unless a later human-approved plan splits work into disjoint ownership scopes.",
-    "multi_role_automations_allowed": False,
-    "automation_role_profile": "single_lane",
+    "multi_role_automations_allowed": True,
+    "automation_role_profile": "planner_builder_hardener_integrator",
     "automation_checkpoint_commits": True,
     "multi_role_allow_remotes": False,
     "optional_mcp_servers": [],
-    "automation_run_mode": "ticket_campaign",
+    "campaign_mode": "bounded",
     "ticket_run_file": "",
     "ticket_run_seed_tickets": [],
     "ticket_completion_notify": True,
@@ -56,8 +61,12 @@ LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "beyond_mvp": "Continue through the remaining dashboard ticket queue in small, reviewable increments.",
     "assumptions": ["Generated from a short low-cortisol build description; ask through the dashboard when a decision is ambiguous."],
     "ticket_generation_complexity": "small",
-    "ticket_generation_decomposition_brief": "Create a dependency-safe first demo in small, reviewable tickets.",
+    "ticket_generation_decomposition_brief": "Decompose the requested project scope into dependency-safe, reviewable ticket groups.",
+    "ticket_generation_scope_groups": [],
     "ticket_generation_quality_warnings": [],
+    "ticket_generation_refinement_needed": False,
+    "ticket_generation_refinement_passed": True,
+    "ticket_generation_scope_surface_floor": 0,
     "additional_context_files": [],
     "overwrite_existing_scaffold_files": False,
 }
@@ -127,6 +136,13 @@ def _int_value(value: Any, fallback: int) -> int:
     except (TypeError, ValueError):
         return fallback
     return parsed if parsed >= 0 else fallback
+
+
+def _compact_ticket_text(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+(?:and|plus|with)\s+", " / ", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" .:-")
+    return text[:120] or fallback
 
 
 def _target_default_project_mode(target: Path) -> str:
@@ -199,12 +215,8 @@ def _normalize_low_cortisol_intake(
     ]:
         payload[key] = _string_list(payload.get(key), list(LOW_CORTISOL_DEFAULT_INTAKE[key]))
 
-    role_profile = str(payload.get("automation_role_profile") or "").strip().lower()
-    role_profile = role_profile.replace("-", "_").replace(" ", "_")
-    if role_profile not in {"single_lane", "planner_builder_hardener_integrator"}:
-        role_profile = "planner_builder_hardener_integrator" if _bool_value(payload.get("multi_role_automations_allowed"), False) else "single_lane"
-    payload["automation_role_profile"] = role_profile
-    payload["multi_role_automations_allowed"] = role_profile == "planner_builder_hardener_integrator"
+    payload["automation_role_profile"] = "planner_builder_hardener_integrator"
+    payload["multi_role_automations_allowed"] = True
 
     payload["human_bridge_enabled"] = True
     payload["human_bridge_mode"] = "file_only"
@@ -219,14 +231,18 @@ def _normalize_low_cortisol_intake(
     payload["automation_checkpoint_commits"] = _bool_value(payload.get("automation_checkpoint_commits"), True)
     payload["multi_role_allow_remotes"] = False
     payload["optional_mcp_servers"] = []
-    payload["automation_run_mode"] = "ticket_campaign"
+    payload["campaign_mode"] = "bounded"
     payload["ticket_run_file"] = ""
     payload["ticket_completion_notify"] = _bool_value(payload.get("ticket_completion_notify"), True)
     payload["overwrite_existing_scaffold_files"] = False
     payload["ticket_generation_complexity"] = normalize_ticket_complexity(payload.get("ticket_generation_complexity"))
+    payload["ticket_generation_scope_groups"] = ticket_scope_groups_from_intake(payload)
     payload["ticket_generation_quality_warnings"] = [
         item for item in payload.get("ticket_generation_quality_warnings", []) if isinstance(item, dict)
     ] if isinstance(payload.get("ticket_generation_quality_warnings"), list) else []
+    payload["ticket_generation_refinement_needed"] = _bool_value(payload.get("ticket_generation_refinement_needed"), False)
+    payload["ticket_generation_refinement_passed"] = _bool_value(payload.get("ticket_generation_refinement_passed"), True)
+    payload["ticket_generation_scope_surface_floor"] = _int_value(payload.get("ticket_generation_scope_surface_floor"), 0)
 
     seed_source = payload.get("ticket_run_seed_tickets")
     if not isinstance(seed_source, list):
@@ -248,6 +264,117 @@ def _normalize_low_cortisol_intake(
     return payload
 
 
+def _low_cortisol_timeout_warning(
+    *,
+    warning_type: str,
+    stage_label: str,
+    timeout_seconds: Any,
+) -> dict[str, Any]:
+    seconds = _int_value(timeout_seconds, 0)
+    if seconds:
+        detail = (
+            f"Codex {stage_label} timed out after {seconds} seconds; "
+            "Diffmogger generated a conservative deterministic fallback."
+        )
+    else:
+        detail = f"Codex {stage_label} timed out; Diffmogger generated a conservative deterministic fallback."
+    return {
+        "ticket_id": "",
+        "type": warning_type,
+        "detail": detail,
+    }
+
+
+def _fallback_scope_groups(description: str) -> list[dict[str, Any]]:
+    goal = description.strip() or "the requested local project"
+    return [
+        {
+            "name": "Project foundation",
+            "description": goal[:500],
+            "surfaces": ["project scaffold", "local development checks"],
+        },
+        {
+            "name": "Core user workflow",
+            "description": "Implement the primary local workflow described by the request.",
+            "surfaces": ["primary workflow", "state persistence"],
+        },
+        {
+            "name": "Reviewability",
+            "description": "Keep the generated project easy to validate and hand off.",
+            "surfaces": ["validation", "documentation"],
+        },
+    ]
+
+
+def _fallback_low_cortisol_intake(target: Path, description: str) -> dict[str, Any]:
+    generated = json.loads(json.dumps(LOW_CORTISOL_DEFAULT_INTAKE))
+    generated.update(
+        {
+            "project_name": target.name or LOW_CORTISOL_DEFAULT_INTAKE["project_name"],
+            "project_mode": _target_default_project_mode(target),
+            "product_goal": description.strip() or LOW_CORTISOL_DEFAULT_INTAKE["product_goal"],
+            "target_user": "The people described in the build request.",
+            "desired_first_demo": "A runnable local milestone that proves the core requested workflow.",
+            "ticket_generation_complexity": "small",
+            "ticket_generation_decomposition_brief": (
+                "Create a conservative local project foundation, core workflow, persistence, validation, and docs queue."
+            ),
+            "ticket_generation_scope_groups": _fallback_scope_groups(description),
+        }
+    )
+    return _normalize_low_cortisol_intake(target, generated, description, require_tickets=False)
+
+
+def _fallback_low_cortisol_tickets(
+    intake: dict[str, Any],
+    description: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    groups = ticket_scope_groups_from_intake(intake) or _fallback_scope_groups(description)
+    verification = ["Run available project checks."]
+    tickets: list[dict[str, Any]] = []
+    truncated = False
+    for group in groups:
+        group_name = _compact_ticket_text(group.get("name"), "project scope")
+        surfaces = _string_list(group.get("surfaces"), [group_name])
+        for surface in surfaces:
+            if len(tickets) >= LOW_CORTISOL_FALLBACK_MAX_TICKETS:
+                truncated = True
+                break
+            surface_name = _compact_ticket_text(surface, group_name)
+            ticket_id = f"TICKET-{len(tickets) + 1:03d}"
+            tickets.append(
+                {
+                    "id": ticket_id,
+                    "summary": f"Deliver {surface_name} for {group_name}",
+                    "status": "pending",
+                    "depends_on": [],
+                    "acceptance_criteria": [
+                        f"{surface_name} has a focused implementation for {group_name}.",
+                        "Scope stays within this ticket's named deliverable.",
+                    ],
+                    "verification_commands": verification,
+                    "evidence": [],
+                    "related_commits": [],
+                    "blocker": "",
+                }
+            )
+        if truncated:
+            break
+    warnings: list[dict[str, Any]] = []
+    if truncated:
+        warnings.append(
+            {
+                "ticket_id": "",
+                "type": "fallback_ticket_limit_reached",
+                "detail": (
+                    f"Fallback ticket generation stopped at {LOW_CORTISOL_FALLBACK_MAX_TICKETS} tickets; "
+                    "split or add remaining scope from the dashboard if needed."
+                ),
+            }
+        )
+    return ticket_run.normalized_tickets(tickets), warnings
+
+
 def _low_cortisol_intake_prompt(target: Path, description: str) -> str:
     snapshot = build_ticket_generation_snapshot(target, include_intake=True)
     current_intake = load_intake(target)
@@ -260,12 +387,13 @@ def _low_cortisol_intake_prompt(target: Path, description: str) -> str:
             "Do not return final seed tickets in this pass; set ticket_run_seed_tickets to an empty array if you include the field.",
             "",
             "Hard requirements:",
-            "- Set automation_run_mode to ticket_campaign.",
+            "- Set campaign_mode to bounded.",
             "- Leave ticket_run_file empty; ticket scope is stored in the dashboard-backed SQLite ticket queue.",
             "- Classify ticket_generation_complexity as one of tiny, small, medium, or large.",
-            "- Add ticket_generation_decomposition_brief with a concise first-demo decomposition plan, not ticket objects.",
-            "- Decide automation_role_profile from complexity: single_lane for simple docs, research, cleanup, small static apps, or one-surface prototypes; planner_builder_hardener_integrator for larger multi-component software work.",
-            "- Treat automation_role_profile as canonical. multi_role_automations_allowed is a backward-compatible derived mirror only.",
+            "- Add ticket_generation_decomposition_brief with a concise full-scope decomposition plan, not ticket objects.",
+            "- Add ticket_generation_scope_groups as a compact array of scope groups. Each group should have name, description, and surfaces.",
+            "- Decompose the full requested project scope, not just an initial demo path.",
+            "- Set automation_role_profile to planner_builder_hardener_integrator. Diffmogger always uses the multi-role conveyor.",
             "- Set optional_mcp_servers to an empty array. Context7 and Playwright MCPs are disabled by default.",
             "- Set human_bridge_enabled true and human_bridge_mode to file_only.",
             "- Keep the intake reusable and target-project agnostic. Do not include secrets.",
@@ -293,26 +421,83 @@ def _low_cortisol_intake_prompt(target: Path, description: str) -> str:
 
 def _low_cortisol_ticket_prompt(target: Path, description: str, intake: dict[str, Any]) -> str:
     complexity = normalize_ticket_complexity(intake.get("ticket_generation_complexity"))
+    snapshot = build_ticket_generation_snapshot(target, include_intake=True)
+    scope_groups = ticket_scope_groups_from_intake(intake)
     return "\n".join(
         [
-            "Generate Diffmogger ticket_run_seed_tickets for the normalized intake.",
+            "Generate the complete Diffmogger ticket_run_seed_tickets queue for the normalized intake.",
             "Return JSON only: one object with ticket_run_seed_tickets and optional quality_notes.",
             "Do not include prose outside JSON. Do not modify files.",
             "",
             ticket_sizing_policy_prompt(complexity),
             "",
             "Ticket requirements:",
-            f"- {ticket_count_guidance(complexity)}",
+            f"- {ticket_coverage_guidance(complexity)}",
+            "- Generate a whole execution queue for the full requested scope, not a capped demo plan.",
+            "- Use the decomposition brief and scope groups as coverage requirements.",
+            "- If the requested scope has many real surfaces, return many tickets rather than broad tickets.",
             "- Use pending status for every ticket.",
             "- Ticket ids must be TICKET-001, TICKET-002, and so on.",
             "- Each ticket must include id, summary, status, depends_on, acceptance_criteria, verification_commands, evidence, related_commits, and blocker.",
             "- Dependencies must point only to earlier seed ticket ids when a real dependency exists.",
             "- Each summary and acceptance list must identify the component, surface, workflow, or artifact being changed.",
             "- Keep every ticket generic and target-project agnostic; do not include secrets.",
-            "- For very large projects, generate only the first-demo path and leave later ideas in beyond_mvp or assumptions.",
             "",
             "Normalized intake JSON:",
             json.dumps(intake, indent=2, sort_keys=True, default=json_default),
+            "",
+            "Ticket generation scope groups JSON:",
+            json.dumps(scope_groups, indent=2, sort_keys=True, default=json_default),
+            "",
+            "Bounded target project snapshot JSON:",
+            project_snapshot_prompt_block(snapshot),
+            "",
+            "Original build request:",
+            description.strip(),
+        ]
+    )
+
+
+def _low_cortisol_refinement_prompt(
+    target: Path,
+    description: str,
+    intake: dict[str, Any],
+    seed_tickets: list[dict[str, Any]],
+    quality_gate: dict[str, Any],
+) -> str:
+    complexity = normalize_ticket_complexity(intake.get("ticket_generation_complexity"))
+    snapshot = build_ticket_generation_snapshot(target, include_intake=True)
+    scope_groups = ticket_scope_groups_from_intake(intake)
+    return "\n".join(
+        [
+            "Refine a Diffmogger seed ticket queue that appears under-decomposed.",
+            "Return JSON only: one object with a complete replacement ticket_run_seed_tickets array and optional quality_notes.",
+            "Do not include prose outside JSON. Do not modify files.",
+            "",
+            ticket_sizing_policy_prompt(complexity),
+            "",
+            "Refinement requirements:",
+            "- Preserve useful tickets when they are already appropriately granular.",
+            "- Split broad tickets into one reviewable local patch with one primary deliverable.",
+            "- Add missing tickets for uncovered decomposition groups and surfaces.",
+            "- Generate as many tickets as the full described scope needs; do not impose a fixed maximum.",
+            "- Keep dependencies pointing only to earlier ticket ids when a real dependency exists.",
+            "- Keep every ticket generic and target-project agnostic; do not include secrets.",
+            "",
+            "Normalized intake JSON:",
+            json.dumps(intake, indent=2, sort_keys=True, default=json_default),
+            "",
+            "Ticket generation scope groups JSON:",
+            json.dumps(scope_groups, indent=2, sort_keys=True, default=json_default),
+            "",
+            "Quality gate JSON:",
+            json.dumps(quality_gate, indent=2, sort_keys=True, default=json_default),
+            "",
+            "Current generated ticket_run_seed_tickets JSON:",
+            json.dumps(seed_tickets, indent=2, sort_keys=True, default=json_default),
+            "",
+            "Bounded target project snapshot JSON:",
+            project_snapshot_prompt_block(snapshot),
             "",
             "Original build request:",
             description.strip(),
@@ -334,15 +519,50 @@ def _extract_seed_tickets_payload(raw: Any) -> list[dict[str, Any]]:
     return [item for item in seed_source if isinstance(item, dict)]
 
 
+def _codex_timeout_seconds(env_names: tuple[str, ...], default: int) -> int:
+    for env_name in env_names:
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = int(raw)
+        except ValueError:
+            continue
+        return max(15, parsed)
+    return default
+
+
 def _intake_codex_timeout_seconds() -> int:
-    raw = os.environ.get("DIFFMOGGER_INTAKE_CODEX_TIMEOUT_SECONDS", "").strip()
-    if not raw:
-        return DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS
-    try:
-        parsed = int(raw)
-    except ValueError:
-        return DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS
-    return max(15, parsed)
+    return _codex_timeout_seconds(
+        (
+            "DIFFMOGGER_INTAKE_CODEX_TIMEOUT_SECONDS",
+            "DIFFMOGGER_CODEX_GENERATION_TIMEOUT_SECONDS",
+        ),
+        DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS,
+    )
+
+
+def _ticket_codex_timeout_seconds() -> int:
+    return _codex_timeout_seconds(
+        (
+            "DIFFMOGGER_TICKET_CODEX_TIMEOUT_SECONDS",
+            "DIFFMOGGER_CODEX_GENERATION_TIMEOUT_SECONDS",
+            "DIFFMOGGER_INTAKE_CODEX_TIMEOUT_SECONDS",
+        ),
+        DEFAULT_TICKET_CODEX_TIMEOUT_SECONDS,
+    )
+
+
+def _ticket_refinement_codex_timeout_seconds() -> int:
+    return _codex_timeout_seconds(
+        (
+            "DIFFMOGGER_TICKET_REFINEMENT_CODEX_TIMEOUT_SECONDS",
+            "DIFFMOGGER_TICKET_CODEX_TIMEOUT_SECONDS",
+            "DIFFMOGGER_CODEX_GENERATION_TIMEOUT_SECONDS",
+            "DIFFMOGGER_INTAKE_CODEX_TIMEOUT_SECONDS",
+        ),
+        DEFAULT_TICKET_REFINEMENT_CODEX_TIMEOUT_SECONDS,
+    )
 
 
 def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
@@ -366,7 +586,14 @@ def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
     proc.wait()
 
 
-def _run_codex_intake_generation(prompt: str, *, cwd: Path, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+def _run_codex_intake_generation(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout_seconds: int,
+    stage_label: str = "intake generation",
+    timeout_error_type: str = "intake_generation_timeout",
+) -> subprocess.CompletedProcess[str]:
     command = [
         "codex",
         "exec",
@@ -395,12 +622,13 @@ def _run_codex_intake_generation(prompt: str, *, cwd: Path, timeout_seconds: int
         stdout = exc.stdout or ""
         stderr = exc.stderr or ""
         raise BackendError(
-            "Codex intake generation timed out.",
-            error_type="intake_generation_timeout",
+            f"Codex {stage_label} timed out.",
+            error_type=timeout_error_type,
             details={
                 "timeout_seconds": timeout_seconds,
                 "stdout": str(stdout)[-2000:],
                 "stderr": str(stderr)[-2000:],
+                "stage": stage_label,
             },
         ) from exc
     return subprocess.CompletedProcess(command, proc.returncode, stdout=stdout, stderr=stderr)
@@ -416,47 +644,130 @@ def command_brief_generate_intake(args: argparse.Namespace) -> dict[str, Any]:
             error_type="missing_build_description",
             details={"target": str(target)},
         )
+    generation_warnings: list[dict[str, Any]] = []
     intake_prompt = _low_cortisol_intake_prompt(target, description)
     stream_event(args, "intake-generate", "Generating intake.")
-    with tempfile.TemporaryDirectory(prefix="diffmogger-intake-") as tmp:
-        intake_result = _run_codex_intake_generation(
-            intake_prompt,
-            cwd=Path(tmp),
-            timeout_seconds=_intake_codex_timeout_seconds(),
+    try:
+        with tempfile.TemporaryDirectory(prefix="diffmogger-intake-") as tmp:
+            intake_result = _run_codex_intake_generation(
+                intake_prompt,
+                cwd=Path(tmp),
+                timeout_seconds=_intake_codex_timeout_seconds(),
+                stage_label="intake generation",
+                timeout_error_type="intake_generation_timeout",
+            )
+    except BackendError as exc:
+        if exc.error_type != "intake_generation_timeout":
+            raise
+        stream_event(args, "intake-fallback", "Intake generation timed out; using deterministic fallback.", level="warning")
+        generation_warnings.append(
+            _low_cortisol_timeout_warning(
+                warning_type="codex_intake_generation_timeout_fallback",
+                stage_label="intake generation",
+                timeout_seconds=exc.details.get("timeout_seconds"),
+            )
         )
-    if intake_result.returncode != 0:
-        raise BackendError(
-            "Codex intake generation failed.",
-            error_type="intake_generation_failed",
-            details={"exit_code": intake_result.returncode, "stdout": intake_result.stdout[-2000:], "stderr": intake_result.stderr[-2000:]},
-        )
-    raw_intake = _extract_json_payload(intake_result.stdout, label="intake")
-    intake = _normalize_low_cortisol_intake(target, raw_intake, description, require_tickets=False)
+        intake = _fallback_low_cortisol_intake(target, description)
+    else:
+        if intake_result.returncode != 0:
+            raise BackendError(
+                "Codex intake generation failed.",
+                error_type="intake_generation_failed",
+                details={"exit_code": intake_result.returncode, "stdout": intake_result.stdout[-2000:], "stderr": intake_result.stderr[-2000:]},
+            )
+        raw_intake = _extract_json_payload(intake_result.stdout, label="intake")
+        intake = _normalize_low_cortisol_intake(target, raw_intake, description, require_tickets=False)
 
     ticket_prompt = _low_cortisol_ticket_prompt(target, description, intake)
     stream_event(args, "ticket-generate", "Generating tickets.")
-    with tempfile.TemporaryDirectory(prefix="diffmogger-tickets-") as tmp:
-        ticket_result = _run_codex_intake_generation(
-            ticket_prompt,
-            cwd=Path(tmp),
-            timeout_seconds=_intake_codex_timeout_seconds(),
+    scope_groups = ticket_scope_groups_from_intake(intake)
+    fallback_ticket_warnings: list[dict[str, Any]] = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="diffmogger-tickets-") as tmp:
+            ticket_result = _run_codex_intake_generation(
+                ticket_prompt,
+                cwd=Path(tmp),
+                timeout_seconds=_ticket_codex_timeout_seconds(),
+                stage_label="ticket generation",
+                timeout_error_type="ticket_generation_timeout",
+            )
+    except BackendError as exc:
+        if exc.error_type != "ticket_generation_timeout":
+            raise
+        stream_event(args, "ticket-fallback", "Ticket generation timed out; using deterministic fallback queue.", level="warning")
+        seed_tickets, fallback_ticket_warnings = _fallback_low_cortisol_tickets(intake, description)
+        fallback_ticket_warnings.insert(
+            0,
+            _low_cortisol_timeout_warning(
+                warning_type="codex_ticket_generation_timeout_fallback",
+                stage_label="ticket generation",
+                timeout_seconds=exc.details.get("timeout_seconds"),
+            ),
         )
-    if ticket_result.returncode != 0:
-        raise BackendError(
-            "Codex ticket generation failed.",
-            error_type="ticket_generation_failed",
-            details={"exit_code": ticket_result.returncode, "stdout": ticket_result.stdout[-2000:], "stderr": ticket_result.stderr[-2000:]},
-        )
-    raw_tickets = _extract_json_payload(ticket_result.stdout, label="ticket seed")
-    seed_tickets = ticket_run.normalized_tickets(_extract_seed_tickets_payload(raw_tickets))
-    if not seed_tickets:
-        raise BackendError(
-            "Codex did not return any ticket_run_seed_tickets.",
-            error_type="intake_generation_no_tickets",
-            details={"project_name": intake["project_name"]},
-        )
+        quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups)
+        refinement_needed = False
+    else:
+        if ticket_result.returncode != 0:
+            raise BackendError(
+                "Codex ticket generation failed.",
+                error_type="ticket_generation_failed",
+                details={"exit_code": ticket_result.returncode, "stdout": ticket_result.stdout[-2000:], "stderr": ticket_result.stderr[-2000:]},
+            )
+        raw_tickets = _extract_json_payload(ticket_result.stdout, label="ticket seed")
+        seed_tickets = ticket_run.normalized_tickets(_extract_seed_tickets_payload(raw_tickets))
+        if not seed_tickets:
+            raise BackendError(
+                "Codex did not return any ticket_run_seed_tickets.",
+                error_type="intake_generation_no_tickets",
+                details={"project_name": intake["project_name"]},
+            )
+        quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups)
+        refinement_needed = not bool(quality_gate.get("passed"))
+        if refinement_needed:
+            ticket_prompt = _low_cortisol_refinement_prompt(target, description, intake, seed_tickets, quality_gate)
+            stream_event(args, "ticket-refine", "Refining under-decomposed tickets.")
+            try:
+                with tempfile.TemporaryDirectory(prefix="diffmogger-ticket-refine-") as tmp:
+                    ticket_result = _run_codex_intake_generation(
+                        ticket_prompt,
+                        cwd=Path(tmp),
+                        timeout_seconds=_ticket_refinement_codex_timeout_seconds(),
+                        stage_label="ticket refinement",
+                        timeout_error_type="ticket_refinement_timeout",
+                    )
+            except BackendError as exc:
+                if exc.error_type != "ticket_refinement_timeout":
+                    raise
+                stream_event(args, "ticket-fallback", "Ticket refinement timed out; using deterministic fallback queue.", level="warning")
+                seed_tickets, fallback_ticket_warnings = _fallback_low_cortisol_tickets(intake, description)
+                fallback_ticket_warnings.insert(
+                    0,
+                    _low_cortisol_timeout_warning(
+                        warning_type="codex_ticket_refinement_timeout_fallback",
+                        stage_label="ticket refinement",
+                        timeout_seconds=exc.details.get("timeout_seconds"),
+                    ),
+                )
+                quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups)
+            else:
+                if ticket_result.returncode != 0:
+                    raise BackendError(
+                        "Codex ticket refinement failed.",
+                        error_type="ticket_refinement_failed",
+                        details={"exit_code": ticket_result.returncode, "stdout": ticket_result.stdout[-2000:], "stderr": ticket_result.stderr[-2000:]},
+                    )
+                raw_tickets = _extract_json_payload(ticket_result.stdout, label="ticket refinement")
+                refined_tickets = ticket_run.normalized_tickets(_extract_seed_tickets_payload(raw_tickets))
+                if refined_tickets:
+                    seed_tickets = refined_tickets
+                    quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups)
     intake["ticket_run_seed_tickets"] = seed_tickets
-    intake["ticket_generation_quality_warnings"] = ticket_quality_warnings(seed_tickets)
+    intake["ticket_generation_scope_groups"] = scope_groups
+    quality_warnings = list(quality_gate.get("warnings") or ticket_quality_warnings(seed_tickets, scope_groups=scope_groups))
+    intake["ticket_generation_quality_warnings"] = [*generation_warnings, *fallback_ticket_warnings, *quality_warnings]
+    intake["ticket_generation_refinement_needed"] = refinement_needed
+    intake["ticket_generation_refinement_passed"] = bool(quality_gate.get("passed"))
+    intake["ticket_generation_scope_surface_floor"] = int(quality_gate.get("scope_surface_floor") or 0)
     state_path = write_dashboard_state_from_intake(target, intake, last_action="low_cortisol_intake_generated")
     write_dashboard_action_state(target, last_action="low_cortisol_intake_generated")
     return {
@@ -466,6 +777,10 @@ def command_brief_generate_intake(args: argparse.Namespace) -> dict[str, Any]:
         "ticket_count": len(intake["ticket_run_seed_tickets"]),
         "ticket_generation_complexity": intake["ticket_generation_complexity"],
         "ticket_generation_quality_warnings": intake["ticket_generation_quality_warnings"],
+        "ticket_generation_scope_groups": intake["ticket_generation_scope_groups"],
+        "ticket_generation_refinement_needed": intake["ticket_generation_refinement_needed"],
+        "ticket_generation_refinement_passed": intake["ticket_generation_refinement_passed"],
+        "ticket_generation_scope_surface_floor": intake["ticket_generation_scope_surface_floor"],
         "automation_role_profile": intake["automation_role_profile"],
         "ticket_run_file": intake["ticket_run_file"],
     }
@@ -523,9 +838,10 @@ def run_required_file_check_for_intake(target: Path, intake: dict[str, Any]) -> 
     ]
     if intake.get("write_worker_agents_allowed"):
         command.append("--write-workers-enabled")
-    if normalize_automation_role_profile(intake) == "planner_builder_hardener_integrator":
-        command.append("--multi-role-enabled")
-    if str(intake.get("automation_run_mode") or "") == "ticket_campaign":
+    command.append("--multi-role-enabled")
+    campaign = str(intake.get("campaign_mode") or intake.get("automation_run_mode") or "").strip().lower()
+    campaign = campaign.replace("-", "_").replace(" ", "_")
+    if campaign in {"bounded", "ticket_campaign"}:
         command.append("--ticket-campaign-enabled")
     if intake.get("optional_mcp_servers"):
         command.append("--optional-mcp-enabled")

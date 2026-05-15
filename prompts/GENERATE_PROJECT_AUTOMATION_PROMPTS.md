@@ -24,7 +24,8 @@ AGENTS.md
 .diffmogger/state/DAILY_AUTOMATION_REVIEW.md
 .diffmogger/scripts/acquire_codex_lock.sh
 .diffmogger/scripts/release_codex_lock.sh
-.diffmogger/scripts/run_codex_automation.sh
+.diffmogger/scripts/run_conveyor_automation.sh
+.diffmogger/scripts/run_role_automation.sh
 .diffmogger/scripts/run_observatory.py
 .diffmogger/scripts/repair_environment.py
 .diffmogger/scripts/state_brief.py
@@ -82,7 +83,7 @@ The generated task projection must include:
 - mode-appropriate backlog or deferred/follow-up ticket section
 - continue/block/critical-stop rationale
 
-Typed automation control and the generated task projection must include current horizon, horizon goal, advancement criteria, evidence gathered this run, advancement decision (`stay`, `advance`, or `defer`), next horizon candidate, and remaining work before advancement. The automation prompt must tell Codex to advance to the next horizon only when criteria are met and to append evidence to the horizon transition log when advancement happens. For `ticket_campaign`, the generated horizons should be bounded ticket-run phases, bootstrap must be readiness-only, normal runs should use dependency-aware `scripts/ticket_run.py . next --json` selection for one ticket per run, and prompts must not tell Codex to invent open-ended roadmap work after all tickets are done or blocked.
+Typed automation control and the generated task projection must include current horizon, horizon goal, advancement criteria, evidence gathered this run, advancement decision (`stay`, `advance`, or `defer`), next horizon candidate, and remaining work before advancement. The automation prompt must tell Codex to advance to the next horizon only when criteria are met and to append evidence to the horizon transition log when advancement happens. For `campaign_mode: bounded`, the generated horizons should be bounded ticket-run phases, bootstrap must be readiness-only, normal runs should use dependency-aware `scripts/ticket_run.py . next --json` selection for one ticket per run, and prompts must not tell Codex to invent open-ended roadmap work after all tickets are done or blocked. For `campaign_mode: ongoing`, prompts should allow safe generic ticket drafting from typed runtime context when no dependency-ready ticket remains.
 
 The guardrails file must stay lean and include:
 
@@ -170,9 +171,9 @@ Generated guardrails must prohibit unbounded recursive agents, overlapping write
 
 If the target helper script supports write workers, keep read-only as the default mode and require an explicit write mode plus ownership scope for write-capable workers.
 
-Support two continuous automation profiles. `single_lane` is the solo continuous profile for docs, research, cleanup, reports, small apps, bounded/simple work, and non-engineering workflows. `planner_builder_hardener_integrator` is the multi-role software-engineering profile for larger work where separate planning, implementation, verification, and integration lanes add value. Treat `automation_role_profile` as canonical; `multi_role_automations_allowed` is only a backward-compatible derived mirror for old intakes.
+Support one continuous automation architecture: the `planner_builder_hardener_integrator` conveyor. Treat `campaign_mode` as the user-facing setup choice: `bounded` stops after seeded/imported tickets are complete or blocked, while `ongoing` drafts/enqueues safe project-agnostic follow-up tickets from typed runtime context and continues.
 
-Generated targets must include `.diffmogger/scripts/run_conveyor_automation.sh`, `.diffmogger/scripts/run_conveyor_automation.py`, `.diffmogger/scripts/run_observatory.py`, `.diffmogger/scripts/repair_environment.py`, and `.diffmogger/schemas/orchestration_state.schema.json` as local automation helpers/contracts. When multi-role mode is enabled, also generate `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, `.diffmogger/agentic/roles/integrator.md`, `.diffmogger/state/MULTI_ROLE_PROGRESS.md`, `.diffmogger/scripts/run_role_automation.sh`, `.diffmogger/scripts/integrate_role_outputs.py`, and `.diffmogger/scripts/list_deferred_patches.py`.
+Generated targets must include `.diffmogger/scripts/run_conveyor_automation.sh`, `.diffmogger/scripts/run_conveyor_automation.py`, `.diffmogger/scripts/run_role_automation.sh`, `.diffmogger/scripts/integrate_role_outputs.py`, `.diffmogger/scripts/list_deferred_patches.py`, `.diffmogger/scripts/run_observatory.py`, `.diffmogger/scripts/repair_environment.py`, `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, `.diffmogger/agentic/roles/integrator.md`, `.diffmogger/state/MULTI_ROLE_PROGRESS.md`, and `.diffmogger/schemas/orchestration_state.schema.json` as local automation helpers/contracts.
 
 Generated multi-role prompts must state that:
 
@@ -186,7 +187,7 @@ Generated multi-role prompts must state that:
 
 Generated guardrails must prohibit recursive role spawning, unbounded write ownership, blind acceptance of role patches, destructive cleanup, remote git operations, and hook-based pushes.
 
-Lock-file instructions should reference the target repo's local `.diffmogger/scripts/run_codex_automation.sh`, `.diffmogger/scripts/acquire_codex_lock.sh`, and `.diffmogger/scripts/release_codex_lock.sh` helpers, the default `.diffmogger/runtime/codex_automation.lock` path, `CODEX_LOCK_PATH` overrides, stale-lock detection, `CODEX_RUN_ID` identity for safe release, and `CODEX_LOCK_ALREADY_ACQUIRED=true` for wrapper-owned runs.
+Lock-file instructions should reference the target repo's local role/conveyor wrappers, `.diffmogger/scripts/acquire_codex_lock.sh`, and `.diffmogger/scripts/release_codex_lock.sh` helpers, the default `.diffmogger/runtime/codex_automation.lock` path, `CODEX_LOCK_PATH` overrides, stale-lock detection, `CODEX_RUN_ID` identity for safe release, and `CODEX_LOCK_ALREADY_ACQUIRED=true` for wrapper-owned runs.
 
 State-compaction instructions should reference `.diffmogger/scripts/compact_agent_state.py --dry-run <target-project>`, preserve unresolved human requests and deferred multi-role manifests, summarize transient multi-role artifacts, and archive concise rollups rather than silently deleting active state.
 

@@ -64,23 +64,23 @@ Multi-role conveyor automation is the standard mode. CLI intakes can use:
 }
 ```
 
-Use `automation_role_profile: "single_lane"` for docs, research, cleanup, reports, small apps, bounded/simple work, and non-engineering workflows. Use `planner_builder_hardener_integrator` for larger software engineering work where independent planning, implementation, verification, and integration lanes add value. Legacy intakes may still include `multi_role_automations_allowed`, but valid `automation_role_profile` values are canonical.
+Diffmogger always scaffolds the `planner_builder_hardener_integrator` conveyor. Legacy intakes may still include `multi_role_automations_allowed`, but new intakes should use `campaign_mode` for the setup choice.
 
 Scaffold creates a local git repo and initial `chore: initial commit` automatically when the selected target does not already have `HEAD`. Continuous automation still checks this before the runner starts.
 
-For bounded ticket work, enable **Ticket Campaign** in the dashboard run config or set these intake fields:
+For bounded ticket work, choose **Bounded campaign** in the dashboard run config or set these intake fields:
 
 ```json
 {
-  "automation_run_mode": "ticket_campaign",
+  "campaign_mode": "bounded",
   "ticket_run_seed_tickets": [],
   "ticket_completion_notify": true
 }
 ```
 
-The native dashboard provides a **Ticket Queue** panel before scaffold when Ticket Campaign is selected. Use it to add/edit/delete seed tickets, paste Markdown/CSV/JSON imports, or ask Codex to draft review-only candidates from the intake. CLI intakes can also include `ticket_run_seed_tickets`; scaffold writes those into the target-local SQLite ticket queue.
+The native dashboard provides a **Ticket Queue** panel before scaffold when bounded campaign is selected. Low-cortisol generation creates a full-scope seed queue by splitting the described project into reviewable local patches with no fixed ticket-count ceiling. Use the queue panel to add/edit/delete seed tickets, paste Markdown/CSV/JSON imports, or ask Codex to draft review-only follow-up candidates from current project state. CLI intakes can also include `ticket_run_seed_tickets`; scaffold writes those into the target-local SQLite ticket queue.
 
-After scaffold, the Run page has the same Ticket Queue controls: inspect, add, edit, delete, preview/apply imports transactionally, draft from intake, and accept selected draft candidates. Runtime decisions, typed conveyor stage, repo capability manifest, events, blockers, and next actions remain canonical in `.diffmogger/runtime/orchestration.sqlite3`. Bootstrap is readiness-only in ticket-campaign mode: it should confirm setup, ticket parsing, and verification, not implement the tickets. Normal campaign runs use `python3 .diffmogger/scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run. Completion notifications use the laptop's native desktop notification system when enabled; failures are recorded in typed human-message state.
+After scaffold, the Run page has the same Ticket Queue controls: inspect, add, edit, delete, preview/apply imports transactionally, draft from intake, and accept selected draft candidates. Runtime decisions, typed conveyor stage, repo capability manifest, events, blockers, and next actions remain canonical in `.diffmogger/runtime/orchestration.sqlite3`. Bootstrap is readiness-only in bounded campaign mode: it should confirm setup, ticket parsing, and verification, not implement the tickets. Normal campaign runs use `python3 .diffmogger/scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run. Ongoing campaigns draft/enqueue safe follow-up tickets from typed runtime context when no dependency-ready tickets remain. Completion notifications use the laptop's native desktop notification system when enabled; failures are recorded in typed human-message state.
 
 For CLI validation of a ticket-campaign target, add `--ticket-campaign-enabled` to `scripts/check_required_files.py`.
 
@@ -107,9 +107,11 @@ Generated target repos include local runtime helpers:
 ```text
 .diffmogger/scripts/acquire_codex_lock.sh
 .diffmogger/scripts/release_codex_lock.sh
-.diffmogger/scripts/run_codex_automation.sh
 .diffmogger/scripts/run_conveyor_automation.py
 .diffmogger/scripts/run_conveyor_automation.sh
+.diffmogger/scripts/run_role_automation.sh
+.diffmogger/scripts/integrate_role_outputs.py
+.diffmogger/scripts/list_deferred_patches.py
 .diffmogger/scripts/run_observatory.py
 .diffmogger/scripts/ticket_run.py
 .diffmogger/scripts/repair_environment.py
@@ -118,14 +120,11 @@ Generated target repos include local runtime helpers:
 .diffmogger/scripts/compact_agent_state.py
 ```
 
-When multi-role mode is enabled, generated targets also include:
+Generated targets also include the conveyor role prompts and progress projection:
 
 ```text
 .diffmogger/agentic/verification_commands.txt
 .diffmogger/agentic/smoke_commands.txt
-.diffmogger/scripts/run_role_automation.sh
-.diffmogger/scripts/integrate_role_outputs.py
-.diffmogger/scripts/list_deferred_patches.py
 ```
 
 For new sidecar targets, those prompt/config files are generated under `.diffmogger/agentic/`; legacy targets without `.diffmogger/manifest.json` may still use `.agentic/`.
@@ -156,12 +155,11 @@ Recommended path: use the dashboard's **Start** button after bootstrap completes
 bash .diffmogger/scripts/run_conveyor_automation.sh
 ```
 
-The conveyor keeps running locally, chooses the next runnable lane from canonical SQLite state, and records events, typed stage contracts, the current work item, repo capability manifests, checkpoints, blockers, validations, and next actions in `.diffmogger/runtime/orchestration.sqlite3`. `.diffmogger/runtime/canonical_state_brief.md` is regenerated before single-lane and role Codex runs; `.diffmogger/runtime/automation_conveyor_state.json` and `.diffmogger/runtime/automation_runner.json` are regenerated as compatibility projections. In `single_lane`, it dispatches `.diffmogger/scripts/run_codex_automation.sh` as a continuous solo loop. In `planner_builder_hardener_integrator`, it prioritizes queued integration first, baseline verification preflight or repair routing when needed, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, planner-needed transitions, builder momentum by default, and one hardener pass after integrated builder work. Role and single-lane Codex subprocesses run under `.diffmogger/scripts/run_process_watchdog.py`; the conveyor also clears orphaned or over-time `active_role_run` state when restarted.
+The conveyor keeps running locally, chooses the next runnable lane from canonical SQLite state, and records events, typed stage contracts, the current work item, repo capability manifests, checkpoints, blockers, validations, and next actions in `.diffmogger/runtime/orchestration.sqlite3`. `.diffmogger/runtime/canonical_state_brief.md` is regenerated before role Codex runs; `.diffmogger/runtime/automation_conveyor_state.json` and `.diffmogger/runtime/automation_runner.json` are regenerated as compatibility projections. It prioritizes queued integration first, baseline verification preflight or repair routing when needed, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, planner-needed transitions, builder momentum by default, and one hardener pass after integrated builder work. Role Codex subprocesses run under `.diffmogger/scripts/run_process_watchdog.py`; the conveyor also clears orphaned or over-time `active_role_run` state when restarted.
 
 The target wrapper can still be run manually for debugging:
 
 ```bash
-bash .diffmogger/scripts/run_codex_automation.sh
 bash .diffmogger/scripts/run_conveyor_automation.sh --dry-run
 bash .diffmogger/scripts/run_conveyor_automation.sh --once
 python3 .diffmogger/scripts/run_observatory.py --open

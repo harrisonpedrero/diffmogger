@@ -49,7 +49,7 @@ The dashboard frontend should call backend commands instead of reading arbitrary
 - State: `state.snapshot`, `state.validate`; these expose the SQLite-backed conveyor work item, current stage, stage contract, capability manifest, graph summaries, context-pack previews, leases, scheduler candidates, next actions, validation receipts, and event history.
 - Tickets: `ticket.load`, `ticket.add`, `ticket.update`, `ticket.delete`, `ticket.import`, `ticket.draft_from_intake`, `ticket.accept_draft`.
 - Safety: `safety.run_check`.
-- Workers: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`.
+- Workers and parallel execution: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`, `execution_group.load`, `execution_group.start`, `execution_group.cancel`, `execution_group.retry_failed`, `execution_group.export_debug_bundle`, `validation_jobs.load`, `lease.release_stale`.
 - Observatory and review: `observatory.snapshot`, `observatory.generate_html`, `observatory.load_html`, `review.load`, `review.export_bundle`, `review.mark_reviewed`.
 - Inbox: `inbox.load`, `inbox.send_note`, `inbox.reply_request`.
 - Advanced: `diagnostics.environment`, `diagnostics.run_checks`, `advanced.list_files`, `advanced.load_file`, `advanced.save_file`, `advanced.validate_file`, `advanced.export_debug_bundle`.
@@ -61,20 +61,20 @@ All commands validate target paths before reading or writing. Advanced file acce
 The dashboard wizard collects the same intake fields supported by `schemas/project_intake.schema.json`:
 
 - fresh-project or existing-project mode
-- product goal, target user, and first demo
+- product goal, target user, and desired runnable milestone
 - tech preferences, constraints, safety rules, and "must never" rules
 - verification commands
 - human bridge mode
 - optional context files
 - optional worker settings
-- optional ticket-campaign mode with seed-ticket entry, bulk import, and review-only Codex draft candidates
+- bounded or ongoing campaign mode with seed-ticket entry, bulk import, and review-only Codex follow-up candidates
 - continuous role conveyor automation
 - optional Context7 and Playwright MCP setup
 - deliverable definition and long-run direction
 
 For existing repos, Diffmogger writes sidecar state under `.diffmogger/` and only manages its marked block in root `AGENTS.md`.
 
-When Ticket Campaign is selected, the wizard shows a **Ticket Queue** panel before review. Seed tickets are saved in the intake as `ticket_run_seed_tickets`; scaffold seeds them into the target-local SQLite ticket queue. If no seed tickets are provided, scaffold keeps a placeholder ticket in SQLite.
+When a bounded campaign is selected, the wizard shows a **Ticket Queue** panel before review. Low-cortisol generation should decompose the full described scope into reviewable local patches with no fixed ticket-count ceiling. Seed tickets are saved in the intake as `ticket_run_seed_tickets`; scaffold seeds them into the target-local SQLite ticket queue. If no seed tickets are provided, scaffold keeps a placeholder ticket in SQLite.
 
 ## Scaffold And Bootstrap
 
@@ -111,7 +111,7 @@ After scaffold/bootstrap and required-file validation, the Run page can start or
 - **Start** launches `.diffmogger/scripts/run_conveyor_automation.sh` in a detached local process.
 - **Stop** terminates the recorded runner process group.
 
-Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Runner and conveyor state are canonical in `.diffmogger/runtime/orchestration.sqlite3`; the Run page surfaces the typed state machine current stage, owner, validation status, capability manifest, continuation token, and queued next actions. It also shows the graph-derived Codebase Graph summary, Task Graph summary, Impact View, context-pack reasons, active leases, lease conflicts, stale graph warnings, and scheduler candidates from the allowlisted `state.snapshot` payload. `.diffmogger/runtime/canonical_state_brief.md` is the generated agent-facing view, and `.diffmogger/runtime/automation_runner.json` plus `.diffmogger/runtime/automation_conveyor_state.json` are generated compatibility projections.
+Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Runner and conveyor state are canonical in `.diffmogger/runtime/orchestration.sqlite3`; the Run page surfaces the typed state machine current stage, owner, validation status, capability manifest, continuation token, and queued next actions. It also shows the graph-derived Codebase Graph summary, Task Graph summary, Impact View, context-pack reasons, active leases, lease conflicts, stale graph warnings, scheduler candidates, proposed execution groups, validation jobs, worker contracts, and integration backlog from allowlisted backend commands over typed state. `.diffmogger/runtime/canonical_state_brief.md` is the generated agent-facing view, and `.diffmogger/runtime/automation_runner.json` plus `.diffmogger/runtime/automation_conveyor_state.json` are generated compatibility projections.
 
 For scaffolded ticket-campaign targets, the Run page exposes the ticket authoring file through a structured **Ticket Queue** panel. It shows status counts, the next selected ticket, placeholder/dependency validation, and lets users inspect, edit, delete, add, preview/apply Markdown/CSV/JSON imports, draft from intake with Codex, and accept candidates. Draft candidates are stored under `.diffmogger/runtime/ticket_drafts/` and are not applied until accepted.
 
@@ -145,6 +145,20 @@ The Run page reads the Observatory worker recommendation and can launch:
 - one local integrator lane
 
 Worker artifacts live under `.diffmogger/runtime/agent_runs/<run_id>/`. The main agent remains responsible for reviewing, integrating, verifying, and updating canonical state plus generated handoff projections.
+
+## Parallel Execution Controls
+
+The Run page includes a **Parallel Execution** panel backed by `execution_group.load` and `validation_jobs.load`. It shows proposed and active execution groups, why work was grouped, skipped candidates, worker contracts, active and conflicting leases, validation jobs, queued worker patches, and warnings for stale graph context, unknown impact, exhausted budgets, disabled write workers, stale leases, report disposition, and integration backlog pressure.
+
+Dashboard controls stay narrow and typed:
+
+- **Start Read-Only Group** starts a proposed read-only execution group within the configured parallelism budget.
+- **Start Validation Group** runs independent validation jobs through the validation budget.
+- **Cancel** marks a proposed, running, or failed execution group cancelled and releases leases tied to that group.
+- **Release** releases an explicit stale lease by lease id.
+- **Export Debug Bundle** writes a compact parallel-state bundle without source contents, environment values, credentials, or arbitrary file reads.
+
+Write-worker fanout remains gated by target worker settings, lease ownership, and serialized integrator handoff. Dashboard controls observe and route typed runtime state; they do not bypass the conveyor or apply worker patches directly.
 
 ## Inbox And Advanced Files
 

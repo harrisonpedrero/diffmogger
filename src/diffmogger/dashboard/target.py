@@ -195,11 +195,18 @@ def normalize_automation_role_profile(
 ) -> str:
     profile = str(data.get("automation_role_profile") or "").strip().lower()
     profile = profile.replace("-", "_").replace(" ", "_")
-    if profile in {"single_lane", "planner_builder_hardener_integrator"}:
-        return profile
-    if "multi_role_automations_allowed" in data:
-        return "planner_builder_hardener_integrator" if legacy_bool(data.get("multi_role_automations_allowed"), True) else "single_lane"
-    return default if default in {"single_lane", "planner_builder_hardener_integrator"} else "planner_builder_hardener_integrator"
+    return "planner_builder_hardener_integrator"
+
+def normalize_campaign_mode(data: dict[str, Any]) -> str:
+    raw = data.get("campaign_mode") if data.get("campaign_mode") is not None else data.get("automation_run_mode")
+    text = str(raw or "ongoing").strip().lower().replace("-", "_").replace(" ", "_")
+    if text in {"bounded", "ongoing"}:
+        return text
+    if text == "ticket_campaign":
+        return "bounded"
+    if text == "continuous_improvement":
+        return "ongoing"
+    return "ongoing"
 
 def dashboard_state_from_intake(
     target: Path,
@@ -212,11 +219,13 @@ def dashboard_state_from_intake(
     optional_mcp = dashboard_app.optional_mcp_servers_from_value(intake.get("optional_mcp_servers"))
     write_workers_enabled = bool(intake.get("write_worker_agents_allowed")) and bool(intake.get("worker_agents_allowed", True))
     automation_role_profile = normalize_automation_role_profile(intake)
-    multi_role_enabled = automation_role_profile == "planner_builder_hardener_integrator"
+    multi_role_enabled = True
+    campaign_mode = normalize_campaign_mode(intake)
     normalized_intake = {
         **intake,
         "automation_role_profile": automation_role_profile,
         "multi_role_automations_allowed": multi_role_enabled,
+        "campaign_mode": campaign_mode,
     }
     state = {
         **existing,
@@ -241,7 +250,7 @@ def dashboard_state_from_intake(
         "automation_role_profile": automation_role_profile,
         "automation_checkpoint_commits": bool(intake.get("automation_checkpoint_commits", True)),
         "multi_role_allow_remotes": bool(intake.get("multi_role_allow_remotes", False)),
-        "automation_run_mode": str(intake.get("automation_run_mode") or "continuous_improvement"),
+        "campaign_mode": campaign_mode,
         "ticket_run_file": str(intake.get("ticket_run_file") or ""),
         "ticket_completion_notify": bool(intake.get("ticket_completion_notify", True)),
         "overwrite_existing_scaffold_files": bool(intake.get("overwrite_existing_scaffold_files", False)),

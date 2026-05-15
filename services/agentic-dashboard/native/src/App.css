@@ -4886,6 +4886,7 @@ textarea:focus-visible {
     "controls controls controls controls readiness readiness readiness readiness process process process process"
     "safety safety safety safety safety safety machine machine machine machine machine machine"
     "graph graph graph graph graph graph graph graph graph graph graph graph"
+    "parallel parallel parallel parallel parallel parallel parallel parallel parallel parallel parallel parallel"
     "blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers"
     "queue queue queue queue queue queue queue queue queue queue queue queue"
     "logs logs logs logs logs logs logs logs workers workers workers workers";
@@ -4914,6 +4915,10 @@ textarea:focus-visible {
 
 .run-control-layout > .graph-insights-panel {
   grid-area: graph;
+}
+
+.run-control-layout > .parallel-execution-panel {
+  grid-area: parallel;
 }
 
 .run-control-layout > .run-ticket-panel {
@@ -4963,6 +4968,10 @@ textarea:focus-visible {
   overflow: hidden;
 }
 
+.parallel-execution-panel {
+  overflow: hidden;
+}
+
 .run-state-machine-panel .panel-heading-row {
   align-items: start;
   min-width: 0;
@@ -4984,6 +4993,148 @@ textarea:focus-visible {
 
 .graph-insights-panel .panel-heading-row {
   margin-bottom: 12px;
+}
+
+.parallel-execution-panel .panel-heading-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  margin-bottom: 10px;
+}
+
+.parallel-execution-panel .panel-heading-row p {
+  max-width: 100%;
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parallel-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.parallel-summary-grid .data-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-alt);
+}
+
+.parallel-warning-list,
+.parallel-control-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.parallel-warning {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 6px;
+  border: 1px solid rgba(240, 179, 82, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  background: rgba(240, 179, 82, 0.08);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.parallel-warning.critical {
+  border-color: rgba(255, 103, 117, 0.45);
+  background: rgba(255, 103, 117, 0.08);
+}
+
+.parallel-warning span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parallel-section {
+  margin-top: 12px;
+  min-width: 0;
+}
+
+.parallel-section h3 {
+  margin: 0 0 7px;
+  color: var(--text-primary);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.parallel-row-list {
+  display: grid;
+  gap: 6px;
+}
+
+.parallel-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 7px 10px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--color-panel-alt);
+}
+
+.parallel-row.compact {
+  min-height: 38px;
+}
+
+.parallel-row > div {
+  min-width: 0;
+}
+
+.parallel-row strong,
+.parallel-row span,
+.parallel-row p,
+.parallel-row code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parallel-row strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.parallel-row span {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.parallel-row p,
+.parallel-row code {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.parallel-row code {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  padding: 5px 6px;
+  background: var(--color-panel);
+  color: var(--text-muted);
 }
 
 .graph-status-pill {

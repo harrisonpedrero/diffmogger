@@ -6,8 +6,8 @@ CHILD: subprocess.Popen[str] | None = None
 TERMINATE_REQUESTED = False
 
 def command_for_role(target: Path, role: str) -> list[str]:
-    if role == "single_lane":
-        return ["bash", str(script_path(target, "scripts/run_codex_automation.sh"))]
+    if role not in ROLES:
+        raise ValueError(f"Unsupported conveyor role: {role}")
     return ["bash", str(script_path(target, "scripts/run_role_automation.sh")), "--role", role]
 
 def terminate_child() -> None:
@@ -69,8 +69,6 @@ def run_role(
     watchdog_status_path = ""
     if role in QUEUE_ROLES:
         watchdog_status_path = str(runtime_path(target, "target/automation_queue") / role / run_id_value / "codex.watchdog.json")
-    elif role == "single_lane":
-        watchdog_status_path = str(runtime_path(target, f"target/automation_logs/codex.{run_id_value}.watchdog.json"))
     print(f"CONVEYOR_RUN role={role} run_id={run_id_value} command={command_display(command)}", flush=True)
     CHILD = subprocess.Popen(
         command,

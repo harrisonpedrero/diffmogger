@@ -158,7 +158,6 @@ for pattern in \
   "/scripts/list_deferred_patches.py" \
   "/scripts/release_codex_lock.sh" \
   "/scripts/repair_environment.py" \
-  "/scripts/run_codex_automation.sh" \
   "/scripts/run_conveyor_automation.py" \
   "/scripts/run_conveyor_automation.sh" \
   "/scripts/run_observatory.py" \
@@ -364,7 +363,6 @@ context_paths=(
   "scripts/list_deferred_patches.py"
   "scripts/release_codex_lock.sh"
   "scripts/repair_environment.py"
-  "scripts/run_codex_automation.sh"
   "scripts/run_conveyor_automation.py"
   "scripts/run_conveyor_automation.sh"
   "scripts/run_observatory.py"

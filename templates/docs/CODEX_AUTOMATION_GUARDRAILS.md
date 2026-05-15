@@ -40,7 +40,8 @@ Do not build unrelated apps or large unrelated systems.
 - For browser-backed smoke checks, visual QA, or documentation research, prefer `.diffmogger/scripts/diffmogger_browser.py` and the exported `DIFFMOGGER_BROWSER_PATH`/`CHROME_PATH` over ambient system Chrome.
 - If Playwright MCP is enabled, use it only for local browser validation and save deferred UI failure screenshots under `docs/backlog/ui_artifacts/<run_id>/` with Markdown links in task/progress state.
 - If repeated browser launches fail before DevTools is ready, record `BLOCKED_ON_ENVIRONMENT` with diagnostics and use an equivalent manual or managed-browser QA path instead of looping on the same launch command.
-- In `ticket_campaign` mode, do not implement tickets during bootstrap, use `.diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket selection, act on at most one selected ticket per normal run, and do not expand scope after the listed tickets are done or blocked; run `.diffmogger/scripts/ticket_run.py` finalization and leave push/PR creation to the human.
+- In `bounded` campaign mode, do not implement tickets during bootstrap, use `.diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket selection, act on at most one selected ticket per normal run, and do not expand scope after the listed tickets are done or blocked; run `.diffmogger/scripts/ticket_run.py` finalization and leave push/PR creation to the human.
+- In `ongoing` campaign mode, continue by drafting/enqueuing safe project-agnostic follow-up tickets from typed runtime context when no dependency-ready tickets remain; do not pause for approval merely because a ticket was drafted.
 - Do not delete tests just to pass checks.
 - Do not hide broad classes of errors with blanket suppressions.
 - Keep changes scoped to the current sprint.
@@ -68,7 +69,7 @@ Do not build unrelated apps or large unrelated systems.
 ## Lock-File Policy
 
 - Acquire `target/codex_automation.lock` before mutating code in automation runs.
-- Scheduled runs should use local `.diffmogger/scripts/run_codex_automation.sh`, which owns lock acquire/release.
+- Scheduled runs should use local `.diffmogger/scripts/run_conveyor_automation.sh`, which delegates to role wrappers that own lock acquire/release for mutating runs.
 - If `CODEX_LOCK_ALREADY_ACQUIRED=true`, do not acquire, overwrite, manually create, or release the lock inside the Codex run.
 - Manual runs should use local `.diffmogger/scripts/acquire_codex_lock.sh` and `.diffmogger/scripts/release_codex_lock.sh`.
 - Set `CODEX_RUN_ID` before acquire/release so the lock can identify the current run.

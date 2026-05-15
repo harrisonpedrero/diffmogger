@@ -176,7 +176,6 @@ class DashboardIntegrationSafetyAffordanceTests(unittest.TestCase):
         (target / "docs" / "CODEX_AUTOMATION_TASKS.md").write_text("AUTOMATION_STATUS: ACTIVE\n", encoding="utf-8")
         (target / "docs" / "MULTI_ROLE_PROGRESS.md").write_text("# Multi-Role Progress\n", encoding="utf-8")
         for script in (
-            "run_codex_automation.sh",
             "run_conveyor_automation.sh",
             "run_conveyor_automation.py",
             "run_role_automation.sh",

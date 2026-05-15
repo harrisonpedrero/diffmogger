@@ -42,11 +42,11 @@ A strong run usually combines implementation, tests or fixtures, integration int
 
 A weak run is one that only reads files and summarizes, makes a tiny doc-only change when implementation work is available, adds a placeholder without wiring it into the product, avoids Codex CLI worker usage on a broad task without explaining why, or updates the task file without improving the app, tests, reports, or automation process.
 
-Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. Use `python3 .diffmogger/scripts/ticket_run.py . next --json` to select one dependency-ready ticket, treat that single selection as the run's implementation scope, and do not continue into another ticket after it is completed, blocked, or marked `candidate_done`. Use `.diffmogger/scripts/ticket_run.py update` to record ticket status and evidence; planner/builder/hardener role worktrees stage that as a typed action for integrator reconciliation after patch acceptance. If the command reports placeholder tickets, missing dependencies, duplicate ticket IDs, cycles, blocked dependencies, or no actionable ticket, record that structured blocker instead of guessing. Do not invent new backlog after every ticket is `done` or `blocked`; finalize the ticket run and stop only after remaining blockers are not repairable baseline/service setup work.
+Exception: in `bounded` campaign mode, the listed tickets are the bounded scope. Use `python3 .diffmogger/scripts/ticket_run.py . next --json` to select one dependency-ready ticket, treat that single selection as the run's implementation scope, and do not continue into another ticket after it is completed, blocked, or marked `candidate_done`. Use `.diffmogger/scripts/ticket_run.py update` to record ticket status and evidence; planner/builder/hardener role worktrees stage that as a typed action for integrator reconciliation after patch acceptance. If the command reports placeholder tickets, missing dependencies, duplicate ticket IDs, cycles, blocked dependencies, or no actionable ticket, record that structured blocker instead of guessing. Do not invent new backlog after every ticket is `done` or `blocked`; finalize the bounded campaign and stop only after remaining blockers are not repairable baseline/service setup work. In `ongoing` campaign mode, do not pause for approval just because a new ticket was drafted; use typed runtime context to continue with the next safe project-agnostic ticket.
 
 ## Run Structure
 
-1. Check lock context before mutating code. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, treat `.diffmogger/scripts/run_codex_automation.sh` as the lock owner and do not acquire, overwrite, manually create, or release `target/codex_automation.lock` inside the Codex run. If no wrapper-owned lock is present, acquire the lock before mutating code using the target repo's local `.diffmogger/scripts/acquire_codex_lock.sh`.
+1. Check lock context before mutating code. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, treat the conveyor role wrapper as the lock owner and do not acquire, overwrite, manually create, or release `target/codex_automation.lock` inside the Codex run. If no wrapper-owned lock is present, acquire the lock before mutating code using the target repo's local `.diffmogger/scripts/acquire_codex_lock.sh`.
 1. Read `target/canonical_state_brief.md` and the required files above. If Markdown or JSON projections contradict the brief, regenerate or reconcile through the target-local Diffmogger typed state APIs.
 {{HUMAN_RUN_STEPS}}
 1. Inspect the repo enough to understand current state.
@@ -58,7 +58,7 @@ Exception: in `ticket_campaign` mode, the listed tickets are the bounded scope. 
 1. Implement it and adjacent safe work.
 1. Run relevant verification.
 1. Update typed runtime state, artifacts, docs, worker activity, human request state when enabled, generated projections, checks run, and next sprint.
-1. If this Codex run acquired the lock itself, release it with the target repo's local `.diffmogger/scripts/release_codex_lock.sh` when possible. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, leave lock release to `.diffmogger/scripts/run_codex_automation.sh`. Summarize results.
+1. If this Codex run acquired the lock itself, release it with the target repo's local `.diffmogger/scripts/release_codex_lock.sh` when possible. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, leave lock release to the conveyor role wrapper. Summarize results.
 
 ## Sprint Sizing
 
@@ -76,7 +76,7 @@ For reversible or low-impact choices, choose a reasonable default and document t
 
 The task file may mirror `## Product Horizon State` and `## Horizon Transition Log` for humans, but it is a projection. Update typed control state first, then regenerate projections.
 
-## Ticket Campaign Mode
+## Campaign Mode
 
 {{TICKET_CAMPAIGN_SECTION}}
 
@@ -200,11 +200,11 @@ Link screenshot-backed bugs in `docs/CODEX_AUTOMATION_TASKS.md` and, when multi-
 
 ## Lock-File Behavior
 
-Single-lane runs are launched by the target repo's local `.diffmogger/scripts/run_codex_automation.sh`. Continuous conveyor automation uses `.diffmogger/scripts/run_conveyor_automation.sh`, which chooses the next runnable lane and delegates to target-local wrappers. The wrapper for a mutating Codex run still owns lock acquisition and release.
+Continuous conveyor automation uses `.diffmogger/scripts/run_conveyor_automation.sh`, which chooses the next runnable lane and delegates to target-local role wrappers. The wrapper for a mutating Codex run still owns lock acquisition and release.
 
 This target project must keep relevant automation runtime scripts in its own `.diffmogger/scripts/` directory. During normal automation runs, do not import, call, or depend on scripts from the Diffmogger starter repo.
 
-If `CODEX_LOCK_ALREADY_ACQUIRED=true`, the lock is already held by `.diffmogger/scripts/run_codex_automation.sh`. In that case:
+If `CODEX_LOCK_ALREADY_ACQUIRED=true`, the lock is already held by the conveyor role wrapper. In that case:
 
 - Do not run an additional acquire command.
 - Do not overwrite `target/codex_automation.lock`.

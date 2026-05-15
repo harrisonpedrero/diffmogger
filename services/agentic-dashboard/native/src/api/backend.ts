@@ -86,6 +86,26 @@ export type CanonicalStateSnapshot = {
   selected_candidate?: Record<string, unknown>;
   skipped_candidates?: Array<Record<string, unknown>>;
   scheduler_fallback_used?: boolean;
+  proposed_execution_groups?: Array<Record<string, unknown>>;
+  parallelization_summary?: Record<string, unknown>;
+  blocked_parallel_candidates?: Array<Record<string, unknown>>;
+  scheduler_parallel_dry_run?: Record<string, unknown>;
+  parallelism_budgets?: Array<Record<string, unknown>>;
+  active_parallel_counts?: Record<string, number>;
+  budget_exhaustion_reasons?: Array<Record<string, unknown>>;
+  active_read_only_workers?: Array<Record<string, unknown>>;
+  pending_worker_reports?: Array<Record<string, unknown>>;
+  completed_worker_reports?: Array<Record<string, unknown>>;
+  worker_finding_disposition_required?: boolean;
+  active_write_workers?: Array<Record<string, unknown>>;
+  queued_worker_patches?: Array<Record<string, unknown>>;
+  write_worker_conflicts?: Array<Record<string, unknown>>;
+  lease_conflict_summary?: Record<string, unknown>;
+  integration_backlog_from_parallel_workers?: Array<Record<string, unknown>>;
+  active_validation_jobs?: Array<Record<string, unknown>>;
+  validation_job_summary?: Record<string, unknown>;
+  parallel_validation_available?: boolean;
+  validation_budget_status?: Record<string, unknown>;
   runner_state?: Record<string, unknown>;
 };
 
@@ -497,6 +517,10 @@ export function runBackendCommand<T = unknown>(request: {
   filesJson?: string;
   projectName?: string;
   ownership?: string;
+  executionGroupId?: string;
+  leaseId?: string;
+  groupMode?: "auto" | "read_only" | "write_workers" | "validation" | string;
+  maxWorkers?: number;
   requestId?: string;
   body?: string;
   intent?: string;
@@ -528,6 +552,10 @@ export function runBackendCommandStreamed<T = unknown>(request: {
   filesJson?: string;
   projectName?: string;
   ownership?: string;
+  executionGroupId?: string;
+  leaseId?: string;
+  groupMode?: "auto" | "read_only" | "write_workers" | "validation" | string;
+  maxWorkers?: number;
   requestId?: string;
   body?: string;
   intent?: string;

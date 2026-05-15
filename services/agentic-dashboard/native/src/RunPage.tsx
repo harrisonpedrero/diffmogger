@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Ban,
   CheckCircle2,
   Clipboard,
   ExternalLink,
@@ -11,6 +12,7 @@ import {
   ShieldCheck,
   Terminal,
   Trash2,
+  UnlockKeyhole,
   Users,
   WandSparkles,
 } from "lucide-react";
@@ -81,8 +83,34 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function asRecords(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value)
+    ? value
+        .map((item) => asRecord(item))
+        .filter((item) => Object.keys(item).length > 0)
+    : [];
+}
+
 function textValue(value: unknown, fallback = ""): string {
   return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function numberValue(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function compactValue(value: unknown, fallback = "Not recorded"): string {
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+
+function toneForStatus(status: unknown): string {
+  const value = String(status ?? "").toLowerCase();
+  if (["completed", "passed", "pass", "released"].includes(value)) return "good";
+  if (["failed", "blocked", "conflict", "critical"].includes(value)) return "critical";
+  if (["warning", "warn", "cancelled", "expired"].includes(value)) return "warn";
+  if (["running", "queued", "proposed", "active"].includes(value)) return "info";
+  return "quiet";
 }
 
 function isTicketCampaign(snapshot: ProjectSnapshot | null): boolean {
@@ -91,7 +119,10 @@ function isTicketCampaign(snapshot: ProjectSnapshot | null): boolean {
     asRecord(snapshot?.brief?.draft_intake),
     asRecord(snapshot?.brief?.dashboard_state),
   ];
-  return records.some((record) => textValue(record.automation_run_mode) === "ticket_campaign");
+  return records.some((record) => {
+    const mode = textValue(record.campaign_mode || record.automation_run_mode).replace(/[-\s]+/g, "_");
+    return mode === "bounded" || mode === "ticket_campaign";
+  });
 }
 
 function ticketSnapshotFromProjectSnapshot(snapshot: ProjectSnapshot | null): TicketSnapshot | null {
@@ -269,6 +300,309 @@ function RunStateMachinePanel(props: {
   );
 }
 
+function firstGroupId(groups: Array<Record<string, unknown>>, mode: string): string {
+  for (const group of groups) {
+    const payload = asRecord(group.payload);
+    const executionMode = textValue(payload.execution_mode || group.mode);
+    const id = textValue(group.execution_group_id);
+    if (id && (executionMode === mode || group.mode === mode)) return id;
+  }
+  return textValue(groups[0]?.execution_group_id);
+}
+
+function groupItems(group: Record<string, unknown>): Array<Record<string, unknown>> {
+  return asRecords(group.items).slice(0, 4);
+}
+
+function leaseTarget(lease: Record<string, unknown>): string {
+  return compactValue(lease.path || lease.scope_node_id || lease.name || lease.lease_id);
+}
+
+function leaseLooksStale(lease: Record<string, unknown>): boolean {
+  const status = String(lease.status ?? "").toLowerCase();
+  if (["expired", "stale"].includes(status)) return true;
+  const expiresAt = textValue(lease.expires_at);
+  if (!expiresAt) return false;
+  const timestamp = new Date(expiresAt).getTime();
+  return Number.isFinite(timestamp) && timestamp < Date.now();
+}
+
+function ParallelExecutionPanel(props: {
+  snapshot: ProjectSnapshot | null;
+  details: Record<string, unknown> | null;
+  busy: boolean;
+  onLoad: () => void;
+  onStartReadOnly: (groupId: string) => void;
+  onStartValidation: () => void;
+  onCancelGroup: (groupId: string) => void;
+  onReleaseLease: (leaseId: string) => void;
+  onExportBundle: () => void;
+}) {
+  const state = asRecord(props.snapshot?.run?.state);
+  const details = asRecord(props.details);
+  const proposed = [
+    ...asRecords(details.proposed_execution_group_rows),
+    ...asRecords(state.proposed_execution_groups),
+  ];
+  const activeGroups = [
+    ...asRecords(details.active_execution_groups),
+    ...asRecords(state.active_execution_groups),
+  ];
+  const recentGroups = asRecords(details.recent_execution_groups).slice(0, 4);
+  const skipped = [
+    ...asRecords(details.blocked_parallel_candidates),
+    ...asRecords(state.blocked_parallel_candidates),
+  ].slice(0, 6);
+  const activeLeases = [
+    ...asRecords(details.active_leases),
+    ...asRecords(state.active_leases),
+  ].slice(0, 6);
+  const conflictingLeases = [
+    ...asRecords(details.conflicting_leases),
+    ...asRecords(state.conflicting_leases),
+  ].slice(0, 4);
+  const contracts = asRecords(details.worker_contracts).slice(0, 5);
+  const validationJobsModel = asRecord(details.validation_jobs || state.validation_job_summary);
+  const validationSummary = asRecord(validationJobsModel.validation_job_summary || state.validation_job_summary);
+  const validationJobs = [
+    ...asRecords(validationJobsModel.active_validation_jobs),
+    ...asRecords(state.active_validation_jobs),
+    ...asRecords(validationSummary.latest),
+  ].slice(0, 5);
+  const integrationBacklog = [
+    ...asRecords(details.integration_backlog_from_parallel_workers),
+    ...asRecords(state.integration_backlog_from_parallel_workers),
+  ].slice(0, 6);
+  const staleLeaseWarnings = activeLeases
+    .filter(leaseLooksStale)
+    .map((lease) => ({
+      kind: "stale_lease",
+      severity: "warn",
+      message: `Stale lease: ${leaseTarget(lease)}`,
+    }));
+  const warnings: Array<Record<string, unknown>> = [
+    ...staleLeaseWarnings,
+    ...asRecords(details.warnings),
+    ...asRecords(state.stale_graph_warnings),
+    ...asRecords(state.budget_exhaustion_reasons).map((item) => ({
+      kind: "budget_exhausted",
+      severity: "warn",
+      message: item.reason,
+    })),
+  ].slice(0, 6);
+  const readOnlyGroupId = firstGroupId(proposed, "read_only");
+  const activeCounts = asRecord(state.active_parallel_counts);
+  const budgetStatus = asRecord(state.validation_budget_status);
+
+  return (
+    <article className="panel parallel-execution-panel" aria-label="Parallel execution">
+      <div className="panel-heading-row">
+        <div>
+          <h2>Parallel Execution</h2>
+          <p>{compactValue(asRecord(state.parallelization_summary).mode, "dry_run")} · {numberValue(asRecord(state.parallelization_summary).group_count)} proposed groups</p>
+        </div>
+        <div className="inline-actions">
+          <button className="icon-text-button" onClick={props.onLoad} disabled={props.busy}>
+            <RefreshCw size={14} />
+            Refresh Details
+          </button>
+          <button className="icon-text-button" onClick={props.onExportBundle} disabled={props.busy}>
+            <FileDown size={14} />
+            Export Debug Bundle
+          </button>
+        </div>
+      </div>
+
+      <div className="parallel-summary-grid">
+        <DetailRow label="Groups" value={numberValue(asRecord(state.parallelization_summary).group_count)} />
+        <DetailRow label="Active jobs" value={numberValue(activeCounts.active_validation_jobs)} />
+        <DetailRow label="Read workers" value={numberValue(activeCounts.active_read_only_workers)} />
+        <DetailRow label="Write workers" value={numberValue(activeCounts.active_write_workers)} />
+      </div>
+
+      {warnings.length > 0 && (
+        <div className="parallel-warning-list">
+          {warnings.map((warning, index) => (
+            <div className={`parallel-warning ${toneForStatus(warning.severity || warning.reason_kind)}`} key={`${warning.kind ?? "warning"}-${index}`}>
+              <AlertTriangle size={14} />
+              <span>{compactValue(warning.message || warning.reason || warning.kind, "Parallel warning")}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="parallel-control-strip">
+        <button className="secondary-action" disabled={props.busy || !readOnlyGroupId} onClick={() => props.onStartReadOnly(readOnlyGroupId)}>
+          <Users size={14} />
+          Start Read-Only Group
+        </button>
+        <button className="secondary-action" disabled={props.busy || budgetStatus.allowed === false} onClick={props.onStartValidation}>
+          <ShieldCheck size={14} />
+          Start Validation Group
+        </button>
+      </div>
+
+      <section className="parallel-section">
+        <h3>Proposed groups</h3>
+        <div className="parallel-row-list">
+          {proposed.length ? proposed.slice(0, 4).map((group, index) => {
+            const id = textValue(group.execution_group_id, `group-${index}`);
+            const payload = asRecord(group.payload);
+            return (
+              <div className="parallel-row" key={`${id}-${index}`}>
+                <div>
+                  <strong>{id}</strong>
+                  <span>{compactValue(payload.execution_mode || group.mode)} · {groupItems(group).length || numberValue(group.item_count)} item(s)</span>
+                </div>
+                <RunTonePill tone={toneForStatus(group.status || "proposed")}>{compactValue(group.status || "proposed")}</RunTonePill>
+                <p>{compactValue(group.reason || payload.why_together, "No grouping reason recorded.")}</p>
+                {groupItems(group).map((item) => (
+                  <code key={textValue(item.item_id) || textValue(item.task_id)}>
+                    {compactValue(item.task_id || item.graph_task_node_id)} · {compactValue(item.owner_role)} · {compactValue(item.action_kind)}
+                  </code>
+                ))}
+              </div>
+            );
+          }) : <p className="empty-copy">No proposed groups recorded yet.</p>}
+        </div>
+      </section>
+
+      <section className="parallel-section">
+        <h3>Active groups</h3>
+        <div className="parallel-row-list">
+          {activeGroups.length ? activeGroups.map((group, index) => {
+            const id = textValue(group.execution_group_id, `active-${index}`);
+            return (
+              <div className="parallel-row" key={id}>
+                <div>
+                  <strong>{id}</strong>
+                  <span>{compactValue(group.mode)} · {compactValue(group.selected_by)}</span>
+                </div>
+                <RunTonePill tone="info">{compactValue(group.status, "running")}</RunTonePill>
+                <button className="ledger-action" disabled={props.busy} onClick={() => props.onCancelGroup(id)}>
+                  <Ban size={14} />
+                  Cancel
+                </button>
+              </div>
+            );
+          }) : <p className="empty-copy">No active execution groups.</p>}
+        </div>
+      </section>
+
+      <section className="parallel-section">
+        <h3>Validation jobs</h3>
+        <div className="parallel-row-list">
+          <div className="parallel-row compact">
+            <div>
+              <strong>{compactValue(validationSummary.aggregate_status, "not_run")}</strong>
+              <span>{numberValue(validationSummary.job_count)} total · {numberValue(validationSummary.active_count)} active</span>
+            </div>
+            <RunTonePill tone={toneForStatus(validationSummary.aggregate_status)}>{compactValue(validationSummary.aggregate_status, "not_run")}</RunTonePill>
+          </div>
+          {validationJobs.map((job, index) => (
+            <div className="parallel-row compact" key={textValue(job.job_id, `validation-${index}`)}>
+              <div>
+                <strong>{compactValue(job.gate_id || job.job_id)}</strong>
+                <span>{compactValue(job.command)} </span>
+              </div>
+              <RunTonePill tone={toneForStatus(job.status)}>{compactValue(job.status)}</RunTonePill>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="parallel-section">
+        <h3>Leases</h3>
+        <div className="parallel-row-list">
+          {activeLeases.length ? activeLeases.map((lease, index) => {
+            const id = textValue(lease.lease_id, `lease-${index}`);
+            return (
+              <div className="parallel-row compact" key={id}>
+                <div>
+                  <strong>{leaseTarget(lease)}</strong>
+                  <span>{compactValue(lease.owner_role)} · {compactValue(lease.expires_at, "no expiry")}</span>
+                </div>
+                <button className="ledger-action" disabled={props.busy} onClick={() => props.onReleaseLease(id)}>
+                  <UnlockKeyhole size={14} />
+                  Release
+                </button>
+              </div>
+            );
+          }) : <p className="empty-copy">No active leases.</p>}
+          {conflictingLeases.map((conflict, index) => (
+            <div className="parallel-warning critical" key={`conflict-${index}`}>
+              <AlertTriangle size={14} />
+              <span>{compactValue(conflict.reason || conflict.overlap_reason, "Lease conflict detected.")}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="parallel-section">
+        <h3>Worker contracts</h3>
+        <div className="parallel-row-list">
+          {contracts.length ? contracts.map((contract, index) => (
+            <div className="parallel-row compact" key={textValue(contract.contract_id, `contract-${index}`)}>
+              <div>
+                <strong>{compactValue(contract.worker_id || contract.contract_id)}</strong>
+                <span>{compactValue(contract.ownership_scope || asRecords(contract.allowed_paths).join(", "), "read-only contract")}</span>
+              </div>
+              <RunTonePill tone="info">{contract.no_spawn_workers === false ? "spawn allowed" : "no spawn"}</RunTonePill>
+            </div>
+          )) : <p className="empty-copy">No worker contracts recorded yet.</p>}
+        </div>
+      </section>
+
+      <section className="parallel-section">
+        <h3>Integration backlog</h3>
+        <div className="parallel-row-list">
+          {integrationBacklog.length ? integrationBacklog.map((patch, index) => (
+            <div className="parallel-row compact" key={textValue(patch.patch_id, `patch-${index}`)}>
+              <div>
+                <strong>{compactValue(patch.patch_id)}</strong>
+                <span>{asRecords(patch.changed_files).length ? `${asRecords(patch.changed_files).length} file(s)` : compactValue(patch.manifest_path)}</span>
+              </div>
+              <RunTonePill tone={toneForStatus(patch.status)}>{compactValue(patch.status)}</RunTonePill>
+            </div>
+          )) : <p className="empty-copy">No parallel worker patches are queued.</p>}
+        </div>
+      </section>
+
+      <section className="parallel-section">
+        <h3>Skipped candidates</h3>
+        <div className="parallel-row-list">
+          {skipped.length ? skipped.map((candidate, index) => (
+            <div className="parallel-row compact" key={`${candidate.task_id ?? candidate.graph_task_node_id ?? index}`}>
+              <div>
+                <strong>{compactValue(candidate.task_id || candidate.graph_task_node_id)}</strong>
+                <span>{compactValue(candidate.reason || candidate.reason_kind)}</span>
+              </div>
+              <RunTonePill tone="warn">skipped</RunTonePill>
+            </div>
+          )) : <p className="empty-copy">No skipped parallel candidates.</p>}
+        </div>
+      </section>
+
+      {recentGroups.length > 0 && (
+        <section className="parallel-section">
+          <h3>Recent groups</h3>
+          <div className="parallel-row-list">
+            {recentGroups.map((group, index) => (
+              <div className="parallel-row compact" key={textValue(group.execution_group_id, `recent-${index}`)}>
+                <div>
+                  <strong>{compactValue(group.execution_group_id)}</strong>
+                  <span>{compactValue(group.mode)} · {compactValue(group.finished_at || group.started_at)}</span>
+                </div>
+                <RunTonePill tone={toneForStatus(group.status)}>{compactValue(group.status)}</RunTonePill>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </article>
+  );
+}
+
 export function RunPage(props: {
   snapshot: ProjectSnapshot | null;
   loading: boolean;
@@ -299,6 +633,7 @@ export function RunPage(props: {
   const [ticketDraftDirection, setTicketDraftDirection] = useState("");
   const [ticketDraft, setTicketDraft] = useState<TicketDraftState | null>(null);
   const [ticketDraftLogs, setTicketDraftLogs] = useState<RunLogEvent[]>([]);
+  const [parallelDetails, setParallelDetails] = useState<Record<string, unknown> | null>(null);
   const [ticketPendingAction, setTicketPendingAction] = useState<
     | { kind: "delete"; ticketId: string }
     | { kind: "import"; mode: "append" | "replace-placeholder" | "replace-all" }
@@ -450,6 +785,48 @@ export function RunPage(props: {
       setCommandError(error instanceof Error ? error.message : String(error));
     } finally {
       unlisten?.();
+      setBusyCommand(null);
+    }
+  }
+
+  async function runParallelCommand(
+    command: string,
+    label: string,
+    options: {
+      executionGroupId?: string;
+      leaseId?: string;
+      groupMode?: string;
+      maxWorkers?: number;
+    } = {},
+  ) {
+    if (!target) return;
+    setCommandError(null);
+    setCommandMessage(`${label} requested.`);
+    setBusyCommand(command);
+    try {
+      const payload = await runBackendCommand<Record<string, unknown>>({
+        command,
+        target,
+        ...options,
+      });
+      if (!payload.ok || !payload.data) {
+        setCommandError(payload.message ?? `${label} failed.`);
+        return;
+      }
+      setCommandMessage(`${label} completed.`);
+      if (command === "execution_group.load") {
+        setParallelDetails(payload.data);
+      } else {
+        const refreshed = await runBackendCommand<Record<string, unknown>>({
+          command: "execution_group.load",
+          target,
+        });
+        if (refreshed.ok && refreshed.data) setParallelDetails(refreshed.data);
+        props.onRefresh();
+      }
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error));
+    } finally {
       setBusyCommand(null);
     }
   }
@@ -863,6 +1240,36 @@ export function RunPage(props: {
 
         <GraphInsightsPanel snapshot={props.snapshot} />
 
+        <ParallelExecutionPanel
+          snapshot={props.snapshot}
+          details={parallelDetails}
+          busy={isBusy}
+          onLoad={() => void runParallelCommand("execution_group.load", "Parallel details refresh")}
+          onStartReadOnly={(groupId) =>
+            void runParallelCommand("execution_group.start", "Read-only group start", {
+              executionGroupId: groupId,
+              groupMode: "read_only",
+              maxWorkers: 2,
+            })
+          }
+          onStartValidation={() =>
+            void runParallelCommand("execution_group.start", "Validation group start", {
+              groupMode: "validation",
+            })
+          }
+          onCancelGroup={(groupId) =>
+            void runParallelCommand("execution_group.cancel", "Execution group cancel", {
+              executionGroupId: groupId,
+            })
+          }
+          onReleaseLease={(leaseId) =>
+            void runParallelCommand("lease.release_stale", "Lease release", {
+              leaseId,
+            })
+          }
+          onExportBundle={() => void runParallelCommand("execution_group.export_debug_bundle", "Parallel debug bundle export")}
+        />
+
         {ticketCampaign && (
           <article className="panel ticket-queue-panel run-ticket-panel">
             <div className="panel-heading-row">
@@ -917,7 +1324,7 @@ export function RunPage(props: {
                 </label>
                 <div className="inline-actions">
                   <QueueActionButton
-                    tooltip="Run Codex to propose only new pending tickets. Nothing is written until you add the draft tickets."
+                    tooltip="Run Codex to propose grounded follow-up tickets. Nothing is written until you add the draft tickets."
                     onClick={draftTickets}
                     disabled={ticketWriteBusy}
                   >

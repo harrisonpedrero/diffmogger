@@ -23,6 +23,7 @@ from diffmogger.runtime.state_store import (
     connect,
     database_path_for_target,
     latest_scheduler_decision_conn,
+    load_ticket_run_state,
     record_human_message,
     scheduler_candidates_read_model,
     state_snapshot,
@@ -283,7 +284,7 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertIn("planner gets the next state-machine pass", reason)
                     self.assertFalse(stop)
 
-    def test_explicit_single_lane_profile_runs_single_lane_wrapper(self) -> None:
+    def test_legacy_single_lane_profile_is_ignored_by_conveyor(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -305,11 +306,10 @@ class ConveyorDecisionTests(unittest.TestCase):
                     role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
                     queue = module.conveyor_decision_queue(target, self.conveyor_state(module), role, reason, 2)
 
-                    self.assertEqual("single_lane", role)
-                    self.assertIn("single-lane automation profile selected", reason)
+                    self.assertEqual("builder", role)
+                    self.assertIn("builder", reason)
                     self.assertFalse(stop)
-                    self.assertEqual("single_lane", queue[0]["role"])
-                    self.assertIn("single-lane automation profile selected", queue[0]["reason"])
+                    self.assertNotIn("single_lane", {entry["role"] for entry in queue})
 
     def test_role_profile_wins_over_legacy_multi_role_flag(self) -> None:
         for path, module in self.modules:
@@ -334,7 +334,7 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertIn("builder", reason)
                     self.assertFalse(stop)
 
-    def test_missing_multi_role_files_falls_back_to_single_lane_wrapper(self) -> None:
+    def test_missing_multi_role_files_blocks_instead_of_single_lane_fallback(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -351,8 +351,8 @@ class ConveyorDecisionTests(unittest.TestCase):
 
                     role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
 
-                    self.assertEqual("single_lane", role)
-                    self.assertIn("multi-role files not found", reason)
+                    self.assertIsNone(role)
+                    self.assertIn("multi-role conveyor files not found", reason)
                     self.assertFalse(stop)
 
     def test_queued_patches_preempt_pending_post_builder_hardener(self) -> None:
@@ -725,7 +725,7 @@ class ConveyorDecisionTests(unittest.TestCase):
                     role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
 
                     self.assertIsNone(role)
-                    self.assertEqual(reason, "ticket campaign complete")
+                    self.assertEqual(reason, "bounded campaign complete")
                     self.assertTrue(stop)
 
     def test_ticket_campaign_blocked_stops_conveyor(self) -> None:
@@ -751,7 +751,7 @@ class ConveyorDecisionTests(unittest.TestCase):
                     role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
 
                     self.assertIsNone(role)
-                    self.assertEqual(reason, "ticket campaign blocked")
+                    self.assertEqual(reason, "bounded campaign blocked")
                     self.assertTrue(stop)
 
     def test_active_ticket_campaign_does_not_preempt_normal_conveyor(self) -> None:
@@ -778,6 +778,36 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertEqual(role, "builder")
                     self.assertIn("builder-first policy", reason)
                     self.assertFalse(stop)
+
+    def test_ongoing_campaign_drafts_next_ticket_without_approval_pause(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.write_ticket_run(
+                        target,
+                        """
+                        {
+                          "run_id": "ongoing-campaign",
+                          "campaign_mode": "ongoing",
+                          "halt_when_complete": false,
+                          "tickets": [
+                            {"id": "T-1", "status": "done", "evidence": ["test passed"]}
+                          ]
+                        }
+                        """,
+                    )
+
+                    role, reason, stop = module.choose_next(target, self.conveyor_state(module), 2)
+                    ticket_run = load_ticket_run_state(target)
+                    tickets = ticket_run["tickets"] if ticket_run else []
+
+                    self.assertEqual(role, "builder")
+                    self.assertIn("builder-first policy", reason)
+                    self.assertFalse(stop)
+                    self.assertTrue(any(ticket.get("id") == "AUTO-002" for ticket in tickets))
+                    self.assertTrue(any(ticket.get("status") == "pending" for ticket in tickets))
 
     def test_deferral_signature_uses_root_cause_before_local_paths(self) -> None:
         for path, module in self.modules:
@@ -883,6 +913,20 @@ class ConveyorDecisionTests(unittest.TestCase):
                     self.assertEqual("integrator", role)
                     self.assertIn("baseline verification ledger", reason)
                     self.assertFalse(stop)
+
+    def test_integrator_role_uses_role_wrapper_command(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+
+                    command = module.command_for_role(target, "integrator")
+
+                    self.assertEqual("bash", command[0])
+                    self.assertEqual("--role", command[-2])
+                    self.assertEqual("integrator", command[-1])
+                    self.assertTrue(command[1].endswith("scripts/run_role_automation.sh"))
 
     def test_false_positive_baseline_blocker_routes_to_preflight_refresh(self) -> None:
         for path, module in self.modules:

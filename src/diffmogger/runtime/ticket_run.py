@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage bounded Diffmogger ticket-campaign runs."""
+"""Manage Diffmogger campaign ticket runs."""
 
 from __future__ import annotations
 
@@ -959,9 +959,9 @@ def notify_completion(target: Path, data: dict[str, Any], summary: dict[str, Any
     message = ticket_notification_message(target, data, summary, report_path)
     payload = {
         "request_id": f"TICKET-{summary['run_id']}",
-        "type": f"ticket_campaign_{summary['status']}",
+        "type": f"bounded_campaign_{summary['status']}",
         "priority": "normal",
-        "summary": f"Ticket campaign {summary['status']}",
+        "summary": f"Bounded campaign {summary['status']}",
         "event_kind": "progress",
         "message_body": message,
         "agent_recommendation": "Review the local report, run verification, then push or open a PR manually.",

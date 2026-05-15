@@ -166,28 +166,13 @@ def native_prerequisites(target: Path, dashboard_app: Any) -> list[Any]:
     )
 
 def target_multi_role_enabled(target: Path) -> bool:
-    control = automation_control_state(target, import_legacy_if_empty=True)
-    payload = control.get("payload") if isinstance(control.get("payload"), dict) else {}
-    role_profile = str(payload.get("role_profile") or "").strip().lower()
-    role_profile = role_profile.replace("-", "_").replace(" ", "_")
-    if role_profile == "single_lane":
-        return False
-    if role_profile == "planner_builder_hardener_integrator":
-        return True
-    for data in (load_intake(target), load_dashboard_state(target)):
-        profile = str(data.get("automation_role_profile") or "").strip().lower()
-        profile = profile.replace("-", "_").replace(" ", "_")
-        if profile == "single_lane":
-            return False
-        if profile == "planner_builder_hardener_integrator":
-            return True
-        if "multi_role_automations_allowed" in data:
-            return bool(data.get("multi_role_automations_allowed"))
-    return False
+    return True
 
 def target_ticket_campaign_enabled(target: Path) -> bool:
     for data in (load_intake(target), load_dashboard_state(target)):
-        if str(data.get("automation_run_mode") or "") == "ticket_campaign":
+        mode = str(data.get("campaign_mode") or data.get("automation_run_mode") or "").strip().lower()
+        mode = mode.replace("-", "_").replace(" ", "_")
+        if mode in {"bounded", "ticket_campaign"}:
             return True
     return False
 
@@ -232,23 +217,17 @@ def automation_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
         existing_or_target_path(target, ".agentic/automation_prompt.md"),
         existing_or_target_path(target, "docs/INITIAL_BOOTSTRAP_PROMPT.md"),
         existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md"),
-        target_script_path(target, "scripts/run_codex_automation.sh"),
         target_script_path(target, "scripts/run_conveyor_automation.sh"),
         target_script_path(target, "scripts/run_conveyor_automation.py"),
+        existing_or_target_path(target, ".agentic/roles/planner.md"),
+        existing_or_target_path(target, ".agentic/roles/builder.md"),
+        existing_or_target_path(target, ".agentic/roles/hardener.md"),
+        existing_or_target_path(target, ".agentic/roles/integrator.md"),
+        existing_or_target_path(target, "docs/MULTI_ROLE_PROGRESS.md"),
+        target_script_path(target, "scripts/run_role_automation.sh"),
+        target_script_path(target, "scripts/integrate_role_outputs.py"),
+        target_script_path(target, "scripts/list_deferred_patches.py"),
     ]
-    if target_multi_role_enabled(target):
-        required.extend(
-            [
-                existing_or_target_path(target, ".agentic/roles/planner.md"),
-                existing_or_target_path(target, ".agentic/roles/builder.md"),
-                existing_or_target_path(target, ".agentic/roles/hardener.md"),
-                existing_or_target_path(target, ".agentic/roles/integrator.md"),
-                existing_or_target_path(target, "docs/MULTI_ROLE_PROGRESS.md"),
-                target_script_path(target, "scripts/run_role_automation.sh"),
-                target_script_path(target, "scripts/integrate_role_outputs.py"),
-                target_script_path(target, "scripts/list_deferred_patches.py"),
-            ]
-        )
     missing = [target_relative_display(target, path) for path in required if not path.exists()]
     if missing:
         return False, "Missing " + ", ".join(missing)
@@ -274,7 +253,7 @@ def run_once_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
     required = [
         existing_or_target_path(target, ".agentic/automation_prompt.md"),
         existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md"),
-        target_script_path(target, "scripts/run_codex_automation.sh"),
+        target_script_path(target, "scripts/run_conveyor_automation.sh"),
     ]
     missing = [path.relative_to(target).as_posix() for path in required if not path.exists()]
     if missing:
@@ -663,7 +642,7 @@ def command_run_once(args: argparse.Namespace) -> dict[str, Any]:
             error_type="automation_not_ready",
             details={"reason": reason},
         )
-    command = ["bash", str(target_script_path(target, "scripts/run_codex_automation.sh"))]
+    command = ["bash", str(target_script_path(target, "scripts/run_conveyor_automation.sh")), "--once"]
     env = {**os.environ, **dashboard_app.automation_environment(target)}
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     result = run_subprocess_streamed(args, command, cwd=target, stage="run", env=env)

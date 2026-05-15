@@ -22,9 +22,10 @@ def required_file_flags(target: Path) -> list[str]:
     flags.extend(["--human-bridge-mode", bridge_mode])
     if bool(intake.get("write_worker_agents_allowed", False)):
         flags.append("--write-workers-enabled")
-    if normalize_automation_role_profile(intake, default="single_lane") == "planner_builder_hardener_integrator":
-        flags.append("--multi-role-enabled")
-    if str(intake.get("automation_run_mode") or "") == "ticket_campaign":
+    flags.append("--multi-role-enabled")
+    campaign = str(intake.get("campaign_mode") or intake.get("automation_run_mode") or "").strip().lower()
+    campaign = campaign.replace("-", "_").replace(" ", "_")
+    if campaign in {"bounded", "ticket_campaign"}:
         flags.append("--ticket-campaign-enabled")
     if intake.get("optional_mcp_servers"):
         flags.append("--optional-mcp-enabled")

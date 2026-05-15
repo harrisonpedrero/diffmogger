@@ -28,7 +28,6 @@ BASE_REQUIRED = [
     ".agentic/smoke_commands.txt",
     "scripts/acquire_codex_lock.sh",
     "scripts/release_codex_lock.sh",
-    "scripts/run_codex_automation.sh",
     "scripts/run_process_watchdog.py",
     "scripts/run_conveyor_automation.py",
     "scripts/run_conveyor_automation.sh",
@@ -189,7 +188,6 @@ DEVELOPMENT_REQUIRED_STRINGS = [
 
 AUTOMATION_REQUIRED_STRINGS = [
     "CODEX_LOCK_ALREADY_ACQUIRED=true",
-    ".diffmogger/scripts/run_codex_automation.sh",
     ".diffmogger/scripts/acquire_codex_lock.sh",
     ".diffmogger/scripts/release_codex_lock.sh",
     ".diffmogger/scripts/spawn_worker_agent.sh",
@@ -200,7 +198,7 @@ AUTOMATION_REQUIRED_STRINGS = [
     "--dangerously-bypass-approvals-and-sandbox",
     "ACTIVE_WITH_PENDING_USER_INPUT",
     "BLOCKED_ON_USER",
-    "ticket_campaign",
+    "campaign",
     ".diffmogger/scripts/ticket_run.py",
 ]
 
@@ -227,11 +225,6 @@ RUNNER_REQUIRED_STRINGS = [
     "canonical_state_brief.md",
     "ticket_run.py",
     "normalize_task_state_headings",
-    "commit_single_lane_changes",
-    "automation_checkpoint_commits",
-    "SINGLE_LANE_COMMIT_CREATED",
-    "child_pid",
-    "forward_signal",
     "run_process_watchdog.py",
 ]
 
@@ -257,15 +250,14 @@ CONVEYOR_REQUIRED_STRINGS = [
     "repo.capability_manifest",
     "queued role patch",
     "run_role_automation.sh",
-    "run_codex_automation.sh",
     "MULTI_ROLE_ALLOW_REMOTES",
     "active_role_run",
     "CODEX_ROLE_TIMEOUT_SECONDS",
     "role_timeout_streaks",
     "decision_queue",
     "planner deferred patch resolved",
-    "ticket campaign complete",
-    "ticket campaign blocked",
+    "bounded campaign complete",
+    "bounded campaign blocked",
 ]
 
 OBSERVATORY_REQUIRED_STRINGS = [
@@ -567,40 +559,7 @@ def optional_mcp_servers(root: Path) -> list[str]:
 
 
 def inferred_multi_role_enabled(root: Path) -> bool:
-    manifest = load_manifest(root)
-    features = manifest.get("features") if isinstance(manifest.get("features"), dict) else {}
-    profile = str(features.get("automation_role_profile") or "").strip()
-    if profile == "single_lane":
-        return False
-    if profile == "planner_builder_hardener_integrator":
-        return True
-    if "multi_role" in features:
-        return bool(features.get("multi_role"))
-
-    intake = project_intake(root)
-    intake_profile = str(intake.get("automation_role_profile") or "").strip().lower()
-    intake_profile = intake_profile.replace("-", "_").replace(" ", "_")
-    if intake_profile == "single_lane":
-        return False
-    if intake_profile == "planner_builder_hardener_integrator":
-        return True
-    if "multi_role_automations_allowed" in intake:
-        return bool(intake.get("multi_role_automations_allowed"))
-
-    for rel in [".agentic/automation_prompt.md", "docs/CODEX_AUTOMATION_TASKS.md"]:
-        try:
-            text = rel_path(root, rel).read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if "Role profile: `single_lane`" in text:
-            return False
-        if "Role profile: `planner_builder_hardener_integrator`" in text:
-            return True
-        if "Multi-role automations allowed: false" in text:
-            return False
-        if "Multi-role automations allowed: true" in text:
-            return True
-    return False
+    return True
 
 
 def inferred_human_bridge_mode(root: Path) -> str:
@@ -782,7 +741,7 @@ def main() -> int:
             mode_markers = DISCORD_NOTIFIER_AUTOMATION_REQUIRED_STRINGS
         write_worker_markers = WRITE_WORKER_AUTOMATION_REQUIRED_STRINGS if args.write_workers_enabled else []
         multi_role_markers = MULTI_ROLE_AUTOMATION_REQUIRED_STRINGS if multi_role_enabled else []
-        ticket_markers = ["Automation run mode: `ticket_campaign`", "SQLite ticket queue"] if args.ticket_campaign_enabled else []
+        ticket_markers = ["Campaign mode: `bounded`", "SQLite ticket queue"] if args.ticket_campaign_enabled else []
         for marker in AUTOMATION_REQUIRED_STRINGS + mode_markers + write_worker_markers + multi_role_markers + ticket_markers:
             if not has_marker(automation_text, marker):
                 problems.append(f"{automation_label}: missing marker {marker!r}")
@@ -878,18 +837,6 @@ def main() -> int:
                 for marker in PLAYWRIGHT_MCP_HELPER_REQUIRED_STRINGS:
                     if not has_marker(playwright_helper_text, marker):
                         problems.append(f"{playwright_helper_label}: missing marker {marker!r}")
-
-    runner_rel = "scripts/run_codex_automation.sh"
-    runner_label = rel_label(root, runner_rel)
-    runner_path = rel_path(root, runner_rel)
-    if runner_path.exists() and runner_path.is_file():
-        runner_text = runner_path.read_text(encoding="utf-8")
-        for marker in RUNNER_REQUIRED_STRINGS:
-            if not has_marker(runner_text, marker):
-                problems.append(f"{runner_label}: missing marker {marker!r}")
-        for marker in RUNNER_FORBIDDEN_STRINGS:
-            if marker in runner_text:
-                problems.append(f"{runner_label}: forbidden self-run marker {marker!r}")
 
     watchdog_rel = "scripts/run_process_watchdog.py"
     watchdog_label = rel_label(root, watchdog_rel)

@@ -31,8 +31,9 @@ for marker in [
     "planner_builder_hardener_integrator",
     "automation_checkpoint_commits",
     "multi_role_allow_remotes",
-    "automation_run_mode",
-    "ticket_campaign",
+    "campaign_mode",
+    "bounded",
+    "ongoing",
     "ticket_run_file",
     "ticket_completion_notify",
     "discord_notifier",
@@ -221,7 +222,6 @@ if "{{HUMAN_BRIDGE_SETUP_CONTENT}}" not in human_setup:
 
 for marker in [
     "CODEX_LOCK_ALREADY_ACQUIRED=true",
-    ".diffmogger/scripts/run_codex_automation.sh",
     ".diffmogger/scripts/acquire_codex_lock.sh",
     ".diffmogger/scripts/release_codex_lock.sh",
     ".diffmogger/scripts/spawn_worker_agent.sh",
@@ -249,11 +249,8 @@ for marker in [
         print(f"Automation prompt missing required marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
-runner = Path("templates/scripts/run_codex_automation.sh").read_text(encoding="utf-8")
+runner = Path("templates/scripts/run_role_automation.sh").read_text(encoding="utf-8")
 for marker in [
-    "CODEX_NESTED_CLI_HOME",
-    "CODEX_LOCK_CONTEXT",
-    "$HOME/.codex",
     "diffmogger_browser.py",
     "DIFFMOGGER_BROWSER_PATH",
     "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
@@ -269,12 +266,6 @@ for marker in [
     "state_brief.py",
     "canonical_state_brief.md",
     "ticket_run.py",
-    "normalize_task_state_headings",
-    "commit_single_lane_changes",
-    "automation_checkpoint_commits",
-    "SINGLE_LANE_COMMIT_CREATED",
-    "child_pid",
-    "forward_signal",
     "run_process_watchdog.py",
 ]:
     if marker not in runner:
@@ -403,15 +394,14 @@ for marker in [
     "repo.capability_manifest",
     "queued role patch",
     "run_role_automation.sh",
-    "run_codex_automation.sh",
 	    "MULTI_ROLE_ALLOW_REMOTES",
 	    "active_role_run",
     "decision_queue",
     "accepted_by_role",
     "deferred_delta_by_role",
     "planner deferred patch resolved",
-    "ticket campaign complete",
-    "ticket campaign blocked",
+    "bounded campaign complete",
+    "bounded campaign blocked",
     "builder-first policy",
 ]:
     if marker not in conveyor:
@@ -1276,7 +1266,7 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests.runtime.test_state_store tests.runtime.test_codebase_graph tests.runtime.test_run_observatory tests.dashboard.test_dashboard_backend_cli tests.dashboard.test_dashboard_env_loading tests.kit.test_native_rebuild_guardrails tests.kit.test_starter_kit_manifest tests.runtime.test_run_conveyor_automation tests.runtime.test_run_role_automation tests.runtime.test_load_automation_env tests.runtime.test_repair_environment tests.runtime.test_integrate_role_outputs tests.runtime.test_list_deferred_patches tests.runtime.test_ticket_run tests.kit.test_check_integration_safety tests.kit.test_check_required_files tests.runtime.test_summarize_worker_outputs
+python3 -m unittest tests.runtime.test_state_store tests.runtime.test_codebase_graph tests.runtime.test_worker_agents tests.runtime.test_run_observatory tests.dashboard.test_dashboard_backend_cli tests.dashboard.test_dashboard_env_loading tests.kit.test_native_rebuild_guardrails tests.kit.test_starter_kit_manifest tests.runtime.test_run_conveyor_automation tests.runtime.test_run_role_automation tests.runtime.test_load_automation_env tests.runtime.test_repair_environment tests.runtime.test_integrate_role_outputs tests.runtime.test_list_deferred_patches tests.runtime.test_ticket_run tests.kit.test_check_integration_safety tests.kit.test_check_required_files tests.runtime.test_summarize_worker_outputs
 
 python3 scripts/check_integration_safety.py >/tmp/Diffmogger-integration-safety.log
 
@@ -1318,12 +1308,6 @@ fi
 if grep -R "Diffmogger Self Improvement scheduled sprint" "$tmp_dir" >/tmp/Diffmogger-self-run-leak.log 2>&1; then
     echo "Scaffold unexpectedly contains self-run lock context" >&2
     cat /tmp/Diffmogger-self-run-leak.log >&2
-    rm -rf "$tmp_dir"
-    exit 1
-fi
-if ! grep "CODEX_LOCK_CONTEXT" "$tmp_dir/.diffmogger/scripts/run_codex_automation.sh" >/tmp/Diffmogger-lock-context-marker.log 2>&1; then
-    echo "Scaffolded runner missing target-local lock context override marker" >&2
-    cat "$tmp_dir/.diffmogger/scripts/run_codex_automation.sh" >&2
     rm -rf "$tmp_dir"
     exit 1
 fi
@@ -1393,7 +1377,7 @@ cat >"$tmp_intake" <<'JSON'
   "human_bridge_enabled": true,
   "human_bridge_mode": "file_only",
   "automation_role_profile": "planner_builder_hardener_integrator",
-  "automation_run_mode": "ticket_campaign",
+  "campaign_mode": "bounded",
   "verification_commands": ["npm test"]
 }
 JSON
@@ -1437,7 +1421,7 @@ cat >"$tmp_intake" <<'JSON'
   "desired_first_demo": "A completed local ticket campaign report.",
   "human_bridge_enabled": true,
   "human_bridge_mode": "local_notifier",
-  "automation_run_mode": "ticket_campaign",
+  "campaign_mode": "bounded",
   "ticket_completion_notify": true,
   "verification_commands": ["npm test"]
 }
@@ -1476,7 +1460,7 @@ done
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
 }
-if ! grep -R "Automation run mode: \`ticket_campaign\`\\|SQLite ticket queue\\|.diffmogger/scripts/ticket_run.py" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" "$tmp_dir/.diffmogger/scripts" >/tmp/Diffmogger-ticket-campaign-grep.log 2>&1; then
+if ! grep -R "Campaign mode: \`bounded\`\\|SQLite ticket queue\\|.diffmogger/scripts/ticket_run.py" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" "$tmp_dir/.diffmogger/scripts" >/tmp/Diffmogger-ticket-campaign-grep.log 2>&1; then
     echo "Ticket-campaign scaffold missing mode markers" >&2
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
@@ -1484,7 +1468,7 @@ fi
 for marker in \
     "T1 Ticket-run readiness" \
     "T4 Completion report and stop" \
-    "Ticket-campaign bootstrap is readiness-only" \
+    "Bounded campaign bootstrap is readiness-only" \
     "python3 .diffmogger/scripts/ticket_run.py . next --json" \
     "at most one dependency-ready ticket per run" \
     "depends_on" \
@@ -1600,7 +1584,7 @@ for marker in \
     'mcp_servers.playwright.command="bash"' \
     'mcp_servers.playwright.disabled_tools=["browser_run_code_unsafe","browser_file_upload"]' \
     "PLAYWRIGHT_MCP_OUTPUT_DIR"; do
-    if ! grep -F -- "$marker" "$tmp_dir/.diffmogger/scripts/run_role_automation.sh" "$tmp_dir/.diffmogger/scripts/run_codex_automation.sh" >/tmp/Diffmogger-optional-mcp-runner-grep.log 2>&1; then
+    if ! grep -F -- "$marker" "$tmp_dir/.diffmogger/scripts/run_role_automation.sh" >/tmp/Diffmogger-optional-mcp-runner-grep.log 2>&1; then
         echo "Optional MCP runner missing marker: $marker" >&2
         rm -rf "$tmp_dir" "$tmp_intake"
         exit 1

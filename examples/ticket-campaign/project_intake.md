@@ -63,9 +63,9 @@ Continuous planner/builder/hardener/integrator conveyor until the ticket run is 
 
 Disabled.
 
-## Automation Run Mode
+## Campaign Mode
 
-ticket_campaign
+bounded
 
 ## Ticket Completion Notify
 

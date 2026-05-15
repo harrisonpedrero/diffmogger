@@ -29,7 +29,7 @@ Canonical runtime/task state belongs in `target/orchestration.sqlite3`; typed co
 
 Target user: {{TARGET_USER}}
 
-Desired first demo: {{DESIRED_FIRST_DEMO}}
+Desired runnable milestone: {{DESIRED_FIRST_DEMO}}
 
 ## Tech Preferences
 
@@ -74,7 +74,7 @@ Create an initial local-first baseline with:
 {{BOOTSTRAP_SCOPE_BOUNDARY}}
 
 - runnable setup
-- first demo path
+- runnable milestone path
 - clear repo structure
 - fixtures, mocks, or local seed data where external services would otherwise be needed
 - verification commands

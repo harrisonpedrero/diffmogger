@@ -72,7 +72,7 @@ def main() -> int:
                     "baseline_verification": baseline_record(target),
                     "integrator_no_progress": no_progress_info(state),
                     "state_machine": state.get("state_machine") if isinstance(state.get("state_machine"), dict) else {},
-                    "ticket_campaign": {"status": ticket_state or "active", "reason": ticket_reason},
+                    "campaign": {"status": ticket_state or "active", "reason": ticket_reason},
                 },
                 indent=2,
                 sort_keys=True,
@@ -136,7 +136,7 @@ def main() -> int:
             print(f"CONVEYOR_DECISION role={role or 'idle'} reason={reason}", flush=True)
 
             if stop:
-                if reason in {"ticket campaign complete", "ticket campaign blocked"}:
+                if reason in {"bounded campaign complete", "bounded campaign blocked"}:
                     finalize_ticket_campaign(target)
                 return 0
             if role is None:

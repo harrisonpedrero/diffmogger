@@ -52,8 +52,9 @@ VALID_PROJECT_MODES = {"fresh_project", "existing_project"}
 VALID_ENV_ACCESS_POLICIES = {"project_commands_only", "direct_env_files_allowed"}
 MAX_WRITE_WORKER_COUNT = 10
 DEFAULT_MAX_WRITE_WORKER_COUNT = 3
-VALID_ROLE_PROFILES = {"single_lane", "planner_builder_hardener_integrator"}
-VALID_AUTOMATION_RUN_MODES = {"continuous_improvement", "ticket_campaign"}
+CONVEYOR_ROLE_PROFILE = "planner_builder_hardener_integrator"
+VALID_ROLE_PROFILES = {CONVEYOR_ROLE_PROFILE}
+VALID_CAMPAIGN_MODES = {"bounded", "ongoing"}
 VALID_OPTIONAL_MCP_SERVERS = {"context7", "playwright"}
 MULTI_ROLE_FILES = {
     ".agentic/roles/planner.md",
@@ -172,8 +173,10 @@ HEADING_TO_KEY = {
     "mcp integrations": "optional_mcp_servers",
     "context7": "optional_mcp_servers",
     "playwright mcp": "optional_mcp_servers",
-    "automation run mode": "automation_run_mode",
-    "run mode": "automation_run_mode",
+    "campaign mode": "campaign_mode",
+    "automation campaign mode": "campaign_mode",
+    "automation run mode": "campaign_mode",
+    "run mode": "campaign_mode",
     "ticket run file": "ticket_run_file",
     "ticket file": "ticket_run_file",
     "ticket run seed tickets": "ticket_run_seed_tickets",
@@ -264,14 +267,14 @@ def normalize_command_list(value: Any) -> list[str]:
 
 def bootstrap_baseline_commands(data: dict[str, Any]) -> list[str]:
     mode = project_mode(data)
-    run_mode = normalize_automation_run_mode(data.get("automation_run_mode"))
-    if mode != "fresh_project" and run_mode != "ticket_campaign":
+    campaign = campaign_mode(data)
+    if mode != "fresh_project" and campaign == "ongoing":
         return normalize_command_list(data.get("verification_commands"))
 
     commands = [
         "python3 -m py_compile scripts/run_process_watchdog.py scripts/ticket_run.py scripts/compact_agent_state.py scripts/run_observatory.py scripts/repair_environment.py",
     ]
-    if run_mode == "ticket_campaign":
+    if campaign == "bounded":
         return [
             "python3 scripts/ticket_run.py . status --json",
             "python3 scripts/ticket_run.py . next --json",
@@ -319,33 +322,33 @@ def normalize_role_profile(value: Any, legacy_multi_role_enabled: Any = None) ->
     text = str(value or "").strip().lower()
     text = text.replace("-", "_").replace(" ", "_")
     if text in VALID_ROLE_PROFILES:
-        return text
-    if legacy_multi_role_enabled is not None:
-        return (
-            "planner_builder_hardener_integrator"
-            if normalize_bool(legacy_multi_role_enabled, True)
-            else "single_lane"
-        )
-    return "planner_builder_hardener_integrator"
+        return CONVEYOR_ROLE_PROFILE
+    return CONVEYOR_ROLE_PROFILE
 
 
 def multi_role_enabled(data: dict[str, Any]) -> bool:
-    return automation_role_profile(data) == "planner_builder_hardener_integrator"
+    return True
 
 
 def automation_role_profile(data: dict[str, Any]) -> str:
-    legacy_multi_role_enabled = (
-        data.get("multi_role_automations_allowed")
-        if "multi_role_automations_allowed" in data
-        else None
-    )
-    return normalize_role_profile(data.get("automation_role_profile"), legacy_multi_role_enabled)
+    return normalize_role_profile(data.get("automation_role_profile"))
 
 
-def normalize_automation_run_mode(value: Any) -> str:
-    text = str(value or "continuous_improvement").strip().lower()
+def normalize_campaign_mode(value: Any, legacy_run_mode: Any = None) -> str:
+    raw = value if value is not None else legacy_run_mode
+    text = str(raw or "ongoing").strip().lower()
     text = text.replace("-", "_").replace(" ", "_")
-    return text if text in VALID_AUTOMATION_RUN_MODES else "continuous_improvement"
+    if text in VALID_CAMPAIGN_MODES:
+        return text
+    if text == "ticket_campaign":
+        return "bounded"
+    if text == "continuous_improvement":
+        return "ongoing"
+    return "ongoing"
+
+
+def campaign_mode(data: dict[str, Any]) -> str:
+    return normalize_campaign_mode(data.get("campaign_mode"), data.get("automation_run_mode"))
 
 
 def normalize_optional_mcp_servers(value: Any) -> list[str]:
@@ -480,7 +483,7 @@ startup_timeout_sec = 20
 tool_timeout_sec = 60
 env_vars = ["CONTEXT7_API_KEY"]"""
         )
-        for profile in ("diffmogger-single-lane", "diffmogger-planner", "diffmogger-builder"):
+        for profile in ("diffmogger-planner", "diffmogger-builder"):
             profile_blocks.append(
                 f"""[profiles.{profile}.mcp_servers.context7]
 enabled = true"""
@@ -498,7 +501,7 @@ startup_timeout_sec = 20
 tool_timeout_sec = 60
 env_vars = ["PLAYWRIGHT_MCP_EXECUTABLE_PATH", "PLAYWRIGHT_MCP_OUTPUT_DIR"]"""
         )
-        for profile in ("diffmogger-single-lane", "diffmogger-hardener", "diffmogger-integrator"):
+        for profile in ("diffmogger-hardener", "diffmogger-integrator"):
             profile_blocks.append(
                 f"""[profiles.{profile}.mcp_servers.playwright]
 enabled = true"""
@@ -507,9 +510,9 @@ enabled = true"""
     if enabled:
         setup = """Optional MCP servers enabled: {servers}
 
-- Context7 is mounted only by single-lane runs and by planner/builder role wrappers. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, continue the sprint with normal web search, repo docs, package metadata, or existing knowledge.
+- Context7 is mounted by planner/builder role wrappers. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, continue the sprint with normal web search, repo docs, package metadata, or existing knowledge.
 - Context7 uses stdio `npx -y @upstash/context7-mcp` by default. `CONTEXT7_API_KEY` is inherited when present for higher rate limits, but the key is never stored in generated files. Remote OAuth setup is manual/optional and must not be required for unattended overnight runs.
-- Playwright MCP is mounted only by single-lane runs and by hardener/integrator role wrappers. Hardener and Integrator should use it for local browser validation and screenshot artifacts, not for implementation-time browsing.
+- Playwright MCP is mounted by hardener/integrator role wrappers. Hardener and Integrator should use it for local browser validation and screenshot artifacts, not for implementation-time browsing.
 - MCP servers are optional and non-required. Missing MCP support must never change `AUTOMATION_STATUS` to `BLOCKED_ON_ENVIRONMENT` by itself.
 - Project-scoped config lives in `.codex/config.toml`; wrappers convert the enabled project entries into temporary `codex exec -c` overrides for each role. Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config.
 """.format(servers=", ".join(enabled))
@@ -530,14 +533,15 @@ No project-scoped MCP config is generated unless `optional_mcp_servers` is set i
 
 
 def ticket_run_values(data: dict[str, Any]) -> dict[str, str]:
-    mode = normalize_automation_run_mode(data.get("automation_run_mode"))
-    ticket_file = "SQLite ticket queue"
+    mode = campaign_mode(data)
     notify = normalize_bool(data.get("ticket_completion_notify"), True)
-    ticket_json = json.dumps(seed_ticket_items(data), indent=4)
-    if mode == "ticket_campaign":
-        section = f"""Automation run mode: `ticket_campaign`
+    has_seed_tickets = bool(data.get("ticket_run_seed_tickets"))
+    tickets = seed_ticket_items(data) if mode == "bounded" or has_seed_tickets else []
+    ticket_json = json.dumps(tickets, indent=4)
+    if mode == "bounded":
+        section = """Campaign mode: `bounded`
 
-Use the dashboard-backed SQLite ticket queue as the bounded ticket-scope surface. Runtime decisions, events, blockers, next actions, and ticket status remain canonical in `target/orchestration.sqlite3`; agents should read `target/canonical_state_brief.md` and use `scripts/ticket_run.py` instead of inspecting SQLite manually. Do not invent new backlog after listed tickets are done or blocked.
+Use the dashboard-backed SQLite ticket queue as the bounded campaign scope. Runtime decisions, events, blockers, next actions, and ticket status remain canonical in `target/orchestration.sqlite3`; agents should read `target/canonical_state_brief.md` and use `scripts/ticket_run.py` instead of inspecting SQLite manually. Do not invent new backlog after the seeded/imported tickets are done or blocked.
 
 Before choosing ticket work in any normal campaign run, run:
 
@@ -545,7 +549,7 @@ Before choosing ticket work in any normal campaign run, run:
 python3 scripts/ticket_run.py . next --json
 ```
 
-Use that dependency-aware selection as the only ticket scope for the run. Act on at most one selected ticket per run, preserving file order as the human's priority order when dependencies allow. A single-lane run may implement and verify that one ticket, but must not continue into another ticket after it is completed, blocked, or marked `candidate_done`.
+Use that dependency-aware selection as the only ticket scope for the run. Act on at most one selected ticket per run, preserving file order as the human's priority order when dependencies allow. A conveyor role may implement, verify, or integrate the selected ticket, but must not expand the campaign after it is completed, blocked, or marked `candidate_done`.
 
 If `next --json` reports placeholder tickets, missing dependencies, duplicate ticket IDs, dependency cycles, blocked dependencies, or no actionable ticket, record the structured blocker in typed runtime state and refresh generated handoff projections instead of guessing or reordering the campaign by hand.
 
@@ -556,7 +560,7 @@ python3 scripts/ticket_run.py . should-halt --finalize
 ```
 
 Then stop launching new work. Diffmogger writes a local report, sends a native desktop notification when enabled, records fallback outbox state if notification delivery fails, and leaves remote push/PR creation to the human."""
-        task_notes = f"""Ticket campaign mode: `ticket_campaign`
+        task_notes = """Campaign mode: `bounded`
 
 - Ticket authoring surface: dashboard-backed SQLite ticket queue
 - Bootstrap boundary: readiness-only; do not implement tickets during bootstrap.
@@ -566,7 +570,7 @@ Then stop launching new work. Diffmogger writes a local report, sends a native d
 - Completion report is written under `target/ticket_run_reports/`.
 - Completion notification uses the local desktop notification system when enabled.
 - Remote push/PR creation is manual."""
-        development = """Ticket campaign mode is enabled. Edit the dashboard ticket queue with concrete local tickets before starting unattended automation. Use optional `depends_on` arrays when one ticket must wait for another ticket to be `done` with evidence.
+        development = """Bounded campaign mode is enabled. Edit the dashboard ticket queue with concrete local tickets before starting unattended automation. Use optional `depends_on` arrays when one ticket must wait for another ticket to be `done` with evidence.
 
 ```bash
 python3 scripts/ticket_run.py . status --json
@@ -574,22 +578,30 @@ python3 scripts/ticket_run.py . next --json
 python3 scripts/ticket_run.py . should-halt --finalize
 ```
 
-Bootstrap is readiness-only in ticket-campaign mode: it should confirm setup, ticket shape, and verification commands, but it must not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, or finalize the campaign. Normal campaign runs should act on at most one `next --json` selection. The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in typed human-message state."""
+Bootstrap is readiness-only in bounded campaign mode: it should confirm setup, ticket shape, and verification commands, but it must not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, or finalize the campaign. Normal campaign runs should act on at most one `next --json` selection. The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in typed human-message state."""
     else:
-        section = """Automation run mode: `continuous_improvement`
+        section = """Campaign mode: `ongoing`
 
-Use the normal horizon/backlog loop. Ticket-campaign halting is inactive unless the project intake explicitly sets `automation_run_mode: ticket_campaign` and seeds the dashboard-backed SQLite ticket queue. The helper `scripts/ticket_run.py` is available for future bounded ticket runs."""
-        task_notes = """Ticket campaign mode: disabled.
+Use the dashboard-backed SQLite ticket queue as an ongoing campaign surface. When no dependency-ready tickets remain, Diffmogger may draft and enqueue the next generic project-agnostic ticket from intake, runtime state, current repo context, blockers, validation receipts, and completed work. Newly drafted tickets do not require human approval before the conveyor continues.
 
-- Use the normal continuous-improvement horizon loop."""
-        development = """Ticket campaign mode is disabled by default. To run against bounded tickets later, set `automation_run_mode` to `ticket_campaign` in `.agentic/project_intake.json` and add tickets through the dashboard.
+Agents should still use dependency-aware ticket selection and act on at most one selected ticket per normal run. If all existing tickets are done or blocked, the conveyor may draft a safe next ticket instead of stopping."""
+        task_notes = """Campaign mode: `ongoing`
+
+- Ticket authoring surface: dashboard-backed SQLite ticket queue plus automatic generic drafting.
+- Normal campaign runs select one dependency-ready ticket with `python3 scripts/ticket_run.py . next --json`.
+- When no dependency-ready tickets remain, the conveyor can draft/enqueue the next safe project-agnostic ticket from typed runtime context.
+- Drafted tickets do not require human approval before work continues.
+- Remote push/PR creation is manual."""
+        development = """Ongoing campaign mode is enabled. Seed tickets may provide the first scope, and the conveyor can draft/enqueue the next safe generic ticket when no dependency-ready ticket remains.
 
 ```bash
 python3 scripts/ticket_run.py . status --json
-python3 scripts/ticket_run.py . should-halt --finalize
-```"""
+python3 scripts/ticket_run.py . next --json
+```
+
+Ongoing campaigns should not halt merely because the current ticket set is done or blocked; they should continue by drafting safe follow-up work from typed runtime context unless the automation status is blocked or stopped."""
     return {
-        "AUTOMATION_RUN_MODE": mode,
+        "CAMPAIGN_MODE": mode,
         "TICKET_RUN_TICKETS_JSON": ticket_json,
         "TICKET_COMPLETION_NOTIFY": "true" if notify else "false",
         "TICKET_CAMPAIGN_SECTION": section.strip(),
@@ -609,7 +621,7 @@ def markdown_table(rows: list[tuple[str, str, str]]) -> str:
 
 
 def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str]:
-    mode = normalize_automation_run_mode(data.get("automation_run_mode"))
+    mode = campaign_mode(data)
     product_goal = inline_phrase(
         data.get("product_goal"),
         "Build a useful local-first product from the intake brief.",
@@ -633,7 +645,7 @@ def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str
     )
     ticket_file = "dashboard-backed SQLite ticket queue"
 
-    if mode == "ticket_campaign":
+    if mode == "bounded":
         rows = [
             (
                 "T1 Ticket-run readiness",
@@ -656,7 +668,7 @@ def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str
                 "`scripts/ticket_run.py . should-halt --finalize` writes the report and completion state, then automation stops launching new work.",
             ),
         ]
-        guidance = f"""Progression is mode-aware for this target. Because `automation_run_mode` is `ticket_campaign`, use the bounded ticket-run phases below instead of a product roadmap. The {ticket_file} is the ticket-scope authoring surface; runtime decisions and blockers remain canonical in SQLite. Do not invent new roadmap work after listed tickets are done or blocked. After T1 readiness, select ticket work with `python3 scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run.
+        guidance = f"""Progression is campaign-aware for this target. Because `campaign_mode` is `bounded`, use the bounded ticket-run phases below instead of an open-ended roadmap. The {ticket_file} is the ticket-scope authoring surface; runtime decisions and blockers remain canonical in SQLite. Do not invent new roadmap work after listed tickets are done or blocked. After T1 readiness, select ticket work with `python3 scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run.
 
 {markdown_table(rows)}
 
@@ -670,7 +682,7 @@ At the end of every run, update `## Product Horizon State` with:
 - next horizon candidate
 - remaining work before advancement
 
-If the phase criteria are met, update the current horizon to the next ticket-run phase and append a dated note to `## Horizon Transition Log` with the previous phase, new phase, evidence, and checks. When every ticket is done, or when all remaining tickets are blocked, finalize the ticket run and stop launching new work."""
+If the phase criteria are met, update the current horizon to the next ticket-run phase and append a dated note to `## Horizon Transition Log` with the previous phase, new phase, evidence, and checks. When every ticket is done, or when all remaining tickets are blocked, finalize the bounded campaign and stop launching new work."""
         return {
             "PRODUCT_HORIZON_GUIDANCE": guidance.strip(),
             "CURRENT_HORIZON": "T1 Ticket-run readiness",
@@ -707,10 +719,10 @@ If the phase criteria are met, update the current horizon to the next ticket-run
                     "- Do not create open-ended roadmap work after the bounded ticket set is finalized.",
                 ]
             ),
-            "CONTINUE_RATIONALE": "Continue. The ticket campaign has bounded local ticket scope and no active blocker.",
+            "CONTINUE_RATIONALE": "Continue. The bounded campaign has local ticket scope and no active blocker.",
             "AGENTS_PROGRESS_RULE": "Treat the ticket queue as a bounded, dependency-aware execution queue; after readiness, act on at most one `scripts/ticket_run.py . next --json` selection per run.",
             "INITIAL_PROGRESS_EVIDENCE_LABEL": "ticket-readiness evidence",
-            "BOOTSTRAP_SCOPE_BOUNDARY": "Ticket-campaign bootstrap is readiness-only: inspect the repo, confirm the dashboard ticket queue parses, run `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` when possible, configure docs/checks, and update typed automation control state plus generated projections. If the ticket queue is empty, placeholder-only, malformed, or ambiguous, record `ACTIVE_WITH_PENDING_USER_INPUT` or an honest blocker instead of solving tickets. Do not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, finalize the campaign, or continue into the first ticket.",
+            "BOOTSTRAP_SCOPE_BOUNDARY": "Bounded campaign bootstrap is readiness-only: inspect the repo, confirm the dashboard ticket queue parses, run `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` when possible, configure docs/checks, and update typed automation control state plus generated projections. If the ticket queue is empty, placeholder-only, malformed, or ambiguous, record `ACTIVE_WITH_PENDING_USER_INPUT` or an honest blocker instead of solving tickets. Do not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, finalize the campaign, or continue into the first ticket.",
             "BOOTSTRAP_END_NOTE": "Use the ticket queue as the first bounded readiness phase. Do not implement tickets during bootstrap, and do not create extra roadmap work after every ticket is done or blocked.",
         }
 
@@ -1117,12 +1129,11 @@ Generated automation should preserve read-only worker-report behavior and keep i
 
 def multi_role_values(data: dict[str, Any]) -> dict[str, str]:
     profile = automation_role_profile(data)
-    enabled = profile == "planner_builder_hardener_integrator"
+    enabled = True
     checkpoint_commits = normalize_bool(data.get("automation_checkpoint_commits"), True)
     allow_remotes = normalize_bool(data.get("multi_role_allow_remotes"), False)
 
-    if enabled:
-        automation_section = f"""Role profile: `{profile}`
+    automation_section = f"""Role profile: `{profile}`
 
 Diffmogger uses a continuous local state-machine conveyor. Role prompts live under `.agentic/roles/`, isolated git worktrees live under `target/automation_worktrees/`, queued patches live under `target/automation_queue/`, canonical runtime state lives in `target/orchestration.sqlite3`, and agents read the generated `target/canonical_state_brief.md` view. `docs/MULTI_ROLE_PROGRESS.md` is a human-readable projection/export.
 
@@ -1131,7 +1142,7 @@ The dashboard Start button launches `scripts/run_conveyor_automation.sh` as a de
 Multi-role mode is local-only. Roles must never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run any git command that touches a remote. Local commits, local branches, local tags, and local worktrees are allowed. Any remote-touching attempt is a `CRITICAL_STOP`.
 
 Planner, builder, and hardener start from the latest main `HEAD` at run start. They may see partially integrated state from earlier patches in the same cycle; this is accepted. The integrator owns the main checkout, applies queued patches FIFO, verifies, creates local checkpoint commits, updates typed state, refreshes `docs/CODEX_AUTOMATION_TASKS.md` and `docs/MULTI_ROLE_PROGRESS.md` as projections, and enforces retention."""
-        guardrails = """- Multi-role automation is enabled by default and runs through the continuous conveyor.
+    guardrails = """- Multi-role automation is enabled by default and runs through the continuous conveyor.
 - Multi-role role runs require an initialized local git repo.
 - Multi-role mode is local-only: never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run git commands that touch a remote.
 - Role scripts must refuse to run when `git remote -v` is non-empty unless `MULTI_ROLE_ALLOW_REMOTES=1`.
@@ -1139,13 +1150,13 @@ Planner, builder, and hardener start from the latest main `HEAD` at run start. T
 - Planner, builder, and hardener must use isolated worktrees and queue patches instead of mutating the main checkout.
 - Integrator must checkpoint dirty main changes as-is before applying queued patches; do not revert or discard human changes.
 - Integrator must defer conflicting, stale, guardrail-violating, or verification-failing patches with machine-readable deferral reasons."""
-        task_notes = f"""- Role profile: `{profile}`
+    task_notes = f"""- Role profile: `{profile}`
 - Continuous conveyor: `scripts/run_conveyor_automation.sh`.
 - The conveyor prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning, post-builder hardening, candidate verification, and then planner/builder/hardener state transitions.
 - Integrator refreshes `docs/MULTI_ROLE_PROGRESS.md` as a projection and creates local checkpoint commits.
 - Deferred patches remain visible through `scripts/list_deferred_patches.py`; use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local triage or add `--decision-template` for a per-manifest cleanup worksheet.
 - Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""
-        development = f"""Role profile: `{profile}`
+    development = f"""Role profile: `{profile}`
 
 Use the dashboard Start/Stop buttons or the continuous conveyor directly. The conveyor keeps work moving by running the next useful lane as soon as the previous lane finishes:
 
@@ -1173,50 +1184,9 @@ python3 scripts/list_deferred_patches.py . --decision-template
 The Markdown view groups the backlog by reason and recommended local action. The decision template adds per-manifest fields for archive, replace-from-current-HEAD, repair-and-retry, retry-as-is, or keep-deferred choices during integrator cleanup.
 
 The target must have a local git repo with an initial commit. Diffmogger scaffold creates both automatically when `HEAD` is missing. Multi-role mode creates local worktrees, local queue artifacts, and local commits only. It never pushes."""
-        bootstrap = f"""Role profile: `{profile}`
+    bootstrap = f"""Role profile: `{profile}`
 
 After bootstrap, the scaffold step ensures this target has a local git repo and initial commit before continuous automation starts. The role prompts, conveyor, and helpers are generated locally; no remote git operations are allowed."""
-    else:
-        automation_section = """Role profile: `single_lane`
-
-Diffmogger uses a single-role continuous conveyor for this target. The dashboard Start button launches `scripts/run_conveyor_automation.sh` as a detached local runner, and the conveyor repeatedly dispatches the target-local single-lane wrapper `scripts/run_codex_automation.sh` when useful work remains.
-
-The solo loop is: read durable typed state, choose the next valuable deliverable, execute it, verify or review the result, update automation control and human-message state, refresh generated projections, then continue, block, or stop according to typed automation status.
-
-When `automation_checkpoint_commits` is true, the single-lane wrapper creates a local checkpoint commit after each successful run that leaves committable product changes. It does not push remotes.
-
-Single-lane mode is for simpler software work, documentation, research synthesis, cleanup, reports, small apps, bounded ticket campaigns, and non-engineering workflows. It does not use planner/builder/hardener/integrator role prompts, isolated role worktrees, queued role patches, or `docs/MULTI_ROLE_PROGRESS.md`."""
-        guardrails = """- Single-role continuous automation runs through the conveyor and `scripts/run_codex_automation.sh`.
-- Do not require planner/builder/hardener/integrator role prompts, role worktrees, queued role patches, or integrator-only progress docs in this profile.
-- Treat every run as one integrated solo sprint: read state, choose a deliverable, execute, verify or review, update durable state, and continue/block/stop honestly.
-- When `automation_checkpoint_commits` is true, successful single-lane runs create local-only checkpoint commits for committable changes.
-- Use the same status model as all Diffmogger targets: `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`.
-- Keep generated work target-project agnostic and keep secrets out of docs, prompts, examples, and state."""
-        task_notes = """- Role profile: `single_lane`
-- Continuous conveyor: `scripts/run_conveyor_automation.sh`.
-- Active work runs through `scripts/run_codex_automation.sh`.
-- The solo loop is read typed state, pick the next valuable deliverable, execute, verify/review, update automation control and human-message state, refresh generated projections, then continue, block, or stop.
-- Single-lane checkpoint commits: enabled when `automation_checkpoint_commits` is true; commits are local-only and created after successful runs with committable changes.
-- This profile does not generate planner/builder/hardener/integrator role prompts, queued role patches, or `docs/MULTI_ROLE_PROGRESS.md`."""
-        development = """Role profile: `single_lane`
-
-Use the dashboard Start/Stop buttons or the continuous conveyor directly. The conveyor keeps work moving by rerunning the single-lane wrapper as long as useful work remains:
-
-```bash
-bash scripts/run_conveyor_automation.sh --dry-run
-bash scripts/run_conveyor_automation.sh --once
-```
-
-Manual single-lane run:
-
-```bash
-bash scripts/run_codex_automation.sh
-```
-
-Single-lane mode is still continuous automation. It keeps the lock wrapper, watchdog, typed automation control, generated task projection, worker-decision logging, human bridge, verification guidance, status model, observatory state, and local checkpoint commits when enabled, but omits multi-role role prompts and integrator queues."""
-        bootstrap = """Role profile: `single_lane`
-
-After bootstrap, use the dashboard Start button or `scripts/run_conveyor_automation.sh` for continuous solo automation. The generated target does not need multi-role worktrees, role prompts, or integration queues. Successful runs create local checkpoint commits when `automation_checkpoint_commits` is enabled."""
 
     return {
         "MULTI_ROLE_AUTOMATIONS_ALLOWED": str(enabled).lower(),
@@ -1496,12 +1466,12 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
         "PROJECT_MODE_GUIDANCE": project_mode_guidance(mode),
         "PRODUCT_GOAL": normalize_lines(data.get("product_goal"), "Build a useful local-first product from the intake brief."),
         "TARGET_USER": normalize_lines(data.get("target_user"), "The primary user described in the intake brief."),
-        "DESIRED_FIRST_DEMO": normalize_lines(data.get("desired_first_demo"), "A runnable local demo that proves the core workflow."),
+        "DESIRED_FIRST_DEMO": normalize_lines(data.get("desired_first_demo"), "A runnable local milestone that proves the core workflow."),
         "TECH_PREFERENCES": normalize_lines(data.get("tech_preferences"), "Use the existing repo stack or choose a simple, well-supported default."),
-        "HARD_CONSTRAINTS": normalize_lines(data.get("hard_constraints"), "Keep the first demo local-first and reviewable."),
+        "HARD_CONSTRAINTS": normalize_lines(data.get("hard_constraints"), "Keep local milestones reviewable."),
         "SAFETY_CONSTRAINTS": normalize_lines(data.get("safety_constraints"), "No secrets, paid actions, public deploys, or real-world side effects without approval."),
         "AUTOMATION_MUST_NEVER_DO": normalize_lines(data.get("automation_must_never_do"), env_values["AUTOMATION_MUST_NEVER_DO_DEFAULT"]),
-        "EXTERNAL_SERVICES": normalize_lines(data.get("external_services"), "None required for the first demo."),
+        "EXTERNAL_SERVICES": normalize_lines(data.get("external_services"), "None required for local execution."),
         "ADDITIONAL_CONTEXT_FILES": normalize_lines(data.get("additional_context_files"), "No additional context files provided."),
         "VERIFICATION_COMMANDS": verification,
         "VERIFICATION_COMMANDS_INLINE": re.sub(r"\s+", " ", verification.replace("`", "")).strip(),
@@ -1511,6 +1481,12 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
         "BEYOND_MVP": normalize_lines(data.get("beyond_mvp"), "Continue improving core value, demo quality, integrations, and automation reliability."),
         "LONG_RUN_DIRECTION": normalize_lines(data.get("beyond_mvp"), "Continue improving core value, demo quality, integrations, and automation reliability."),
         "ASSUMPTIONS": normalize_lines(data.get("assumptions"), "Assumptions should be documented during bootstrap."),
+        "PARALLELISM_BUDGET_OVERRIDES_JSON": json.dumps(
+            data.get("parallelism_budget_overrides")
+            if isinstance(data.get("parallelism_budget_overrides"), dict)
+            else {},
+            sort_keys=True,
+        ),
         "CREATED_AT": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     values.update(progression_values(data, project_name))
@@ -1538,8 +1514,6 @@ def render_template(text: str, values: dict[str, str]) -> str:
 
 def template_included(rel: str, values: dict[str, str]) -> bool:
     if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel in HUMAN_BRIDGE_SETUP_FILES:
-        return False
-    if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and rel in MULTI_ROLE_FILES:
         return False
     if values.get("MCP_ENABLED") != "true" and rel in MCP_FILES:
         return False
@@ -1584,8 +1558,6 @@ def runtime_entrypoints() -> list[dict[str, str]]:
 
 
 def runtime_entrypoint_included(entry: dict[str, str], values: dict[str, str]) -> bool:
-    if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") != "true" and entry["script"] in MULTI_ROLE_RUNTIME_ENTRYPOINTS:
-        return False
     return True
 
 
@@ -1702,15 +1674,10 @@ def diffmogger_runtime_paths(values: dict[str, str]) -> list[str]:
         sidecar_rel("target/ticket_drafts"),
         sidecar_rel("target/ticket_run_completion.json"),
         sidecar_rel("target/ticket_run_reports"),
+        sidecar_rel("target/automation_queue"),
+        sidecar_rel("target/automation_worktrees"),
+        sidecar_rel("target/baseline_verification.json"),
     ]
-    if values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") == "true":
-        paths.extend(
-            [
-                sidecar_rel("target/automation_queue"),
-                sidecar_rel("target/automation_worktrees"),
-                sidecar_rel("target/baseline_verification.json"),
-            ]
-        )
     return paths
 
 
@@ -1724,6 +1691,12 @@ def seed_runtime_state(target: Path, values: dict[str, str]) -> None:
         max_write_workers = int(values.get("MAX_WRITE_WORKER_COUNT") or "0")
     except ValueError:
         max_write_workers = 0
+    try:
+        budget_overrides = json.loads(values.get("PARALLELISM_BUDGET_OVERRIDES_JSON") or "{}")
+    except json.JSONDecodeError:
+        budget_overrides = {}
+    if not isinstance(budget_overrides, dict):
+        budget_overrides = {}
     write_automation_control_state(
         target,
         {
@@ -1744,29 +1717,30 @@ def seed_runtime_state(target: Path, values: dict[str, str]) -> None:
             },
             "payload": {
                 "project_name": values.get("PROJECT_NAME") or target.name,
-                "automation_run_mode": values.get("AUTOMATION_RUN_MODE") or "continuous_improvement",
+                "campaign_mode": values.get("CAMPAIGN_MODE") or "ongoing",
                 "role_profile": values.get("AUTOMATION_ROLE_PROFILE") or "",
+                "parallelism_budget_overrides": budget_overrides,
             },
         },
         actor_role="scaffold",
         event_type="automation.control_seeded",
     )
-    if values.get("AUTOMATION_RUN_MODE") == "ticket_campaign":
-        try:
-            tickets = json.loads(values.get("TICKET_RUN_TICKETS_JSON") or "[]")
-        except json.JSONDecodeError:
-            tickets = []
-        write_ticket_run_state(
-            target,
-            {
-                "run_id": slugify(values.get("PROJECT_NAME") or "ticket-run"),
-                "halt_when_complete": True,
-                "notify_on_complete": values.get("TICKET_COMPLETION_NOTIFY") == "true",
-                "tickets": tickets if isinstance(tickets, list) else [],
-            },
-            actor_role="scaffold",
-            event_type="ticket.run_seeded",
-        )
+    try:
+        tickets = json.loads(values.get("TICKET_RUN_TICKETS_JSON") or "[]")
+    except json.JSONDecodeError:
+        tickets = []
+    write_ticket_run_state(
+        target,
+        {
+            "run_id": slugify(values.get("PROJECT_NAME") or "ticket-run"),
+            "halt_when_complete": values.get("CAMPAIGN_MODE") == "bounded",
+            "notify_on_complete": values.get("TICKET_COMPLETION_NOTIFY") == "true",
+            "campaign_mode": values.get("CAMPAIGN_MODE") or "ongoing",
+            "tickets": tickets if isinstance(tickets, list) else [],
+        },
+        actor_role="scaffold",
+        event_type="ticket.run_seeded",
+    )
     write_canonical_state_brief(target)
 
 
@@ -1796,9 +1770,9 @@ def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -
         path_aliases=path_aliases,
         features={
             "human_bridge_mode": values.get("HUMAN_BRIDGE_MODE", "file_only"),
-            "automation_run_mode": values.get("AUTOMATION_RUN_MODE", "continuous_improvement"),
-            "automation_role_profile": values.get("AUTOMATION_ROLE_PROFILE", "single_lane"),
-            "multi_role": values.get("MULTI_ROLE_AUTOMATIONS_ALLOWED") == "true",
+            "campaign_mode": values.get("CAMPAIGN_MODE", "ongoing"),
+            "automation_role_profile": values.get("AUTOMATION_ROLE_PROFILE", CONVEYOR_ROLE_PROFILE),
+            "multi_role": True,
             "optional_mcp": values.get("MCP_ENABLED") == "true",
             "playwright_mcp": values.get("PLAYWRIGHT_MCP_ENABLED") == "true",
             "runtime_bundle": True,

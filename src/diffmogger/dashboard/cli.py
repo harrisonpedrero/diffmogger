@@ -49,7 +49,20 @@ from .commands.tickets import (
     command_ticket_split_preview,
     command_ticket_update,
 )
-from .commands.workers import command_worker_run_integrator, command_worker_run_read_only, command_worker_run_write
+from .commands.workers import (
+    command_execution_group_cancel,
+    command_execution_group_export_debug_bundle,
+    command_execution_group_load,
+    command_execution_group_retry_failed,
+    command_execution_group_start,
+    command_lease_release_stale,
+    command_validation_jobs_load,
+    command_worker_launch_read_only_group,
+    command_worker_launch_write_group,
+    command_worker_run_integrator,
+    command_worker_run_read_only,
+    command_worker_run_write,
+)
 
 def add_target_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target", required=True, help="Target project directory")
@@ -90,8 +103,17 @@ def build_parser() -> argparse.ArgumentParser:
         "ticket.accept_split": command_ticket_accept_split,
         "safety.run_check": command_safety_run_check,
         "worker.run_read_only": command_worker_run_read_only,
+        "worker.launch_read_only_group": command_worker_launch_read_only_group,
+        "worker.launch_write_group": command_worker_launch_write_group,
         "worker.run_write": command_worker_run_write,
         "worker.run_integrator": command_worker_run_integrator,
+        "execution_group.load": command_execution_group_load,
+        "execution_group.start": command_execution_group_start,
+        "execution_group.cancel": command_execution_group_cancel,
+        "execution_group.retry_failed": command_execution_group_retry_failed,
+        "execution_group.export_debug_bundle": command_execution_group_export_debug_bundle,
+        "validation_jobs.load": command_validation_jobs_load,
+        "lease.release_stale": command_lease_release_stale,
         "observatory.snapshot": command_observatory_snapshot,
         "observatory.generate_html": command_observatory_generate_html,
         "observatory.load_html": command_observatory_load_html,
@@ -140,6 +162,19 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument("--note", default="", help="Optional reviewer note")
         if name == "worker.run_write":
             subparser.add_argument("--ownership", required=True, help="Disjoint file or module ownership scope")
+        if name == "worker.launch_read_only_group":
+            subparser.add_argument("--execution-group-id", default="", help="Optional proposed read-only execution group id")
+            subparser.add_argument("--max-workers", type=int, default=2, help="Maximum read-only workers to launch")
+        if name == "worker.launch_write_group":
+            subparser.add_argument("--execution-group-id", default="", help="Optional proposed write-worker execution group id")
+            subparser.add_argument("--max-workers", type=int, default=0, help="Maximum write workers to launch; default uses intake cap")
+        if name in {"execution_group.load", "execution_group.start", "execution_group.cancel", "execution_group.retry_failed"}:
+            subparser.add_argument("--execution-group-id", default="", help="Execution group id")
+        if name == "execution_group.start":
+            subparser.add_argument("--mode", default="auto", choices=["auto", "read_only", "write_workers", "validation"], help="Execution group mode to start")
+            subparser.add_argument("--max-workers", type=int, default=0, help="Maximum workers to launch when starting worker groups")
+        if name == "lease.release_stale":
+            subparser.add_argument("--lease-id", required=True, help="Active lease id to release")
         if name in {"brief.scaffold_preview", "brief.scaffold_bootstrap"}:
             subparser.add_argument("--force", action="store_true", help="Overwrite existing scaffold-managed files")
         if name == "brief.scaffold_bootstrap":

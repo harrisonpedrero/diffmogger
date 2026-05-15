@@ -14,7 +14,7 @@ It is not a hosted agent platform or a product-specific app. Diffmogger is built
 - A continuous planner/builder/hardener/integrator conveyor backed by `.diffmogger/runtime/orchestration.sqlite3` with append-only events, typed stage contracts, a durable work item, repo capability manifests, validation receipts, checkpoints, and generated JSON/Markdown views, including `.diffmogger/runtime/canonical_state_brief.md` for Codex agents.
 - Stable root CLI command names while implementation lives under `src/diffmogger/`.
 - An explicit status model: `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`.
-- Optional worker agents, optional ticket campaigns, optional Context7/Playwright MCP setup, optional notifier integration, and single-lane fallback for legacy targets.
+- Optional worker agents, bounded or ongoing campaigns, optional Context7/Playwright MCP setup, optional notifier integration, and deterministic conveyor scheduling.
 
 ## Quickstart
 
@@ -102,7 +102,7 @@ The target repo should not need the Diffmogger checkout at runtime. The native d
 
 The native dashboard is the only user-facing dashboard. It lives in `services/agentic-dashboard/native/` and calls `scripts/dashboard_backend_cli.py`, which exposes allowlisted JSON commands for scaffold, diagnostics, typed conveyor state snapshots, Start/Stop automation, safety checks, inbox messages, Observatory snapshots, review bundles, worker controls, and debug bundles.
 
-For ticket-campaign targets, the dashboard manages a structured Ticket Queue backed by `.diffmogger/runtime/orchestration.sqlite3`. Users can seed tickets before scaffold, inspect/edit/delete tickets after scaffold, preview/apply Markdown/CSV/JSON imports, and accept review-only Codex draft candidates stored under `.diffmogger/runtime/ticket_drafts/`.
+For campaign targets, the dashboard manages a structured Ticket Queue backed by `.diffmogger/runtime/orchestration.sqlite3`. Low-cortisol generation decomposes the full described scope into as many reviewable seed tickets as needed, rather than a capped demo plan. Users can seed tickets before scaffold, inspect/edit/delete tickets after scaffold, preview/apply Markdown/CSV/JSON imports, and accept review-only Codex follow-up draft candidates stored under `.diffmogger/runtime/ticket_drafts/`.
 
 Useful dashboard commands:
 

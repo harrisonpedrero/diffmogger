@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 
@@ -18,12 +19,19 @@ from diffmogger.runtime.state_store import (
     RUNNER_PROJECTION_NAME,
     STATE_SCHEMA_VERSION,
     automation_control_state,
+    can_start_execution_group,
+    can_start_worker,
     canonical_state_brief_path_for_target,
+    connect,
+    database_path_for_target,
     load_conveyor_state,
     load_runner_state,
+    parallelism_budgets_conn,
     render_canonical_state_brief,
+    run_parallel_validation_conn,
     state_snapshot,
     validate_state_database,
+    validation_jobs_conn,
     write_canonical_state_brief,
     write_runner_state,
     write_ticket_run_state,
@@ -31,6 +39,31 @@ from diffmogger.runtime.state_store import (
 
 
 class StateStoreTests(unittest.TestCase):
+    def _write_intake(
+        self,
+        target: Path,
+        *,
+        worker_agents_allowed: bool = True,
+        write_worker_agents_allowed: bool = False,
+        max_write_worker_count: int = 0,
+    ) -> None:
+        agentic = target / ".agentic"
+        agentic.mkdir(parents=True, exist_ok=True)
+        (agentic / "project_intake.json").write_text(
+            json.dumps(
+                {
+                    "project_name": "Parallel Budget Demo",
+                    "product_goal": "Exercise reusable automation budget state.",
+                    "target_user": "A local automation maintainer.",
+                    "desired_first_demo": "Show budgeted conveyor state.",
+                    "worker_agents_allowed": worker_agents_allowed,
+                    "write_worker_agents_allowed": write_worker_agents_allowed,
+                    "max_write_worker_count": max_write_worker_count,
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def test_initializes_sqlite_and_generated_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -58,6 +91,240 @@ class StateStoreTests(unittest.TestCase):
             self.assertIn(STATE_SCHEMA_VERSION, {item["version"] for item in snapshot["schema_migrations"]})
             self.assertEqual("pass", snapshot["state_health_summary"]["status"])
             self.assertTrue(all(item["ok"] for item in snapshot["invariant_results"]))
+
+    def test_parallelism_budget_defaults_disable_write_workers_until_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self._write_intake(
+                target,
+                worker_agents_allowed=True,
+                write_worker_agents_allowed=False,
+                max_write_worker_count=5,
+            )
+
+            snapshot = state_snapshot(target)
+            budget_by_scope = {item["scope"]: item for item in snapshot["parallelism_budgets"]}
+
+            self.assertTrue(budget_by_scope["read_only_workers"]["enabled"])
+            self.assertEqual(3, budget_by_scope["read_only_workers"]["max_concurrent"])
+            self.assertFalse(budget_by_scope["write_workers"]["enabled"])
+            self.assertEqual(0, budget_by_scope["write_workers"]["max_concurrent"])
+            self.assertIn("active_parallel_counts", snapshot)
+            self.assertIn("budget_exhaustion_reasons", snapshot)
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                self.assertTrue(can_start_worker(conn, "read_only", owner_role="builder")["allowed"])
+                write_check = can_start_worker(conn, "write", owner_role="builder")
+            self.assertFalse(write_check["allowed"])
+            self.assertTrue(any("write_workers" in reason for reason in write_check["reasons"]))
+
+    def test_write_worker_budget_respects_max_write_worker_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self._write_intake(
+                target,
+                worker_agents_allowed=True,
+                write_worker_agents_allowed=True,
+                max_write_worker_count=3,
+            )
+
+            state_snapshot(target)
+            with closing(connect(database_path_for_target(target))) as conn:
+                budgets = {item["scope"]: item for item in parallelism_budgets_conn(conn)}
+                write_check = can_start_worker(conn, "write", owner_role="builder")
+
+            self.assertTrue(budgets["write_workers"]["enabled"])
+            self.assertEqual(3, budgets["write_workers"]["max_concurrent"])
+            self.assertEqual(3, budgets["write_workers"]["max_per_role"]["builder"])
+            self.assertTrue(write_check["allowed"])
+
+    def test_active_execution_group_count_prevents_starting_new_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            state_snapshot(target)
+            with closing(connect(database_path_for_target(target))) as conn:
+                conn.execute(
+                    """
+                    UPDATE parallelism_budgets
+                    SET max_concurrent = 1, enabled = 1, source = 'test'
+                    WHERE scope = 'global'
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO execution_groups(
+                        execution_group_id, status, mode, created_at, selected_by, reason, payload_json
+                    )
+                    VALUES(?, 'running', 'mixed', '2026-05-14T00:00:00+00:00', 'test', 'occupy slot', '{}')
+                    """,
+                    ("execution-group:test-running",),
+                )
+                conn.commit()
+                check = can_start_execution_group(conn, "mixed", item_count=1)
+
+            self.assertFalse(check["allowed"])
+            self.assertTrue(any("global" in reason for reason in check["reasons"]))
+
+    def test_read_only_budget_does_not_authorize_write_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self._write_intake(
+                target,
+                worker_agents_allowed=True,
+                write_worker_agents_allowed=False,
+                max_write_worker_count=0,
+            )
+
+            state_snapshot(target)
+            with closing(connect(database_path_for_target(target))) as conn:
+                read_only_check = can_start_worker(conn, "read_only", owner_role="planner")
+                write_check = can_start_worker(conn, "write", owner_role="planner")
+
+            self.assertTrue(read_only_check["allowed"])
+            self.assertFalse(write_check["allowed"])
+
+    def test_parallelism_budget_summary_appears_in_snapshot_and_brief(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self._write_intake(
+                target,
+                worker_agents_allowed=True,
+                write_worker_agents_allowed=True,
+                max_write_worker_count=2,
+            )
+
+            snapshot = state_snapshot(target)
+            rendered = render_canonical_state_brief(snapshot, target=target)
+
+            self.assertIn("parallelism_budgets", snapshot)
+            self.assertIn("active_parallel_counts", snapshot)
+            self.assertIn("budget_exhaustion_reasons", snapshot)
+            self.assertTrue(any(item["scope"] == "write_workers" for item in snapshot["parallelism_budgets"]))
+            self.assertEqual(0, snapshot["active_parallel_counts"]["active_write_workers"])
+            self.assertIn("scope=write_workers", rendered)
+
+    def test_parallel_validation_runs_independent_commands_as_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            src = target / "src"
+            src.mkdir(parents=True)
+            (src / "one.py").write_text("VALUE = 1\n", encoding="utf-8")
+            (src / "two.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+            commands = [
+                {"command": f"{sys.executable} -m py_compile {src / 'one.py'}", "gate_id": "gate:one"},
+                {"command": f"{sys.executable} -m py_compile {src / 'two.py'}", "gate_id": "gate:two"},
+            ]
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = run_parallel_validation_conn(conn, target, commands, selected_by="test", plan_id="plan:parallel")
+                jobs = validation_jobs_conn(conn, limit=10)
+
+            self.assertEqual("passed", result["status"])
+            self.assertEqual(2, result["parallel_job_count"])
+            self.assertEqual(0, result["serial_job_count"])
+            self.assertEqual(2, len(result["jobs"]))
+            self.assertEqual({"passed"}, {job["status"] for job in jobs})
+            self.assertEqual({"read_only_check"}, {job["payload"]["classification"] for job in jobs})
+
+    def test_parallel_validation_exclusive_command_runs_serially(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            command = f"{sys.executable} -c \"print('exclusive validation')\""
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = run_parallel_validation_conn(
+                    conn,
+                    target,
+                    [{"command": command, "classification": "exclusive", "exclusive": True, "gate_id": "gate:exclusive"}],
+                    selected_by="test",
+                    plan_id="plan:exclusive",
+                )
+                jobs = validation_jobs_conn(conn, limit=5)
+
+            self.assertEqual("passed", result["status"])
+            self.assertEqual(0, result["parallel_job_count"])
+            self.assertEqual(1, result["serial_job_count"])
+            self.assertEqual(1, len(jobs))
+            self.assertTrue(jobs[0]["payload"]["exclusive"])
+            self.assertEqual("exclusive", jobs[0]["payload"]["classification"])
+
+    def test_parallel_validation_failed_required_job_fails_aggregate_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            command = f"{sys.executable} -c \"import sys; sys.exit(7)\""
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = run_parallel_validation_conn(
+                    conn,
+                    target,
+                    [{"command": command, "classification": "test", "required": True, "gate_id": "gate:required"}],
+                    selected_by="test",
+                    plan_id="plan:required-fail",
+                )
+                receipt = conn.execute(
+                    "SELECT status FROM validation_receipts WHERE run_id = ?",
+                    (result["execution_group_id"],),
+                ).fetchone()
+
+            self.assertEqual("failed", result["status"])
+            self.assertEqual("failed", result["validation_job_summary"]["aggregate_status"])
+            self.assertEqual("failed", result["jobs"][0]["status"])
+            self.assertIsNotNone(receipt)
+            self.assertEqual("fail", receipt["status"])
+
+    def test_parallel_validation_optional_failed_job_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            command = f"{sys.executable} -c \"import sys; sys.exit(3)\""
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = run_parallel_validation_conn(
+                    conn,
+                    target,
+                    [{"command": command, "classification": "test", "required": False, "gate_id": "gate:optional"}],
+                    selected_by="test",
+                    plan_id="plan:optional-fail",
+                )
+
+            self.assertEqual("warning", result["status"])
+            self.assertEqual("warning", result["validation_job_summary"]["aggregate_status"])
+            self.assertEqual("warning", result["jobs"][0]["status"])
+
+    def test_parallel_validation_records_log_artifact_and_snapshot_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            command = (
+                f"{sys.executable} -c \"import sys; "
+                "print('validation stdout marker'); "
+                "print('validation stderr marker', file=sys.stderr)\""
+            )
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = run_parallel_validation_conn(
+                    conn,
+                    target,
+                    [{"command": command, "classification": "test", "gate_id": "gate:logs"}],
+                    selected_by="test",
+                    plan_id="plan:logs",
+                )
+                artifact = conn.execute(
+                    "SELECT * FROM artifacts WHERE artifact_id = ?",
+                    (result["jobs"][0]["log_artifact_id"],),
+                ).fetchone()
+
+            self.assertIsNotNone(artifact)
+            log_path = target / artifact["path"]
+            log_text = log_path.read_text(encoding="utf-8")
+            self.assertIn("validation stdout marker", log_text)
+            self.assertIn("validation stderr marker", log_text)
+
+            snapshot = state_snapshot(target)
+            rendered = render_canonical_state_brief(snapshot, target=target)
+            self.assertEqual("passed", snapshot["validation_job_summary"]["aggregate_status"])
+            self.assertTrue(snapshot["parallel_validation_available"])
+            self.assertIn("validation_jobs:", rendered)
+            self.assertNotIn("## stdout", json.dumps(snapshot["validation_job_summary"]))
+            self.assertNotIn("## stderr", json.dumps(snapshot["validation_job_summary"]))
 
     def test_older_user_version_upgrades_through_schema_migrations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -432,7 +699,7 @@ class StateStoreTests(unittest.TestCase):
                 json.dumps(
                     {
                         "project_name": "Ticket Campaign Demo",
-                        "automation_run_mode": "ticket_campaign",
+                        "campaign_mode": "bounded",
                     }
                 ),
                 encoding="utf-8",
@@ -496,7 +763,7 @@ class StateStoreTests(unittest.TestCase):
                 json.dumps(
                     {
                         "project_name": "Ticket Campaign Demo",
-                        "automation_run_mode": "ticket_campaign",
+                        "campaign_mode": "bounded",
                     }
                 ),
                 encoding="utf-8",

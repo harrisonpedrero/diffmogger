@@ -17,7 +17,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
-from diffmogger.runtime.state_store import load_ticket_run_state, stable_json, state_snapshot, write_ticket_run_state
+from diffmogger.runtime.paths import target_path
+from diffmogger.runtime.state_store import (
+    connect,
+    database_path_for_target,
+    load_ticket_run_state,
+    record_candidate_lane_conn,
+    select_candidate_lane_conn,
+    stable_json,
+    state_snapshot,
+    write_ticket_run_state,
+)
 
 INTEGRATOR_PATHS = [
     ROOT / "src" / "diffmogger" / "runtime" / "integrate_role_outputs.py",
@@ -146,6 +156,91 @@ class RuntimeStateActionTests(unittest.TestCase):
             "runtime_state_status": "pending",
             "runtime_state_results": [],
         }
+
+    def write_speculative_candidate(
+        self,
+        target: Path,
+        *,
+        run_id: str,
+        candidate_id: str,
+        worker_id: str,
+        new_content: str,
+    ) -> str:
+        queue_dir = target_path(target, f"target/automation_queue/builder/{run_id}")
+        patch_path = queue_dir / "changes.patch"
+        manifest_path = queue_dir / "manifest.json"
+        summary_path = queue_dir / "summary.md"
+        queue_dir.mkdir(parents=True, exist_ok=True)
+        self.write_patch_for_file(target, "src/app.py", new_content, patch_path)
+        summary_path.write_text(f"# Candidate {candidate_id}\n", encoding="utf-8")
+        base_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=target, text=True, capture_output=True, check=True).stdout.strip()
+        patch_id = f"worker-patch:{candidate_id}"
+        manifest = {
+            "schema_version": 1,
+            "role": "builder",
+            "run_id": run_id,
+            "status": "candidate",
+            "source": "speculative_candidate_lane",
+            "candidate_id": candidate_id,
+            "worker_id": worker_id,
+            "base_commit": base_commit,
+            "patch_path": f"target/automation_queue/builder/{run_id}/changes.patch",
+            "summary_path": f"target/automation_queue/builder/{run_id}/summary.md",
+            "changed_files": ["src/app.py"],
+            "checks_run": [],
+            "validation_evidence": [{"status": "passed", "command": "path:src/** smoke"}],
+            "created_at": "2026-05-14T00:00:00+00:00",
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with connect(database_path_for_target(target)) as conn:
+            conn.execute(
+                """
+                INSERT INTO worker_agents(
+                    worker_id, execution_group_id, run_id, mode, role, status,
+                    started_at, finished_at, payload_json
+                )
+                VALUES(?, 'execution-group:speculative-integrator', ?, 'write', 'builder',
+                       'completed', '2026-05-14T00:00:00+00:00',
+                       '2026-05-14T00:00:01+00:00', '{}')
+                """,
+                (worker_id, run_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO worker_patches(
+                    patch_id, worker_id, execution_group_id, status, manifest_path,
+                    patch_path, changed_files_json, base_commit, leases_json,
+                    validation_evidence_json, conflict_signature, created_at,
+                    queued_at, integrated_at, payload_json
+                )
+                VALUES(?, ?, 'execution-group:speculative-integrator', 'candidate',
+                       ?, ?, ?, ?, '[]', ?, '', '2026-05-14T00:00:00+00:00',
+                       '', '', ?)
+                """,
+                (
+                    patch_id,
+                    worker_id,
+                    f"target/automation_queue/builder/{run_id}/manifest.json",
+                    f"target/automation_queue/builder/{run_id}/changes.patch",
+                    json.dumps(["src/app.py"]),
+                    base_commit,
+                    json.dumps([{"status": "passed", "command": "path:src/** smoke"}]),
+                    json.dumps({"schema_version": 1, "speculative_candidate": True}),
+                ),
+            )
+            record_candidate_lane_conn(
+                conn,
+                target,
+                candidate_id=candidate_id,
+                task_id="TICKET-ALT",
+                execution_group_id="execution-group:speculative-integrator",
+                worker_id=worker_id,
+                approach_summary=f"Candidate implementation {candidate_id}",
+                status="validated",
+                patch_id=patch_id,
+                validation_summary={"status": "passed", "test_coverage": "path-scoped smoke"},
+            )
+        return patch_id
 
     def replace_action(self, rel_path: str, start: str | None, end: str) -> dict[str, object]:
         return {
@@ -882,6 +977,70 @@ Review `/tmp/example-project/target/automation_queue/builder/run/codex.raw.log` 
 
                     self.assertTrue(result.ok, result.detail)
                     self.assertIn("scoped smoke", result.detail)
+
+    def test_selected_speculative_candidate_goes_through_integrator_verification(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target, bridge_mode="local_notifier")
+                    self.add_committed_file(target, "src/app.py", "VALUE = 'base'\n")
+                    (target / ".agentic" / "smoke_commands.txt").write_text(
+                        "path:src/** | python3 -c 'print(\"candidate smoke\")'\n",
+                        encoding="utf-8",
+                    )
+                    subprocess.run(["git", "add", ".agentic/smoke_commands.txt"], cwd=target, check=True, stdout=subprocess.DEVNULL)
+                    subprocess.run(
+                        [
+                            "git",
+                            "-c",
+                            "user.name=Test",
+                            "-c",
+                            "user.email=test@example.invalid",
+                            "commit",
+                            "-m",
+                            "test: add scoped smoke",
+                        ],
+                        cwd=target,
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                    )
+                    selected_id = "candidate-lane:selected"
+                    rejected_id = "candidate-lane:rejected"
+                    self.write_speculative_candidate(
+                        target,
+                        run_id="candidate-selected",
+                        candidate_id=selected_id,
+                        worker_id="worker:selected",
+                        new_content="VALUE = 'selected'\n",
+                    )
+                    self.write_speculative_candidate(
+                        target,
+                        run_id="candidate-rejected",
+                        candidate_id=rejected_id,
+                        worker_id="worker:rejected",
+                        new_content="VALUE = 'rejected'\n",
+                    )
+                    with connect(database_path_for_target(target)) as conn:
+                        selection = select_candidate_lane_conn(
+                            conn,
+                            target,
+                            selected_id,
+                            selected_by="planner",
+                            comparison_notes="Selected candidate keeps the smaller behavior change.",
+                        )
+
+                    exit_code = module.integrate(target, "integrator-candidate", dry_run=False)
+
+                    self.assertEqual("selected", selection["status"])
+                    self.assertEqual(0, exit_code)
+                    self.assertEqual("VALUE = 'selected'\n", (target / "src/app.py").read_text(encoding="utf-8"))
+                    selected_manifest = json.loads((target / "target/automation_queue/builder/candidate-selected/manifest.json").read_text(encoding="utf-8"))
+                    rejected_manifest = json.loads((target / "target/automation_queue/builder/candidate-rejected/manifest.json").read_text(encoding="utf-8"))
+                    self.assertEqual("applied", selected_manifest["status"])
+                    self.assertEqual("superseded", rejected_manifest["status"])
+                    self.assertIn("candidate smoke", "\n".join(selected_manifest["checks_run"]))
+                    self.assertEqual(selected_id, rejected_manifest["superseded_by_candidate_id"])
 
     def test_hardener_full_suite_classifies_missing_env_var_without_path_category(self) -> None:
         for path, module in self.modules:

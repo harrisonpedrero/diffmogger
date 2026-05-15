@@ -121,6 +121,40 @@ Generated target projects are conservative by default only in the sense that wri
 
 `max_write_worker_count` is capped at 10. The main agent should use the most parallelism the task can safely absorb: no workers for tiny or tightly coupled changes, a few workers for normal multi-surface work, and up to the cap for broad implementation, hardening, observability, docs, examples, validation, or competing prototype lanes.
 
+## Runtime Budgets
+
+Diffmogger stores local concurrency limits in SQLite as `parallelism_budgets`. Budgets are derived from intake worker settings and surfaced in `state.snapshot`, so the dashboard and conveyor can show why work can or cannot start without launching anything.
+
+- read-only worker budget is enabled when `worker_agents_allowed` is true
+- write worker budget is enabled only when `write_worker_agents_allowed` is true
+- write worker capacity comes from `max_write_worker_count`
+- validation and integration have conservative local caps
+
+Runtime helpers check these budgets before manual workers, execution groups, or validation jobs start. A read-only budget never authorizes write-capable workers.
+
+## Read-Only Fanout
+
+Diffmogger can launch read-only workers from proposed execution groups. The launcher consumes a read-only dry-run group, checks the typed budget, creates `worker_agents` and `worker_contracts` rows, and writes each worker report under the sidecar-aware `target/agent_runs/<run_id>/` runtime path.
+
+Each worker receives a bounded context-pack preview: paths, reasons, confidence, and stale-context warnings only. Raw source contents are not embedded by default. Contracts forbid source writes, network access, credential access, external messages, and spawning more workers. The main agent remains responsible for consolidating reports and marking findings accepted, rejected, or deferred.
+
+Worker report state is visible in `state.snapshot` as active read-only workers, pending reports, completed reports, and whether finding disposition is still required.
+
+## Write-Worker Fanout
+
+Write-worker fanout is opt-in only. It requires `write_worker_agents_allowed: true`, respects `max_write_worker_count`, and launches from a proposed write-worker execution group whose likely write surfaces are disjoint.
+
+Before any write worker starts, Diffmogger acquires active resource leases for the worker's ownership scope. A worker without leases, without an ownership scope, or with an overlapping active lease is blocked. Workers run in isolated scratch/worktree space and produce queue artifacts rather than changing the main checkout.
+
+Each write worker produces:
+
+- a typed `worker_agents` row
+- a `worker_contracts` row with ownership scope, allowed paths, denied paths/actions, expected patch output, and verification expectations
+- a `worker_patches` row linked to the worker, leases, base commit, changed files, validation evidence, and any conflict signature
+- a normal integrator queue manifest under `target/automation_queue/builder/<run_id>/`
+
+The serialized integrator remains the only path that applies patches to the main checkout. Parallel worker patches are visible in `state.snapshot` as queued worker patches, write-worker conflicts, lease conflict summary, and the integration backlog from parallel workers.
+
 Every run should choose a strategy:
 
 ```text

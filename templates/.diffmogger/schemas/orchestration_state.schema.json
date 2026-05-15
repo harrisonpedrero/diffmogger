@@ -45,7 +45,27 @@
     "skipped_scheduler_candidates",
     "scheduler_fallback_used",
     "graph_signals_used",
-    "lease_conflicts_considered"
+    "lease_conflicts_considered",
+    "proposed_execution_groups",
+    "parallelization_summary",
+    "blocked_parallel_candidates",
+    "scheduler_parallel_dry_run",
+    "parallelism_budgets",
+    "active_parallel_counts",
+    "budget_exhaustion_reasons",
+    "active_read_only_workers",
+    "pending_worker_reports",
+    "completed_worker_reports",
+    "worker_finding_disposition_required",
+    "active_write_workers",
+    "queued_worker_patches",
+    "write_worker_conflicts",
+    "lease_conflict_summary",
+    "integration_backlog_from_parallel_workers",
+    "active_validation_jobs",
+    "validation_job_summary",
+    "parallel_validation_available",
+    "validation_budget_status"
   ],
   "properties": {
     "schema_version": {
@@ -469,6 +489,92 @@
       "items": {"type": "object", "additionalProperties": true}
     },
     "legacy_result": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "proposed_execution_groups": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "parallelization_summary": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "blocked_parallel_candidates": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "scheduler_parallel_dry_run": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "parallelism_budgets": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "active_parallel_counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer"}
+    },
+    "budget_exhaustion_reasons": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "active_read_only_workers": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "pending_worker_reports": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "completed_worker_reports": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "worker_finding_disposition_required": {"type": "boolean"},
+    "active_write_workers": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "queued_worker_patches": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "write_worker_conflicts": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "lease_conflict_summary": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "integration_backlog_from_parallel_workers": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "candidate_lanes": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "candidate_lane_summary": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "candidate_lane_comparisons": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "active_validation_jobs": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "validation_job_summary": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "parallel_validation_available": {"type": "boolean"},
+    "validation_budget_status": {
       "type": "object",
       "additionalProperties": true
     },

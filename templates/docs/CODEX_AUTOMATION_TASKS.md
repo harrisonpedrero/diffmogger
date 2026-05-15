@@ -12,7 +12,7 @@ Last updated: {{CREATED_AT}}
 - Project mode: {{PROJECT_MODE_LABEL}}
 - Goal: {{PRODUCT_GOAL}}
 - Target user: {{TARGET_USER}}
-- Desired first demo: {{DESIRED_FIRST_DEMO}}
+- Desired runnable milestone: {{DESIRED_FIRST_DEMO}}
 - Tech preferences: {{TECH_PREFERENCES}}
 - Project-mode guidance: {{PROJECT_MODE_GUIDANCE}}
 - Current baseline: not bootstrapped yet.

@@ -34,17 +34,17 @@ Create or confirm the first runnable product baseline and install the automation
 - Create or update human bridge docs if enabled.
 - Create or update `.diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md`.
 - Create or update `.diffmogger/state/DAILY_AUTOMATION_REVIEW.md`.
-- Create or update local automation helper scripts under `.diffmogger/scripts/`: `run_codex_automation.sh`, `run_conveyor_automation.sh`, `run_conveyor_automation.py`, `run_observatory.py`, `repair_environment.py`, `state_brief.py`, `acquire_codex_lock.sh`, `release_codex_lock.sh`, `spawn_worker_agent.sh`, `summarize_worker_outputs.py`, and `compact_agent_state.py`. If multi-role mode is enabled, also create or update `run_role_automation.sh`, `integrate_role_outputs.py`, and `list_deferred_patches.py`.
+- Create or update local automation helper scripts under `.diffmogger/scripts/`: `run_conveyor_automation.sh`, `run_conveyor_automation.py`, `run_role_automation.sh`, `integrate_role_outputs.py`, `list_deferred_patches.py`, `run_observatory.py`, `repair_environment.py`, `state_brief.py`, `acquire_codex_lock.sh`, `release_codex_lock.sh`, `spawn_worker_agent.sh`, `summarize_worker_outputs.py`, and `compact_agent_state.py`.
 - Ensure the runtime can initialize `.diffmogger/runtime/orchestration.sqlite3`, materialize typed automation control, the conveyor work item, stage contracts, repo capability manifest, validation receipts, blockers, and next actions, regenerate `.diffmogger/runtime/canonical_state_brief.md`, and include `.diffmogger/schemas/orchestration_state.schema.json`.
 - If multi-role mode is enabled, create or update `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, `.diffmogger/agentic/roles/integrator.md`, and `.diffmogger/state/MULTI_ROLE_PROGRESS.md`.
 - Add a one-command local verification or demo path when practical.
 - Ensure `.diffmogger/agentic/automation_prompt.md` explains the configured human bridge mode, local lock helpers, wrapper-owned lock behavior with `CODEX_LOCK_ALREADY_ACQUIRED=true`, canonical typed SQLite runtime state, generated projection compaction, nested child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` worker usage, parent wrapper `--add-dir "$HOME/.codex"` behavior for nested CLI startup, explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` records, and explicit worker strategy decisions.
 - Preserve read-only worker reports for exploration. If the intake explicitly enables write-capable workers, document the capped maximum, parallelism-budget decision, reviewable ownership rules, lightweight coordination, main-agent integration/review/verification duties, and the option to run integration-only with no workers.
-- Preserve single-lane automation as the default. If the intake explicitly enables multi-role automation, document the local-only no-remote rule, continuous conveyor option, worktree queue paths, integrator ownership, SQLite checkpoints/events, batched verification fallback, deferred-patch schema, observability through `.diffmogger/scripts/run_observatory.py`, and `.diffmogger/state/MULTI_ROLE_PROGRESS.md` projection responsibilities.
+- Preserve the single multi-role conveyor architecture. Document bounded vs ongoing campaign behavior, the local-only no-remote rule, worktree queue paths, integrator ownership, SQLite checkpoints/events, batched verification fallback, deferred-patch schema, observability through `.diffmogger/scripts/run_observatory.py`, and `.diffmogger/state/MULTI_ROLE_PROGRESS.md` projection responsibilities.
 
 ## Behavior
 
-Build the product, not only plans. Use reasonable defaults. Avoid secrets and real external side effects. Prefer fixtures, mocks, or local seed data for the first demo. In existing projects, integrate rather than rewrite.
+Build the product, not only plans. Use reasonable defaults. Avoid secrets and real external side effects. Prefer fixtures, mocks, or local seed data for runnable local milestones. In existing projects, integrate rather than rewrite.
 
 ## Verification
 

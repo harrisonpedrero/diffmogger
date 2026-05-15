@@ -12,27 +12,19 @@ from .target import detect_target_context, load_dashboard_state, load_intake
 from diffmogger.runtime.paths import existing_or_target_path, normalize_rel
 
 
-TICKET_COMPLEXITY_RANGES: dict[str, tuple[int, int]] = {
-    "tiny": (2, 3),
-    "small": (4, 6),
-    "medium": (7, 12),
-    "large": (12, 18),
-}
+TICKET_COMPLEXITY_TIERS = ("tiny", "small", "medium", "large")
 
-TICKET_SIZING_POLICY = """Ticket sizing policy:
-- A ticket is one reviewable local patch.
-- Each ticket must have one primary deliverable.
-- Each ticket needs clear acceptance criteria and concrete verification.
-- Split a ticket if it spans multiple components or surfaces.
+TICKET_SIZING_POLICY = """Ticket generation policy:
+- A ticket is one reviewable local patch with one primary deliverable.
+- Generate as many tickets as the described scope needs; do not impose a global ticket-count cap or fixed tier range.
+- Cover the full requested project scope. Do not silently defer core requested work just to keep the queue short.
+- If the user explicitly asks for MVP vs beyond-MVP, keep that distinction visible in ticket order, dependencies, or acceptance criteria without omitting requested MVP scope.
+- Split by component, workflow, data model, integration point, validation surface, docs surface, CLI/UI surface, migration/storage surface, safety boundary, and hardening surface.
+- Split a ticket if it spans multiple unrelated components or surfaces.
 - Split a ticket if its summary says "and" across unrelated work.
 - Split a ticket if it combines scaffold, feature, docs, and tests as one broad task.
 - Split a ticket if it would require a broad rewrite.
-- Complexity tiers:
-  - tiny: 2-3 tickets
-  - small: 4-6 tickets
-  - medium: 7-12 tickets
-  - large: 12-18 initial first-demo tickets
-- For very large projects, generate first-demo tickets only. Capture deferred follow-ups in intake fields instead of turning them into giant tickets."""
+- Complexity tiers describe breadth only: tiny has a few narrow surfaces; small has several related surfaces; medium has multiple workflows or integrations; large has many components, workflows, validations, and hardening surfaces."""
 
 PROJECT_SNAPSHOT_MAX_TREE_ENTRIES = 90
 PROJECT_SNAPSHOT_MAX_FILE_BYTES = 6000
@@ -97,6 +89,18 @@ _BROAD_COMPONENT_WORDS = {
     "visualizer",
     "worker",
 }
+_SURFACE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "component": ("component", "module", "service", "frontend", "backend", "client", "server", "worker"),
+    "workflow": ("workflow", "flow", "journey", "onboarding", "review", "approval"),
+    "data_model": ("data model", "schema", "model", "record", "entity"),
+    "integration": ("integration", "adapter", "api", "webhook", "import", "export"),
+    "validation": ("validation", "test", "tests", "lint", "typecheck", "build", "smoke"),
+    "docs": ("docs", "documentation", "readme", "guide"),
+    "cli_ui": ("cli", "ui", "dashboard", "screen", "form", "controls"),
+    "migration_storage": ("migration", "storage", "database", "sqlite", "persistence"),
+    "safety": ("safety", "permission", "approval", "guardrail", "secret"),
+    "hardening": ("hardening", "error", "empty state", "edge case", "accessibility", "performance"),
+}
 _VAGUE_PHRASES = {
     "all the",
     "complete app",
@@ -111,34 +115,45 @@ _VAGUE_PHRASES = {
     "polish everything",
     "various",
 }
+_TOKEN_STOPWORDS = {
+    "and",
+    "are",
+    "for",
+    "from",
+    "into",
+    "that",
+    "the",
+    "this",
+    "with",
+    "without",
+}
 
 
 def normalize_ticket_complexity(value: Any, *, fallback: str = "small") -> str:
     text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if text in TICKET_COMPLEXITY_RANGES:
+    if text in TICKET_COMPLEXITY_TIERS:
         return text
-    for tier in TICKET_COMPLEXITY_RANGES:
+    for tier in TICKET_COMPLEXITY_TIERS:
         if re.search(rf"\b{tier}\b", text):
             return tier
-    return fallback if fallback in TICKET_COMPLEXITY_RANGES else "small"
+    return fallback if fallback in TICKET_COMPLEXITY_TIERS else "small"
 
 
-def ticket_count_range(complexity: Any) -> tuple[int, int]:
-    return TICKET_COMPLEXITY_RANGES[normalize_ticket_complexity(complexity)]
-
-
-def ticket_count_guidance(complexity: Any) -> str:
+def ticket_coverage_guidance(complexity: Any) -> str:
     tier = normalize_ticket_complexity(complexity)
-    low, high = ticket_count_range(tier)
-    if tier == "large":
-        return f"Use {low}-{high} initial first-demo tickets for this large project; defer later work in intake fields."
-    return f"Use {low}-{high} seed tickets for this {tier} project."
+    if tier == "tiny":
+        return "For a tiny project, still cover every requested component and validation surface; a short queue is fine only when the scope is genuinely narrow."
+    if tier == "small":
+        return "For a small project, split each workflow, data/storage change, UI or CLI surface, docs surface, and verification surface into reviewable patches."
+    if tier == "medium":
+        return "For a medium project, create enough tickets to cover each workflow, integration point, data model, UI or CLI surface, validation surface, and hardening boundary cleanly."
+    return "For a large project, decompose every described component, workflow, integration, data/storage surface, validation surface, docs surface, safety boundary, and hardening area; do not compress the queue to a demo-sized plan."
 
 
 def ticket_sizing_policy_prompt(complexity: Any | None = None) -> str:
     if complexity is None:
         return TICKET_SIZING_POLICY
-    return "\n".join([TICKET_SIZING_POLICY, "", f"Current complexity guidance: {ticket_count_guidance(complexity)}"])
+    return "\n".join([TICKET_SIZING_POLICY, "", f"Current complexity guidance: {ticket_coverage_guidance(complexity)}"])
 
 
 def _text_list(value: Any) -> list[str]:
@@ -158,7 +173,90 @@ def _ticket_text(ticket: dict[str, Any]) -> str:
     return " ".join(parts).lower()
 
 
-def ticket_quality_warnings(tickets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", text.lower())
+        if token not in _TOKEN_STOPWORDS
+    }
+
+
+def _surface_hits(text: str) -> list[str]:
+    text_lower = text.lower()
+    hits: list[str] = []
+    for surface, keywords in _SURFACE_KEYWORDS.items():
+        if any(keyword in text_lower for keyword in keywords):
+            hits.append(surface)
+    return hits
+
+
+def normalize_scope_groups(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    groups: list[dict[str, Any]] = []
+    for index, item in enumerate(value[:80]):
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("group") or item.get("title") or f"scope group {index + 1}").strip()
+            description = str(item.get("description") or item.get("summary") or "").strip()
+            surfaces = _text_list(
+                item.get("surfaces")
+                or item.get("components")
+                or item.get("workflows")
+                or item.get("deliverables")
+                or []
+            )
+        else:
+            name = str(item or "").strip()
+            description = ""
+            surfaces = []
+        if not name:
+            continue
+        groups.append(
+            {
+                "name": name[:160],
+                "description": description[:500],
+                "surfaces": [surface[:160] for surface in surfaces[:30]],
+            }
+        )
+    return groups
+
+
+def ticket_scope_groups_from_intake(intake: dict[str, Any]) -> list[dict[str, Any]]:
+    groups = normalize_scope_groups(intake.get("ticket_generation_scope_groups"))
+    if groups:
+        return groups
+    brief = str(intake.get("ticket_generation_decomposition_brief") or "").strip()
+    if not brief:
+        return []
+    if "decompose the requested project scope" in brief.lower():
+        return []
+    fragments = [
+        re.sub(r"^[-*\d.()\s]+", "", fragment).strip(" .")
+        for fragment in re.split(r"\r?\n|;|\.\s+|,\s+", brief)
+    ]
+    groups = []
+    for fragment in fragments:
+        if len(fragment) < 6:
+            continue
+        groups.append({"name": fragment[:160], "description": "", "surfaces": [fragment[:160]]})
+        if len(groups) >= 30:
+            break
+    return groups
+
+
+def _scope_group_ticket_floor(scope_groups: list[dict[str, Any]]) -> int:
+    floor = 0
+    for group in scope_groups:
+        surfaces = _text_list(group.get("surfaces"))
+        floor += max(1, len(surfaces))
+    return floor
+
+
+def ticket_quality_warnings(
+    tickets: list[dict[str, Any]],
+    *,
+    scope_groups: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     warnings: list[dict[str, Any]] = []
     for index, ticket in enumerate(tickets):
         ticket_id = str(ticket.get("id") or f"ticket[{index}]")
@@ -205,6 +303,16 @@ def ticket_quality_warnings(tickets: list[dict[str, Any]]) -> list[dict[str, Any
                 }
             )
 
+        surfaces = _surface_hits(combined)
+        if len(surfaces) >= 4:
+            warnings.append(
+                {
+                    "ticket_id": ticket_id,
+                    "type": "acceptance_spans_multiple_surfaces",
+                    "detail": f"Ticket spans several project surfaces: {', '.join(surfaces[:6])}.",
+                }
+            )
+
         if any(phrase in combined for phrase in _VAGUE_PHRASES):
             warnings.append(
                 {
@@ -213,7 +321,64 @@ def ticket_quality_warnings(tickets: list[dict[str, Any]]) -> list[dict[str, Any
                     "detail": "Ticket uses broad or vague wording that may hide multiple deliverables.",
                 }
             )
+    groups = normalize_scope_groups(scope_groups)
+    if groups:
+        corpus = " ".join(_ticket_text(ticket) for ticket in tickets)
+        for group in groups:
+            group_text = " ".join(
+                [
+                    str(group.get("name") or ""),
+                    str(group.get("description") or ""),
+                    " ".join(_text_list(group.get("surfaces"))),
+                ]
+            )
+            keywords = _tokens(group_text)
+            if keywords and not any(keyword in corpus for keyword in keywords):
+                warnings.append(
+                    {
+                        "ticket_id": "",
+                        "type": "missing_scope_group",
+                        "detail": f"Generated queue does not visibly cover decomposition group: {group.get('name')}.",
+                    }
+                )
+        expected_floor = _scope_group_ticket_floor(groups)
+        if expected_floor and len(tickets) < expected_floor:
+            warnings.append(
+                {
+                    "ticket_id": "",
+                    "type": "under_decomposed_queue",
+                    "detail": (
+                        f"Generated queue has {len(tickets)} ticket(s), but the decomposition identifies "
+                        f"at least {expected_floor} reviewable surface(s)."
+                    ),
+                }
+            )
     return warnings
+
+
+def ticket_generation_quality_gate(
+    tickets: list[dict[str, Any]],
+    *,
+    scope_groups: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    warnings = ticket_quality_warnings(tickets, scope_groups=scope_groups)
+    blocking_types = {
+        "acceptance_spans_multiple_surfaces",
+        "broad_conjunction_summary",
+        "missing_scope_group",
+        "multiple_components",
+        "too_many_acceptance_criteria",
+        "under_decomposed_queue",
+        "vague_scope",
+    }
+    blocking = [item for item in warnings if item.get("type") in blocking_types]
+    return {
+        "passed": not blocking,
+        "warnings": warnings,
+        "blocking_warnings": blocking,
+        "scope_group_count": len(normalize_scope_groups(scope_groups)),
+        "scope_surface_floor": _scope_group_ticket_floor(normalize_scope_groups(scope_groups)),
+    }
 
 
 def _git_status_summary(target: Path) -> dict[str, Any]:

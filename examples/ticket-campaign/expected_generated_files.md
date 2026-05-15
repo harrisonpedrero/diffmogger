@@ -71,7 +71,6 @@ AGENTS.md
 .diffmogger/state/DEVELOPMENT.md
 .diffmogger/scripts/acquire_codex_lock.sh
 .diffmogger/scripts/release_codex_lock.sh
-.diffmogger/scripts/run_codex_automation.sh
 .diffmogger/scripts/build_replay.py
 .diffmogger/scripts/run_process_watchdog.py
 .diffmogger/scripts/run_conveyor_automation.py

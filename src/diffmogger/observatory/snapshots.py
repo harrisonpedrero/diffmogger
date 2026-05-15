@@ -124,8 +124,6 @@ ROLE_WORKTREE_TICKET_SOURCE_MARKERS = (
     "isolated role worktree",
 )
 BOILERPLATE_GUIDANCE_MARKERS = (
-    "automation runs should use `scripts/run_codex_automation.sh`",
-    "automation runs should use `.diffmogger/scripts/run_codex_automation.sh`",
     "continuous conveyor automation should use `scripts/run_conveyor_automation.sh`",
     "continuous conveyor automation should use `.diffmogger/scripts/run_conveyor_automation.sh`",
 )

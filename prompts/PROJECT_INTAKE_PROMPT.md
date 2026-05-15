@@ -14,7 +14,7 @@ Capture:
 2. Project mode: fresh project or existing project integration.
 3. Product goal.
 4. Target user.
-5. Desired first demo.
+5. Desired runnable milestone.
 6. Tech preferences.
 7. Hard constraints.
 8. Safety constraints.
@@ -26,8 +26,8 @@ Capture:
 14. Whether freeform human requests should receive direct notifier messages when the notifier is available.
 15. Whether worker agents are allowed and whether Codex CLI worker reports are expected on broad runs.
 16. Whether optional write-capable worker agents are allowed, the maximum write-worker count from 0-10, and guidance that enabled write workers are bounded acceleration for work that can split into reviewable lanes.
-17. Automation role profile: use `single_lane` for docs, research, cleanup, reports, small apps, bounded/simple work, and non-engineering workflows; use `planner_builder_hardener_integrator` for larger software engineering work where separate planning, implementation, verification, and integration lanes add value. Capture checkpoint-commit preference and local-only remote opt-in when multi-role is enabled.
-18. Automation run mode: continuous improvement or bounded ticket campaign.
+17. Automation architecture: Diffmogger always uses the `planner_builder_hardener_integrator` conveyor. Capture checkpoint-commit preference and local-only remote opt-in.
+18. Campaign mode: `bounded` for a seeded/imported ticket queue that stops when complete or blocked, or `ongoing` for automatic generic ticket drafting and continued conveyor work.
 19. Optional MCP servers: Context7 and/or Playwright, only when useful.
 20. Seed tickets for a bounded ticket campaign, if any.
 21. What counts as a meaningful integrated deliverable.
@@ -49,7 +49,7 @@ Output in this structure:
 
 ## Target User
 
-## Desired First Demo
+## Desired Runnable Milestone
 
 ## Tech Preferences
 

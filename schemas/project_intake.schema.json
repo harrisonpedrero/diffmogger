@@ -119,15 +119,29 @@
       "description": "Project-specific guidance for optional write workers. Keep this generic, bounded, and focused on disjoint ownership and main-agent integration.",
       "default": "Write workers are optional and should be used only for large, well-planned changes with disjoint file or module ownership. Prefer fewer workers when the change can be done clearly by the main agent."
     },
+    "parallelism_budget_overrides": {
+      "type": "object",
+      "description": "Optional advanced local concurrency overrides by budget scope. Omit for Diffmogger's conservative defaults derived from worker settings.",
+      "additionalProperties": false,
+      "properties": {
+        "global": {"$ref": "#/$defs/parallelism_budget_override"},
+        "read_only_workers": {"$ref": "#/$defs/parallelism_budget_override"},
+        "write_workers": {"$ref": "#/$defs/parallelism_budget_override"},
+        "validation": {"$ref": "#/$defs/parallelism_budget_override"},
+        "integration": {"$ref": "#/$defs/parallelism_budget_override"},
+        "dashboard_manual": {"$ref": "#/$defs/parallelism_budget_override"}
+      },
+      "default": {}
+    },
     "multi_role_automations_allowed": {
       "type": "boolean",
-      "description": "Backward-compatible derived mirror of automation_role_profile. New intakes should set automation_role_profile; scaffold ignores this flag when a valid profile is present.",
+      "description": "Legacy compatibility mirror. Diffmogger now always scaffolds the multi-role conveyor; new intakes should omit this flag.",
       "default": true
     },
     "automation_role_profile": {
       "type": "string",
-      "description": "Canonical automation profile. Use single_lane for simpler or non-engineering continuous work; use planner_builder_hardener_integrator for larger software engineering work.",
-      "enum": ["single_lane", "planner_builder_hardener_integrator"],
+      "description": "Canonical automation profile. Diffmogger now always uses the planner/builder/hardener/integrator conveyor.",
+      "enum": ["planner_builder_hardener_integrator"],
       "default": "planner_builder_hardener_integrator"
     },
     "automation_checkpoint_commits": {
@@ -135,11 +149,11 @@
       "description": "Whether the integrator may create local automation-authored checkpoint commits before applying queued role patches.",
       "default": true
     },
-    "automation_run_mode": {
+    "campaign_mode": {
       "type": "string",
-      "description": "Whether recurring automation should continuously improve the project or halt after a bounded local ticket campaign.",
-      "enum": ["continuous_improvement", "ticket_campaign"],
-      "default": "continuous_improvement"
+      "description": "Whether the conveyor should run a bounded seeded/imported ticket queue or continue drafting/enqueuing new generic tickets as an ongoing campaign.",
+      "enum": ["bounded", "ongoing"],
+      "default": "ongoing"
     },
     "ticket_run_file": {
       "type": "string",
@@ -148,7 +162,7 @@
     },
     "ticket_run_seed_tickets": {
       "type": "array",
-      "description": "Optional ticket-campaign seed tickets used only when initializing the dashboard-backed SQLite ticket queue.",
+      "description": "Optional seed tickets used when initializing the dashboard-backed SQLite ticket queue for bounded or ongoing campaigns.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -168,8 +182,55 @@
     },
     "ticket_completion_notify": {
       "type": "boolean",
-      "description": "Whether ticket-campaign finalization should send a native local desktop notification or record a fallback outbox entry.",
+      "description": "Whether bounded campaign finalization should send a native local desktop notification or record a fallback outbox entry.",
       "default": true
+    },
+    "ticket_generation_complexity": {
+      "type": "string",
+      "description": "Coverage breadth hint for low-cortisol full-scope ticket generation. This is not a ticket-count range.",
+      "enum": ["tiny", "small", "medium", "large"],
+      "default": "small"
+    },
+    "ticket_generation_decomposition_brief": {
+      "type": "string",
+      "description": "Compact full-scope decomposition brief used to generate the dashboard-backed SQLite ticket queue.",
+      "default": ""
+    },
+    "ticket_generation_scope_groups": {
+      "type": "array",
+      "description": "Compact scope groups used as coverage requirements for full-scope seed ticket generation.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "name": {"type": "string"},
+          "description": {"type": "string"},
+          "surfaces": {"type": "array", "items": {"type": "string"}, "default": []}
+        }
+      },
+      "default": []
+    },
+    "ticket_generation_quality_warnings": {
+      "type": "array",
+      "description": "Compact quality warnings from low-cortisol ticket generation, such as under-decomposition warnings.",
+      "items": {"type": "object", "additionalProperties": true},
+      "default": []
+    },
+    "ticket_generation_refinement_needed": {
+      "type": "boolean",
+      "description": "Whether the low-cortisol ticket quality gate requested a refinement pass.",
+      "default": false
+    },
+    "ticket_generation_refinement_passed": {
+      "type": "boolean",
+      "description": "Whether the final low-cortisol ticket queue passed the coverage-oriented quality gate.",
+      "default": true
+    },
+    "ticket_generation_scope_surface_floor": {
+      "type": "integer",
+      "description": "Derived lower-bound count of reviewable surfaces from the decomposition, used only for under-decomposition diagnostics.",
+      "minimum": 0,
+      "default": 0
     },
     "multi_role_allow_remotes": {
       "type": "boolean",
@@ -199,6 +260,21 @@
       "type": "array",
       "items": { "type": "string" },
       "default": []
+    }
+  },
+  "$defs": {
+    "parallelism_budget_override": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "max_concurrent": {"type": "integer", "minimum": 0, "maximum": 10},
+        "max_per_role": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 10}
+        },
+        "max_runtime_seconds": {"type": "integer", "minimum": 0, "maximum": 86400}
+      }
     }
   }
 }

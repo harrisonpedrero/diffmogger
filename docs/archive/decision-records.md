@@ -72,7 +72,7 @@ Current note: Python entrypoints are now thin wrappers over the bundled `.diffmo
 
 ## DR-012: Scheduler Wrapper Owns Scheduled-Run Locks
 
-Decision: generated scheduled runs use `.diffmogger/scripts/run_codex_automation.sh` to acquire and release `.diffmogger/runtime/codex_automation.lock`, and export `CODEX_LOCK_ALREADY_ACQUIRED=true` so the Codex prompt does not acquire a second lock.
+Decision: generated scheduled runs use conveyor role wrappers to acquire and release `.diffmogger/runtime/codex_automation.lock`, and export `CODEX_LOCK_ALREADY_ACQUIRED=true` so the Codex prompt does not acquire a second lock.
 
 Why: a first fresh-project run showed that both the wrapper and the prompt could attempt lock creation. One lock owner is easier to reason about and avoids malformed fallback lock files.
 

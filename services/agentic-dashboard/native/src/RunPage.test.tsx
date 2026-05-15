@@ -83,7 +83,7 @@ describe("RunPage", () => {
   it("renders ticket queue controls for ticket campaign targets", () => {
     const html = renderToStaticMarkup(
       <RunPage
-        snapshot={snapshot({ brief: { intake: { automation_run_mode: "ticket_campaign" } } })}
+        snapshot={snapshot({ brief: { intake: { campaign_mode: "bounded" } } })}
         loading={false}
         onChoose={() => undefined}
         onNavigate={() => undefined}
@@ -100,7 +100,7 @@ describe("RunPage", () => {
     expect(html).toContain("New Ticket");
     expect(html).toContain("Preview Import");
     expect(html).toContain("Apply Import");
-    expect(html).toContain("Run Codex to propose only new pending tickets");
+    expect(html).toContain("Run Codex to propose grounded follow-up tickets");
     expect(html).toContain("Create a blank pending ticket in the editor");
   });
 
@@ -108,7 +108,7 @@ describe("RunPage", () => {
     const html = renderToStaticMarkup(
       <RunPage
         snapshot={snapshot({
-          brief: { intake: { automation_run_mode: "ticket_campaign" } },
+          brief: { intake: { campaign_mode: "bounded" } },
           run: {
             state: {
               ticket_run: {
@@ -327,6 +327,86 @@ describe("RunPage", () => {
     expect(html).toContain("Task Graph");
     expect(html).toContain("Why these files?");
     expect(html).toContain("path mention in ticket summary");
+  });
+
+  it("renders execution group, validation, lease, and backlog fixtures", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            state: {
+              proposed_execution_groups: [
+                {
+                  execution_group_id: "execution-group:read-only-demo",
+                  status: "proposed",
+                  mode: "dry_run",
+                  reason: "read-only reviews can run together",
+                  payload: { execution_mode: "read_only", why_together: "read-only surfaces do not write" },
+                  items: [
+                    {
+                      item_id: "item:docs",
+                      task_id: "TICKET-001",
+                      owner_role: "hardener",
+                      action_kind: "review",
+                    },
+                  ],
+                },
+              ],
+              active_execution_groups: [
+                {
+                  execution_group_id: "execution-group:running-validation",
+                  status: "running",
+                  mode: "validation",
+                  selected_by: "dashboard",
+                },
+              ],
+              active_parallel_counts: {
+                active_validation_jobs: 1,
+                active_read_only_workers: 2,
+                active_write_workers: 0,
+              },
+              parallelization_summary: { mode: "dry_run", group_count: 1 },
+              active_leases: [
+                {
+                  lease_id: "lease:old",
+                  scope_node_id: "file:src/demo.ts",
+                  owner_role: "builder",
+                  status: "active",
+                  expires_at: "2000-01-01T00:00:00+00:00",
+                },
+              ],
+              validation_job_summary: {
+                aggregate_status: "warning",
+                job_count: 2,
+                active_count: 1,
+                latest: [{ job_id: "job:test", gate_id: "gate:test", command: "npm test", status: "running" }],
+              },
+              integration_backlog_from_parallel_workers: [
+                { patch_id: "patch:worker-1", status: "queued", manifest_path: "target/automation_queue/patch.json" },
+              ],
+              blocked_parallel_candidates: [
+                { task_id: "TICKET-009", reason: "unknown impact write task is serial" },
+              ],
+            },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Parallel Execution");
+    expect(html).toContain("execution-group:read-only-demo");
+    expect(html).toContain("Start Read-Only Group");
+    expect(html).toContain("Start Validation Group");
+    expect(html).toContain("Stale lease: file:src/demo.ts");
+    expect(html).toContain("Validation jobs");
+    expect(html).toContain("patch:worker-1");
+    expect(html).toContain("unknown impact write task is serial");
+    expect(html).toContain("Cancel");
+    expect(html).toContain("Release");
   });
 
   it("renders a recheck action for baseline blockers", () => {

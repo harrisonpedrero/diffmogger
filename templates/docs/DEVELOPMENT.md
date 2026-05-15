@@ -75,7 +75,7 @@ docs/PROJECT_CONTEXT.md
 Scheduled runs should use the local wrapper:
 
 ```bash
-bash .diffmogger/scripts/run_codex_automation.sh
+bash .diffmogger/scripts/run_conveyor_automation.sh --once
 ```
 
 The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto --skip-git-repo-check` through `.diffmogger/scripts/run_process_watchdog.py`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock when the run exits. Set `CODEX_ROLE_TIMEOUT_SECONDS` to override the 90-minute hard timeout and `CODEX_ROLE_TERMINATION_GRACE_SECONDS` to tune graceful shutdown.
@@ -98,7 +98,7 @@ python3 .diffmogger/scripts/run_observatory.py --open
 
 Continuous conveyor automation requires this target to be an initialized git repo with an initial commit. Diffmogger scaffold creates the local repo and first `chore: initial commit` automatically when `HEAD` is missing.
 
-The conveyor records canonical local state in `target/orchestration.sqlite3`, including typed automation control, stage contracts, the current work item, repository capability manifest, validation receipts, blockers, human messages, and next actions. It regenerates `target/canonical_state_brief.md` before Codex runs, keeps `target/automation_conveyor_state.json` and `target/automation_runner.json` as generated compatibility projections, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to the target-local single-lane or multi-role wrappers. The observatory reads canonical state plus `target/baseline_verification.json` to show runner state, automation control, typed conveyor stage, baseline verification state, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
+The conveyor records canonical local state in `target/orchestration.sqlite3`, including typed automation control, stage contracts, the current work item, repository capability manifest, validation receipts, blockers, human messages, and next actions. It regenerates `target/canonical_state_brief.md` before Codex runs, keeps `target/automation_conveyor_state.json` and `target/automation_runner.json` as generated compatibility projections, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to target-local planner, builder, hardener, and integrator role wrappers. The observatory reads canonical state plus `target/baseline_verification.json` to show runner state, automation control, typed conveyor stage, baseline verification state, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
 
 ## Managed Browser Runtime
 

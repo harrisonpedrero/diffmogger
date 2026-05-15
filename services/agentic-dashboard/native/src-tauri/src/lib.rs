@@ -27,6 +27,8 @@ const READ_ONLY_BACKEND_COMMANDS: &[&str] = &[
     "run.load_log",
     "state.snapshot",
     "state.validate",
+    "execution_group.load",
+    "validation_jobs.load",
     "observatory.snapshot",
     "review.load",
     "diagnostics.run_checks",
@@ -57,6 +59,11 @@ const MUTATING_BACKEND_COMMANDS: &[&str] = &[
     "worker.run_read_only",
     "worker.run_write",
     "worker.run_integrator",
+    "execution_group.start",
+    "execution_group.cancel",
+    "execution_group.retry_failed",
+    "execution_group.export_debug_bundle",
+    "lease.release_stale",
     "observatory.generate_html",
     "observatory.load_html",
     "review.export_bundle",
@@ -573,6 +580,10 @@ fn build_backend_args(
     files_json: Option<&str>,
     project_name: Option<&str>,
     ownership: Option<&str>,
+    execution_group_id: Option<&str>,
+    lease_id: Option<&str>,
+    group_mode: Option<&str>,
+    max_workers: Option<u32>,
     request_id: Option<&str>,
     body: Option<&str>,
     intent: Option<&str>,
@@ -723,6 +734,50 @@ fn build_backend_args(
         })?;
         args.push("--ownership".to_string());
         args.push(scope.to_string());
+    }
+
+    if matches!(
+        command,
+        "execution_group.load"
+            | "execution_group.start"
+            | "execution_group.cancel"
+            | "execution_group.retry_failed"
+            | "worker.launch_read_only_group"
+            | "worker.launch_write_group"
+    ) {
+        if let Some(id) = execution_group_id.filter(|value| !value.trim().is_empty()) {
+            args.push("--execution-group-id".to_string());
+            args.push(id.to_string());
+        }
+    }
+
+    if command == "execution_group.start" {
+        if let Some(mode) = group_mode.filter(|value| !value.trim().is_empty()) {
+            args.push("--mode".to_string());
+            args.push(mode.to_string());
+        }
+    }
+
+    if matches!(
+        command,
+        "execution_group.start" | "worker.launch_read_only_group" | "worker.launch_write_group"
+    ) {
+        if let Some(limit) = max_workers.filter(|value| *value > 0) {
+            args.push("--max-workers".to_string());
+            args.push(limit.to_string());
+        }
+    }
+
+    if command == "lease.release_stale" {
+        let id = lease_id.ok_or_else(|| {
+            CommandError::new(
+                "missing_lease_id",
+                "A lease id is required for lease.release_stale.",
+                json!({ "command": command }),
+            )
+        })?;
+        args.push("--lease-id".to_string());
+        args.push(id.to_string());
     }
 
     if matches!(command, "inbox.send_note" | "inbox.reply_request") {
@@ -897,6 +952,10 @@ struct BackendArgs<'a> {
     files_json: Option<&'a str>,
     project_name: Option<&'a str>,
     ownership: Option<&'a str>,
+    execution_group_id: Option<&'a str>,
+    lease_id: Option<&'a str>,
+    group_mode: Option<&'a str>,
+    max_workers: Option<u32>,
     request_id: Option<&'a str>,
     body: Option<&'a str>,
     intent: Option<&'a str>,
@@ -926,6 +985,10 @@ fn run_python_backend(command: &str, options: BackendArgs<'_>) -> Result<Value, 
         options.files_json,
         options.project_name,
         options.ownership,
+        options.execution_group_id,
+        options.lease_id,
+        options.group_mode,
+        options.max_workers,
         options.request_id,
         options.body,
         options.intent,
@@ -989,26 +1052,36 @@ fn list_recent_projects(app: AppHandle) -> Result<Vec<RecentTarget>, CommandErro
 }
 
 #[tauri::command]
-fn load_project_snapshot(app: AppHandle, target: String) -> Result<Value, CommandError> {
-    let resolved = validate_target_path(&target)?;
-    let target_text = resolved.display().to_string();
-    let snapshot = run_python_backend(
-        "project.load_snapshot",
-        BackendArgs {
-            target: Some(&target_text),
-            ..Default::default()
-        },
-    )?;
+async fn load_project_snapshot(app: AppHandle, target: String) -> Result<Value, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = validate_target_path(&target)?;
+        let target_text = resolved.display().to_string();
+        let snapshot = run_python_backend(
+            "project.load_snapshot",
+            BackendArgs {
+                target: Some(&target_text),
+                ..Default::default()
+            },
+        )?;
 
-    if snapshot.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        add_recent_target(&app, &resolved)?;
-    }
+        if snapshot.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            add_recent_target(&app, &resolved)?;
+        }
 
-    Ok(snapshot)
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|error| {
+        CommandError::new(
+            "backend_task_failed",
+            "Could not join the backend snapshot task.",
+            json!({ "exception": error.to_string() }),
+        )
+    })?
 }
 
 #[tauri::command]
-fn select_project_folder(app: AppHandle) -> Result<Option<ProjectLoadResult>, CommandError> {
+async fn select_project_folder(app: AppHandle) -> Result<Option<ProjectLoadResult>, CommandError> {
     let picked = rfd::FileDialog::new()
         .set_title("Choose Diffmogger project folder")
         .pick_folder();
@@ -1018,32 +1091,42 @@ fn select_project_folder(app: AppHandle) -> Result<Option<ProjectLoadResult>, Co
 
     let resolved = validate_target_path(&folder.display().to_string())?;
     let target_text = resolved.display().to_string();
-    let snapshot = run_python_backend(
-        "project.load_snapshot",
-        BackendArgs {
-            target: Some(&target_text),
-            ..Default::default()
-        },
-    )?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = run_python_backend(
+            "project.load_snapshot",
+            BackendArgs {
+                target: Some(&target_text),
+                ..Default::default()
+            },
+        )?;
 
-    let recent = if snapshot.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        add_recent_target(&app, &resolved)?
-    } else {
-        RecentTarget {
-            path: resolved.display().to_string(),
-            name: target_name(&resolved),
-            last_opened_at: unix_now(),
-        }
-    };
+        let recent = if snapshot.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            add_recent_target(&app, &resolved)?
+        } else {
+            RecentTarget {
+                path: resolved.display().to_string(),
+                name: target_name(&resolved),
+                last_opened_at: unix_now(),
+            }
+        };
 
-    Ok(Some(ProjectLoadResult {
-        target: recent,
-        snapshot,
-    }))
+        Ok(Some(ProjectLoadResult {
+            target: recent,
+            snapshot,
+        }))
+    })
+    .await
+    .map_err(|error| {
+        CommandError::new(
+            "backend_task_failed",
+            "Could not join the backend snapshot task.",
+            json!({ "exception": error.to_string() }),
+        )
+    })?
 }
 
 #[tauri::command]
-fn run_backend_command(
+async fn run_backend_command(
     command: String,
     target: Option<String>,
     review_dir: Option<String>,
@@ -1053,6 +1136,10 @@ fn run_backend_command(
     files_json: Option<String>,
     project_name: Option<String>,
     ownership: Option<String>,
+    execution_group_id: Option<String>,
+    lease_id: Option<String>,
+    group_mode: Option<String>,
+    max_workers: Option<u32>,
     request_id: Option<String>,
     body: Option<String>,
     intent: Option<String>,
@@ -1070,35 +1157,49 @@ fn run_backend_command(
     draft_id: Option<String>,
     ticket_ids: Option<String>,
 ) -> Result<Value, CommandError> {
-    run_python_backend(
-        &command,
-        BackendArgs {
-            target: target.as_deref(),
-            review_dir: review_dir.as_deref(),
-            output_dir: output_dir.as_deref(),
-            file_key: file_key.as_deref(),
-            intake_json: intake_json.as_deref(),
-            files_json: files_json.as_deref(),
-            project_name: project_name.as_deref(),
-            ownership: ownership.as_deref(),
-            request_id: request_id.as_deref(),
-            body: body.as_deref(),
-            intent: intent.as_deref(),
-            related: related.as_deref(),
-            force,
-            run_codex,
-            ticket_json: ticket_json.as_deref(),
-            ticket_id: ticket_id.as_deref(),
-            import_format: import_format.as_deref(),
-            import_mode: import_mode.as_deref(),
-            input_file: input_file.as_deref(),
-            input_json: input_json.as_deref(),
-            input_text: input_text.as_deref(),
-            preview,
-            draft_id: draft_id.as_deref(),
-            ticket_ids: ticket_ids.as_deref(),
-        },
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        run_python_backend(
+            &command,
+            BackendArgs {
+                target: target.as_deref(),
+                review_dir: review_dir.as_deref(),
+                output_dir: output_dir.as_deref(),
+                file_key: file_key.as_deref(),
+                intake_json: intake_json.as_deref(),
+                files_json: files_json.as_deref(),
+                project_name: project_name.as_deref(),
+                ownership: ownership.as_deref(),
+                execution_group_id: execution_group_id.as_deref(),
+                lease_id: lease_id.as_deref(),
+                group_mode: group_mode.as_deref(),
+                max_workers,
+                request_id: request_id.as_deref(),
+                body: body.as_deref(),
+                intent: intent.as_deref(),
+                related: related.as_deref(),
+                force,
+                run_codex,
+                ticket_json: ticket_json.as_deref(),
+                ticket_id: ticket_id.as_deref(),
+                import_format: import_format.as_deref(),
+                import_mode: import_mode.as_deref(),
+                input_file: input_file.as_deref(),
+                input_json: input_json.as_deref(),
+                input_text: input_text.as_deref(),
+                preview,
+                draft_id: draft_id.as_deref(),
+                ticket_ids: ticket_ids.as_deref(),
+            },
+        )
+    })
+    .await
+    .map_err(|error| {
+        CommandError::new(
+            "backend_task_failed",
+            "Could not join the backend command task.",
+            json!({ "exception": error.to_string() }),
+        )
+    })?
 }
 
 #[tauri::command]
@@ -1115,6 +1216,10 @@ async fn run_backend_command_streamed(
     files_json: Option<String>,
     project_name: Option<String>,
     ownership: Option<String>,
+    execution_group_id: Option<String>,
+    lease_id: Option<String>,
+    group_mode: Option<String>,
+    max_workers: Option<u32>,
     request_id: Option<String>,
     body: Option<String>,
     intent: Option<String>,
@@ -1143,6 +1248,10 @@ async fn run_backend_command_streamed(
             files_json.as_deref(),
             project_name.as_deref(),
             ownership.as_deref(),
+            execution_group_id.as_deref(),
+            lease_id.as_deref(),
+            group_mode.as_deref(),
+            max_workers,
             request_id.as_deref(),
             body.as_deref(),
             intent.as_deref(),
@@ -1622,6 +1731,47 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    fn test_build_backend_args(
+        command: &str,
+        target: &str,
+        options: BackendArgs<'_>,
+    ) -> Vec<String> {
+        let (_cwd, args) = build_backend_args(
+            command,
+            options.target.or(Some(target)),
+            options.review_dir,
+            options.output_dir,
+            options.file_key,
+            options.intake_json,
+            options.files_json,
+            options.project_name,
+            options.ownership,
+            options.execution_group_id,
+            options.lease_id,
+            options.group_mode,
+            options.max_workers,
+            options.request_id,
+            options.body,
+            options.intent,
+            options.related,
+            options.force,
+            options.run_codex,
+            options.ticket_json,
+            options.ticket_id,
+            options.import_format,
+            options.import_mode,
+            options.input_file,
+            options.input_json,
+            options.input_text,
+            options.preview,
+            options.draft_id,
+            options.ticket_ids,
+            false,
+        )
+        .expect("backend args should build");
+        args
+    }
+
     #[test]
     fn rejects_unallowlisted_backend_command() {
         let error = run_python_backend("shell.exec", BackendArgs::default()).unwrap_err();
@@ -1696,38 +1846,29 @@ mod tests {
     }
 
     #[test]
+    fn allows_parallel_backend_commands_without_opening_shell_access() {
+        assert!(backend_command_allowed("execution_group.load"));
+        assert!(backend_command_allowed("execution_group.start"));
+        assert!(backend_command_allowed("execution_group.cancel"));
+        assert!(backend_command_allowed("execution_group.retry_failed"));
+        assert!(backend_command_allowed("execution_group.export_debug_bundle"));
+        assert!(backend_command_allowed("validation_jobs.load"));
+        assert!(backend_command_allowed("lease.release_stale"));
+        assert!(!backend_command_allowed("shell.exec"));
+    }
+
+    #[test]
     fn ticket_draft_forwards_optional_direction() {
         let root = kit_root().expect("Diffmogger kit root should resolve during native tests");
         let root_text = root.display().to_string();
-        let (_cwd, args) = build_backend_args(
+        let args = test_build_backend_args(
             "ticket.draft_from_intake",
-            Some(&root_text),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("Focus on onboarding setup tickets."),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-        )
-        .expect("ticket draft args should build");
+            &root_text,
+            BackendArgs {
+                body: Some("Focus on onboarding setup tickets."),
+                ..Default::default()
+            },
+        );
 
         assert!(args
             .windows(2)
@@ -1738,64 +1879,22 @@ mod tests {
     fn ticket_split_forwards_ticket_and_draft_ids() {
         let root = kit_root().expect("Diffmogger kit root should resolve during native tests");
         let root_text = root.display().to_string();
-        let (_cwd, preview_args) = build_backend_args(
+        let preview_args = test_build_backend_args(
             "ticket.split_preview",
-            Some(&root_text),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("TICKET-007"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-        )
-        .expect("ticket split preview args should build");
-        let (_cwd, accept_args) = build_backend_args(
+            &root_text,
+            BackendArgs {
+                ticket_id: Some("TICKET-007"),
+                ..Default::default()
+            },
+        );
+        let accept_args = test_build_backend_args(
             "ticket.accept_split",
-            Some(&root_text),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("ticket-split-1"),
-            None,
-            false,
-        )
-        .expect("ticket split accept args should build");
+            &root_text,
+            BackendArgs {
+                draft_id: Some("ticket-split-1"),
+                ..Default::default()
+            },
+        );
 
         assert!(preview_args.windows(2).any(|pair| pair == ["--ticket-id", "TICKET-007"]));
         assert!(accept_args.windows(2).any(|pair| pair == ["--draft-id", "ticket-split-1"]));
@@ -1805,35 +1904,15 @@ mod tests {
     fn scaffold_preview_forwards_intake_json_and_force() {
         let root = kit_root().expect("Diffmogger kit root should resolve during native tests");
         let root_text = root.display().to_string();
-        let (_cwd, args) = build_backend_args(
+        let args = test_build_backend_args(
             "brief.scaffold_preview",
-            Some(&root_text),
-            None,
-            None,
-            None,
-            Some(r#"{"project_name":"Preview"}"#),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(true),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-        )
-        .expect("preview args should build");
+            &root_text,
+            BackendArgs {
+                intake_json: Some(r#"{"project_name":"Preview"}"#),
+                force: Some(true),
+                ..Default::default()
+            },
+        );
 
         assert!(args
             .windows(2)

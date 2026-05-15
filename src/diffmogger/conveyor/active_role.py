@@ -20,8 +20,6 @@ def watchdog_status_for_active_run(target: Path, active: dict[str, Any]) -> dict
         run_id_value = str(active.get("run_id") or "")
         if role in QUEUE_ROLES and run_id_value:
             path = runtime_path(target, f"target/automation_queue/{role}/{run_id_value}/codex.watchdog.json")
-        elif role == "single_lane" and run_id_value:
-            path = runtime_path(target, f"target/automation_logs/codex.{run_id_value}.watchdog.json")
         else:
             return {}
     if not path.is_absolute():

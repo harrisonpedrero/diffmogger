@@ -36,6 +36,12 @@ INTERESTING_HEADINGS = (
     "checks run",
     "integration notes",
 )
+DISPOSITION_HEADINGS = (
+    "accepted findings",
+    "rejected findings",
+    "deferred findings",
+    "unresolved risks",
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +50,7 @@ class WorkerReport:
     role: str
     status: str
     highlights: list[str]
+    dispositions: dict[str, list[str]]
 
 
 def latest_run_id(target: Path) -> str:
@@ -104,7 +111,14 @@ def summarize_report(path: Path) -> WorkerReport:
                 highlights.append(line)
             if len(highlights) >= 6:
                 break
-    return WorkerReport(path=path, role=role, status=infer_status(text), highlights=highlights)
+    dispositions = {heading: section_lines(text, heading) for heading in DISPOSITION_HEADINGS}
+    return WorkerReport(
+        path=path,
+        role=role,
+        status=infer_status(text),
+        highlights=highlights,
+        dispositions=dispositions,
+    )
 
 
 def build_summary(target: Path, run_id: str) -> tuple[Path, str]:
@@ -148,6 +162,24 @@ def build_summary(target: Path, run_id: str) -> tuple[Path, str]:
             lines.extend(report.highlights)
         else:
             lines.append("- No concise highlights found; read the full worker report.")
+        lines.append("")
+
+    lines.extend(["## Finding Disposition", ""])
+    disposition_labels = (
+        ("accepted findings", "Accepted Findings"),
+        ("rejected findings", "Rejected Findings"),
+        ("deferred findings", "Deferred Findings"),
+        ("unresolved risks", "Unresolved Risks"),
+    )
+    for key, label in disposition_labels:
+        lines.extend([f"### {label}", ""])
+        found = False
+        for report in parsed:
+            for line in report.dispositions.get(key, []):
+                lines.append(f"- {report.role}: {line.removeprefix('- ').removeprefix('* ')}")
+                found = True
+        if not found:
+            lines.append("- Pending main-agent disposition.")
         lines.append("")
 
     lines.extend(

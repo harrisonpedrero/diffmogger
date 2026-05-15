@@ -324,12 +324,6 @@ def apply_timeout_circuit_breaker(
     streak = timeout_streak_count(state, role)
     if streak < limit:
         return role, reason, stop
-    if role == "single_lane":
-        return (
-            None,
-            f"single-lane automation timed out {streak} consecutive time(s); waiting before relaunch",
-            False,
-        )
     if role == "planner":
         return (
             None,

@@ -20,7 +20,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 from diffmogger.dashboard.shared import PrerequisiteItem as SharedPrerequisiteItem
 from diffmogger.runtime.paths import sidecar_rel
-from diffmogger.runtime.state_store import database_path_for_target, load_ticket_run_state, write_ticket_run_state
+from diffmogger.runtime.state_store import connect, database_path_for_target, load_ticket_run_state, write_ticket_run_state
 
 CLI = ROOT / "scripts" / "dashboard_backend_cli.py"
 CLI_MODULE = ROOT / "src" / "diffmogger" / "dashboard" / "backend_cli.py"
@@ -101,6 +101,10 @@ class DashboardBackendCliTests(unittest.TestCase):
                 "conflicting_leases",
                 "stale_graph_warnings",
                 "scheduling_candidates",
+                "active_read_only_workers",
+                "pending_worker_reports",
+                "completed_worker_reports",
+                "worker_finding_disposition_required",
             ]:
                 self.assertIn(key, state)
             self.assertIsInstance(state["stale_graph_warnings"], list)
@@ -110,6 +114,94 @@ class DashboardBackendCliTests(unittest.TestCase):
 
         self.assertIn('"state.snapshot"', native_lib)
         self.assertNotIn('"graph.snapshot"', native_lib)
+
+    def test_parallel_dashboard_commands_are_allowlisted_but_shell_is_not(self) -> None:
+        native_lib = (ROOT / "services/agentic-dashboard/native/src-tauri/src/lib.rs").read_text(encoding="utf-8")
+        allowlist_region = native_lib.split("fn backend_command_allowed", 1)[0]
+
+        for command in [
+            "execution_group.load",
+            "execution_group.start",
+            "execution_group.cancel",
+            "execution_group.retry_failed",
+            "execution_group.export_debug_bundle",
+            "validation_jobs.load",
+            "lease.release_stale",
+        ]:
+            self.assertIn(f'"{command}"', allowlist_region)
+        self.assertNotIn('"shell.exec"', allowlist_region)
+
+    def test_execution_group_load_exposes_parallel_dashboard_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+
+            result, payload = self.run_cli("execution_group.load", "--target", str(target))
+
+            self.assertEqual(0, result.returncode)
+            self.assertTrue(payload["ok"])
+            data = payload["data"]
+            for key in [
+                "proposed_execution_groups",
+                "active_execution_groups",
+                "worker_contracts",
+                "active_leases",
+                "conflicting_leases",
+                "validation_jobs",
+                "integration_backlog_from_parallel_workers",
+                "blocked_parallel_candidates",
+                "warnings",
+            ]:
+                self.assertIn(key, data)
+
+    def test_execution_group_cancel_records_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+            group_id = "execution-group:dashboard-cancel"
+            with connect(database_path_for_target(target)) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO execution_groups(
+                        execution_group_id, status, mode, created_at, started_at,
+                        selected_by, reason, payload_json
+                    )
+                    VALUES(?, 'running', 'read_only', '2026-05-14T00:00:00+00:00',
+                           '2026-05-14T00:00:00+00:00', 'test', 'running test group', '{}')
+                    """,
+                    (group_id,),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO execution_group_items(
+                        item_id, execution_group_id, task_id, owner_role, action_kind,
+                        status, reason, payload_json
+                    )
+                    VALUES('item:dashboard-cancel', ?, 'TICKET-001', 'hardener',
+                           'review', 'running', 'test item', '{}')
+                    """,
+                    (group_id,),
+                )
+
+            result, payload = self.run_cli(
+                "execution_group.cancel",
+                "--target",
+                str(target),
+                "--execution-group-id",
+                group_id,
+            )
+
+            self.assertEqual(0, result.returncode)
+            self.assertTrue(payload["ok"])
+            data = payload["data"]
+            self.assertEqual("cancelled", data["execution_group"]["status"])
+            with connect(database_path_for_target(target)) as conn:
+                row = conn.execute("SELECT status FROM execution_groups WHERE execution_group_id = ?", (group_id,)).fetchone()
+                item = conn.execute("SELECT status FROM execution_group_items WHERE execution_group_id = ?", (group_id,)).fetchone()
+            self.assertEqual("cancelled", row["status"])
+            self.assertEqual("cancelled", item["status"])
+            dashboard_state = json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
+            self.assertEqual("execution_group_cancelled", dashboard_state["last_action"])
 
     def test_state_brief_command_writes_agent_readable_view(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,7 +233,7 @@ class DashboardBackendCliTests(unittest.TestCase):
                         "desired_first_demo": "Tickets can be inspected and edited locally.",
                         "human_bridge_enabled": False,
                         "human_bridge_mode": "disabled",
-                        "automation_run_mode": "ticket_campaign",
+                        "campaign_mode": "bounded",
                         "verification_commands": ["python3 -m unittest"],
                         "ticket_run_seed_tickets": [
                             {
@@ -241,11 +333,18 @@ class DashboardBackendCliTests(unittest.TestCase):
 
     def write_ready_automation_target(self, target: Path) -> None:
         files = {
-            ".agentic/project_intake.json": '{"multi_role_automations_allowed": false}\n',
+            ".agentic/project_intake.json": '{"multi_role_automations_allowed": true, "automation_role_profile": "planner_builder_hardener_integrator"}\n',
             ".agentic/automation_prompt.md": "# Automation\n",
+            ".agentic/roles/planner.md": "# Planner\n",
+            ".agentic/roles/builder.md": "# Builder\n",
+            ".agentic/roles/hardener.md": "# Hardener\n",
+            ".agentic/roles/integrator.md": "# Integrator\n",
             "docs/INITIAL_BOOTSTRAP_PROMPT.md": "# Bootstrap\n",
             "docs/CODEX_AUTOMATION_TASKS.md": "AUTOMATION_STATUS: ACTIVE\n\nCurrent baseline: bootstrapped.\n",
-            "scripts/run_codex_automation.sh": "#!/usr/bin/env bash\nexit 0\n",
+            "docs/MULTI_ROLE_PROGRESS.md": "# Progress\n",
+            "scripts/run_role_automation.sh": "#!/usr/bin/env bash\nexit 0\n",
+            "scripts/integrate_role_outputs.py": "print('integrate')\n",
+            "scripts/list_deferred_patches.py": "print('list')\n",
             "scripts/run_conveyor_automation.py": "print('conveyor')\n",
             "scripts/run_conveyor_automation.sh": (
                 "#!/usr/bin/env bash\n"
@@ -263,8 +362,9 @@ class DashboardBackendCliTests(unittest.TestCase):
         generated_path(target, ".agentic/project_intake.json").write_text(
             json.dumps(
                 {
-                    "multi_role_automations_allowed": False,
-                    "automation_run_mode": "ticket_campaign",
+                    "multi_role_automations_allowed": True,
+                    "automation_role_profile": "planner_builder_hardener_integrator",
+                    "campaign_mode": "bounded",
                     "ticket_run_file": "",
                 }
             )
@@ -686,7 +786,7 @@ class DashboardBackendCliTests(unittest.TestCase):
                 "write_worker_agents_allowed": True,
                 "max_write_worker_count": 2,
                 "multi_role_automations_allowed": True,
-                "automation_run_mode": "continuous_improvement",
+                "campaign_mode": "ongoing",
                 "optional_mcp_servers": ["context7"],
                 "additional_context_files": [],
             }
@@ -718,7 +818,7 @@ class DashboardBackendCliTests(unittest.TestCase):
 
             def fake_intake_generation(prompt, **_kwargs):
                 prompts.append(prompt)
-                if "Generate Diffmogger ticket_run_seed_tickets" in prompt:
+                if "Generate the complete Diffmogger ticket_run_seed_tickets" in prompt:
                     stdout = json.dumps(
                         {
                             "ticket_run_seed_tickets": [
@@ -740,10 +840,17 @@ class DashboardBackendCliTests(unittest.TestCase):
                             "desired_first_demo": "A user can create a plan.",
                             "human_bridge_mode": "local_notifier",
                             "optional_mcp_servers": ["context7", "playwright"],
-                            "automation_run_mode": "continuous_improvement",
+                            "campaign_mode": "ongoing",
                             "automation_role_profile": "planner_builder_hardener_integrator",
                             "ticket_generation_complexity": "tiny",
-                            "ticket_generation_decomposition_brief": "First normalize the app shell, then add the planning flow.",
+                            "ticket_generation_decomposition_brief": "Normalize the app shell and add the planning flow.",
+                            "ticket_generation_scope_groups": [
+                                {
+                                    "name": "Planning workflow",
+                                    "description": "Core planning path",
+                                    "surfaces": ["planning flow"],
+                                }
+                            ],
                             "ticket_run_seed_tickets": [
                                 {
                                     "id": "TICKET-999",
@@ -765,7 +872,7 @@ class DashboardBackendCliTests(unittest.TestCase):
                 payload = brief_commands.command_brief_generate_intake(args)
 
             intake = payload["intake"]
-            self.assertEqual("ticket_campaign", intake["automation_run_mode"])
+            self.assertEqual("bounded", intake["campaign_mode"])
             self.assertEqual("", intake["ticket_run_file"])
             self.assertEqual([], intake["optional_mcp_servers"])
             self.assertEqual("file_only", intake["human_bridge_mode"])
@@ -776,17 +883,221 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual(["TICKET-001"], [ticket["id"] for ticket in intake["ticket_run_seed_tickets"]])
             self.assertEqual(2, len(prompts))
             self.assertIn("Do not return final seed tickets", prompts[0])
-            self.assertIn("Ticket sizing policy", prompts[0])
-            self.assertIn("tiny: 2-3 tickets", prompts[1])
+            self.assertIn("Ticket generation policy", prompts[0])
+            self.assertIn("Generate a whole execution queue for the full requested scope", prompts[1])
+            self.assertNotIn("2-3 tickets", prompts[1])
             dashboard_state = json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
             self.assertEqual("low_cortisol_intake_generated", dashboard_state["last_action"])
             self.assertEqual("Gentle Intake", dashboard_state["brief_draft_intake"]["project_name"])
+
+    def test_brief_generate_intake_refines_under_decomposed_ticket_queue(self) -> None:
+        from diffmogger.dashboard.commands import brief as brief_commands
+
+        with tempfile.TemporaryDirectory() as tmp:
+            prompts: list[str] = []
+
+            def fake_generation(prompt, **_kwargs):
+                prompts.append(prompt)
+                if "Refine a Diffmogger seed ticket queue" in prompt:
+                    stdout = json.dumps(
+                        {
+                            "ticket_run_seed_tickets": [
+                                {"id": "TICKET-001", "summary": "Create storage SQLite schema", "status": "pending"},
+                                {"id": "TICKET-002", "summary": "Add storage migration path", "status": "pending", "depends_on": ["TICKET-001"]},
+                                {"id": "TICKET-003", "summary": "Build dashboard queue screen", "status": "pending", "depends_on": ["TICKET-001"]},
+                                {"id": "TICKET-004", "summary": "Add dashboard controls", "status": "pending", "depends_on": ["TICKET-003"]},
+                                {"id": "TICKET-005", "summary": "Add validation tests", "status": "pending", "depends_on": ["TICKET-004"]},
+                            ]
+                        }
+                    )
+                elif "Generate the complete Diffmogger ticket_run_seed_tickets" in prompt:
+                    stdout = json.dumps(
+                        {
+                            "ticket_run_seed_tickets": [
+                                {
+                                    "id": "TICKET-001",
+                                    "summary": "Build storage and dashboard and validation tests",
+                                    "status": "pending",
+                                    "acceptance_criteria": [
+                                        "Storage is created",
+                                        "Migration path exists",
+                                        "Dashboard queue screen renders",
+                                        "Dashboard controls work",
+                                        "Validation tests pass",
+                                        "Docs mention the workflow",
+                                    ],
+                                }
+                            ]
+                        }
+                    )
+                else:
+                    stdout = json.dumps(
+                        {
+                            "project_name": "Refined Intake",
+                            "product_goal": "Build a generic queue dashboard with local storage.",
+                            "target_user": "Maintainers",
+                            "desired_first_demo": "A queue dashboard works locally.",
+                            "ticket_generation_complexity": "medium",
+                            "ticket_generation_decomposition_brief": "Cover storage, dashboard, and validation surfaces.",
+                            "ticket_generation_scope_groups": [
+                                {"name": "Storage", "surfaces": ["SQLite schema", "migration"]},
+                                {"name": "Dashboard", "surfaces": ["queue screen", "controls"]},
+                                {"name": "Validation", "surfaces": ["tests"]},
+                            ],
+                        }
+                    )
+                return subprocess.CompletedProcess(["codex", "exec", prompt], 0, stdout=stdout, stderr="")
+
+            args = argparse.Namespace(target=tmp, body="Build a generic queue dashboard with local storage.", stream_jsonl=False)
+            with mock.patch.object(brief_commands, "_run_codex_intake_generation", side_effect=fake_generation):
+                payload = brief_commands.command_brief_generate_intake(args)
+
+            self.assertEqual(3, len(prompts))
+            self.assertTrue(payload["ticket_generation_refinement_needed"])
+            self.assertTrue(payload["ticket_generation_refinement_passed"])
+            self.assertEqual(5, payload["ticket_count"])
+            self.assertEqual(["TICKET-001", "TICKET-002", "TICKET-003", "TICKET-004", "TICKET-005"], [ticket["id"] for ticket in payload["intake"]["ticket_run_seed_tickets"]])
+
+    def test_brief_generate_intake_falls_back_when_intake_generation_times_out(self) -> None:
+        from diffmogger.dashboard.commands import brief as brief_commands
+        from diffmogger.dashboard.errors import BackendError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+
+            def fake_generation(prompt, **kwargs):
+                calls.append(str(kwargs.get("stage_label") or ""))
+                if kwargs.get("stage_label") == "intake generation":
+                    raise BackendError(
+                        "Codex intake generation timed out.",
+                        error_type="intake_generation_timeout",
+                        details={"timeout_seconds": 33},
+                    )
+                stdout = json.dumps(
+                    {
+                        "ticket_run_seed_tickets": [
+                            {
+                                "id": "TICKET-001",
+                                "summary": "Deliver fallback intake workflow",
+                                "status": "pending",
+                            }
+                        ]
+                    }
+                )
+                return subprocess.CompletedProcess(["codex", "exec", prompt], 0, stdout=stdout, stderr="")
+
+            args = argparse.Namespace(target=tmp, body="Build a tiny fictional workflow.", stream_jsonl=False)
+            with mock.patch.object(brief_commands, "_run_codex_intake_generation", side_effect=fake_generation):
+                payload = brief_commands.command_brief_generate_intake(args)
+
+            warning_types = {item["type"] for item in payload["ticket_generation_quality_warnings"]}
+            self.assertEqual(["intake generation", "ticket generation"], calls[:2])
+            self.assertIn("codex_intake_generation_timeout_fallback", warning_types)
+            self.assertEqual("bounded", payload["intake"]["campaign_mode"])
+            self.assertEqual(1, payload["ticket_count"])
+
+    def test_brief_generate_intake_falls_back_when_ticket_generation_times_out(self) -> None:
+        from diffmogger.dashboard.commands import brief as brief_commands
+        from diffmogger.dashboard.errors import BackendError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            def fake_generation(prompt, **kwargs):
+                if kwargs.get("stage_label") == "ticket generation":
+                    raise BackendError(
+                        "Codex ticket generation timed out.",
+                        error_type="ticket_generation_timeout",
+                        details={"timeout_seconds": 44},
+                    )
+                stdout = json.dumps(
+                    {
+                        "project_name": "Fallback Tickets",
+                        "product_goal": "Build a generic queue dashboard with local storage.",
+                        "target_user": "Maintainers",
+                        "desired_first_demo": "A queue dashboard works locally.",
+                        "ticket_generation_complexity": "medium",
+                        "ticket_generation_decomposition_brief": "Cover storage and dashboard surfaces.",
+                        "ticket_generation_scope_groups": [
+                            {"name": "Storage", "surfaces": ["SQLite schema", "migration"]},
+                            {"name": "Dashboard", "surfaces": ["queue screen"]},
+                        ],
+                    }
+                )
+                return subprocess.CompletedProcess(["codex", "exec", prompt], 0, stdout=stdout, stderr="")
+
+            args = argparse.Namespace(target=tmp, body="Build a generic queue dashboard with local storage.", stream_jsonl=False)
+            with mock.patch.object(brief_commands, "_run_codex_intake_generation", side_effect=fake_generation):
+                payload = brief_commands.command_brief_generate_intake(args)
+
+            warning_types = {item["type"] for item in payload["ticket_generation_quality_warnings"]}
+            self.assertIn("codex_ticket_generation_timeout_fallback", warning_types)
+            self.assertFalse(payload["ticket_generation_refinement_needed"])
+            self.assertTrue(payload["ticket_generation_refinement_passed"])
+            self.assertEqual(["TICKET-001", "TICKET-002", "TICKET-003"], [ticket["id"] for ticket in payload["intake"]["ticket_run_seed_tickets"]])
+
+    def test_brief_generate_intake_falls_back_when_ticket_refinement_times_out(self) -> None:
+        from diffmogger.dashboard.commands import brief as brief_commands
+        from diffmogger.dashboard.errors import BackendError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            def fake_generation(prompt, **kwargs):
+                if kwargs.get("stage_label") == "ticket refinement":
+                    raise BackendError(
+                        "Codex ticket refinement timed out.",
+                        error_type="ticket_refinement_timeout",
+                        details={"timeout_seconds": 55},
+                    )
+                if kwargs.get("stage_label") == "ticket generation":
+                    stdout = json.dumps(
+                        {
+                            "ticket_run_seed_tickets": [
+                                {
+                                    "id": "TICKET-001",
+                                    "summary": "Build storage and dashboard and validation tests",
+                                    "status": "pending",
+                                    "acceptance_criteria": [
+                                        "Storage is created",
+                                        "Migration path exists",
+                                        "Dashboard queue screen renders",
+                                        "Dashboard controls work",
+                                        "Validation tests pass",
+                                        "Docs mention the workflow",
+                                    ],
+                                }
+                            ]
+                        }
+                    )
+                else:
+                    stdout = json.dumps(
+                        {
+                            "project_name": "Refinement Fallback",
+                            "product_goal": "Build a generic queue dashboard with local storage.",
+                            "target_user": "Maintainers",
+                            "desired_first_demo": "A queue dashboard works locally.",
+                            "ticket_generation_complexity": "medium",
+                            "ticket_generation_scope_groups": [
+                                {"name": "Storage", "surfaces": ["SQLite schema", "migration"]},
+                                {"name": "Dashboard", "surfaces": ["queue screen", "controls"]},
+                                {"name": "Validation", "surfaces": ["tests"]},
+                            ],
+                        }
+                    )
+                return subprocess.CompletedProcess(["codex", "exec", prompt], 0, stdout=stdout, stderr="")
+
+            args = argparse.Namespace(target=tmp, body="Build a generic queue dashboard with local storage.", stream_jsonl=False)
+            with mock.patch.object(brief_commands, "_run_codex_intake_generation", side_effect=fake_generation):
+                payload = brief_commands.command_brief_generate_intake(args)
+
+            warning_types = {item["type"] for item in payload["ticket_generation_quality_warnings"]}
+            self.assertIn("codex_ticket_refinement_timeout_fallback", warning_types)
+            self.assertTrue(payload["ticket_generation_refinement_needed"])
+            self.assertTrue(payload["ticket_generation_refinement_passed"])
+            self.assertEqual(5, payload["ticket_count"])
 
     def test_brief_generate_intake_streams_two_pass_progress(self) -> None:
         from diffmogger.dashboard.commands import brief as brief_commands
 
         def fake_generation(prompt, **_kwargs):
-            if "Generate Diffmogger ticket_run_seed_tickets" in prompt:
+            if "Generate the complete Diffmogger ticket_run_seed_tickets" in prompt:
                 stdout = json.dumps(
                     {
                         "ticket_run_seed_tickets": [
@@ -858,15 +1169,40 @@ class DashboardBackendCliTests(unittest.TestCase):
         self.assertTrue(kwargs["start_new_session"])
         self.assertEqual(42, seen["timeout"])
 
-    def test_ticket_generation_policy_ranges_and_quality_gate(self) -> None:
-        from diffmogger.dashboard.ticket_generation import ticket_count_range, ticket_quality_warnings, ticket_sizing_policy_prompt
+    def test_brief_generation_timeout_message_uses_stage_label(self) -> None:
+        from diffmogger.dashboard.commands import brief as brief_commands
+        from diffmogger.dashboard.errors import BackendError
 
-        self.assertEqual((2, 3), ticket_count_range("tiny"))
-        self.assertEqual((4, 6), ticket_count_range("small"))
-        self.assertEqual((7, 12), ticket_count_range("medium"))
-        self.assertEqual((12, 18), ticket_count_range("large"))
+        class FakePopen:
+            pid = 12345
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def communicate(self, *, timeout=None):
+                raise subprocess.TimeoutExpired(["codex"], timeout or 0, output="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(brief_commands.subprocess, "Popen", FakePopen), mock.patch.object(brief_commands, "_terminate_process_group"):
+            with self.assertRaises(BackendError) as raised:
+                brief_commands._run_codex_intake_generation(
+                    "prompt",
+                    cwd=Path(tmp),
+                    timeout_seconds=42,
+                    stage_label="ticket generation",
+                    timeout_error_type="ticket_generation_timeout",
+                )
+
+        self.assertEqual("Codex ticket generation timed out.", raised.exception.message)
+        self.assertEqual("ticket_generation_timeout", raised.exception.error_type)
+        self.assertEqual("ticket generation", raised.exception.details["stage"])
+
+    def test_ticket_generation_policy_is_coverage_oriented_and_quality_gate_warns(self) -> None:
+        from diffmogger.dashboard.ticket_generation import ticket_generation_quality_gate, ticket_quality_warnings, ticket_sizing_policy_prompt
+
         self.assertIn("one reviewable local patch", ticket_sizing_policy_prompt("large"))
-        self.assertIn("12-18 initial first-demo tickets", ticket_sizing_policy_prompt("large"))
+        self.assertIn("as many tickets as the described scope needs", ticket_sizing_policy_prompt("large"))
+        self.assertNotIn("12-18", ticket_sizing_policy_prompt("large"))
+        self.assertNotIn("first-demo tickets", ticket_sizing_policy_prompt("large"))
 
         warnings = ticket_quality_warnings(
             [
@@ -881,6 +1217,15 @@ class DashboardBackendCliTests(unittest.TestCase):
         self.assertIn("broad_conjunction_summary", {item["type"] for item in warnings})
         self.assertIn("too_many_acceptance_criteria", {item["type"] for item in warnings})
         self.assertIn("too_many_verification_commands", {item["type"] for item in warnings})
+        gate = ticket_generation_quality_gate(
+            [{"id": "TICKET-001", "summary": "Build storage and dashboard", "status": "pending"}],
+            scope_groups=[
+                {"name": "Storage", "surfaces": ["schema", "migration"]},
+                {"name": "Dashboard", "surfaces": ["list screen", "controls"]},
+            ],
+        )
+        self.assertFalse(gate["passed"])
+        self.assertIn("under_decomposed_queue", {item["type"] for item in gate["warnings"]})
 
     def test_context_import_copies_files_and_updates_project_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as source_tmp:
@@ -949,8 +1294,9 @@ class DashboardBackendCliTests(unittest.TestCase):
                 "codex_cli_workers_expected_on_broad_runs": True,
                 "write_worker_agents_allowed": False,
                 "max_write_worker_count": 0,
-                "multi_role_automations_allowed": False,
-                "automation_run_mode": "continuous_improvement",
+                "multi_role_automations_allowed": True,
+                "automation_role_profile": "planner_builder_hardener_integrator",
+                "campaign_mode": "ongoing",
                 "optional_mcp_servers": [],
                 "meaningful_deliverable": "A usable scaffold.",
                 "beyond_mvp": "More automation.",
@@ -977,14 +1323,14 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertGreater(len(scaffold_payload["data"]["log"]), 0)
             self.assertTrue(generated_path(Path(tmp), ".agentic/project_intake.json").exists())
             self.assertTrue(generated_path(Path(tmp), "docs/INITIAL_BOOTSTRAP_PROMPT.md").exists())
-            self.assertFalse(generated_path(Path(tmp), "scripts/run_role_automation.sh").exists())
+            self.assertTrue((Path(tmp) / ".diffmogger" / "scripts" / "run_role_automation.sh").exists())
             head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=tmp, capture_output=True, text=True, check=False)
             self.assertEqual(0, head.returncode, head.stderr)
             subject = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=tmp, capture_output=True, text=True, check=False)
             self.assertEqual("chore: initial commit", subject.stdout.strip())
             dashboard_state = json.loads(generated_path(Path(tmp), ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
-            self.assertEqual("single_lane", dashboard_state["automation_role_profile"])
-            self.assertFalse(dashboard_state["multi_role_automations_allowed"])
+            self.assertEqual("planner_builder_hardener_integrator", dashboard_state["automation_role_profile"])
+            self.assertTrue(dashboard_state["multi_role_automations_allowed"])
             _run_result, run_payload = self.run_cli("run.load", "--target", tmp)
             self.assertNotIn("can_run_now", run_payload["data"]["controls"])
 
@@ -1003,8 +1349,9 @@ class DashboardBackendCliTests(unittest.TestCase):
                 "human_bridge_mode": "file_only",
                 "worker_agents_allowed": True,
                 "write_worker_agents_allowed": False,
-                "multi_role_automations_allowed": False,
-                "automation_run_mode": "continuous_improvement",
+                "multi_role_automations_allowed": True,
+                "automation_role_profile": "planner_builder_hardener_integrator",
+                "campaign_mode": "ongoing",
                 "optional_mcp_servers": [],
                 "additional_context_files": [],
             }
@@ -1081,8 +1428,9 @@ class DashboardBackendCliTests(unittest.TestCase):
                 "human_bridge_mode": "file_only",
                 "worker_agents_allowed": True,
                 "write_worker_agents_allowed": False,
-                "multi_role_automations_allowed": False,
-                "automation_run_mode": "continuous_improvement",
+                "multi_role_automations_allowed": True,
+                "automation_role_profile": "planner_builder_hardener_integrator",
+                "campaign_mode": "ongoing",
                 "optional_mcp_servers": [],
                 "additional_context_files": [],
             }
@@ -1381,11 +1729,13 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertIn("User-provided draft direction:", captured_prompts[0])
             self.assertIn("Focus on onboarding setup tickets and skip reporting polish.", captured_prompts[0])
             self.assertIn("preserving the append-only rules", captured_prompts[0])
-            self.assertIn("Ticket sizing policy", captured_prompts[0])
-            self.assertIn("Bounded project snapshot JSON:", captured_prompts[0])
+            self.assertIn("Ticket generation policy", captured_prompts[0])
+            self.assertIn("Current project snapshot JSON:", captured_prompts[0])
             self.assertIn("README.md", captured_prompts[0])
             self.assertIn("vitest run", captured_prompts[0])
             self.assertIn("Ground every candidate in observed project structure", captured_prompts[0])
+            self.assertIn("Do not regenerate the original project scope by default.", captured_prompts[0])
+            self.assertIn("You may propose many tickets when there are many real gaps", captured_prompts[0])
 
     def test_ticket_draft_from_intake_returns_empty_append_draft_when_nothing_new(self) -> None:
         from diffmogger.dashboard.commands import tickets as ticket_commands
@@ -1475,8 +1825,8 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual(["TICKET-003", "TICKET-004"], [ticket["id"] for ticket in preview["candidates"]])
             self.assertEqual(["TICKET-003"], preview["candidates"][1]["depends_on"])
             self.assertIn("Split one pending Diffmogger ticket", prompts[0])
-            self.assertIn("Ticket sizing policy", prompts[0])
-            self.assertIn("Bounded project snapshot JSON:", prompts[0])
+            self.assertIn("Ticket generation policy", prompts[0])
+            self.assertIn("Current project snapshot JSON:", prompts[0])
 
             before_accept = self.run_cli("ticket.load", "--target", tmp)[1]["data"]["tickets"]
             self.assertFalse(any(ticket["id"] == "TICKET-003" for ticket in before_accept))

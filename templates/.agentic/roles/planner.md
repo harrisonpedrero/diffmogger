@@ -33,7 +33,7 @@ Maintain stable planning continuity for the next builder and hardener cycles. Pl
 - Prefer clarifying the next builder/hardener work over broad replanning.
 - If deferred patches are stale, recommend replacement work from fresh main `HEAD`.
 - If `target/baseline_verification.json` reports `repairable_local_service`, plan a concrete `verification_scope=baseline_repair` task that creates or wires a safe project-local service harness instead of asking the human to start it manually.
-- In `ticket_campaign` mode, plan only from the dashboard-backed ticket queue exposed through `scripts/ticket_run.py` and the canonical state brief; clarify dependencies with optional `depends_on` arrays, split oversized listed tickets into reviewable local tickets when needed, and do not invent unrelated backlog after the campaign is terminal.
+- In `bounded` campaign mode, plan only from the dashboard-backed ticket queue exposed through `scripts/ticket_run.py` and the canonical state brief; clarify dependencies with optional `depends_on` arrays, split oversized listed tickets into reviewable local tickets when needed, and do not invent unrelated backlog after the campaign is terminal. In `ongoing` campaign mode, draft safe project-agnostic follow-up tickets from typed runtime context when no dependency-ready ticket remains.
 
 ## Worktree Behavior
 

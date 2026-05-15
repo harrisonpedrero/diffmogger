@@ -20,28 +20,26 @@ def target_role_profile(target: Path) -> str:
     control = automation_control_state(target, import_legacy_if_empty=True)
     payload = control.get("payload") if isinstance(control.get("payload"), dict) else {}
     profile = str(payload.get("role_profile") or "").strip()
-    if profile in {"single_lane", "planner_builder_hardener_integrator"}:
+    if profile == "planner_builder_hardener_integrator":
         return profile
     manifest = load_manifest(target)
     features = manifest.get("features") if isinstance(manifest.get("features"), dict) else {}
     profile = str(features.get("automation_role_profile") or "").strip()
-    if profile in {"single_lane", "planner_builder_hardener_integrator"}:
+    if profile == "planner_builder_hardener_integrator":
         return profile
     if "multi_role" in features:
-        return "planner_builder_hardener_integrator" if features.get("multi_role") else "single_lane"
+        return "planner_builder_hardener_integrator"
 
     for rel in [".agentic/project_intake.json", ".agentic/dashboard_state.json"]:
         data = read_json(dpath(target, rel))
         profile = str(data.get("automation_role_profile") or "").strip().lower()
         profile = profile.replace("-", "_").replace(" ", "_")
-        if profile == "single_lane":
-            return "single_lane"
         if profile == "planner_builder_hardener_integrator":
             return "planner_builder_hardener_integrator"
         if "multi_role_automations_allowed" in data:
-            return "planner_builder_hardener_integrator" if data.get("multi_role_automations_allowed") else "single_lane"
+            return "planner_builder_hardener_integrator"
 
-    return ""
+    return "planner_builder_hardener_integrator"
 
 def queued_manifests(target: Path) -> list[Path]:
     queue_root = runtime_path(target, "target/automation_queue")

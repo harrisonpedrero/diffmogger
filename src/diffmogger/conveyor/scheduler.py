@@ -14,6 +14,7 @@ from diffmogger.runtime.state_store import (
     expire_stale_leases_conn,
     impact_graph_read_model,
     lease_suggestions_for_next_action_conn,
+    plan_parallel_execution_groups_conn,
     refresh_capability_manifest_conn,
     refresh_impact_graph_conn,
     refresh_task_graph_conn,
@@ -43,7 +44,7 @@ def _legacy_action_kind(role: str | None, reason: str, stop: bool) -> tuple[str,
         return "baseline_repair", 94.0
     if "human message" in lowered:
         return "human_triage", 92.0
-    if "ticket campaign is blocked" in lowered or "ticket campaign blocked" in lowered:
+    if "bounded campaign is blocked" in lowered or "bounded campaign blocked" in lowered:
         return "ticket_terminal_or_repair", 91.0
     if "candidate_done ticket" in lowered:
         return "candidate_done_validation", 88.0
@@ -51,8 +52,6 @@ def _legacy_action_kind(role: str | None, reason: str, stop: bool) -> tuple[str,
         return "no_progress_recovery", 86.0
     if "duplicate builder deferred" in lowered or "guardrail deferrals" in lowered:
         return "deferred_patch_triage", 85.0
-    if role == "single_lane":
-        return "single_lane_fallback", 80.0
     if role == "builder":
         return "normal_builder_work", 45.0
     if role in {"planner", "hardener", "integrator"}:
@@ -293,6 +292,7 @@ def choose_next_graph_aware(
             impact_summary = refresh_impact_graph_conn(conn, target)
             expire_stale_leases_conn(conn)
             impact_model = impact_graph_read_model(conn, target)
+            parallel_dry_run = plan_parallel_execution_groups_conn(conn, target, selected_by="graph_scheduler")
 
             graph_candidates = _graph_ticket_candidates(conn, target)
             graph_signals_used = {
@@ -305,6 +305,16 @@ def choose_next_graph_aware(
                 "impact_snapshot_id": str(impact_summary.get("latest_snapshot_id") or ""),
                 "graph_candidate_count": len(graph_candidates),
                 "stale_context_warning": str(impact_model.get("stale_context_warning") or ""),
+                "parallel_dry_run_group_count": int(
+                    (parallel_dry_run.get("parallelization_summary") or {}).get("group_count") or 0
+                )
+                if isinstance(parallel_dry_run.get("parallelization_summary"), Mapping)
+                else 0,
+                "parallel_dry_run_blocked_count": int(
+                    (parallel_dry_run.get("parallelization_summary") or {}).get("blocked_candidate_count") or 0
+                )
+                if isinstance(parallel_dry_run.get("parallelization_summary"), Mapping)
+                else 0,
             }
             candidates: list[dict[str, Any]] = []
             selected = dict(legacy)

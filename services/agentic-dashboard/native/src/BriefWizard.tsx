@@ -83,11 +83,11 @@ export type IntakeDraft = {
   max_write_worker_count: number;
   write_worker_guidance: string;
   multi_role_automations_allowed: boolean;
-  automation_role_profile: "single_lane" | "planner_builder_hardener_integrator";
+  automation_role_profile: "planner_builder_hardener_integrator";
   automation_checkpoint_commits: boolean;
   multi_role_allow_remotes: boolean;
   optional_mcp_servers: string[];
-  automation_run_mode: "continuous_improvement" | "ticket_campaign";
+  campaign_mode: "bounded" | "ongoing";
   ticket_run_file: string;
   ticket_run_seed_tickets: Ticket[];
   ticket_completion_notify: boolean;
@@ -98,7 +98,7 @@ export type IntakeDraft = {
   overwrite_existing_scaffold_files: boolean;
 };
 
-export type AutomationScope = "boundless_build" | "ticket_campaign";
+export type AutomationScope = "ongoing" | "bounded";
 
 type ContextUiFile = PickedContextFile & {
   relPath?: string;
@@ -169,7 +169,12 @@ type GeneratedIntakeResponse = {
   intake?: Record<string, unknown>;
   ticket_count?: number;
   ticket_generation_complexity?: string;
+  ticket_generation_decomposition_brief?: string;
+  ticket_generation_scope_groups?: unknown[];
   ticket_generation_quality_warnings?: unknown[];
+  ticket_generation_refinement_needed?: boolean;
+  ticket_generation_refinement_passed?: boolean;
+  ticket_generation_scope_surface_floor?: number;
   automation_role_profile?: IntakeDraft["automation_role_profile"];
   ticket_run_file?: string;
 };
@@ -196,7 +201,7 @@ const defaultDraft: IntakeDraft = {
   hard_constraints: ["Keep the generated project target-agnostic.", "Preserve existing project conventions when integrating into a repo."],
   safety_constraints: ["Do not store secrets in generated docs.", "Keep destructive operations explicit and human-approved."],
   automation_must_never_do: ["Never push to remotes without direct human instruction.", "Never modify credentials or production data."],
-  external_services: ["None required for the first demo."],
+  external_services: ["None required for local execution."],
   env_access_policy: "project_commands_only",
   verification_commands: ["Run the project test suite.", "Run lint/typecheck/build commands when present."],
   human_bridge_enabled: true,
@@ -214,7 +219,7 @@ const defaultDraft: IntakeDraft = {
   automation_checkpoint_commits: true,
   multi_role_allow_remotes: false,
   optional_mcp_servers: [],
-  automation_run_mode: "continuous_improvement",
+  campaign_mode: "ongoing",
   ticket_run_file: "",
   ticket_run_seed_tickets: [],
   ticket_completion_notify: true,
@@ -265,20 +270,7 @@ function enumValue<T extends string>(value: unknown, valid: readonly T[], fallba
   return valid.includes(value as T) ? (value as T) : fallback;
 }
 
-function roleProfileValues(source: Record<string, unknown>): Pick<IntakeDraft, "multi_role_automations_allowed" | "automation_role_profile"> {
-  const profile =
-    source.automation_role_profile === "single_lane" ||
-    source.automation_role_profile === "planner_builder_hardener_integrator"
-      ? source.automation_role_profile
-      : "";
-  const resolvedProfile =
-    profile ||
-    (boolValue(source.multi_role_automations_allowed, defaultDraft.multi_role_automations_allowed)
-      ? "planner_builder_hardener_integrator"
-      : "single_lane");
-  if (resolvedProfile === "single_lane") {
-    return { multi_role_automations_allowed: false, automation_role_profile: "single_lane" };
-  }
+function roleProfileValues(): Pick<IntakeDraft, "multi_role_automations_allowed" | "automation_role_profile"> {
   return {
     multi_role_automations_allowed: true,
     automation_role_profile: "planner_builder_hardener_integrator",
@@ -286,15 +278,17 @@ function roleProfileValues(source: Record<string, unknown>): Pick<IntakeDraft, "
 }
 
 export function automationScopeForDraft(
-  draft: Pick<IntakeDraft, "automation_run_mode">,
+  draft: Pick<IntakeDraft, "campaign_mode"> | { campaign_mode?: unknown; automation_run_mode?: unknown },
 ): AutomationScope {
-  return draft.automation_run_mode === "ticket_campaign" ? "ticket_campaign" : "boundless_build";
+  const raw = "campaign_mode" in draft && draft.campaign_mode !== undefined ? draft.campaign_mode : draft.automation_run_mode;
+  const text = String(raw || "ongoing").trim().toLowerCase().replace(/[-\s]+/g, "_");
+  return text === "bounded" || text === "ticket_campaign" ? "bounded" : "ongoing";
 }
 
 export function applyAutomationScope(draft: IntakeDraft, scope: AutomationScope): IntakeDraft {
   return {
     ...draft,
-    automation_run_mode: scope === "ticket_campaign" ? "ticket_campaign" : "continuous_improvement",
+    campaign_mode: scope,
   };
 }
 
@@ -302,7 +296,7 @@ function draftFromSource(source: Record<string, unknown>, targetName: string): I
   const optionalMcp = listValue(source.optional_mcp_servers).filter((item) =>
     ["context7", "playwright"].includes(item),
   );
-  const roleProfile = roleProfileValues(source);
+  const roleProfile = roleProfileValues();
   return {
     ...defaultDraft,
     project_name: stringValue(source.project_name, targetName),
@@ -349,11 +343,10 @@ function draftFromSource(source: Record<string, unknown>, targetName: string): I
     automation_checkpoint_commits: boolValue(source.automation_checkpoint_commits, defaultDraft.automation_checkpoint_commits),
     multi_role_allow_remotes: boolValue(source.multi_role_allow_remotes, defaultDraft.multi_role_allow_remotes),
     optional_mcp_servers: optionalMcp,
-    automation_run_mode: enumValue(
-      source.automation_run_mode,
-      ["continuous_improvement", "ticket_campaign"],
-      defaultDraft.automation_run_mode,
-    ),
+    campaign_mode: automationScopeForDraft({
+      campaign_mode: source.campaign_mode,
+      automation_run_mode: source.automation_run_mode,
+    }),
     ticket_run_file: stringValue(source.ticket_run_file, defaultDraft.ticket_run_file),
     ticket_run_seed_tickets: normalizeTickets(source.ticket_run_seed_tickets),
     ticket_completion_notify: boolValue(source.ticket_completion_notify, defaultDraft.ticket_completion_notify),
@@ -390,7 +383,7 @@ export function lowCortisolDraftFromGeneratedIntake(
     human_bridge_enabled: true,
     human_bridge_mode: "file_only",
     optional_mcp_servers: [],
-    automation_run_mode: "ticket_campaign",
+    campaign_mode: "bounded",
     ticket_run_file: defaultDraft.ticket_run_file,
     ticket_run_seed_tickets: generatedTickets,
     additional_context_files: generatedContext.length ? generatedContext : current.additional_context_files,
@@ -400,12 +393,12 @@ export function lowCortisolDraftFromGeneratedIntake(
 
 function serializeDraft(draft: IntakeDraft): Record<string, unknown> {
   const scope = automationScopeForDraft(draft);
-  const roleProfile = roleProfileValues(draft as unknown as Record<string, unknown>);
+  const roleProfile = roleProfileValues();
   const payload: Record<string, unknown> = {
     ...draft,
     multi_role_automations_allowed: roleProfile.multi_role_automations_allowed,
     automation_role_profile: roleProfile.automation_role_profile,
-    automation_run_mode: scope === "ticket_campaign" ? "ticket_campaign" : "continuous_improvement",
+    campaign_mode: scope,
     ticket_run_seed_tickets: draft.ticket_run_seed_tickets.map((ticket) => normalizeTicket(ticket)),
     human_bridge_mode: draft.human_bridge_enabled ? draft.human_bridge_mode : "disabled",
     max_write_worker_count: draft.write_worker_agents_allowed ? Math.max(1, Math.min(10, draft.max_write_worker_count)) : 0,
@@ -548,11 +541,11 @@ function SetupPlanSummary(props: {
       </div>
       <div className="setup-summary-ledger">
         <DetailMetric label="Target" value={props.targetPath ? "Selected" : "No target"} />
-        <DetailMetric label="Mode" value={scope === "ticket_campaign" ? "Ticket campaign" : "Continuous"} />
-        <DetailMetric label="Role profile" value={props.draft.automation_role_profile === "single_lane" ? "Single lane" : "Conveyor"} />
+        <DetailMetric label="Campaign" value={scope === "bounded" ? "Bounded" : "Ongoing"} />
+        <DetailMetric label="Architecture" value="Conveyor" />
         <DetailMetric label="Context" value={props.contextCount} />
         <DetailMetric label="Guardrails" value={props.draft.safety_constraints.length + props.draft.automation_must_never_do.length} />
-        <DetailMetric label="Tickets" value={scope === "ticket_campaign" ? props.draft.ticket_run_seed_tickets.length : "Off"} />
+        <DetailMetric label="Tickets" value={scope === "bounded" ? props.draft.ticket_run_seed_tickets.length : "Auto"} />
       </div>
       <div className="setup-summary-status">
         <div className={props.saveState}>
@@ -1173,7 +1166,7 @@ export function BriefWizard(props: {
             <FormField label="Target user">
               <textarea value={draft.target_user} onChange={(event) => updateDraft("target_user", event.target.value)} rows={5} />
             </FormField>
-            <FormField label="Desired first demo">
+            <FormField label="Desired runnable milestone">
               <textarea
                 value={draft.desired_first_demo}
                 onChange={(event) => updateDraft("desired_first_demo", event.target.value)}
@@ -1272,39 +1265,17 @@ export function BriefWizard(props: {
 
   function renderModeStep() {
     const buildScope = automationScopeForDraft(draft);
-    const ticketCampaign = buildScope === "ticket_campaign";
+    const ticketCampaign = buildScope === "bounded";
     const ticketIssues = localTicketIssues(draft.ticket_run_seed_tickets);
 
     return (
       <div className="brief-step-grid">
         <section className="brief-section span-3">
-          <h2>Automation profile</h2>
-          <div className="brief-choice-grid two-up compact">
-            <button
-              className={draft.automation_role_profile === "single_lane" ? "selected" : ""}
-              onClick={() =>
-                setDraft((current) => ({
-                  ...current,
-                  multi_role_automations_allowed: false,
-                  automation_role_profile: "single_lane",
-                }))
-              }
-            >
-              <strong>Single lane</strong>
-              <span>One continuous agent loop for docs, research, reports, cleanup, and simpler work.</span>
-            </button>
-            <button
-              className={draft.automation_role_profile === "planner_builder_hardener_integrator" ? "selected" : ""}
-              onClick={() =>
-                setDraft((current) => ({
-                  ...current,
-                  multi_role_automations_allowed: true,
-                  automation_role_profile: "planner_builder_hardener_integrator",
-                }))
-              }
-            >
+          <h2>Automation architecture</h2>
+          <div className="brief-choice-grid compact">
+            <button className="selected">
               <strong>Multi-role conveyor</strong>
-              <span>Planner, builder, hardener, and integrator lanes for larger engineering work.</span>
+              <span>Planner, builder, hardener, and integrator lanes backed by typed SQLite runtime state.</span>
             </button>
           </div>
         </section>
@@ -1312,18 +1283,18 @@ export function BriefWizard(props: {
           <h2>Scope</h2>
           <div className="brief-choice-grid two-up compact">
             <button
-              className={buildScope === "boundless_build" ? "selected" : ""}
-              onClick={() => setDraft((current) => applyAutomationScope(current, "boundless_build"))}
+              className={buildScope === "ongoing" ? "selected" : ""}
+              onClick={() => setDraft((current) => applyAutomationScope(current, "ongoing"))}
             >
-              <strong>Continuous improvement</strong>
-              <span>Use the project goal and guardrails as the ongoing backlog.</span>
+              <strong>Ongoing campaign</strong>
+              <span>Draft and enqueue safe follow-up tickets as work completes.</span>
             </button>
             <button
               className={ticketCampaign ? "selected" : ""}
-              onClick={() => setDraft((current) => applyAutomationScope(current, "ticket_campaign"))}
+              onClick={() => setDraft((current) => applyAutomationScope(current, "bounded"))}
             >
-              <strong>Ticket queue</strong>
-              <span>Use the dashboard queue and completion signal.</span>
+              <strong>Bounded campaign</strong>
+              <span>Run the seeded or imported ticket queue, then stop when complete or blocked.</span>
             </button>
           </div>
         </section>
@@ -1621,8 +1592,8 @@ export function BriefWizard(props: {
   }
 
   function renderReviewStep() {
-    const modeLabel = `Continuous role conveyor · ${
-      automationScopeForDraft(draft) === "ticket_campaign" ? "ticket queue" : "continuous improvement"
+    const modeLabel = `Multi-role conveyor · ${
+      automationScopeForDraft(draft) === "bounded" ? "bounded campaign" : "ongoing campaign"
     }`;
     const reviewTicketIssues = localTicketIssues(draft.ticket_run_seed_tickets);
     const previewFiles = preview ? visibleScaffoldPreviewFiles(preview.files) : null;
@@ -1656,7 +1627,7 @@ export function BriefWizard(props: {
               <span>Run controls</span>
               <strong>{scaffoldResult ? "Available now" : "Available after scaffold succeeds"}</strong>
             </div>
-            {automationScopeForDraft(draft) === "ticket_campaign" && (
+            {automationScopeForDraft(draft) === "bounded" && (
               <div>
                 <span>Seed tickets</span>
                 <strong>
@@ -1665,7 +1636,7 @@ export function BriefWizard(props: {
               </div>
             )}
           </div>
-          {automationScopeForDraft(draft) === "ticket_campaign" && reviewTicketIssues.length > 0 && (
+          {automationScopeForDraft(draft) === "bounded" && reviewTicketIssues.length > 0 && (
             <div className="ticket-issue-list">
               {reviewTicketIssues.slice(0, 5).map((issue, index) => (
                 <div className={`ticket-issue ${issue.level}`} key={`${issue.type}-review-${index}`}>

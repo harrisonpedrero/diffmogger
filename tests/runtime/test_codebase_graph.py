@@ -15,17 +15,20 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from diffmogger.runtime.state_store import (
+    GRAPH_SNAPSHOT_RETENTION_LIMIT,
     acquire_resource_lease,
     connect,
     database_path_for_target,
     ensure_codebase_graph_conn,
     expire_stale_leases,
     list_conflicting_leases,
+    prune_graph_snapshots_conn,
     refresh_codebase_graph,
     refresh_codebase_graph_changed_file,
     refresh_capability_manifest_conn,
     release_resource_lease,
     state_snapshot,
+    write_canonical_state_brief,
     write_ticket_run_state,
 )
 
@@ -60,6 +63,11 @@ def graph_snapshot_count(target: Path) -> int:
                 "SELECT COUNT(*) AS count FROM graph_snapshots WHERE graph_namespace = 'codebase'"
             ).fetchone()["count"]
         )
+
+
+def execution_group_count(target: Path) -> int:
+    with connect_graph(target) as conn:
+        return int(conn.execute("SELECT COUNT(*) AS count FROM execution_groups").fetchone()["count"])
 
 
 def file_node_paths(target: Path, snapshot_id: str) -> list[str]:
@@ -362,6 +370,64 @@ class CodebaseGraphTests(unittest.TestCase):
             self.assertEqual(0, second["graph_inventory_added_count"])
             self.assertEqual(0, second["graph_inventory_deleted_count"])
             self.assertEqual(0, second["graph_inventory_structural_count"])
+
+    def test_derived_graph_snapshot_pruning_keeps_recent_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    for index in range(GRAPH_SNAPSHOT_RETENTION_LIMIT + 3):
+                        snapshot_id = f"snapshot:{index:02d}"
+                        conn.execute(
+                            """
+                            INSERT INTO graph_snapshots(
+                                snapshot_id, graph_namespace, repo_root, generated_at, head_commit,
+                                dirty_tracked_file_count, dirty_tracked_files_digest, indexed_file_count,
+                                directory_node_count, command_node_count, test_node_count, stale_node_count,
+                                digest, payload_json
+                            )
+                            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                snapshot_id,
+                                "impact",
+                                str(target),
+                                f"2026-01-01T00:00:{index:02d}+00:00",
+                                "",
+                                0,
+                                "",
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                f"digest:{index:02d}",
+                                "{}",
+                            ),
+                        )
+                        conn.execute(
+                            """
+                            INSERT INTO graph_nodes(
+                                snapshot_id, node_id, graph_namespace, kind, path, name, digest, is_stale, metadata_json
+                            )
+                            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (snapshot_id, f"node:{index:02d}", "impact", "ticket", "", f"Node {index}", "", 0, "{}"),
+                        )
+
+                    pruned = prune_graph_snapshots_conn(conn, "impact")
+
+                snapshots = conn.execute(
+                    "SELECT snapshot_id FROM graph_snapshots WHERE graph_namespace = 'impact' ORDER BY generated_at"
+                ).fetchall()
+                node_count = conn.execute(
+                    "SELECT COUNT(*) AS count FROM graph_nodes WHERE graph_namespace = 'impact'"
+                ).fetchone()["count"]
+
+            self.assertEqual(3, pruned)
+            self.assertEqual(GRAPH_SNAPSHOT_RETENTION_LIMIT, len(snapshots))
+            self.assertEqual(GRAPH_SNAPSHOT_RETENTION_LIMIT, node_count)
+            self.assertEqual("snapshot:03", snapshots[0]["snapshot_id"])
 
     def test_test_file_naming_creates_likely_tests_edge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -963,6 +1029,206 @@ class ResourceLeaseTests(unittest.TestCase):
             self.assertTrue(repo_suggestions)
             self.assertTrue(all(not item["recommended"] for item in repo_suggestions))
             self.assertEqual([], snapshot["active_leases"])
+
+
+class ParallelExecutionPlannerTests(unittest.TestCase):
+    def write_ticket_run(self, target: Path, tickets: list[dict[str, object]]) -> None:
+        write_ticket_run_state(
+            target,
+            {
+                "run_id": "ticket-run",
+                "halt_when_complete": True,
+                "notify_on_complete": False,
+                "tickets": tickets,
+            },
+            actor_role="test",
+            event_type="ticket.run_test",
+        )
+
+    def grouped_task_ids(self, snapshot: dict[str, object]) -> list[set[str]]:
+        groups = snapshot.get("proposed_execution_groups") if isinstance(snapshot.get("proposed_execution_groups"), list) else []
+        grouped: list[set[str]] = []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            items = group.get("items") if isinstance(group.get("items"), list) else []
+            grouped.append({str(item.get("task_id") or "") for item in items if isinstance(item, dict)})
+        return grouped
+
+    def blocked_by_task(self, snapshot: dict[str, object]) -> dict[str, dict[str, object]]:
+        blocked = snapshot.get("blocked_parallel_candidates") if isinstance(snapshot.get("blocked_parallel_candidates"), list) else []
+        return {
+            str(item.get("task_id") or ""): item
+            for item in blocked
+            if isinstance(item, dict) and str(item.get("task_id") or "")
+        }
+
+    def test_disjoint_write_tasks_share_proposed_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_text(target, "src/auth.py", "AUTH = True\n")
+            write_text(target, "src/billing.py", "BILLING = True\n")
+            self.write_ticket_run(
+                target,
+                [
+                    {"id": "T1", "summary": "Update src/auth.py", "status": "pending"},
+                    {"id": "T2", "summary": "Update src/billing.py", "status": "pending"},
+                ],
+            )
+
+            snapshot = state_snapshot(target)
+
+            self.assertIn({"T1", "T2"}, self.grouped_task_ids(snapshot))
+            self.assertEqual(1, snapshot["parallelization_summary"]["group_count"])
+            group = snapshot["proposed_execution_groups"][0]
+            self.assertEqual("dry_run", group["mode"])
+            self.assertEqual("write_workers", group["payload"]["execution_mode"])
+            self.assertTrue(group["execution_group_id"].startswith("execution-group:"))
+            self.assertTrue(all(item["item_id"].startswith("execution-group-item:") for item in group["items"]))
+
+    def test_overlapping_file_impact_prevents_parallel_grouping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_text(target, "src/auth.py", "AUTH = True\n")
+            self.write_ticket_run(
+                target,
+                [
+                    {"id": "T1", "summary": "Update src/auth.py login", "status": "pending"},
+                    {"id": "T2", "summary": "Update src/auth.py session", "status": "pending"},
+                ],
+            )
+
+            snapshot = state_snapshot(target)
+            grouped = self.grouped_task_ids(snapshot)
+            blocked = self.blocked_by_task(snapshot)
+
+            self.assertFalse(any({"T1", "T2"}.issubset(group) for group in grouped))
+            self.assertEqual(0, snapshot["parallelization_summary"]["group_count"])
+            self.assertTrue(any(item.get("reason_kind") == "write_surface_overlap" for item in blocked.values()), blocked)
+
+    def test_read_only_tasks_can_group_with_overlapping_read_surfaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_text(target, "src/auth.py", "AUTH = True\n")
+            self.write_ticket_run(
+                target,
+                [
+                    {
+                        "id": "T1",
+                        "summary": "Inspect src/auth.py for follow-up planning",
+                        "status": "pending",
+                        "action_kind": "read_only_analysis",
+                        "execution_mode": "read_only",
+                    },
+                    {
+                        "id": "T2",
+                        "summary": "Review src/auth.py test context",
+                        "status": "pending",
+                        "action_kind": "read_only_context_review",
+                        "execution_mode": "read_only",
+                    },
+                ],
+            )
+
+            snapshot = state_snapshot(target)
+
+            self.assertIn({"T1", "T2"}, self.grouped_task_ids(snapshot))
+            self.assertEqual("dry_run", snapshot["proposed_execution_groups"][0]["mode"])
+            self.assertEqual("read_only", snapshot["proposed_execution_groups"][0]["payload"]["execution_mode"])
+
+    def test_integration_task_is_not_grouped_with_write_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_text(target, "src/auth.py", "AUTH = True\n")
+            write_text(target, "src/billing.py", "BILLING = True\n")
+            self.write_ticket_run(
+                target,
+                [
+                    {
+                        "id": "T1",
+                        "summary": "Integrate src/auth.py queued patch",
+                        "status": "pending",
+                        "owner_role": "integrator",
+                        "action_kind": "integrate_queued_patch",
+                    },
+                    {"id": "T2", "summary": "Update src/billing.py", "status": "pending"},
+                ],
+            )
+
+            snapshot = state_snapshot(target)
+            blocked = self.blocked_by_task(snapshot)
+
+            self.assertNotIn({"T1", "T2"}, self.grouped_task_ids(snapshot))
+            self.assertEqual("integration_serialized", blocked["T1"]["reason_kind"])
+
+    def test_task_with_pending_approval_is_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_text(target, "src/auth.py", "AUTH = True\n")
+            write_text(target, "src/billing.py", "BILLING = True\n")
+            self.write_ticket_run(
+                target,
+                [
+                    {
+                        "id": "T1",
+                        "summary": "Update src/auth.py protected behavior",
+                        "status": "pending",
+                        "requires_approval": True,
+                        "approval_status": "pending",
+                    },
+                    {"id": "T2", "summary": "Update src/billing.py", "status": "pending"},
+                ],
+            )
+
+            snapshot = state_snapshot(target)
+            blocked = self.blocked_by_task(snapshot)
+
+            self.assertEqual("pending_approval", blocked["T1"]["reason_kind"])
+            self.assertFalse(any("T1" in group for group in self.grouped_task_ids(snapshot)))
+
+    def test_unknown_impact_write_task_is_excluded_from_write_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_text(target, "src/auth.py", "AUTH = True\n")
+            self.write_ticket_run(target, [{"id": "T1", "summary": "Implement safer defaults", "status": "pending"}])
+
+            snapshot = state_snapshot(target)
+            blocked = self.blocked_by_task(snapshot)
+
+            self.assertEqual([], snapshot["proposed_execution_groups"])
+            self.assertEqual("unknown_impact_write", blocked["T1"]["reason_kind"])
+
+    def test_parallel_dry_run_snapshot_is_compact_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_text(target, "src/auth.py", "SECRET_SOURCE_BODY = 'hidden'\n")
+            write_text(target, "src/billing.py", "BILLING = True\n")
+            self.write_ticket_run(
+                target,
+                [
+                    {"id": "T1", "summary": "Update src/auth.py", "status": "pending"},
+                    {"id": "T2", "summary": "Update src/billing.py", "status": "pending"},
+                ],
+            )
+
+            first = state_snapshot(target)
+            first_count = execution_group_count(target)
+            second = state_snapshot(target)
+            brief = write_canonical_state_brief(target)
+            markdown = Path(brief["path"]).read_text(encoding="utf-8")
+
+            self.assertEqual(
+                [group["execution_group_id"] for group in first["proposed_execution_groups"]],
+                [group["execution_group_id"] for group in second["proposed_execution_groups"]],
+            )
+            self.assertEqual(first_count, execution_group_count(target))
+            self.assertIn("scheduler_parallel_dry_run", second)
+            self.assertIn("proposed_execution_groups", second)
+            self.assertIn("blocked_parallel_candidates", second)
+            self.assertIn("## Parallel Execution Dry Run", markdown)
+            self.assertIn("proposed_group", markdown)
+            self.assertIn("context_preview", markdown)
+            self.assertNotIn("SECRET_SOURCE_BODY", json.dumps(second["scheduler_parallel_dry_run"], sort_keys=True))
 
 
 if __name__ == "__main__":
