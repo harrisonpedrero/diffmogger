@@ -565,7 +565,7 @@ function conveyorModel(snapshot: ProjectSnapshot | null): HomeModel["conveyor"] 
       status: derivedStatus,
       badge: text(fromSnapshot.badge, derivedStatus),
       tone: roleStatusTone(derivedStatus),
-      reason: text(fromSnapshot.reason ?? latest.reason, activeRole === role ? text(active.reason, "Lane is active.") : "Awaiting conveyor decision."),
+      reason: text(fromSnapshot.reason ?? latest.reason, activeRole === role ? text(active.reason, "Lane is active.") : "Awaiting DAG scheduler decision."),
       counts: {
         queued: number(counts.queued),
         applied: number(counts.applied),
@@ -731,7 +731,7 @@ function eventLedger(snapshot: ProjectSnapshot | null): HomeModel["eventLedger"]
 
   return {
     rows: rows.slice(0, 8),
-    emptyMessage: "No command, queue, conveyor, or commit events are exposed in the current snapshot.",
+    emptyMessage: "No command, queue, DAG scheduler, or commit events are exposed in the current snapshot.",
   };
 }
 

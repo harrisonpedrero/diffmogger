@@ -6,12 +6,15 @@ This directory is for source-kit documentation. Generated target-state docs live
 
 - [Fresh Project Setup](FRESH_PROJECT_SETUP.md): dashboard and CLI setup flow for fresh or existing target repos.
 - [Dashboard](DASHBOARD.md): native dashboard, backend CLI, run controls, safety, review, and worker controls.
-- [Operating Model](OPERATING_MODEL.md): recurring run loop, statuses, sidecar layout, conveyor state, and generated runtime state.
+- [Operating Model](OPERATING_MODEL.md): recurring run loop, statuses, sidecar layout, execution DAG state, and generated runtime views.
 - [Human Bridge](HUMAN_BRIDGE.md): file-only handoff and optional notifier modes.
 - [Worker Agents](WORKER_AGENTS.md): read-only workers, write-worker opt-in, and multi-role conventions.
 - [Troubleshooting](TROUBLESHOOTING.md): local failure modes and recovery steps.
 - [Examples](EXAMPLES.md): fictional reusable intake examples.
 - [Native Dashboard Architecture](architecture/native-dashboard.md): source layout, backend command contract, and build notes.
+- [DAG Symbol Scheduler Audit](architecture/dag-symbol-scheduler-audit.md): internal map of DAG scheduler, graph facts, leases, validation, dashboard projections, and conveyor-era residue.
+- [Symbol Identity Contract](architecture/symbol-identity-contract.md): normalized cross-language symbol shape and scheduler resolution policy.
+- [Concurrency Readiness Audit](architecture/concurrency-readiness-audit.md): end-to-end scheduler readiness findings and small follow-up tickets for safer parallel throughput.
 
 ## Root Docs
 

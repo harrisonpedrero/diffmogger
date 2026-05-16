@@ -90,7 +90,7 @@ Why: nested Codex workers launched from inside a scheduled automation sandbox ma
 
 ## DR-015: Write-Capable Workers Are Explicitly Opt-In And Main-Agent Integrated
 
-Decision: generated target projects support optional bounded write-capable workers only when the intake explicitly enables `write_worker_agents_allowed`, with `max_write_worker_count` capped at 10 and read-only worker reports preserved as the default.
+Decision: generated target projects support optional bounded write-capable workers with `max_write_worker_count` capped at 10 and read-only worker reports preserved for exploration. The older `write_worker_agents_allowed` gate has been superseded; write workers are available by default and the main agent chooses whether to use zero or more workers per run.
 
 Why: high-throughput implementation can help when work can split into reviewable lanes, but overlapping autonomous writes are risky. The main agent must choose a strategy and parallelism budget each run, define enough ownership and contracts before spawning write workers, tell workers they are not alone in the codebase, review and integrate diffs, run verification, update typed runtime state, and refresh generated projections. Integration-only runs with no workers remain valid when faster or safer.
 

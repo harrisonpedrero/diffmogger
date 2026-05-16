@@ -1,6 +1,6 @@
 # Codex Automation Tasks
 
-Generated prompt/handoff projection. SQLite in `target/orchestration.sqlite3` is live runtime authority for automation status, product horizon, task summary, conveyor stages, repo capabilities, events, validations, blockers, and next actions; `target/canonical_state_brief.md` is the current bounded agent-readable view.
+Generated prompt/handoff projection. SQLite in `target/orchestration.sqlite3` is live runtime authority for automation status, product horizon, execution DAG progress, repo capabilities, events, validations, blockers, and next actions; `target/canonical_state_brief.md` is the current bounded agent-readable view.
 
 AUTOMATION_STATUS: ACTIVE
 
@@ -17,7 +17,7 @@ Last updated: {{CREATED_AT}}
 - Project-mode guidance: {{PROJECT_MODE_GUIDANCE}}
 - Current baseline: not bootstrapped yet.
 - State authority: canonical runtime/task-control state is `target/orchestration.sqlite3`; this Markdown file is a generated prompt/handoff projection.
-- Conveyor state machine: stage contracts, current work item, repository capability manifest, validation receipts, blockers, and next actions are typed SQLite state.
+- Execution DAG: tickets, planning/scoping, building, reviewing, validation, integration, blockers, completion, hard/advisory dependencies, validation receipts, and next actions are typed SQLite state. Conveyor stage fields are compatibility projections only.
 
 ## Automation Must Never Do
 

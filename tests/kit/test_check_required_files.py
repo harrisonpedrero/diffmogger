@@ -265,7 +265,7 @@ class RequiredFilesCheckTests(unittest.TestCase):
             self.assertIn("Bounded campaign bootstrap is readiness-only", bootstrap)
             self.assertIn("Do not implement ticket acceptance criteria", bootstrap)
             self.assertIn("python3 .diffmogger/scripts/ticket_run.py . next --json", prompt)
-            self.assertIn("act on at most one dependency-ready ticket per run", prompt)
+            self.assertIn("let execution DAG dependencies, confidence, and ownership scopes determine", prompt)
             self.assertIn("## Deferred / Follow-Up Tickets", task)
             for forbidden in ["MVP", "Beyond MVP", "Ambitious extensions"]:
                 self.assertNotIn(forbidden, combined)

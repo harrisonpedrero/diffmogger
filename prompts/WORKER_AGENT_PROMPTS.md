@@ -36,7 +36,7 @@ python3 .diffmogger/scripts/summarize_worker_outputs.py /absolute/path/to/target
 
 These helpers default to read-only worker-report mode, avoid network, tell workers not to spawn more workers, and fail gracefully when `codex` is unavailable.
 
-When generated project intake explicitly enables write-capable workers, use explicit write mode and ownership:
+For write-capable workers, use explicit write mode and ownership:
 
 ```bash
 bash .diffmogger/scripts/spawn_worker_agent.sh --mode write --target /absolute/path/to/target-project --run-id "$CODEX_RUN_ID" --role feature_a --ownership "src/feature-a/** and tests/feature-a/** only" --prompt "Implement the assigned slice and write changed files/checks to the report."

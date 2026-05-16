@@ -104,7 +104,8 @@ Errors also return JSON and use non-zero exit codes:
 Current command groups:
 
 - Project and Brief: `project.load_snapshot`, `project.list_recent`, `brief.load`,
-  `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`.
+  `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`,
+  `brief.run_bootstrap`.
 - Context: `context.import`.
 - Run and automation: `run.load`, `run.load_log`, `automation.start`,
   `automation.stop`, `safety.run_check`.
@@ -131,8 +132,9 @@ The native app uses backend snapshots to derive page state:
 
 - No target selected: Home offers native folder selection and recent projects.
 - Unconfigured target: Home and Run point to Brief. Run controls remain disabled.
-- Scaffolded target with no runs: Home routes to Run; Run presents Start when continuous automation
-  is ready, while Observatory and Review show honest empty states.
+- Scaffolded target with no runs: Home routes to Run; Run presents **Start**. When initial
+  preparation is pending, Start performs the guarded first-run preparation before launching
+  continuous automation, while Observatory and Review show honest empty states.
 - Running target: Home/Run show running status, sidebar running badge, and log controls.
 - Human input pending: Home routes to Inbox and the sidebar shows an input badge.
 - Environment blocked or critical stop: Home/Run/Observatory use warning or critical tones and route
@@ -163,7 +165,7 @@ Keep native behavior and test coverage aligned with the backend contracts for:
 - worker strategy controls
 - file-only human bridge messaging
 - Markdown file monitor/editor
-- multi-role/conveyor settings
+- multi-role DAG scheduler settings
 - Context7 and Playwright MCP intake options
 - dashboard state persistence in `.diffmogger/agentic/dashboard_state.json`
 

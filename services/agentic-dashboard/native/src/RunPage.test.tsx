@@ -56,6 +56,76 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
   };
 }
 
+function executionDag(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    authority: "sqlite",
+    digest: "dag-render-test",
+    nodes: [
+      {
+        node_id: "dag-node:scope",
+        task_id: "TICKET-001",
+        action_type: "scoping",
+        status: "completed",
+        owner_role: "planner",
+        attempt_count: 1,
+        confidence: 0.91,
+        metadata: { paths: ["docs/plan.md"] },
+      },
+      {
+        node_id: "dag-node:build",
+        task_id: "TICKET-001",
+        action_type: "building",
+        status: "ready",
+        owner_role: "builder",
+        attempt_count: 2,
+        confidence: 0.82,
+        patch: { id: "patch:worker-1", path: "target/automation_queue/changes.patch" },
+        metadata: { paths: ["src/app.ts"], execution_mode: "write_workers" },
+      },
+      {
+        node_id: "dag-node:review",
+        task_id: "TICKET-001",
+        action_type: "reviewing",
+        status: "running",
+        owner_role: "hardener",
+        attempt_count: 1,
+        confidence: 0.88,
+        metadata: { paths: ["src/app.ts"], execution_mode: "read_only" },
+      },
+      {
+        node_id: "dag-node:completion",
+        task_id: "TICKET-001",
+        action_type: "completion",
+        status: "skipped",
+        owner_role: "integrator",
+        attempt_count: 0,
+        confidence: 0.4,
+      },
+    ],
+    edges: [
+      {
+        edge_id: "edge:scope-build",
+        source: "dag-node:scope",
+        target: "dag-node:build",
+        dependency_kind: "depends_on",
+        dependency_mode: "hard",
+        confidence: 0.95,
+        reason: "scope must finish before build",
+      },
+      {
+        edge_id: "edge:build-review",
+        source: "dag-node:build",
+        target: "dag-node:review",
+        dependency_kind: "reviews",
+        dependency_mode: "hard",
+        confidence: 0.9,
+        reason: "review completed worker patch",
+      },
+    ],
+    ...overrides,
+  };
+}
+
 describe("RunPage", () => {
   it("renders Start and Stop automation controls when backend allows them", () => {
     const html = renderToStaticMarkup(
@@ -201,6 +271,37 @@ describe("RunPage", () => {
     expect(html).not.toContain("<h1>Ready</h1>");
   });
 
+  it("renders Start when scaffolded automation will prepare the target first", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            task: { status: "ACTIVE", bootstrap_status: "pending", bootstrap_pending: true },
+            controls: {
+              is_scaffolded: true,
+              is_running: false,
+              can_start_automation: false,
+              start_automation_reason: "Bootstrap has not completed yet.",
+              can_bootstrap_and_start: true,
+              bootstrap_start_reason: "Ready to run initial bootstrap before starting automation.",
+              can_stop_automation: false,
+              can_run_safety_check: true,
+            },
+            automation: { state: "not_ready", message: "Continuous automation is not ready. Bootstrap has not completed yet." },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain(">Ready</span>");
+    expect(html).toContain("First start will prepare the target");
+    expect(html).toContain("Start");
+  });
+
   it("renders helper strategy as an advanced manual control", () => {
     const html = renderToStaticMarkup(
       <RunPage
@@ -237,33 +338,13 @@ describe("RunPage", () => {
     expect(html).not.toContain("Run integrator");
   });
 
-  it("renders the typed conveyor state machine panel", () => {
+  it("renders the live execution graph as a native SVG", () => {
     const html = renderToStaticMarkup(
       <RunPage
         snapshot={snapshot({
           run: {
             state: {
-              next_actions: [{ owner_role: "builder", status: "next", reason: "Implement the selected work item." }],
-              conveyor_machine: {
-                current_stage: "implementation",
-                stage_status: "ready",
-                owner_role: "builder",
-                work_item: {
-                  id: "workitem:default",
-                  status: "ACTIVE",
-                  current_stage: "implementation",
-                  stage_status: "ready",
-                  owner_role: "builder",
-                  capability_manifest_id: "capability:repo",
-                  capability_manifest_version: 2,
-                  validation_status: "passed",
-                  continuation_token: "workitem:default:implementation:42",
-                },
-                capability_manifest: {
-                  languages: { primary: "TypeScript" },
-                  commands: [{ kind: "test", command: "npm test" }],
-                },
-              },
+              execution_dag: executionDag(),
             },
           },
         })}
@@ -274,10 +355,155 @@ describe("RunPage", () => {
       />,
     );
 
-    expect(html).toContain("State Machine");
-    expect(html).toContain("workitem:default:implementation:42");
-    expect(html).toContain("TypeScript / 1 command");
-    expect(html).toContain("Implement the selected work item.");
+    expect(html).toContain("Live Execution Graph");
+    expect(html).toContain("<svg");
+    expect(html).toContain("Orchestrate");
+    expect(html).toContain("Decompose");
+    expect(html).toContain("Scope");
+    expect(html).toContain("Build");
+    expect(html).toContain("Review");
+    expect(html).toContain("Validate");
+    expect(html).toContain("Repair");
+    expect(html).toContain("Integrate");
+    expect(html).toContain("Audit/Calibrate");
+    expect(html).toContain("Done");
+    expect(html).toContain("Build");
+    expect(html).toContain("TICKET-001 / builder /...");
+    expect(html).toContain("patch patch:worker-1 target/automation_queue/changes.patch");
+    expect(html).toContain("dag-edge hard");
+    expect(html).not.toContain("State Machine");
+  });
+
+  it("renders blocked and failed DAG details", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            state: {
+              execution_dag: executionDag({
+                nodes: [
+                  {
+                    node_id: "dag-node:failed-validation",
+                    task_id: "TICKET-002",
+                    action_type: "validation",
+                    status: "failed",
+                    owner_role: "hardener",
+                    attempt_count: 3,
+                    confidence: 0.76,
+                    blocker_reason: "pytest failed",
+                    validation_receipt_refs: ["receipt:validation-job"],
+                    metadata: { paths: ["tests/test_app.py"] },
+                  },
+                  {
+                    node_id: "dag-node:blocker",
+                    task_id: "TICKET-002",
+                    action_type: "blocker",
+                    status: "blocked",
+                    owner_role: "planner",
+                    attempt_count: 1,
+                    confidence: 0.96,
+                    blocker_reason: "retry limit exhausted",
+                  },
+                ],
+                edges: [
+                  {
+                    edge_id: "edge:blocker-validation",
+                    source: "dag-node:blocker",
+                    target: "dag-node:failed-validation",
+                    dependency_kind: "blocks",
+                    dependency_mode: "hard",
+                    confidence: 0.96,
+                    reason: "validation retry limit is exhausted",
+                  },
+                ],
+              }),
+            },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("status-failed");
+    expect(html).toContain("status-blocked");
+    expect(html).toContain("pytest failed");
+    expect(html).toContain("retry limit exhausted");
+    expect(html).toContain("validation receipts receipt:validation-job");
+  });
+
+  it("renders a compact empty DAG state when snapshots have no DAG nodes", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({ run: { state: { execution_dag: { nodes: [], edges: [] } } } })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("No DAG data for this run");
+    expect(html).not.toContain("Execution DAG progress graph");
+    expect(html).not.toContain("State Machine");
+  });
+
+  it("renders oversized DAGs as a multi-resolution cluster view", () => {
+    const nodes = Array.from({ length: 820 }, (_, index) => ({
+      node_id: `dag-node:${index}`,
+      task_id: `T${index}`,
+      action_type: "build",
+      status: index === 0 ? "running" : "pending",
+      owner_role: "builder",
+      confidence: 0.8,
+    }));
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            state: {
+              execution_dag: executionDag({ nodes, edges: [] }),
+            },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Multi-resolution Execution Graph");
+    expect(html).toContain("phase-status lens");
+    expect(html).toContain("Clusters");
+    expect(html).toContain("820 nodes");
+    expect(html).toContain("dag-cluster");
+  });
+
+  it("renders DAG summary counts", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            state: {
+              execution_dag: executionDag(),
+            },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("DAG status summary");
+    expect(html).toContain("<span>Ready</span><strong>1</strong>");
+    expect(html).toContain("<span>Running</span><strong>1</strong>");
+    expect(html).toContain("<span>Blocked</span><strong>0</strong>");
+    expect(html).toContain("<span>Completed</span><strong>2</strong>");
   });
 
   it("renders graph insight surfaces from canonical state", () => {
@@ -366,6 +592,26 @@ describe("RunPage", () => {
                 active_write_workers: 0,
               },
               parallelization_summary: { mode: "dry_run", group_count: 1 },
+              why_not_parallel: {
+                status: "blocked",
+                summary: "1 blocked parallel candidate; top reason: Missing direct write signal.",
+                reason_groups: [
+                  {
+                    reason_kind: "missing_direct_write_signal",
+                    label: "Missing direct write signal",
+                    count: 1,
+                    next_action: "Add direct file/path metadata or exact fresh symbol ownership evidence.",
+                  },
+                ],
+                next_improvements: [
+                  {
+                    reason_kind: "missing_direct_write_signal",
+                    improvement_kind: "add_paths_or_exact_symbols",
+                    count: 1,
+                    next_action: "Add direct file/path metadata or exact fresh symbol ownership evidence.",
+                  },
+                ],
+              },
               active_leases: [
                 {
                   lease_id: "lease:old",
@@ -404,6 +650,9 @@ describe("RunPage", () => {
     expect(html).toContain("Stale lease: file:src/demo.ts");
     expect(html).toContain("Validation jobs");
     expect(html).toContain("patch:worker-1");
+    expect(html).toContain("Why Not Parallel?");
+    expect(html).toContain("Missing direct write signal");
+    expect(html).toContain("add_paths_or_exact_symbols");
     expect(html).toContain("unknown impact write task is serial");
     expect(html).toContain("Cancel");
     expect(html).toContain("Release");

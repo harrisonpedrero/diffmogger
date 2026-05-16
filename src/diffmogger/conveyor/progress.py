@@ -24,7 +24,7 @@ def write_no_progress_progress_note(target: Path, info: dict[str, Any]) -> None:
             "# Multi-Role Progress",
             "",
             f"Generated dashboard/export projection for optional multi-role automation. SQLite in `{sqlite_rel}` is the live state authority.",
-            "Continuous conveyor mode prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning after planner deferral changes, post-builder hardening, candidate verification, and builder momentum.",
+            "Continuous DAG scheduler mode prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning after planner deferral changes, review/hardening, validation, targeted repairs, and compatible build waves.",
             "",
             "## Project State At Last Integration",
             "",

@@ -2,22 +2,32 @@
 
 from __future__ import annotations
 
+from contextlib import closing
+
 from . import runner as conveyor_runner
 from .active_role import active_role_run_blocker, recover_stale_active_role_run
 from .baseline import automation_status, baseline_record
 from .decisions import choose_next, conveyor_decision_queue
 from .locks import acquire_conveyor_lock, release_conveyor_lock
 from .progress import (
-    apply_timeout_circuit_breaker,
     no_progress_info,
     record_cycle,
-    update_integrator_no_progress,
-    write_no_progress_progress_note,
 )
-from .queue_state import queued_manifests, queue_snapshot
+from .queue_state import queued_manifests
 from .runner import finish_active_role_run
 from .state import *
 from .tickets import finalize_ticket_campaign, ticket_campaign_terminal
+from diffmogger.runtime.state_store import connect, database_path_for_target, latest_scheduler_decision_conn
+
+
+def _latest_selected_scheduler_candidate(target: Path) -> dict[str, Any]:
+    try:
+        with closing(connect(database_path_for_target(target))) as conn:
+            decision = latest_scheduler_decision_conn(conn)
+    except Exception:
+        return {}
+    selected = decision.get("selected_candidate") if isinstance(decision.get("selected_candidate"), dict) else {}
+    return dict(selected)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -48,8 +58,8 @@ def main() -> int:
         role, reason, stop = None, active_blocker, False
     else:
         role, reason, stop = choose_next(target, state, args.no_progress_threshold)
-        role, reason, stop = apply_timeout_circuit_breaker(state, role, reason, stop)
     ticket_state, ticket_reason = ticket_campaign_terminal(target)
+    selected_candidate = _latest_selected_scheduler_candidate(target)
 
     if args.dry_run:
         queue = conveyor_decision_queue(
@@ -72,6 +82,7 @@ def main() -> int:
                     "baseline_verification": baseline_record(target),
                     "integrator_no_progress": no_progress_info(state),
                     "state_machine": state.get("state_machine") if isinstance(state.get("state_machine"), dict) else {},
+                    "selected_scheduler_candidate": selected_candidate,
                     "campaign": {"status": ticket_state or "active", "reason": ticket_reason},
                 },
                 indent=2,
@@ -116,7 +127,7 @@ def main() -> int:
                 role, reason, stop = None, active_blocker, False
             else:
                 role, reason, stop = choose_next(target, state, args.no_progress_threshold)
-                role, reason, stop = apply_timeout_circuit_breaker(state, role, reason, stop)
+            selected_candidate = _latest_selected_scheduler_candidate(target)
             state["last_decision"] = {"role": role, "reason": reason, "decided_at": utc_now()}
             state["decision_queue"] = conveyor_decision_queue(
                 target,
@@ -131,7 +142,7 @@ def main() -> int:
                 event_type="conveyor.decision_recorded",
                 actor_role="conveyor",
                 phase="decision",
-                payload={"role": role, "reason": reason, "stop": stop},
+                payload={"role": role, "reason": reason, "stop": stop, "selected_scheduler_candidate": selected_candidate},
             )
             print(f"CONVEYOR_DECISION role={role or 'idle'} reason={reason}", flush=True)
 
@@ -146,10 +157,9 @@ def main() -> int:
                 continue
 
             started_at = utc_now()
-            before_snapshot = queue_snapshot(target) if role == "integrator" else None
-            exit_code = conveyor_runner.run_role(
+            exit_code = conveyor_runner.run_scheduler_action(
                 target,
-                role,
+                selected_candidate,
                 allow_remotes,
                 state_path=state_path,
                 reason=reason,
@@ -158,19 +168,11 @@ def main() -> int:
             finished_at = utc_now()
             state = load_state(state_path)
             finish_active_role_run(state, exit_code=exit_code, finished_at=finished_at)
-            metadata: dict[str, Any] = {}
-            if role == "integrator" and before_snapshot is not None:
-                after_snapshot = queue_snapshot(target)
-                metadata = update_integrator_no_progress(
-                    state,
-                    before=before_snapshot,
-                    after=after_snapshot,
-                    exit_code=exit_code,
-                    threshold=args.no_progress_threshold,
-                    finished_at=finished_at,
-                )
-                if metadata.get("just_tripped"):
-                    write_no_progress_progress_note(target, no_progress_info(state))
+            metadata: dict[str, Any] = {
+                "scheduler_action": str(selected_candidate.get("action_kind") or ""),
+                "dag_node_id": str(selected_candidate.get("dag_node_id") or ""),
+                "execution_group_id": str(selected_candidate.get("execution_group_id") or ""),
+            }
             record_cycle(
                 state,
                 role=role,

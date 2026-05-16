@@ -922,6 +922,8 @@ run_with_watchdog() {
     --stdout-file "$stdout_file" \
     --stderr-file "$stderr_file" \
     --status-file "$status_file" \
+    --progress-path "$worktree_dir" \
+    --progress-path "$queue_dir" \
     -- "$@"
 }
 
@@ -1226,6 +1228,7 @@ if watchdog:
     fallback.extend(
         [
             f"- Watchdog timed out: {str(bool(watchdog.get('timed_out'))).lower()}",
+            f"- Watchdog idle timed out: {str(bool(watchdog.get('idle_timed_out'))).lower()}",
             f"- Watchdog terminated process group: {str(bool(watchdog.get('terminated'))).lower()}",
             f"- Watchdog status file: {scrub(str(watchdog_status_path))}",
         ]

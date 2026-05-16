@@ -2,7 +2,7 @@
   <img src="docs/assets/diffmogger-logo-cropped.png" alt="Diffmogger" width="720">
 </p>
 
-Diffmogger provides local automation infrastructure for continuous Codex work. It turns a repo into a dashboard-first automation loop with canonical typed SQLite state, durable prompts, target-local runtime wrappers, a planner/builder/hardener/integrator conveyor, patch queues, safety checks, generated human handoff files, review exports, a native dashboard, and a CLI.
+Diffmogger provides local automation infrastructure for continuous Codex work. It turns a repo into a dashboard-first automation loop with canonical typed SQLite state, durable prompts, target-local runtime wrappers, a planner/builder/hardener/integrator execution DAG scheduler, patch queues, safety checks, generated human handoff files, review exports, a native dashboard, and a CLI.
 
 It is not a hosted agent platform or a product-specific app. Diffmogger is built for solo and small-team repos that want Codex runs to preserve context, recover from blockers, route work through specialized roles, and compound over time instead of restarting from a blank prompt.
 
@@ -11,10 +11,10 @@ It is not a hosted agent platform or a product-specific app. Diffmogger is built
 - A native Tauri dashboard for setup, ticket-campaign queue creation/management, Start/Stop run control, safety checks, review export, inbox messages, and activity monitoring.
 - A generated sidecar layout under `.diffmogger/` so target repos keep Diffmogger-owned prompts, canonical state, runtime files, queues, worktrees, logs, and manifests out of product-owned paths.
 - Thin target-local Python wrappers under `.diffmogger/scripts/` that import the bundled `.diffmogger/lib/diffmogger/` runtime.
-- A continuous planner/builder/hardener/integrator conveyor backed by `.diffmogger/runtime/orchestration.sqlite3` with append-only events, typed stage contracts, a durable work item, repo capability manifests, validation receipts, checkpoints, and generated JSON/Markdown views, including `.diffmogger/runtime/canonical_state_brief.md` for Codex agents.
+- A continuous planner/builder/hardener/integrator runner backed by `.diffmogger/runtime/orchestration.sqlite3` with append-only events, typed execution DAG node/edge contracts, repo capability manifests, validation receipts, checkpoints, and generated JSON/Markdown views, including `.diffmogger/runtime/canonical_state_brief.md` for Codex agents.
 - Stable root CLI command names while implementation lives under `src/diffmogger/`.
 - An explicit status model: `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`.
-- Optional worker agents, bounded or ongoing campaigns, optional Context7/Playwright MCP setup, optional notifier integration, and deterministic conveyor scheduling.
+- Optional worker agents, bounded or ongoing campaigns, optional Context7/Playwright MCP setup, optional notifier integration, and deterministic DAG-backed scheduling.
 
 ## Quickstart
 
@@ -31,7 +31,7 @@ In the dashboard:
 1. Pick a fresh or existing target folder.
 2. Fill in the project intake.
 3. Add optional context files.
-4. Run **Scaffold & Bootstrap**.
+4. Run **Scaffold**, then open **Run** and click **Start**.
 5. Review **Run Safety Check** and **Export Review Bundle** after the first run.
 
 CLI scaffold path:
@@ -53,7 +53,7 @@ Scaffold initializes git and creates a local `chore: initial commit` automatical
 src/diffmogger/                 Canonical Python source.
 src/diffmogger/kit/             Source-kit tools such as scaffold and validation.
 src/diffmogger/runtime/         Target runtime entrypoints and helpers.
-src/diffmogger/conveyor/        Continuous conveyor decisions, active-role recovery, and runner logic.
+src/diffmogger/conveyor/        Legacy-named DAG scheduler package, active-role recovery, and runner logic.
 src/diffmogger/integrator/      Multi-role integration, git safety, verification, and progress logic.
 src/diffmogger/observatory/     Observatory snapshot, scoring, render, and server logic.
 src/diffmogger/dashboard/       Native dashboard backend CLI and shared helpers.
@@ -91,7 +91,7 @@ New target repos receive a sidecar namespace:
 .diffmogger/state/        generated Markdown prompt, handoff, bridge, and review projections
 .diffmogger/scripts/      target-local wrappers and shell helpers
 .diffmogger/lib/          bundled Python runtime from src/diffmogger/
-.diffmogger/runtime/      canonical SQLite state machine, generated projections, logs, queues, locks, worker reports
+.diffmogger/runtime/      canonical SQLite execution DAG state, generated projections, logs, queues, locks, worker reports
 .diffmogger/schemas/      JSON Schema contracts for exported/projection state
 .diffmogger/manifest.json generated ownership and path manifest
 ```
@@ -100,7 +100,7 @@ The target repo should not need the Diffmogger checkout at runtime. The native d
 
 ## Dashboard
 
-The native dashboard is the only user-facing dashboard. It lives in `services/agentic-dashboard/native/` and calls `scripts/dashboard_backend_cli.py`, which exposes allowlisted JSON commands for scaffold, diagnostics, typed conveyor state snapshots, Start/Stop automation, safety checks, inbox messages, Observatory snapshots, review bundles, worker controls, and debug bundles.
+The native dashboard is the only user-facing dashboard. It lives in `services/agentic-dashboard/native/` and calls `scripts/dashboard_backend_cli.py`, which exposes allowlisted JSON commands for scaffold, diagnostics, typed execution DAG state snapshots, Start/Stop automation, safety checks, inbox messages, Observatory snapshots, review bundles, worker controls, and debug bundles.
 
 For campaign targets, the dashboard manages a structured Ticket Queue backed by `.diffmogger/runtime/orchestration.sqlite3`. Low-cortisol generation decomposes the full described scope into as many reviewable seed tickets as needed, rather than a capped demo plan. Users can seed tickets before scaffold, inspect/edit/delete tickets after scaffold, preview/apply Markdown/CSV/JSON imports, and accept review-only Codex follow-up draft candidates stored under `.diffmogger/runtime/ticket_drafts/`.
 

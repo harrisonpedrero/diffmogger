@@ -291,7 +291,7 @@ function RoleCard(props: {
         <h3>{props.role.role}</h3>
         <CompactBadge value={props.role.badge} tone={props.role.status} />
       </div>
-      <p>{text(props.role.reason, "Awaiting conveyor decision.")}</p>
+      <p>{text(props.role.reason, "Awaiting DAG scheduler decision.")}</p>
       <div className="obs-role-counts">
         {["queued", "deferred", "applied", "failed", "skipped"].map((key) => (
           <span key={key}>{key}: {number(counts[key])}</span>
@@ -356,7 +356,7 @@ function StateMachineBelt(props: { snapshot: ObservatorySnapshot | null }) {
     <div className="obs-machine-wrap">
       <div className="obs-machine-header">
         <div>
-          <h3>State Machine</h3>
+          <h3>DAG Compatibility State</h3>
           <p>{text(workItem.continuation_token, "No continuation token recorded yet.")}</p>
         </div>
         <div className="obs-machine-facts">
@@ -365,7 +365,7 @@ function StateMachineBelt(props: { snapshot: ObservatorySnapshot | null }) {
           <CompactBadge label="Capabilities" value={capabilitySummary(machine)} tone="good" />
         </div>
       </div>
-      <div className="obs-horizontal-scroll machine" aria-label="Typed conveyor state machine">
+      <div className="obs-horizontal-scroll machine" aria-label="DAG compatibility state projection">
         <div className="obs-machine-belt">
           {stages.map((stage, index) => (
             <div className="obs-machine-step" key={stage.stage}>
@@ -397,7 +397,7 @@ function ConveyorSection(props: {
 }) {
   const roles = props.snapshot?.conveyor.roles ?? [];
   return (
-    <ObsSection title="Conveyor" className={`obs-conveyor-section ${props.className ?? ""}`}>
+    <ObsSection title="Role Lanes" className={`obs-conveyor-section ${props.className ?? ""}`}>
       <div className="obs-conveyor-layout">
         <div className="obs-lane-heading">
           <h3>Execution Lanes</h3>
@@ -691,7 +691,7 @@ function SelectedRoleInspector(props: {
   if (!props.role) {
     return (
       <ObsSection title="Lane inspector" className={props.className}>
-        <p className="obs-muted">Select a conveyor lane to inspect role counts and recent matching events.</p>
+        <p className="obs-muted">Select a role lane to inspect role counts and recent matching events.</p>
       </ObsSection>
     );
   }
@@ -702,7 +702,7 @@ function SelectedRoleInspector(props: {
       <div className="activity-role-inspector">
         <div className="activity-role-reason">
           <CompactBadge value={props.role.status} tone={props.role.status} />
-          <p>{text(props.role.reason, "Awaiting conveyor decision.")}</p>
+          <p>{text(props.role.reason, "Awaiting DAG scheduler decision.")}</p>
         </div>
         <div className="obs-compact-table">
           {["queued", "deferred", "applied", "failed", "skipped"].map((key) => (

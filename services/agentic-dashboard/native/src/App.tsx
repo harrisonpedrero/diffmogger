@@ -514,7 +514,7 @@ function HomeActionButton(props: {
 
 function MiniConveyor(props: { lanes: HomeConveyorLane[] }) {
   return (
-    <div className="mini-conveyor" aria-label="Mini conveyor">
+    <div className="mini-conveyor" aria-label="Mini DAG role lanes">
       {props.lanes.map((lane, index) => (
         <div className="mini-conveyor-step" key={lane.role}>
           <span className={`mini-conveyor-node ${lane.tone}`} aria-hidden="true" />
@@ -1528,6 +1528,53 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
     }
   }
 
+  async function runPaletteBootstrapThenStart(command: PaletteCommand) {
+    if (!snapshot) return;
+    setPaletteBusyId(command.id);
+    setPaletteError("");
+    setPaletteMessage("Preparing target before start.");
+    announce("Preparing target before start.");
+    const runId = `palette-${command.id}-${Date.now()}`;
+    try {
+      const bootstrapPayload = await runBackendCommandStreamed({
+        runId,
+        command: "brief.run_bootstrap",
+        target: snapshot.target.path,
+      });
+      const bootstrapAlreadyCompleted = bootstrapPayload.error?.type === "bootstrap_already_completed";
+      if (!bootstrapPayload.ok && !bootstrapAlreadyCompleted) {
+        const message = bootstrapPayload.message ?? "First-run preparation failed.";
+        setPaletteError(message);
+        announce(message);
+        await refreshProject();
+        return;
+      }
+      setPaletteMessage("Preparation completed. Starting automation.");
+      announce("Preparation completed. Starting automation.");
+      const startPayload = await runBackendCommandStreamed({
+        runId,
+        command: "automation.start",
+        target: snapshot.target.path,
+      });
+      if (!startPayload.ok) {
+        const message = startPayload.message ?? "Automation start failed.";
+        setPaletteError(message);
+        announce(message);
+        await refreshProject();
+        return;
+      }
+      setPaletteMessage("Start completed.");
+      announce("Start completed.");
+      await refreshProject();
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setPaletteError(message);
+      announce(message);
+    } finally {
+      setPaletteBusyId("");
+    }
+  }
+
   async function executePaletteCommand(command: PaletteCommand) {
     if (command.disabledReason) {
       setPaletteError(command.disabledReason);
@@ -1671,7 +1718,11 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
       return;
     }
     if (command.id === "start-automation") {
-      await runPaletteStreamed(command, "automation.start");
+      if (snapshot?.run.controls?.can_bootstrap_and_start === true) {
+        await runPaletteBootstrapThenStart(command);
+      } else {
+        await runPaletteStreamed(command, "automation.start");
+      }
       return;
     }
     if (command.id === "stop-automation") {

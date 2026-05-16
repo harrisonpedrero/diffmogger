@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -25,10 +26,11 @@ from typing import Any, Callable, Mapping
 
 from diffmogger.runtime.blocker_review import adjudicate_baseline_blocker
 from diffmogger.runtime import codebase_graph
+from diffmogger.runtime import code_intelligence
 from diffmogger.runtime.paths import existing_or_target_path, target_path, target_rel
 
 
-STATE_SCHEMA_VERSION = 12
+STATE_SCHEMA_VERSION = 19
 STATE_APPLICATION_ID = 0x444D4752  # DMGR
 CANONICAL_DB_RELATIVE = "target/orchestration.sqlite3"
 CONVEYOR_PROJECTION_RELATIVE = "target/automation_conveyor_state.json"
@@ -37,6 +39,7 @@ CONVEYOR_TASK_ID = "task:conveyor"
 CONVEYOR_WORK_ITEM_ID = "workitem:default"
 CONVEYOR_PROJECTION_NAME = "conveyor.state"
 CONVEYOR_MACHINE_PROJECTION_NAME = "conveyor.machine"
+EXECUTION_DAG_PROJECTION_NAME = "execution_dag"
 BLOCKER_REVIEW_PROJECTION_NAME = "blocker.review"
 CAPABILITY_PROJECTION_NAME = "repo.capability_manifest"
 CAPABILITY_MANIFEST_ID = "capability:repo"
@@ -65,6 +68,249 @@ TASK_GRAPH_EDGE_KINDS = (
 TASK_DONE_STATUSES = {"done", "resolved", "closed", "complete", "completed", "superseded"}
 TASK_PENDING_STATUSES = {"pending", "open", "active", "in_progress", "running", "waiting", "blocked"}
 TASK_BLOCKED_STATUSES = {"blocked", "blocked_on_user", "blocked_on_environment"}
+EXECUTION_DAG_CANONICAL_ACTION_TYPES = (
+    "orchestrate",
+    "decompose",
+    "scope",
+    "build",
+    "review",
+    "validate",
+    "repair",
+    "integrate",
+    "audit",
+    "calibrate",
+)
+EXECUTION_DAG_SYSTEM_ACTION_TYPES = ("ticket", "blocker", "completion")
+EXECUTION_DAG_LEGACY_ACTION_ALIASES = {
+    "planning": "decompose",
+    "scoping": "scope",
+    "building": "build",
+    "reviewing": "review",
+    "validation": "validate",
+    "integration": "integrate",
+}
+EXECUTION_DAG_NODE_ACTION_TYPES = (
+    *EXECUTION_DAG_SYSTEM_ACTION_TYPES,
+    *EXECUTION_DAG_CANONICAL_ACTION_TYPES,
+    *EXECUTION_DAG_LEGACY_ACTION_ALIASES.keys(),
+)
+EXECUTION_DAG_ACTION_CAPABILITIES = {
+    "orchestrate": {
+        "role_family": "planner",
+        "prompt_base": "planner",
+        "permissions": ["read_runtime_state", "write_execution_dag", "write_scheduler_decision"],
+        "required_inputs": ["automation_control", "execution_dag_read_model", "runtime_config"],
+        "outputs": ["scheduler_decision", "dag_updates", "telemetry"],
+        "lease_behavior": "none",
+        "execution_mode": "read_only",
+        "required_by_default": True,
+        "optional_by_default": False,
+        "parallelizable": False,
+        "serialized": True,
+    },
+    "decompose": {
+        "role_family": "planner",
+        "prompt_base": "planner",
+        "permissions": ["read_task_state", "write_execution_dag"],
+        "required_inputs": ["ticket_or_task", "repo_capability_manifest"],
+        "outputs": ["scoped_dag_nodes", "dependency_edges", "ownership_hints"],
+        "lease_behavior": "none",
+        "execution_mode": "read_only",
+        "required_by_default": True,
+        "optional_by_default": False,
+        "parallelizable": True,
+        "serialized": False,
+    },
+    "scope": {
+        "role_family": "planner",
+        "prompt_base": "planner",
+        "permissions": ["read_files", "read_graph_facts", "write_scoping_notes"],
+        "required_inputs": ["task_summary", "impact_context", "confidence_signals"],
+        "outputs": ["ownership_scope", "context_pack", "blocked_candidate_reason"],
+        "lease_behavior": "read_only",
+        "execution_mode": "read_only",
+        "required_by_default": False,
+        "optional_by_default": True,
+        "required_when": ["confidence_below_direct_write_threshold", "missing_direct_ownership_signal"],
+        "parallelizable": True,
+        "serialized": False,
+    },
+    "build": {
+        "role_family": "builder",
+        "prompt_base": "builder",
+        "permissions": ["read_files", "write_owned_paths", "create_patch"],
+        "required_inputs": ["task_summary", "ownership_scope", "required_leases"],
+        "outputs": ["patch", "changed_files", "validation_evidence", "integration_notes"],
+        "lease_behavior": "exclusive_write",
+        "execution_mode": "write_workers",
+        "required_by_default": True,
+        "optional_by_default": False,
+        "parallelizable": True,
+        "serialized": False,
+    },
+    "review": {
+        "role_family": "hardener",
+        "prompt_base": "hardener/reviewer",
+        "permissions": ["read_patch", "read_owned_paths", "write_review_notes"],
+        "required_inputs": ["patch", "ownership_scope", "risk_signals"],
+        "outputs": ["review_result", "risk_notes", "repair_recommendations"],
+        "lease_behavior": "read_only",
+        "execution_mode": "read_only",
+        "required_by_default": False,
+        "optional_by_default": True,
+        "required_when": ["low_confidence", "shared_ownership", "validation_failed", "integration_risk"],
+        "parallelizable": True,
+        "serialized": False,
+    },
+    "validate": {
+        "role_family": "hardener",
+        "prompt_base": "hardener/reviewer",
+        "permissions": ["run_validation_commands", "write_validation_receipts"],
+        "required_inputs": ["patch_or_worktree", "validation_plan", "capability_manifest"],
+        "outputs": ["validation_receipts", "logs", "diagnostics"],
+        "lease_behavior": "validation_budget",
+        "execution_mode": "validation",
+        "required_by_default": True,
+        "optional_by_default": False,
+        "parallelizable": True,
+        "serialized": False,
+    },
+    "repair": {
+        "role_family": "builder",
+        "prompt_base": "builder",
+        "permissions": ["read_failed_receipts", "write_owned_paths", "create_patch"],
+        "required_inputs": ["failed_validation_receipt", "failed_work_node", "ownership_scope"],
+        "outputs": ["repair_patch", "changed_files", "repair_notes"],
+        "lease_behavior": "exclusive_write",
+        "execution_mode": "write_workers",
+        "required_by_default": False,
+        "optional_by_default": False,
+        "required_when": ["required_validation_failed", "integration_conflict"],
+        "parallelizable": True,
+        "serialized": False,
+    },
+    "integrate": {
+        "role_family": "integrator",
+        "prompt_base": "integrator",
+        "permissions": ["apply_patch", "resolve_conflicts", "update_canonical_state"],
+        "required_inputs": ["accepted_patch", "review_result", "validation_receipts"],
+        "outputs": ["integrated_patch", "state_updates", "post_integration_notes"],
+        "lease_behavior": "serialized_repo",
+        "execution_mode": "mixed",
+        "required_by_default": True,
+        "optional_by_default": False,
+        "parallelizable": False,
+        "serialized": True,
+    },
+    "audit": {
+        "role_family": "hardener",
+        "prompt_base": "hardener/reviewer",
+        "permissions": ["read_runtime_state", "read_files", "write_audit_notes"],
+        "required_inputs": ["risk_signals", "dag_history", "validation_receipts"],
+        "outputs": ["audit_result", "follow_up_nodes", "calibration_notes"],
+        "lease_behavior": "read_only",
+        "execution_mode": "read_only",
+        "required_by_default": False,
+        "optional_by_default": True,
+        "required_when": ["integration_detects_risk", "shared_ownership", "repeated_failures"],
+        "parallelizable": True,
+        "serialized": False,
+    },
+    "calibrate": {
+        "role_family": "planner",
+        "prompt_base": "planner",
+        "permissions": ["read_telemetry", "write_scheduler_config_recommendations"],
+        "required_inputs": ["scheduler_telemetry", "failure_history", "wall_clock_history"],
+        "outputs": ["confidence_adjustments", "throughput_notes", "follow_up_nodes"],
+        "lease_behavior": "none",
+        "execution_mode": "read_only",
+        "required_by_default": False,
+        "optional_by_default": True,
+        "parallelizable": True,
+        "serialized": False,
+    },
+}
+EXECUTION_DAG_SYSTEM_ACTION_CAPABILITIES = {
+    "ticket": {
+        "role_family": "planner",
+        "prompt_base": "planner",
+        "permissions": ["read_task_state"],
+        "required_inputs": ["ticket_or_task"],
+        "outputs": ["root_progress_node"],
+        "lease_behavior": "none",
+        "execution_mode": "read_only",
+        "required_by_default": True,
+        "optional_by_default": False,
+        "parallelizable": False,
+        "serialized": False,
+    },
+    "blocker": {
+        "role_family": "planner",
+        "prompt_base": "planner",
+        "permissions": ["read_blocker_state", "write_blocker_state"],
+        "required_inputs": ["blocker_reason"],
+        "outputs": ["blocker_status"],
+        "lease_behavior": "none",
+        "execution_mode": "read_only",
+        "required_by_default": False,
+        "optional_by_default": False,
+        "parallelizable": False,
+        "serialized": False,
+    },
+    "completion": {
+        "role_family": "integrator",
+        "prompt_base": "integrator",
+        "permissions": ["read_runtime_state", "write_completion_report"],
+        "required_inputs": ["integrated_work", "validation_receipts"],
+        "outputs": ["completion_report", "terminal_status"],
+        "lease_behavior": "none",
+        "execution_mode": "read_only",
+        "required_by_default": True,
+        "optional_by_default": False,
+        "parallelizable": False,
+        "serialized": True,
+    },
+}
+EXECUTION_DAG_OWNER_BY_ACTION = {
+    **{action: str(capability["role_family"]) for action, capability in EXECUTION_DAG_ACTION_CAPABILITIES.items()},
+    **{action: str(capability["role_family"]) for action, capability in EXECUTION_DAG_SYSTEM_ACTION_CAPABILITIES.items()},
+    "planning": "planner",
+    "scoping": "planner",
+    "building": "builder",
+    "reviewing": "hardener",
+    "validation": "hardener",
+    "integration": "integrator",
+}
+EXECUTION_DAG_DEPENDENCY_KINDS = (
+    "depends_on",
+    "blocks",
+    "validates",
+    "repairs",
+    "reviews",
+    "integrates",
+    "completes",
+    "supersedes",
+)
+EXECUTION_DAG_DEPENDENCY_MODES = {"hard", "advisory"}
+EXECUTION_DAG_READY_STATUSES = {"ready", "pending", "planned", "queued"}
+EXECUTION_DAG_ACTIVE_STATUSES = {"active", "running", "in_progress"}
+EXECUTION_DAG_BLOCKED_STATUSES = {"blocked", "blocked_on_user", "blocked_on_environment", "waiting"}
+EXECUTION_DAG_DONE_STATUSES = {
+    "done",
+    "complete",
+    "completed",
+    "candidate_done",
+    "passed",
+    "validated",
+    "reviewed",
+    "integrated",
+    "resolved",
+    "closed",
+    "superseded",
+    "skipped",
+    "scope_exhausted",
+}
+EXECUTION_DAG_TERMINAL_STATUSES = EXECUTION_DAG_DONE_STATUSES | {"failed", "cancelled"}
 IMPACT_GRAPH_NAMESPACE = "impact"
 IMPACT_GRAPH_EDGE_KINDS = (
     "likely_touches",
@@ -77,7 +323,27 @@ IMPACT_GRAPH_EDGE_KINDS = (
     "relevant_context_for",
 )
 GRAPH_SNAPSHOT_RETENTION_LIMIT = 12
+GRAPH_SNAPSHOT_FILE_NODE_LIMIT = 2500
+GRAPH_SNAPSHOT_SYMBOL_NODE_LIMIT = 6000
+GRAPH_SNAPSHOT_OTHER_NODE_LIMIT = 500
+GRAPH_SNAPSHOT_EDGE_LIMIT = 12000
+GRAPH_SNAPSHOT_FACT_LIMIT = 40000
+GRAPH_FACT_VALUE_TEXT_LIMIT = 2000
 IMPACT_CONTEXT_PACK_LIMIT = 12
+SYMBOL_CONTEXT_DIRECT_SYMBOL_LIMIT = 8
+SYMBOL_CONTEXT_OWNING_FILE_LIMIT = 8
+SYMBOL_CONTEXT_TEST_LIMIT = 6
+SYMBOL_CONTEXT_NEIGHBOR_LIMIT = 8
+SYMBOL_CONTEXT_INTERFACE_LIMIT = 6
+SYMBOL_CONTEXT_EXCLUDED_LIMIT = 8
+CONTEXT_PACK_INLINE_ITEM_LIMIT = 3
+CONTEXT_PACK_INLINE_SYMBOL_LIMIT = 3
+RUNTIME_PHASE_TIMING_RETENTION_LIMIT = 600
+RUNTIME_SCHEDULER_DECISION_RETENTION_LIMIT = 120
+RUNTIME_EXECUTION_GROUP_RETENTION_LIMIT = 160
+RUNTIME_PATCH_LINEAGE_DETAIL_LIMIT = 160
+RUNTIME_SLOW_PHASE_MS = 2500.0
+RUNTIME_PERFORMANCE_LATEST_LIMIT = 24
 IMPACT_CONTEXT_SECRET_BASENAMES = {
     ".env",
     ".env.local",
@@ -86,8 +352,12 @@ IMPACT_CONTEXT_SECRET_BASENAMES = {
     ".npmrc",
     ".pypirc",
 }
-RESOURCE_LEASE_SCOPE_KINDS = {"file", "directory", "module", "command", "repo"}
+RESOURCE_LEASE_SCOPE_KINDS = {"file", "directory", "module", "package", "symbol", "command", "tests", "docs", "repo"}
 RESOURCE_LEASE_STATUSES = {"active", "released", "expired", "superseded"}
+SYMBOL_RESOURCE_LEASE_MIN_EXTRACTOR_CONFIDENCE = 0.85
+SYMBOL_RESOURCE_LEASE_MIN_PARSER_CONFIDENCE = 0.85
+MODULE_RESOURCE_LEASE_MIN_CONFIDENCE = 0.85
+PACKAGE_RESOURCE_LEASE_MIN_CONFIDENCE = 0.9
 EXECUTION_GROUP_STATUSES = {"proposed", "running", "completed", "failed", "cancelled"}
 EXECUTION_GROUP_MODES = {"dry_run", "read_only", "write_workers", "validation", "mixed", "speculative_candidates"}
 CANDIDATE_LANE_STATUSES = {"proposed", "validated", "selected", "rejected", "superseded"}
@@ -103,17 +373,61 @@ PARALLELISM_ACTIVE_STATUSES = {"active", "in_progress", "running"}
 PARALLELISM_BUDGET_DEFAULT_RUNTIME_SECONDS = 3600
 PARALLELISM_BUDGET_GLOBAL_CONCURRENT = 4
 PARALLELISM_BUDGET_READ_ONLY_CONCURRENT = 3
+PARALLELISM_BUDGET_WRITE_CONCURRENT = 3
 PARALLELISM_BUDGET_VALIDATION_CONCURRENT = 2
 VALIDATION_JOB_STATUSES = {"queued", "running", "passed", "failed", "warning", "cancelled"}
 VALIDATION_COMMAND_CLASSIFICATIONS = {
     "read_only_check",
+    "unit_test",
+    "lint",
+    "typecheck",
+    "smoke",
+    "docs_check",
+    "generated_helper",
     "build",
     "test",
     "browser",
+    "resource_heavy",
+    "setup",
     "environment_repair",
     "exclusive",
     "unknown",
 }
+VALIDATION_PARALLEL_SAFE_CLASSIFICATIONS = {
+    "read_only_check",
+    "unit_test",
+    "test",
+    "lint",
+    "typecheck",
+    "smoke",
+    "docs_check",
+    "generated_helper",
+}
+VALIDATION_SERIAL_CLASSIFICATIONS = {
+    "build",
+    "browser",
+    "resource_heavy",
+    "setup",
+    "environment_repair",
+    "exclusive",
+    "unknown",
+}
+VALIDATION_PLAN_MAX_COMMANDS = 8
+VALIDATION_PLAN_TARGETED_TEST_LIMIT = 4
+VALIDATION_PLAN_BROAD_COMMAND_LIMIT = 6
+VALIDATION_INTERFACE_SUFFIXES = {".graphql", ".gql", ".proto", ".sql"}
+VALIDATION_INTERFACE_NAME_HINTS = (
+    "openapi",
+    "swagger",
+    "graphql",
+    "proto",
+    "schema",
+    "schemas",
+    "contract",
+    "contracts",
+    "route",
+    "routes",
+)
 WORKER_AGENT_STATUSES = {"queued", "running", "completed", "failed", "unavailable", "cancelled"}
 WORKER_CONTRACT_DENIED_ACTIONS = (
     "modify source files or docs",
@@ -127,6 +441,11 @@ WORKER_CONTRACT_EXPECTED_OUTPUT = (
     "Markdown read-only worker report with assignment, files inspected, findings, "
     "risks, recommendations, suggested verification, and confidence."
 )
+SCOPE_EVIDENCE_WORKER_EXPECTED_OUTPUT = (
+    "Markdown read-only scope report with ownership evidence, likely paths, likely symbols, "
+    "validation hints, risk notes, confidence, and one fenced JSON scope_evidence_records block. "
+    "Do not modify source or runtime state."
+)
 WRITE_WORKER_EXPECTED_PATCH_OUTPUT = (
     "Queued git patch, changed-files list, validation evidence, and integration notes "
     "for serialized integrator review."
@@ -135,6 +454,78 @@ PARALLEL_DRY_RUN_GROUP_LIMIT = 4
 PARALLEL_DRY_RUN_GROUP_ITEM_LIMIT = 6
 PARALLEL_DRY_RUN_BLOCKED_LIMIT = 20
 PARALLEL_WRITE_TOUCH_CONFIDENCE_THRESHOLD = 0.75
+PARALLEL_SCOPING_READ_CONFIDENCE_THRESHOLD = 0.55
+SCOPE_EVIDENCE_PROMOTION_CONFIDENCE_THRESHOLD = 0.85
+SCOPE_FANOUT_MAX_COMPLETED_ATTEMPTS = 1
+WHY_NOT_PARALLEL_EXAMPLE_LIMIT = 3
+WHY_NOT_PARALLEL_REASON_ORDER = (
+    "missing_direct_write_signal",
+    "insufficient_scoping_confidence",
+    "scope_fanout_exhausted",
+    "stale_symbol",
+    "write_surface_overlap",
+    "lease_conflict",
+    "budget_blocked",
+    "unknown_impact_write",
+    "unknown_scoping_context",
+)
+WHY_NOT_PARALLEL_REASON_GUIDANCE = {
+    "missing_direct_write_signal": {
+        "label": "Missing direct write signal",
+        "next_action": "Add direct file/path metadata or exact fresh symbol ownership evidence.",
+        "improvement_kind": "add_paths_or_exact_symbols",
+    },
+    "insufficient_scoping_confidence": {
+        "label": "Insufficient scoping confidence",
+        "next_action": "Run bounded read-only scope fanout or add concrete path and symbol hints.",
+        "improvement_kind": "run_scope_fanout",
+    },
+    "scope_fanout_exhausted": {
+        "label": "Scope fanout exhausted",
+        "next_action": "Accept serialized execution, or add stronger path and symbol hints before retrying parallel write work.",
+        "improvement_kind": "serial_fallback_after_scope",
+    },
+    "write_surface_overlap": {
+        "label": "Write surface overlap",
+        "next_action": "Split ownership into disjoint paths or symbols before launching write workers.",
+        "improvement_kind": "split_ownership",
+    },
+    "stale_symbol": {
+        "label": "Stale symbol evidence",
+        "next_action": "Refresh the codebase index, then re-run scope or impact scoring.",
+        "improvement_kind": "refresh_index",
+    },
+    "budget_blocked": {
+        "label": "Budget blocked",
+        "next_action": "Raise or free the relevant parallel worker budget.",
+        "improvement_kind": "raise_budget",
+    },
+    "lease_conflict": {
+        "label": "Lease conflict",
+        "next_action": "Wait for or release the conflicting lease, or split ownership more narrowly.",
+        "improvement_kind": "resolve_lease_conflict",
+    },
+    "unknown_impact_write": {
+        "label": "Unknown write impact",
+        "next_action": "Add a narrow path or symbol hint before considering write parallelism.",
+        "improvement_kind": "add_impact_hint",
+    },
+    "unknown_scoping_context": {
+        "label": "Unknown scoping context",
+        "next_action": "Add a starting path or run read-only discovery to gather ownership evidence.",
+        "improvement_kind": "discover_scope",
+    },
+    "insufficient_write_confidence": {
+        "label": "Insufficient write confidence",
+        "next_action": "Collect stronger direct ownership evidence before assigning write work.",
+        "improvement_kind": "raise_write_confidence",
+    },
+    "group_limit": {
+        "label": "Parallel group limit",
+        "next_action": "Raise the dry-run group limit or defer lower-priority candidates to the next wave.",
+        "improvement_kind": "raise_group_limit",
+    },
+}
 AUTOMATION_CONTROL_ID = "automation-control:default"
 AUTOMATION_CONTROL_STREAM_ID = "stream:automation-control"
 AUTOMATION_CONTROL_TASK_ID = "task:automation-control"
@@ -188,12 +579,16 @@ ORCHESTRATION_TABLES = (
     "conveyor_work_items",
     "conveyor_stage_contracts",
     "conveyor_stage_attempts",
+    "execution_dag_nodes",
+    "execution_dag_edges",
     "capability_manifests",
     "graph_snapshots",
     "graph_nodes",
     "graph_edges",
     "graph_node_facts",
     "graph_edge_facts",
+    "codebase_file_index",
+    "code_intelligence_facts",
     "resource_leases",
     "scheduler_candidates",
     "execution_groups",
@@ -202,6 +597,11 @@ ORCHESTRATION_TABLES = (
     "worker_agents",
     "worker_contracts",
     "worker_patches",
+    "worker_patch_integration_preflight",
+    "scope_evidence_records",
+    "scope_fanout_outcomes",
+    "worker_patch_lineage",
+    "runtime_phase_timings",
     "candidate_lanes",
     "validation_receipts",
     "escalations",
@@ -283,7 +683,7 @@ LOCKFILE_NAMES = {
 }
 
 GRAPH_FILE_NODE_KINDS = {"file", "test_file", "config_file", "doc_file", "lockfile"}
-CODEBASE_GRAPH_PARTIAL_REINDEX_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+CODEBASE_GRAPH_PARTIAL_REINDEX_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".rs", ".go", ".java"}
 
 CONFIG_FILE_NAMES = {
     ".babelrc",
@@ -368,6 +768,7 @@ TICKET_CAMPAIGN_HORIZONS = (
     "T3 Verification and hardening",
     "T4 Completion report and stop",
 )
+ROLE_MANIFEST_QUEUE_ROLES = ("planner", "builder", "hardener")
 
 
 def utc_now() -> str:
@@ -773,6 +1174,7 @@ def discover_repo_capabilities(target: Path) -> dict[str, Any]:
     if (target / "go.mod").exists():
         analyzers.append("go-vet")
 
+    code_intelligence_manifest = code_intelligence.detect_code_intelligence_providers(target)
     head = git_value(target, "rev-parse", "--verify", "HEAD")
     branch = git_value(target, "branch", "--show-current")
     status_porcelain = git_value(target, "status", "--porcelain=v1", "--untracked-files=no")
@@ -801,6 +1203,7 @@ def discover_repo_capabilities(target: Path) -> dict[str, Any]:
         },
         "commands": commands,
         "analyzers": sorted(set(analyzers)),
+        "code_intelligence": code_intelligence_manifest,
         "policy": {
             "canonical_state": "sqlite",
             "agents_propose_transitions": True,
@@ -943,6 +1346,55 @@ def create_codebase_graph_tables(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(snapshot_id, edge_id, fact_key),
             FOREIGN KEY(snapshot_id, edge_id) REFERENCES graph_edges(snapshot_id, edge_id) ON DELETE CASCADE
         );
+
+        CREATE TABLE IF NOT EXISTS codebase_file_index (
+            snapshot_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            node_id TEXT NOT NULL DEFAULT '',
+            content_hash TEXT NOT NULL DEFAULT '',
+            extractor_version TEXT NOT NULL DEFAULT '',
+            indexed_at TEXT NOT NULL DEFAULT '',
+            language TEXT NOT NULL DEFAULT '',
+            parse_status TEXT NOT NULL DEFAULT '',
+            symbol_count INTEGER NOT NULL DEFAULT 0,
+            failure_reason TEXT NOT NULL DEFAULT '',
+            is_stale INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(snapshot_id, path),
+            FOREIGN KEY(snapshot_id) REFERENCES graph_snapshots(snapshot_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_codebase_file_index_status
+            ON codebase_file_index(snapshot_id, parse_status, is_stale);
+        """
+    )
+
+
+def create_code_intelligence_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS code_intelligence_facts (
+            fact_id TEXT PRIMARY KEY,
+            snapshot_id TEXT NOT NULL DEFAULT '',
+            file_path TEXT NOT NULL DEFAULT '',
+            symbol_node_id TEXT NOT NULL DEFAULT '',
+            symbol_name TEXT NOT NULL DEFAULT '',
+            query_kind TEXT NOT NULL DEFAULT '',
+            language TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'code_intelligence',
+            language_server_id TEXT NOT NULL DEFAULT '',
+            language_server_version TEXT NOT NULL DEFAULT '',
+            collected_at TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0,
+            is_stale INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_code_intelligence_snapshot
+            ON code_intelligence_facts(snapshot_id, query_kind, status);
+        CREATE INDEX IF NOT EXISTS idx_code_intelligence_symbol
+            ON code_intelligence_facts(snapshot_id, symbol_node_id, collected_at);
+        CREATE INDEX IF NOT EXISTS idx_code_intelligence_path
+            ON code_intelligence_facts(snapshot_id, file_path, status);
         """
     )
 
@@ -1125,6 +1577,169 @@ def create_worker_agent_tables(conn: sqlite3.Connection) -> None:
     )
 
 
+def create_worker_patch_integration_preflight_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS worker_patch_integration_preflight (
+            preflight_id TEXT PRIMARY KEY,
+            patch_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'unknown',
+            reason_kind TEXT NOT NULL DEFAULT '',
+            safe_order INTEGER NOT NULL DEFAULT 0,
+            ready_to_integrate INTEGER NOT NULL DEFAULT 0,
+            can_proceed_after_validation INTEGER NOT NULL DEFAULT 0,
+            missing_metadata INTEGER NOT NULL DEFAULT 0,
+            stale_base INTEGER NOT NULL DEFAULT 0,
+            changed_files_json TEXT NOT NULL DEFAULT '[]',
+            leases_json TEXT NOT NULL DEFAULT '[]',
+            conflict_patch_ids_json TEXT NOT NULL DEFAULT '[]',
+            dependency_node_ids_json TEXT NOT NULL DEFAULT '[]',
+            reasons_json TEXT NOT NULL DEFAULT '[]',
+            base_commit TEXT NOT NULL DEFAULT '',
+            head_commit TEXT NOT NULL DEFAULT '',
+            predicted_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(patch_id) REFERENCES worker_patches(patch_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_worker_patch_preflight_status
+            ON worker_patch_integration_preflight(status, safe_order, predicted_at);
+        CREATE INDEX IF NOT EXISTS idx_worker_patch_preflight_patch
+            ON worker_patch_integration_preflight(patch_id);
+        """
+    )
+
+
+def create_scope_evidence_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS scope_evidence_records (
+            evidence_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL DEFAULT '',
+            graph_task_node_id TEXT NOT NULL DEFAULT '',
+            dag_node_id TEXT NOT NULL DEFAULT '',
+            execution_group_id TEXT NOT NULL DEFAULT '',
+            execution_group_item_id TEXT NOT NULL DEFAULT '',
+            worker_id TEXT NOT NULL DEFAULT '',
+            worker_run_id TEXT NOT NULL DEFAULT '',
+            report_artifact_id TEXT NOT NULL DEFAULT '',
+            codebase_snapshot_id TEXT NOT NULL DEFAULT '',
+            candidate_path TEXT NOT NULL DEFAULT '',
+            owner_node_id TEXT NOT NULL DEFAULT '',
+            candidate_symbol TEXT NOT NULL DEFAULT '',
+            symbol_node_id TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0,
+            normalized_confidence REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'advisory',
+            rejection_reason TEXT NOT NULL DEFAULT '',
+            stale_context_warning TEXT NOT NULL DEFAULT '',
+            likely_tests_json TEXT NOT NULL DEFAULT '[]',
+            reasons_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_scope_evidence_task
+            ON scope_evidence_records(task_id, status, normalized_confidence);
+        CREATE INDEX IF NOT EXISTS idx_scope_evidence_worker
+            ON scope_evidence_records(worker_id, report_artifact_id);
+        CREATE INDEX IF NOT EXISTS idx_scope_evidence_owner
+            ON scope_evidence_records(codebase_snapshot_id, owner_node_id, symbol_node_id, status);
+        """
+    )
+
+
+def create_scope_fanout_outcome_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS scope_fanout_outcomes (
+            outcome_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL DEFAULT '',
+            graph_task_node_id TEXT NOT NULL DEFAULT '',
+            dag_node_id TEXT NOT NULL DEFAULT '',
+            execution_group_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            worker_count INTEGER NOT NULL DEFAULT 0,
+            completed_worker_count INTEGER NOT NULL DEFAULT 0,
+            failed_worker_count INTEGER NOT NULL DEFAULT 0,
+            report_count INTEGER NOT NULL DEFAULT 0,
+            evidence_record_count INTEGER NOT NULL DEFAULT 0,
+            accepted_count INTEGER NOT NULL DEFAULT 0,
+            advisory_count INTEGER NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0,
+            top_rejection_reasons_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_scope_fanout_outcomes_task
+            ON scope_fanout_outcomes(task_id, dag_node_id, status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_scope_fanout_outcomes_group
+            ON scope_fanout_outcomes(execution_group_id, status);
+        """
+    )
+
+
+def create_worker_patch_lineage_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS worker_patch_lineage (
+            lineage_id TEXT PRIMARY KEY,
+            patch_id TEXT NOT NULL UNIQUE,
+            worker_id TEXT NOT NULL DEFAULT '',
+            execution_group_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL DEFAULT '',
+            source_dag_node_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'observed',
+            predicted_files_json TEXT NOT NULL DEFAULT '[]',
+            predicted_symbols_json TEXT NOT NULL DEFAULT '[]',
+            actual_files_json TEXT NOT NULL DEFAULT '[]',
+            actual_symbols_json TEXT NOT NULL DEFAULT '[]',
+            validations_json TEXT NOT NULL DEFAULT '[]',
+            conflicts_json TEXT NOT NULL DEFAULT '[]',
+            repair_node_ids_json TEXT NOT NULL DEFAULT '[]',
+            integration_result TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL DEFAULT '',
+            finished_at TEXT NOT NULL DEFAULT '',
+            elapsed_seconds REAL NOT NULL DEFAULT 0,
+            prediction_accuracy_json TEXT NOT NULL DEFAULT '{}',
+            telemetry_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(patch_id) REFERENCES worker_patches(patch_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_worker_patch_lineage_group
+            ON worker_patch_lineage(execution_group_id, status);
+        CREATE INDEX IF NOT EXISTS idx_worker_patch_lineage_task
+            ON worker_patch_lineage(task_id, status);
+        CREATE INDEX IF NOT EXISTS idx_worker_patch_lineage_worker
+            ON worker_patch_lineage(worker_id);
+        """
+    )
+
+
+def create_runtime_performance_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_phase_timings (
+            timing_id TEXT PRIMARY KEY,
+            source TEXT NOT NULL DEFAULT '',
+            run_id TEXT NOT NULL DEFAULT '',
+            phase TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT NOT NULL,
+            elapsed_ms REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'ok',
+            warning INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_phase_timings_phase
+            ON runtime_phase_timings(phase, finished_at);
+        CREATE INDEX IF NOT EXISTS idx_runtime_phase_timings_warning
+            ON runtime_phase_timings(warning, finished_at);
+        """
+    )
+
+
 def create_candidate_lane_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -1172,6 +1787,60 @@ def create_validation_job_tables(conn: sqlite3.Connection) -> None:
             ON validation_jobs(execution_group_id, status);
         CREATE INDEX IF NOT EXISTS idx_validation_jobs_status
             ON validation_jobs(status, started_at);
+        """
+    )
+
+
+def create_execution_dag_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS execution_dag_nodes (
+            node_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            owner_role TEXT NOT NULL DEFAULT '',
+            worktree_id TEXT NOT NULL DEFAULT '',
+            worktree_path TEXT NOT NULL DEFAULT '',
+            patch_id TEXT NOT NULL DEFAULT '',
+            patch_path TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT NOT NULL DEFAULT '',
+            finished_at TEXT NOT NULL DEFAULT '',
+            blocker_reason TEXT NOT NULL DEFAULT '',
+            validation_receipt_refs_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_execution_dag_nodes_task
+            ON execution_dag_nodes(task_id, action_type, status);
+        CREATE INDEX IF NOT EXISTS idx_execution_dag_nodes_status
+            ON execution_dag_nodes(status, owner_role, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_execution_dag_nodes_action
+            ON execution_dag_nodes(action_type, owner_role, status);
+
+        CREATE TABLE IF NOT EXISTS execution_dag_edges (
+            edge_id TEXT PRIMARY KEY,
+            source_node_id TEXT NOT NULL,
+            target_node_id TEXT NOT NULL,
+            dependency_kind TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0,
+            dependency_mode TEXT NOT NULL DEFAULT 'hard',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(source_node_id) REFERENCES execution_dag_nodes(node_id) ON DELETE CASCADE,
+            FOREIGN KEY(target_node_id) REFERENCES execution_dag_nodes(node_id) ON DELETE CASCADE
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_dag_edges_unique
+            ON execution_dag_edges(source_node_id, target_node_id, dependency_kind, dependency_mode);
+        CREATE INDEX IF NOT EXISTS idx_execution_dag_edges_source
+            ON execution_dag_edges(source_node_id, dependency_mode);
+        CREATE INDEX IF NOT EXISTS idx_execution_dag_edges_target
+            ON execution_dag_edges(target_node_id, dependency_mode);
         """
     )
 
@@ -1250,6 +1919,48 @@ def migrate_schema_to_12(conn: sqlite3.Connection) -> None:
     create_candidate_lane_tables(conn)
 
 
+def migrate_schema_to_13(conn: sqlite3.Connection) -> None:
+    """Add the canonical typed execution DAG runtime tables."""
+
+    create_execution_dag_tables(conn)
+
+
+def migrate_schema_to_14(conn: sqlite3.Connection) -> None:
+    """Add optional code-intelligence evidence facts."""
+
+    create_code_intelligence_tables(conn)
+
+
+def migrate_schema_to_15(conn: sqlite3.Connection) -> None:
+    """Add worker patch impact lineage and telemetry facts."""
+
+    create_worker_patch_lineage_tables(conn)
+
+
+def migrate_schema_to_16(conn: sqlite3.Connection) -> None:
+    """Add bounded runtime phase timing telemetry."""
+
+    create_runtime_performance_tables(conn)
+
+
+def migrate_schema_to_17(conn: sqlite3.Connection) -> None:
+    """Add normalized read-only scope evidence records."""
+
+    create_scope_evidence_tables(conn)
+
+
+def migrate_schema_to_18(conn: sqlite3.Connection) -> None:
+    """Add queued worker patch integration preflight records."""
+
+    create_worker_patch_integration_preflight_tables(conn)
+
+
+def migrate_schema_to_19(conn: sqlite3.Connection) -> None:
+    """Add typed read-only scope fanout outcomes."""
+
+    create_scope_fanout_outcome_tables(conn)
+
+
 SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: migrate_schema_to_4,
     5: migrate_schema_to_5,
@@ -1260,6 +1971,13 @@ SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     10: migrate_schema_to_10,
     11: migrate_schema_to_11,
     12: migrate_schema_to_12,
+    13: migrate_schema_to_13,
+    14: migrate_schema_to_14,
+    15: migrate_schema_to_15,
+    16: migrate_schema_to_16,
+    17: migrate_schema_to_17,
+    18: migrate_schema_to_18,
+    19: migrate_schema_to_19,
 }
 
 
@@ -1676,8 +2394,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     create_execution_group_tables(conn)
     create_parallelism_budget_tables(conn)
     create_worker_agent_tables(conn)
+    create_worker_patch_integration_preflight_tables(conn)
+    create_scope_evidence_tables(conn)
+    create_scope_fanout_outcome_tables(conn)
+    create_worker_patch_lineage_tables(conn)
+    create_runtime_performance_tables(conn)
     create_candidate_lane_tables(conn)
     create_validation_job_tables(conn)
+    create_execution_dag_tables(conn)
+    create_code_intelligence_tables(conn)
     conn.commit()
     apply_schema_migrations(conn, starting_version=starting_version)
     current_version = sqlite_user_version(conn)
@@ -2064,8 +2789,716 @@ def prune_graph_snapshots_conn(
     return len(stale_snapshot_ids)
 
 
+def _elapsed_ms(start: float) -> float:
+    return round(max(0.0, time.perf_counter() - start) * 1000.0, 3)
+
+
+def record_runtime_phase_timing_conn(
+    conn: sqlite3.Connection,
+    *,
+    phase: str,
+    source: str = "",
+    run_id: str = "",
+    started_at: str = "",
+    finished_at: str = "",
+    elapsed_ms: float = 0.0,
+    status: str = "ok",
+    payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    phase = str(phase or "").strip().lower().replace(" ", "_")
+    if not phase:
+        return {}
+    started_at = started_at or utc_now()
+    finished_at = finished_at or utc_now()
+    elapsed = round(max(0.0, float(elapsed_ms or 0.0)), 3)
+    status = str(status or "ok")
+    warning = bool(elapsed >= RUNTIME_SLOW_PHASE_MS or status not in {"ok", "not_run", "skipped"})
+    payload_json = dict(payload or {})
+    payload_json.setdefault("slow_phase_threshold_ms", RUNTIME_SLOW_PHASE_MS)
+    timing_id = f"runtime-phase:{sha256_text(stable_json({'phase': phase, 'source': source, 'run_id': run_id, 'started_at': started_at, 'finished_at': finished_at, 'elapsed_ms': elapsed, 'status': status}))[:24]}"
+    row = {
+        "timing_id": timing_id,
+        "source": str(source or ""),
+        "run_id": str(run_id or ""),
+        "phase": phase,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "elapsed_ms": elapsed,
+        "status": status,
+        "warning": warning,
+        "payload": payload_json,
+    }
+    try:
+        was_in_transaction = bool(conn.in_transaction)
+        conn.execute(
+            """
+            INSERT INTO runtime_phase_timings(
+                timing_id, source, run_id, phase, started_at, finished_at,
+                elapsed_ms, status, warning, payload_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(timing_id) DO UPDATE SET
+                source=excluded.source,
+                run_id=excluded.run_id,
+                phase=excluded.phase,
+                started_at=excluded.started_at,
+                finished_at=excluded.finished_at,
+                elapsed_ms=excluded.elapsed_ms,
+                status=excluded.status,
+                warning=excluded.warning,
+                payload_json=excluded.payload_json
+            """,
+            (
+                timing_id,
+                row["source"],
+                row["run_id"],
+                phase,
+                started_at,
+                finished_at,
+                elapsed,
+                status,
+                1 if warning else 0,
+                stable_json(payload_json),
+            ),
+        )
+        if not was_in_transaction:
+            conn.commit()
+    except sqlite3.Error:
+        return row
+    return row
+
+
+def _runtime_phase_timing_row(row: sqlite3.Row) -> dict[str, Any]:
+    payload = _json_cell(row["payload_json"], {})
+    return {
+        "timing_id": str(row["timing_id"]),
+        "source": str(row["source"] or ""),
+        "run_id": str(row["run_id"] or ""),
+        "phase": str(row["phase"] or ""),
+        "started_at": str(row["started_at"] or ""),
+        "finished_at": str(row["finished_at"] or ""),
+        "elapsed_ms": round(float(row["elapsed_ms"] or 0), 3),
+        "status": str(row["status"] or ""),
+        "warning": bool(int(row["warning"] or 0)),
+        "payload": payload if isinstance(payload, dict) else {},
+    }
+
+
+def runtime_phase_timings_conn(conn: sqlite3.Connection, *, limit: int = RUNTIME_PERFORMANCE_LATEST_LIMIT) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM runtime_phase_timings
+        ORDER BY finished_at DESC, rowid DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit or RUNTIME_PERFORMANCE_LATEST_LIMIT)),),
+    ).fetchall()
+    return [_runtime_phase_timing_row(row) for row in rows]
+
+
+def runtime_performance_summary_conn(conn: sqlite3.Connection) -> dict[str, Any]:
+    latest = runtime_phase_timings_conn(conn, limit=max(RUNTIME_PERFORMANCE_LATEST_LIMIT, 64))
+    latest_by_phase: dict[str, dict[str, Any]] = {}
+    for item in latest:
+        phase = str(item.get("phase") or "")
+        if phase and phase not in latest_by_phase:
+            latest_by_phase[phase] = item
+    slow_rows = conn.execute(
+        """
+        SELECT *
+        FROM runtime_phase_timings
+        WHERE warning = 1
+        ORDER BY finished_at DESC, rowid DESC
+        LIMIT ?
+        """,
+        (RUNTIME_PERFORMANCE_LATEST_LIMIT,),
+    ).fetchall()
+    phase_counts = {
+        str(row["phase"] or ""): int(row["count"] or 0)
+        for row in conn.execute(
+            """
+            SELECT phase, COUNT(*) AS count
+            FROM runtime_phase_timings
+            GROUP BY phase
+            ORDER BY phase
+            """
+        ).fetchall()
+    }
+    return {
+        "schema_version": 1,
+        "slow_phase_threshold_ms": RUNTIME_SLOW_PHASE_MS,
+        "latest_phase_timings": latest[:RUNTIME_PERFORMANCE_LATEST_LIMIT],
+        "latest_by_phase": latest_by_phase,
+        "slow_phases": [_runtime_phase_timing_row(row) for row in slow_rows],
+        "phase_counts": phase_counts,
+        "guardrails": {
+            "graph_snapshot_retention_limit": GRAPH_SNAPSHOT_RETENTION_LIMIT,
+            "graph_snapshot_file_node_limit": GRAPH_SNAPSHOT_FILE_NODE_LIMIT,
+            "graph_snapshot_symbol_node_limit": GRAPH_SNAPSHOT_SYMBOL_NODE_LIMIT,
+            "graph_snapshot_edge_limit": GRAPH_SNAPSHOT_EDGE_LIMIT,
+            "context_pack_inline_item_limit": CONTEXT_PACK_INLINE_ITEM_LIMIT,
+            "runtime_phase_timing_retention_limit": RUNTIME_PHASE_TIMING_RETENTION_LIMIT,
+            "scheduler_decision_retention_limit": RUNTIME_SCHEDULER_DECISION_RETENTION_LIMIT,
+            "patch_lineage_detail_limit": RUNTIME_PATCH_LINEAGE_DETAIL_LIMIT,
+        },
+    }
+
+
+def _compact_worker_patch_lineage_rows_conn(conn: sqlite3.Connection, *, keep: int) -> int:
+    rows = conn.execute(
+        """
+        SELECT rowid, lineage_id, predicted_files_json, predicted_symbols_json,
+               actual_files_json, actual_symbols_json, validations_json,
+               conflicts_json, repair_node_ids_json, telemetry_json, payload_json
+        FROM worker_patch_lineage
+        ORDER BY updated_at DESC, rowid DESC
+        """
+    ).fetchall()
+    compacted = 0
+    for row in rows[max(1, int(keep or RUNTIME_PATCH_LINEAGE_DETAIL_LIMIT)):]:
+        payload = _json_cell(row["payload_json"], {})
+        if isinstance(payload, dict) and payload.get("compacted"):
+            continue
+        predicted_files = _json_cell(row["predicted_files_json"], [])
+        predicted_symbols = _json_cell(row["predicted_symbols_json"], [])
+        actual_files = _json_cell(row["actual_files_json"], [])
+        actual_symbols = _json_cell(row["actual_symbols_json"], [])
+        validations = _json_cell(row["validations_json"], [])
+        conflicts = _json_cell(row["conflicts_json"], [])
+        repairs = _json_cell(row["repair_node_ids_json"], [])
+        telemetry = _json_cell(row["telemetry_json"], {})
+        compact_payload = {
+            "schema_version": 1,
+            "compacted": True,
+            "original_payload_sha256": sha256_text(str(row["payload_json"] or "")),
+            "predicted_file_count": len(predicted_files) if isinstance(predicted_files, list) else 0,
+            "predicted_symbol_count": len(predicted_symbols) if isinstance(predicted_symbols, list) else 0,
+            "actual_file_count": len(actual_files) if isinstance(actual_files, list) else 0,
+            "actual_symbol_count": len(actual_symbols) if isinstance(actual_symbols, list) else 0,
+            "validation_count": len(validations) if isinstance(validations, list) else 0,
+            "conflict_count": len(conflicts) if isinstance(conflicts, list) else 0,
+            "repair_node_count": len(repairs) if isinstance(repairs, list) else 0,
+        }
+        compact_telemetry = dict(telemetry) if isinstance(telemetry, dict) else {}
+        compact_telemetry["compacted_detail_payload"] = True
+        conn.execute(
+            """
+            UPDATE worker_patch_lineage
+            SET validations_json = '[]',
+                conflicts_json = '[]',
+                telemetry_json = ?,
+                payload_json = ?
+            WHERE rowid = ?
+            """,
+            (stable_json(compact_telemetry), stable_json(compact_payload), int(row["rowid"])),
+        )
+        compacted += 1
+    return compacted
+
+
+def _delete_old_scheduler_decisions_conn(conn: sqlite3.Connection, *, keep: int) -> int:
+    rows = conn.execute(
+        """
+        SELECT decision_id, MAX(generated_at) AS generated_at, MAX(rowid) AS latest_rowid
+        FROM scheduler_candidates
+        GROUP BY decision_id
+        ORDER BY generated_at DESC, latest_rowid DESC
+        """
+    ).fetchall()
+    stale = [str(row["decision_id"]) for row in rows[max(1, int(keep or RUNTIME_SCHEDULER_DECISION_RETENTION_LIMIT)):]]
+    if not stale:
+        return 0
+    placeholders = ",".join("?" for _ in stale)
+    deleted = int(
+        conn.execute(
+            f"DELETE FROM scheduler_candidates WHERE decision_id IN ({placeholders})",
+            tuple(stale),
+        ).rowcount
+        or 0
+    )
+    return deleted
+
+
+def _compact_old_execution_groups_conn(conn: sqlite3.Connection, *, keep: int) -> int:
+    rows = conn.execute(
+        """
+        SELECT rowid, execution_group_id, payload_json
+        FROM execution_groups
+        WHERE status IN ('completed', 'failed', 'cancelled')
+        ORDER BY created_at DESC, rowid DESC
+        """
+    ).fetchall()
+    compacted = 0
+    for row in rows[max(1, int(keep or RUNTIME_EXECUTION_GROUP_RETENTION_LIMIT)):]:
+        payload_text = str(row["payload_json"] or "{}")
+        payload = _json_cell(payload_text, {})
+        if isinstance(payload, dict) and payload.get("compacted"):
+            continue
+        group_id = str(row["execution_group_id"] or "")
+        item_count = int(
+            conn.execute(
+                "SELECT COUNT(*) AS count FROM execution_group_items WHERE execution_group_id = ?",
+                (group_id,),
+            ).fetchone()["count"]
+            or 0
+        )
+        compact_payload = {
+            "schema_version": 1,
+            "compacted": True,
+            "original_payload_sha256": sha256_text(payload_text),
+            "item_count": item_count,
+        }
+        conn.execute(
+            "UPDATE execution_groups SET payload_json = ? WHERE rowid = ?",
+            (stable_json(compact_payload), int(row["rowid"])),
+        )
+        item_rows = conn.execute(
+            "SELECT item_id, context_pack_id FROM execution_group_items WHERE execution_group_id = ?",
+            (group_id,),
+        ).fetchall()
+        for item_row in item_rows:
+            conn.execute(
+                "UPDATE execution_group_items SET payload_json = ? WHERE item_id = ?",
+                (
+                    stable_json(
+                        {
+                            "schema_version": 1,
+                            "compacted": True,
+                            "execution_group_id": group_id,
+                            "context_pack_id": str(item_row["context_pack_id"] or ""),
+                        }
+                    ),
+                    str(item_row["item_id"]),
+                ),
+            )
+        compacted += 1
+    return compacted
+
+
+def compact_runtime_telemetry_conn(conn: sqlite3.Connection) -> dict[str, Any]:
+    with conn:
+        timing_rows = conn.execute(
+            """
+            SELECT timing_id
+            FROM runtime_phase_timings
+            ORDER BY finished_at DESC, rowid DESC
+            """
+        ).fetchall()
+        stale_timing_ids = [
+            str(row["timing_id"])
+            for row in timing_rows[max(1, int(RUNTIME_PHASE_TIMING_RETENTION_LIMIT)):]
+        ]
+        deleted_timing_count = 0
+        if stale_timing_ids:
+            placeholders = ",".join("?" for _ in stale_timing_ids)
+            deleted_timing_count = int(
+                conn.execute(
+                    f"DELETE FROM runtime_phase_timings WHERE timing_id IN ({placeholders})",
+                    tuple(stale_timing_ids),
+                ).rowcount
+                or 0
+            )
+        compacted_lineage_count = _compact_worker_patch_lineage_rows_conn(conn, keep=RUNTIME_PATCH_LINEAGE_DETAIL_LIMIT)
+        deleted_scheduler_candidate_count = _delete_old_scheduler_decisions_conn(conn, keep=RUNTIME_SCHEDULER_DECISION_RETENTION_LIMIT)
+        compacted_execution_group_count = _compact_old_execution_groups_conn(conn, keep=RUNTIME_EXECUTION_GROUP_RETENTION_LIMIT)
+    return {
+        "schema_version": 1,
+        "deleted_runtime_phase_timing_count": deleted_timing_count,
+        "compacted_worker_patch_lineage_count": compacted_lineage_count,
+        "deleted_scheduler_candidate_count": deleted_scheduler_candidate_count,
+        "compacted_execution_group_count": compacted_execution_group_count,
+        "limits": {
+            "runtime_phase_timing_retention_limit": RUNTIME_PHASE_TIMING_RETENTION_LIMIT,
+            "patch_lineage_detail_limit": RUNTIME_PATCH_LINEAGE_DETAIL_LIMIT,
+            "scheduler_decision_retention_limit": RUNTIME_SCHEDULER_DECISION_RETENTION_LIMIT,
+            "execution_group_retention_limit": RUNTIME_EXECUTION_GROUP_RETENTION_LIMIT,
+        },
+    }
+
+
+def _codebase_parse_failure_reason(parse_status: str) -> str:
+    status = str(parse_status or "").strip()
+    if not status or status in {"ok", "empty", "not_applicable"}:
+        return ""
+    return status
+
+
+def _codebase_file_index_rows_conn(
+    conn: sqlite3.Connection,
+    snapshot_id: str,
+    *,
+    limit: int = 24,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT path, node_id, content_hash, extractor_version, indexed_at,
+               language, parse_status, symbol_count, failure_reason, is_stale,
+               metadata_json
+        FROM codebase_file_index
+        WHERE snapshot_id = ?
+        ORDER BY is_stale DESC,
+                 CASE WHEN failure_reason <> '' THEN 0 ELSE 1 END,
+                 path
+        LIMIT ?
+        """,
+        (snapshot_id, max(1, min(100, int(limit or 24)))),
+    ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        metadata = _json_cell(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        items.append(
+            {
+                "path": str(row["path"] or ""),
+                "node_id": str(row["node_id"] or ""),
+                "content_hash": str(row["content_hash"] or ""),
+                "extractor_version": str(row["extractor_version"] or ""),
+                "indexed_at": str(row["indexed_at"] or ""),
+                "language": str(row["language"] or ""),
+                "parse_status": str(row["parse_status"] or ""),
+                "symbol_count": int(row["symbol_count"] or 0),
+                "failure_reason": str(row["failure_reason"] or ""),
+                "is_stale": bool(int(row["is_stale"] or 0)),
+                "parser_source": str(metadata.get("parser_source") or ""),
+                "parser_confidence": float(metadata.get("parser_confidence") or 0),
+            }
+        )
+    return items
+
+
+def _codebase_file_index_counts_conn(conn: sqlite3.Connection, snapshot_id: str) -> dict[str, int]:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count,
+               SUM(CASE WHEN is_stale = 1 THEN 1 ELSE 0 END) AS stale_count,
+               SUM(CASE WHEN failure_reason <> '' THEN 1 ELSE 0 END) AS failed_count
+        FROM codebase_file_index
+        WHERE snapshot_id = ?
+        """,
+        (snapshot_id,),
+    ).fetchone()
+    if row is None:
+        return {"file_index_count": 0, "stale_file_count": 0, "failed_file_count": 0}
+    return {
+        "file_index_count": int(row["count"] or 0),
+        "stale_file_count": int(row["stale_count"] or 0),
+        "failed_file_count": int(row["failed_count"] or 0),
+    }
+
+
+def _upsert_codebase_file_index_for_paths_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    snapshot_id: str,
+    *,
+    paths: list[str] | None = None,
+    indexed_at: str | None = None,
+) -> None:
+    indexed_at = indexed_at or utc_now()
+    params: list[Any] = [snapshot_id, CODEBASE_GRAPH_NAMESPACE]
+    path_filter = ""
+    normalized_paths = sorted({normalize_path_for_brief(str(path or "")) for path in (paths or []) if str(path or "")})
+    if normalized_paths:
+        placeholders = ", ".join("?" for _ in normalized_paths)
+        path_filter = f" AND path IN ({placeholders})"
+        params.extend(normalized_paths)
+    rows = conn.execute(
+        f"""
+        SELECT node_id, path, digest, is_stale, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+          AND path <> ''
+          {path_filter}
+        ORDER BY path
+        """,
+        params,
+    ).fetchall()
+    for row in rows:
+        path = str(row["path"] or "")
+        node_id = str(row["node_id"] or "")
+        metadata = _json_cell(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        content_hash = str(row["digest"] or "")
+        current_hash = file_digest(target / path)
+        is_stale = int(row["is_stale"] or 0)
+        if not current_hash or (content_hash and current_hash != content_hash):
+            is_stale = 1
+        parse_status = str(metadata.get("parser_status") or "not_applicable")
+        failure_reason = _codebase_parse_failure_reason(parse_status)
+        symbol_row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM graph_edges
+            WHERE snapshot_id = ?
+              AND graph_namespace = ?
+              AND kind = 'owns_symbol'
+              AND from_node_id = ?
+            """,
+            (snapshot_id, CODEBASE_GRAPH_NAMESPACE, node_id),
+        ).fetchone()
+        symbol_count = int(symbol_row["count"] if symbol_row else 0)
+        index_metadata = {
+            "parser_source": str(metadata.get("parser_source") or ""),
+            "parser_confidence": float(metadata.get("parser_confidence") or 0),
+            "extension": str(metadata.get("extension") or Path(path).suffix.lower()),
+        }
+        conn.execute(
+            """
+            INSERT INTO codebase_file_index(
+                snapshot_id, path, node_id, content_hash, extractor_version, indexed_at,
+                language, parse_status, symbol_count, failure_reason, is_stale, metadata_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_id, path) DO UPDATE SET
+                node_id=excluded.node_id,
+                content_hash=excluded.content_hash,
+                extractor_version=excluded.extractor_version,
+                indexed_at=CASE
+                    WHEN excluded.content_hash <> codebase_file_index.content_hash
+                      OR excluded.extractor_version <> codebase_file_index.extractor_version
+                      OR excluded.parse_status <> codebase_file_index.parse_status
+                      OR excluded.symbol_count <> codebase_file_index.symbol_count
+                    THEN excluded.indexed_at
+                    ELSE codebase_file_index.indexed_at
+                END,
+                language=excluded.language,
+                parse_status=excluded.parse_status,
+                symbol_count=excluded.symbol_count,
+                failure_reason=excluded.failure_reason,
+                is_stale=excluded.is_stale,
+                metadata_json=excluded.metadata_json
+            """,
+            (
+                snapshot_id,
+                path,
+                node_id,
+                content_hash,
+                codebase_graph.SYMBOL_EXTRACTOR_VERSION,
+                indexed_at,
+                str(metadata.get("language") or ""),
+                parse_status,
+                symbol_count,
+                failure_reason,
+                is_stale,
+                stable_json(index_metadata),
+            ),
+        )
+
+
+def _delete_codebase_file_graph_facts_conn(conn: sqlite3.Connection, snapshot_id: str, rel: str) -> dict[str, int]:
+    rel = normalize_path_for_brief(rel)
+    file_node_rows = conn.execute(
+        """
+        SELECT node_id
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND path = ?
+          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE, rel),
+    ).fetchall()
+    symbol_node_rows = conn.execute(
+        """
+        SELECT node_id
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind = 'symbol'
+          AND path = ?
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE, rel),
+    ).fetchall()
+    file_node_ids = [str(row["node_id"]) for row in file_node_rows]
+    symbol_node_ids = [str(row["node_id"]) for row in symbol_node_rows]
+    edge_rows = conn.execute(
+        """
+        SELECT edge_id, metadata_json
+        FROM graph_edges
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    delete_edge_ids: set[str] = set()
+    related_node_ids = set(file_node_ids) | set(symbol_node_ids)
+    for edge_row in edge_rows:
+        metadata = _json_cell(edge_row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if str(metadata.get("source_path") or "") == rel or str(metadata.get("target_path") or "") == rel:
+            delete_edge_ids.add(str(edge_row["edge_id"]))
+    if delete_edge_ids:
+        conn.executemany(
+            "DELETE FROM graph_edge_facts WHERE snapshot_id = ? AND edge_id = ?",
+            [(snapshot_id, edge_id) for edge_id in sorted(delete_edge_ids)],
+        )
+        conn.executemany(
+            "DELETE FROM graph_edges WHERE snapshot_id = ? AND edge_id = ?",
+            [(snapshot_id, edge_id) for edge_id in sorted(delete_edge_ids)],
+        )
+    if related_node_ids:
+        conn.executemany(
+            "DELETE FROM graph_node_facts WHERE snapshot_id = ? AND node_id = ?",
+            [(snapshot_id, node_id) for node_id in sorted(related_node_ids)],
+        )
+        conn.executemany(
+            "DELETE FROM graph_nodes WHERE snapshot_id = ? AND node_id = ?",
+            [(snapshot_id, node_id) for node_id in sorted(related_node_ids)],
+        )
+    conn.execute("DELETE FROM codebase_file_index WHERE snapshot_id = ? AND path = ?", (snapshot_id, rel))
+    return {
+        "deleted_edge_count": len(delete_edge_ids),
+        "deleted_node_count": len(related_node_ids),
+        "deleted_file_node_count": len(file_node_ids),
+        "deleted_symbol_node_count": len(symbol_node_ids),
+    }
+
+
+def _graph_storage_node_bucket(node: Mapping[str, Any]) -> str:
+    kind = str(node.get("kind") or "")
+    if kind in GRAPH_FILE_NODE_KINDS:
+        return "file"
+    if kind == "symbol":
+        return "symbol"
+    return "other"
+
+
+def _graph_storage_node_sort_key(node: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(node.get("path") or ""),
+        str(node.get("name") or ""),
+        str(node.get("kind") or ""),
+        str(node.get("node_id") or ""),
+    )
+
+
+def _graph_storage_edge_sort_key(edge: Mapping[str, Any]) -> tuple[int, str, str, str]:
+    priority = {"owns_symbol": 0, "imports": 1, "defines_module": 2, "references": 3}
+    return (
+        priority.get(str(edge.get("kind") or ""), 9),
+        str(edge.get("from_node_id") or ""),
+        str(edge.get("to_node_id") or ""),
+        str(edge.get("edge_id") or ""),
+    )
+
+
+def _bounded_graph_facts(facts: Any, remaining_budget: int) -> tuple[list[dict[str, Any]], int]:
+    if remaining_budget <= 0:
+        return [], 0
+    bounded: list[dict[str, Any]] = []
+    consumed = 0
+    for fact in (facts if isinstance(facts, list) else []):
+        if consumed >= remaining_budget:
+            break
+        if not isinstance(fact, Mapping):
+            continue
+        item = dict(fact)
+        value = str(item.get("fact_value") or "")
+        if len(value) > GRAPH_FACT_VALUE_TEXT_LIMIT:
+            value = value[: max(0, GRAPH_FACT_VALUE_TEXT_LIMIT - 3)].rstrip() + "..."
+        item["fact_value"] = value
+        bounded.append(item)
+        consumed += 1
+    return bounded, consumed
+
+
+def _bounded_codebase_graph_for_storage(graph: Mapping[str, Any]) -> dict[str, Any]:
+    nodes = [dict(node) for node in (graph.get("nodes") if isinstance(graph.get("nodes"), list) else []) if isinstance(node, Mapping)]
+    edges = [dict(edge) for edge in (graph.get("edges") if isinstance(graph.get("edges"), list) else []) if isinstance(edge, Mapping)]
+    original_node_counts: dict[str, int] = {}
+    for node in nodes:
+        bucket = _graph_storage_node_bucket(node)
+        original_node_counts[bucket] = original_node_counts.get(bucket, 0) + 1
+
+    limits = {
+        "file": GRAPH_SNAPSHOT_FILE_NODE_LIMIT,
+        "symbol": GRAPH_SNAPSHOT_SYMBOL_NODE_LIMIT,
+        "other": GRAPH_SNAPSHOT_OTHER_NODE_LIMIT,
+        "edge": GRAPH_SNAPSHOT_EDGE_LIMIT,
+        "fact": GRAPH_SNAPSHOT_FACT_LIMIT,
+    }
+    selected_nodes: list[dict[str, Any]] = []
+    dropped_node_counts: dict[str, int] = {}
+    for bucket in ("file", "symbol", "other"):
+        bucket_nodes = sorted((node for node in nodes if _graph_storage_node_bucket(node) == bucket), key=_graph_storage_node_sort_key)
+        limit = max(0, int(limits[bucket]))
+        selected_nodes.extend(bucket_nodes[:limit])
+        if len(bucket_nodes) > limit:
+            dropped_node_counts[bucket] = len(bucket_nodes) - limit
+    selected_node_ids = {str(node.get("node_id") or "") for node in selected_nodes if str(node.get("node_id") or "")}
+    eligible_edges = [
+        edge
+        for edge in edges
+        if str(edge.get("from_node_id") or "") in selected_node_ids and str(edge.get("to_node_id") or "") in selected_node_ids
+    ]
+    edge_limit = max(0, int(GRAPH_SNAPSHOT_EDGE_LIMIT))
+    selected_edges = sorted(eligible_edges, key=_graph_storage_edge_sort_key)[:edge_limit]
+    original_fact_count = sum(
+        len(item.get("facts") if isinstance(item.get("facts"), list) else [])
+        for item in [*nodes, *edges]
+    )
+    remaining_facts = max(0, int(GRAPH_SNAPSHOT_FACT_LIMIT))
+    stored_nodes: list[dict[str, Any]] = []
+    stored_fact_count = 0
+    for node in selected_nodes:
+        item = dict(node)
+        facts, consumed = _bounded_graph_facts(item.get("facts"), remaining_facts)
+        item["facts"] = facts
+        remaining_facts -= consumed
+        stored_fact_count += consumed
+        stored_nodes.append(item)
+    stored_edges: list[dict[str, Any]] = []
+    for edge in selected_edges:
+        item = dict(edge)
+        facts, consumed = _bounded_graph_facts(item.get("facts"), remaining_facts)
+        item["facts"] = facts
+        remaining_facts -= consumed
+        stored_fact_count += consumed
+        stored_edges.append(item)
+
+    dropped_edge_count = max(0, len(edges) - len(stored_edges))
+    dropped_fact_count = max(0, original_fact_count - stored_fact_count)
+    storage_truncated = bool(dropped_node_counts or dropped_edge_count or dropped_fact_count)
+    payload = graph.get("payload") if isinstance(graph.get("payload"), Mapping) else {}
+    bounded_payload = dict(payload)
+    bounded_payload.update(
+        {
+            "storage_truncated": storage_truncated,
+            "snapshot_storage": {
+                "schema_version": 1,
+                "bounded": True,
+                "storage_truncated": storage_truncated,
+                "limits": limits,
+                "original_node_count": len(nodes),
+                "stored_node_count": len(stored_nodes),
+                "original_edge_count": len(edges),
+                "stored_edge_count": len(stored_edges),
+                "original_fact_count": original_fact_count,
+                "stored_fact_count": stored_fact_count,
+                "dropped_node_counts": dropped_node_counts,
+                "dropped_edge_count": dropped_edge_count,
+                "dropped_fact_count": dropped_fact_count,
+            },
+        }
+    )
+    return {
+        **dict(graph),
+        "nodes": stored_nodes,
+        "edges": stored_edges,
+        "payload": bounded_payload,
+    }
+
+
 def _insert_codebase_graph_conn(conn: sqlite3.Connection, graph: Mapping[str, Any]) -> None:
+    graph = _bounded_codebase_graph_for_storage(graph)
     snapshot_id = str(graph["snapshot_id"])
+    generated_at = str(graph.get("generated_at") or utc_now())
     with conn:
         conn.execute("DELETE FROM graph_snapshots WHERE snapshot_id = ?", (snapshot_id,))
         conn.execute(
@@ -2082,7 +3515,7 @@ def _insert_codebase_graph_conn(conn: sqlite3.Connection, graph: Mapping[str, An
                 snapshot_id,
                 CODEBASE_GRAPH_NAMESPACE,
                 str(graph.get("repo_root") or ""),
-                str(graph.get("generated_at") or utc_now()),
+                generated_at,
                 str(graph.get("head_commit") or ""),
                 int(graph.get("dirty_tracked_file_count") or 0),
                 str(graph.get("dirty_tracked_files_digest") or ""),
@@ -2180,6 +3613,12 @@ def _insert_codebase_graph_conn(conn: sqlite3.Connection, graph: Mapping[str, An
                     ),
                 )
         prune_graph_snapshots_conn(conn, CODEBASE_GRAPH_NAMESPACE)
+        _upsert_codebase_file_index_for_paths_conn(
+            conn,
+            Path(str(graph.get("repo_root") or ".")),
+            snapshot_id,
+            indexed_at=generated_at,
+        )
 
 
 def _codebase_graph_payload_inventory_fields(inventory: Mapping[str, Any]) -> dict[str, Any]:
@@ -2215,15 +3654,37 @@ def refresh_codebase_graph_conn(
     *,
     capability: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    graph = build_codebase_graph(target, capability=capability)
-    latest = _latest_codebase_graph_snapshot_row(conn)
-    if latest is not None and str(latest["digest"]) == str(graph["digest"]):
-        payload = graph.get("payload") if isinstance(graph.get("payload"), Mapping) else {}
-        _merge_codebase_graph_snapshot_payload_conn(conn, latest, payload)
-        refresh_codebase_graph_staleness_conn(conn, target, snapshot_id=str(latest["snapshot_id"]))
+    started_at = utc_now()
+    started = time.perf_counter()
+    status = "ok"
+    payload: dict[str, Any] = {}
+    try:
+        graph = build_codebase_graph(target, capability=capability)
+        latest = _latest_codebase_graph_snapshot_row(conn)
+        if latest is not None and str(latest["digest"]) == str(graph["digest"]):
+            graph_payload = graph.get("payload") if isinstance(graph.get("payload"), Mapping) else {}
+            _merge_codebase_graph_snapshot_payload_conn(conn, latest, graph_payload)
+            refresh_codebase_graph_staleness_conn(conn, target, snapshot_id=str(latest["snapshot_id"]))
+            payload["refresh_mode"] = "staleness_check"
+            return codebase_graph_summary(conn)
+        _insert_codebase_graph_conn(conn, graph)
+        payload["refresh_mode"] = "full"
+        payload["indexed_file_count"] = int(graph.get("indexed_file_count") or 0)
         return codebase_graph_summary(conn)
-    _insert_codebase_graph_conn(conn, graph)
-    return codebase_graph_summary(conn)
+    except Exception as exc:
+        status = "error"
+        payload["error_type"] = exc.__class__.__name__
+        raise
+    finally:
+        record_runtime_phase_timing_conn(
+            conn,
+            phase="indexing",
+            source="codebase_graph.refresh",
+            started_at=started_at,
+            elapsed_ms=_elapsed_ms(started),
+            status=status,
+            payload=payload,
+        )
 
 
 def refresh_codebase_graph(target: Path) -> dict[str, Any]:
@@ -2276,6 +3737,12 @@ def refresh_codebase_graph_staleness_conn(
                 "UPDATE graph_snapshots SET stale_node_count = ? WHERE snapshot_id = ?",
                 (stale_count, resolved_snapshot_id),
             )
+        _upsert_codebase_file_index_for_paths_conn(
+            conn,
+            target,
+            resolved_snapshot_id,
+            paths=[str(node["path"] or "") for node in file_rows],
+        )
     return stale_count
 
 
@@ -2285,6 +3752,220 @@ def _graph_counts(conn: sqlite3.Connection, snapshot_id: str, column: str, table
         (snapshot_id,),
     ).fetchall()
     return {str(row["kind"]): int(row["count"]) for row in rows}
+
+
+def _codebase_graph_snapshot_preview_conn(
+    conn: sqlite3.Connection,
+    snapshot_id: str,
+    *,
+    limit: int = 24,
+) -> dict[str, list[dict[str, Any]]]:
+    limit = max(1, min(100, int(limit or 24)))
+    file_rows = conn.execute(
+        """
+        SELECT node_id, kind, path, name, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+        ORDER BY path
+        LIMIT ?
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE, limit),
+    ).fetchall()
+    symbol_rows = conn.execute(
+        """
+        SELECT node_id, path, name, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind = 'symbol'
+        ORDER BY path, name
+        LIMIT ?
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE, limit),
+    ).fetchall()
+    ownership_rows = conn.execute(
+        """
+        SELECT source_node.path AS source_path,
+               target_node.name AS symbol_name,
+               target_node.metadata_json AS symbol_metadata,
+               edge.metadata_json AS edge_metadata
+        FROM graph_edges edge
+        JOIN graph_nodes source_node
+          ON source_node.snapshot_id = edge.snapshot_id
+         AND source_node.node_id = edge.from_node_id
+        JOIN graph_nodes target_node
+          ON target_node.snapshot_id = edge.snapshot_id
+         AND target_node.node_id = edge.to_node_id
+        WHERE edge.snapshot_id = ?
+          AND edge.graph_namespace = ?
+          AND edge.kind = 'owns_symbol'
+        ORDER BY source_node.path, target_node.name
+        LIMIT ?
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE, limit),
+    ).fetchall()
+    import_rows = conn.execute(
+        """
+        SELECT source_node.path AS source_path,
+               target_node.path AS target_path,
+               target_node.name AS target_name,
+               edge.metadata_json AS edge_metadata
+        FROM graph_edges edge
+        JOIN graph_nodes source_node
+          ON source_node.snapshot_id = edge.snapshot_id
+         AND source_node.node_id = edge.from_node_id
+        JOIN graph_nodes target_node
+          ON target_node.snapshot_id = edge.snapshot_id
+         AND target_node.node_id = edge.to_node_id
+        WHERE edge.snapshot_id = ?
+          AND edge.graph_namespace = ?
+          AND edge.kind = 'imports'
+        ORDER BY source_node.path, target_node.path, target_node.name
+        LIMIT ?
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE, limit),
+    ).fetchall()
+    semantic_rows = conn.execute(
+        """
+        SELECT source_node.path AS source_path,
+               target_node.path AS target_path,
+               edge.metadata_json AS edge_metadata
+        FROM graph_edges edge
+        JOIN graph_nodes source_node
+          ON source_node.snapshot_id = edge.snapshot_id
+         AND source_node.node_id = edge.from_node_id
+        JOIN graph_nodes target_node
+          ON target_node.snapshot_id = edge.snapshot_id
+         AND target_node.node_id = edge.to_node_id
+        WHERE edge.snapshot_id = ?
+          AND edge.graph_namespace = ?
+          AND edge.kind = 'references'
+          AND source_node.kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+          AND target_node.kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+        ORDER BY source_node.path, target_node.path
+        LIMIT ?
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE, limit),
+    ).fetchall()
+
+    file_nodes: list[dict[str, Any]] = []
+    for row in file_rows:
+        metadata = _json_cell(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        file_nodes.append(
+            {
+                "node_id": str(row["node_id"] or ""),
+                "kind": str(row["kind"] or ""),
+                "path": str(row["path"] or ""),
+                "name": str(row["name"] or ""),
+                "language": str(metadata.get("language") or ""),
+                "parse_status": str(metadata.get("parser_status") or "not_applicable"),
+                "failure_reason": _codebase_parse_failure_reason(str(metadata.get("parser_status") or "not_applicable")),
+                "confidence": float(metadata.get("parser_confidence") or 1.0),
+            }
+        )
+
+    symbol_nodes: list[dict[str, Any]] = []
+    for row in symbol_rows:
+        metadata = _json_cell(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        symbol_nodes.append(
+            {
+                "node_id": str(row["node_id"] or ""),
+                "kind": "symbol",
+                "path": str(row["path"] or ""),
+                "name": str(row["name"] or ""),
+                "symbol_kind": str(metadata.get("symbol_kind") or ""),
+                "qualified_name": str(metadata.get("qualified_name") or row["name"] or ""),
+                "owner_file_path": str(metadata.get("owner_file_path") or row["path"] or ""),
+                "file_path": str(metadata.get("file_path") or metadata.get("owner_file_path") or row["path"] or ""),
+                "package_name": str(metadata.get("package_name") or ""),
+                "module_name": str(metadata.get("module_name") or ""),
+                "visibility": str(metadata.get("visibility") or ""),
+                "language": str(metadata.get("language") or ""),
+                "exported": bool(metadata.get("exported")),
+                "confidence": float(metadata.get("confidence") or 0),
+                "extractor_confidence": float(metadata.get("extractor_confidence") or metadata.get("confidence") or 0),
+                "resolution_kind": str(metadata.get("resolution_kind") or "exact"),
+                "owning_range": metadata.get("owning_range") if isinstance(metadata.get("owning_range"), dict) else {},
+                "symbol_id": str(metadata.get("symbol_id") or ""),
+                "symbol_identity_schema_version": int(metadata.get("symbol_identity_schema_version") or 0),
+            }
+        )
+
+    ownership_edges: list[dict[str, Any]] = []
+    for row in ownership_rows:
+        edge_metadata = _json_cell(row["edge_metadata"], {})
+        if not isinstance(edge_metadata, dict):
+            edge_metadata = {}
+        symbol_metadata = _json_cell(row["symbol_metadata"], {})
+        if not isinstance(symbol_metadata, dict):
+            symbol_metadata = {}
+        ownership_edges.append(
+            {
+                "kind": "owns_symbol",
+                "source_path": str(row["source_path"] or ""),
+                "symbol_name": str(edge_metadata.get("symbol_name") or row["symbol_name"] or ""),
+                "symbol_kind": str(edge_metadata.get("symbol_kind") or symbol_metadata.get("symbol_kind") or ""),
+                "qualified_name": str(symbol_metadata.get("qualified_name") or row["symbol_name"] or ""),
+                "confidence": float(edge_metadata.get("confidence") or symbol_metadata.get("confidence") or 0),
+            }
+        )
+
+    import_edges: list[dict[str, Any]] = []
+    for row in import_rows:
+        edge_metadata = _json_cell(row["edge_metadata"], {})
+        if not isinstance(edge_metadata, dict):
+            edge_metadata = {}
+        import_edges.append(
+            {
+                "kind": "imports",
+                "source_path": str(row["source_path"] or edge_metadata.get("source_path") or ""),
+                "target_path": str(row["target_path"] or edge_metadata.get("target_path") or row["target_name"] or ""),
+                "raw_import": str(edge_metadata.get("raw_import") or edge_metadata.get("module") or ""),
+                "confidence": float(edge_metadata.get("confidence") or 0),
+                "resolved": bool(edge_metadata.get("resolved")),
+            }
+        )
+    semantic_edges: list[dict[str, Any]] = []
+    for row in semantic_rows:
+        edge_metadata = _json_cell(row["edge_metadata"], {})
+        if not isinstance(edge_metadata, dict):
+            edge_metadata = {}
+        signal_kind = str(edge_metadata.get("signal_kind") or "")
+        source = str(edge_metadata.get("source") or "")
+        if (
+            signal_kind not in getattr(codebase_graph, "SEMANTIC_REFERENCE_SIGNAL_KINDS", set())
+            and source not in {codebase_graph.SEMANTIC_REFERENCE_SOURCE, codebase_graph.CROSS_LANGUAGE_INTERFACE_SOURCE}
+        ):
+            continue
+        semantic_edges.append(
+            {
+                "kind": "references",
+                "source_path": str(row["source_path"] or edge_metadata.get("source_path") or ""),
+                "target_path": str(row["target_path"] or edge_metadata.get("target_path") or ""),
+                "signal_kind": signal_kind,
+                "source": source,
+                "resolution_kind": str(edge_metadata.get("resolution_kind") or ""),
+                "reference": str(edge_metadata.get("reference") or edge_metadata.get("matched_reference") or ""),
+                "reason": str(edge_metadata.get("reason") or ""),
+                "confidence": float(edge_metadata.get("confidence") or 0),
+                "dependency_mode": str(edge_metadata.get("dependency_mode") or "advisory"),
+                "write_candidate": bool(edge_metadata.get("write_candidate")),
+            }
+        )
+
+    return {
+        "file_nodes": file_nodes,
+        "symbol_nodes": symbol_nodes,
+        "ownership_edges": ownership_edges,
+        "import_edges": import_edges,
+        "semantic_edges": semantic_edges,
+    }
 
 
 def codebase_graph_summary(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -2310,8 +3991,19 @@ def codebase_graph_summary(conn: sqlite3.Connection) -> dict[str, Any]:
             "indexed_path_count": 0,
             "indexed_paths_truncated": False,
             "indexed_path_sample": [],
+            "storage_truncated": False,
+            "snapshot_storage": {},
             "node_counts": {},
             "edge_counts": {},
+            "file_index": [],
+            "file_index_count": 0,
+            "stale_file_count": 0,
+            "failed_file_count": 0,
+            "file_nodes": [],
+            "symbol_nodes": [],
+            "ownership_edges": [],
+            "import_edges": [],
+            "semantic_edges": [],
         }
     snapshot_id = str(row["snapshot_id"])
     payload = _json_cell(row["payload_json"], {})
@@ -2330,6 +4022,9 @@ def codebase_graph_summary(conn: sqlite3.Connection) -> dict[str, Any]:
             )
     node_counts = _graph_counts(conn, snapshot_id, "kind", "graph_nodes")
     edge_counts = _graph_counts(conn, snapshot_id, "kind", "graph_edges")
+    file_index_counts = _codebase_file_index_counts_conn(conn, snapshot_id)
+    file_index = _codebase_file_index_rows_conn(conn, snapshot_id)
+    preview = _codebase_graph_snapshot_preview_conn(conn, snapshot_id)
     latest = {
         "snapshot_id": snapshot_id,
         "graph_namespace": str(row["graph_namespace"]),
@@ -2346,6 +4041,17 @@ def codebase_graph_summary(conn: sqlite3.Connection) -> dict[str, Any]:
         "graph_inventory_digest": str(payload.get("graph_inventory_digest") or ""),
         "indexed_path_count": int(payload.get("indexed_path_count") or 0),
         "indexed_paths_truncated": bool(payload.get("indexed_paths_truncated")),
+        "storage_truncated": bool(payload.get("storage_truncated")),
+        "snapshot_storage": dict(payload.get("snapshot_storage") or {}) if isinstance(payload.get("snapshot_storage"), Mapping) else {},
+        "node_counts": node_counts,
+        "edge_counts": edge_counts,
+        "file_index": file_index,
+        **file_index_counts,
+        "file_nodes": preview["file_nodes"],
+        "symbol_nodes": preview["symbol_nodes"],
+        "ownership_edges": preview["ownership_edges"],
+        "import_edges": preview["import_edges"],
+        "semantic_edges": preview["semantic_edges"],
     }
     return {
         "schema_version": 1,
@@ -2367,9 +4073,481 @@ def codebase_graph_summary(conn: sqlite3.Connection) -> dict[str, Any]:
         "indexed_path_count": int(payload.get("indexed_path_count") or 0),
         "indexed_paths_truncated": bool(payload.get("indexed_paths_truncated")),
         "indexed_path_sample": list(payload.get("indexed_path_sample") or [])[:24],
+        "storage_truncated": bool(payload.get("storage_truncated")),
+        "snapshot_storage": dict(payload.get("snapshot_storage") or {}) if isinstance(payload.get("snapshot_storage"), Mapping) else {},
         "node_counts": node_counts,
         "edge_counts": edge_counts,
+        "file_index": file_index,
+        **file_index_counts,
+        "file_nodes": preview["file_nodes"],
+        "symbol_nodes": preview["symbol_nodes"],
+        "ownership_edges": preview["ownership_edges"],
+        "import_edges": preview["import_edges"],
+        "semantic_edges": preview["semantic_edges"],
     }
+
+
+def _code_intelligence_provider_summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    code_intel = manifest.get("code_intelligence") if isinstance(manifest.get("code_intelligence"), Mapping) else {}
+    providers = code_intel.get("providers") if isinstance(code_intel.get("providers"), list) else []
+    selected = code_intel.get("selected_by_language") if isinstance(code_intel.get("selected_by_language"), Mapping) else {}
+    return {
+        "schema_version": int(code_intel.get("schema_version") or code_intelligence.CODE_INTELLIGENCE_SCHEMA_VERSION),
+        "languages": list(code_intel.get("languages") or []),
+        "providers": [dict(item) for item in providers if isinstance(item, Mapping)],
+        "selected_by_language": {
+            str(language): dict(item)
+            for language, item in selected.items()
+            if isinstance(item, Mapping)
+        },
+        "available_count": int(code_intel.get("available_count") or 0),
+        "missing_count": int(code_intel.get("missing_count") or 0),
+        "policy": dict(code_intel.get("policy") or {}),
+    }
+
+
+def _latest_code_intelligence_facts_conn(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: str = "",
+    limit: int = 24,
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    where = ""
+    if snapshot_id:
+        where = "WHERE snapshot_id = ?"
+        params.append(snapshot_id)
+    rows = conn.execute(
+        f"""
+        SELECT fact_id, snapshot_id, file_path, symbol_node_id, symbol_name,
+               query_kind, language, status, source, language_server_id,
+               language_server_version, collected_at, confidence, is_stale,
+               payload_json
+        FROM code_intelligence_facts
+        {where}
+        ORDER BY collected_at DESC, fact_id
+        LIMIT ?
+        """,
+        (*params, int(limit)),
+    ).fetchall()
+    facts: list[dict[str, Any]] = []
+    for row in rows:
+        payload = _json_cell(row["payload_json"], {})
+        facts.append(
+            {
+                "fact_id": str(row["fact_id"]),
+                "snapshot_id": str(row["snapshot_id"]),
+                "file_path": str(row["file_path"] or ""),
+                "symbol_node_id": str(row["symbol_node_id"] or ""),
+                "symbol_name": str(row["symbol_name"] or ""),
+                "query_kind": str(row["query_kind"] or ""),
+                "language": str(row["language"] or ""),
+                "status": str(row["status"] or ""),
+                "source": str(row["source"] or ""),
+                "language_server_id": str(row["language_server_id"] or ""),
+                "language_server_version": str(row["language_server_version"] or ""),
+                "collected_at": str(row["collected_at"] or ""),
+                "confidence": float(row["confidence"] or 0),
+                "is_stale": bool(int(row["is_stale"] or 0)),
+                "payload": payload if isinstance(payload, dict) else {},
+            }
+        )
+    return facts
+
+
+def code_intelligence_summary(conn: sqlite3.Connection, target: Path, *, manifest: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    started_at = utc_now()
+    started = time.perf_counter()
+    status = "ok"
+    payload: dict[str, Any] = {}
+    try:
+        capability = manifest if isinstance(manifest, Mapping) else latest_capability_manifest(conn)
+        provider_summary = _code_intelligence_provider_summary(capability)
+        row = _latest_codebase_graph_snapshot_row(conn)
+        snapshot_id = str(row["snapshot_id"]) if row else ""
+        counts = {
+            str(item["status"] or ""): int(item["count"] or 0)
+            for item in conn.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM code_intelligence_facts
+                WHERE (? = '' OR snapshot_id = ?)
+                GROUP BY status
+                ORDER BY status
+                """,
+                (snapshot_id, snapshot_id),
+            ).fetchall()
+        }
+        diagnostic_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM code_intelligence_facts
+                WHERE (? = '' OR snapshot_id = ?)
+                  AND query_kind = 'diagnostics'
+                """,
+                (snapshot_id, snapshot_id),
+            ).fetchone()["count"]
+        )
+        payload["fact_count"] = sum(counts.values())
+        payload["provider_available_count"] = int(provider_summary.get("available_count") or 0)
+        return {
+            "schema_version": code_intelligence.CODE_INTELLIGENCE_SCHEMA_VERSION,
+            "provider_availability": provider_summary,
+            "latest_codebase_snapshot_id": snapshot_id,
+            "fact_counts": counts,
+            "fact_count": sum(counts.values()),
+            "diagnostic_count": diagnostic_count,
+            "latest_facts": _latest_code_intelligence_facts_conn(conn, snapshot_id=snapshot_id),
+            "fallback": "extractor_only" if not provider_summary["available_count"] else "extractor_plus_lsp_when_facts_exist",
+        }
+    except Exception as exc:
+        status = "error"
+        payload["error_type"] = exc.__class__.__name__
+        raise
+    finally:
+        record_runtime_phase_timing_conn(
+            conn,
+            phase="resolution",
+            source="code_intelligence.summary",
+            started_at=started_at,
+            elapsed_ms=_elapsed_ms(started),
+            status=status,
+            payload=payload,
+        )
+
+
+def _code_intelligence_insert_fact_conn(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: str,
+    file_path: str = "",
+    symbol_node_id: str = "",
+    symbol_name: str = "",
+    query_kind: str,
+    language: str = "",
+    status: str,
+    source: str,
+    language_server_id: str = "",
+    language_server_version: str = "",
+    collected_at: str = "",
+    confidence: float = 0.0,
+    is_stale: bool = False,
+    payload: Mapping[str, Any] | None = None,
+) -> str:
+    collected_at = collected_at or utc_now()
+    fact_id = "code-intelligence-fact:" + sha256_text(
+        stable_json(
+            {
+                "snapshot_id": snapshot_id,
+                "file_path": file_path,
+                "symbol_node_id": symbol_node_id,
+                "symbol_name": symbol_name,
+                "query_kind": query_kind,
+                "language": language,
+                "server": language_server_id,
+            }
+        )
+    )[:24]
+    conn.execute(
+        """
+        INSERT INTO code_intelligence_facts(
+            fact_id, snapshot_id, file_path, symbol_node_id, symbol_name,
+            query_kind, language, status, source, language_server_id,
+            language_server_version, collected_at, confidence, is_stale,
+            payload_json
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(fact_id) DO UPDATE SET
+            snapshot_id=excluded.snapshot_id,
+            file_path=excluded.file_path,
+            symbol_node_id=excluded.symbol_node_id,
+            symbol_name=excluded.symbol_name,
+            query_kind=excluded.query_kind,
+            language=excluded.language,
+            status=excluded.status,
+            source=excluded.source,
+            language_server_id=excluded.language_server_id,
+            language_server_version=excluded.language_server_version,
+            collected_at=excluded.collected_at,
+            confidence=excluded.confidence,
+            is_stale=excluded.is_stale,
+            payload_json=excluded.payload_json
+        """,
+        (
+            fact_id,
+            snapshot_id,
+            file_path,
+            symbol_node_id,
+            symbol_name,
+            query_kind,
+            language,
+            status,
+            source,
+            language_server_id,
+            language_server_version,
+            collected_at,
+            float(confidence),
+            1 if is_stale else 0,
+            stable_json(dict(payload or {})),
+        ),
+    )
+    return fact_id
+
+
+def _code_intelligence_item_path(item: Mapping[str, Any]) -> str:
+    return normalize_path_for_brief(str(item.get("file_path") or item.get("path") or item.get("uri") or ""))
+
+
+def _code_intelligence_symbol_status(
+    *,
+    symbol: Mapping[str, Any],
+    symbol_metadata: Mapping[str, Any],
+    result: code_intelligence.CodeIntelligenceResult,
+    owner_path: str,
+) -> tuple[str, float, dict[str, Any]]:
+    provider_status = str(result.status or "")
+    if provider_status in {"timeout", "unavailable", "unsupported", "error"}:
+        confidence = 0.25 if provider_status == "timeout" else 0.0
+        return provider_status, confidence, {"error": result.error, "elapsed_ms": result.elapsed_ms, "items": []}
+    symbol_name = str(symbol.get("name") or "").strip()
+    qualified_name = str(symbol_metadata.get("qualified_name") or symbol_name).strip()
+    aliases = {value for value in (symbol_name, qualified_name) if value}
+    aliases.update(value.rsplit(".", 1)[-1] for value in list(aliases) if "." in value)
+    aliases.update(value.rsplit("::", 1)[-1] for value in list(aliases) if "::" in value)
+    candidates = []
+    for raw_item in result.items:
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = dict(raw_item)
+        item_name = str(item.get("name") or item.get("symbol_name") or "").strip()
+        item_qualified = str(item.get("qualified_name") or "").strip()
+        if item_name not in aliases and item_qualified not in aliases:
+            continue
+        candidates.append(item)
+    owner_matches = [item for item in candidates if _code_intelligence_item_path(item) == owner_path]
+    candidate_paths = {_code_intelligence_item_path(item) for item in candidates if _code_intelligence_item_path(item)}
+    payload = {
+        "elapsed_ms": result.elapsed_ms,
+        "candidate_count": len(candidates),
+        "candidate_paths": sorted(candidate_paths),
+        "owner_path": owner_path,
+        "items": candidates[:8],
+    }
+    if owner_matches and len(candidate_paths) <= 1:
+        confidence = max(0.96, *(float(item.get("confidence") or 0.0) for item in owner_matches))
+        return "confirmed", confidence, payload
+    if owner_matches and len(candidate_paths) > 1:
+        return "ambiguous", 0.58, payload
+    if candidates:
+        return "downgraded", 0.42, payload
+    return "downgraded", 0.4, payload
+
+
+def refresh_code_intelligence_facts_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    provider: code_intelligence.CodeIntelligenceProvider | None = None,
+    max_symbols: int = 200,
+    refresh_graph: bool = True,
+) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    capability = latest_capability_manifest(conn) or refresh_capability_manifest_conn(conn, target)
+    if refresh_graph:
+        codebase = ensure_codebase_graph_conn(conn, target, capability=capability)
+        snapshot_id = str(codebase.get("latest_snapshot_id") or "")
+    else:
+        row = _latest_codebase_graph_snapshot_row(conn)
+        snapshot_id = str(row["snapshot_id"]) if row else ""
+    if not snapshot_id:
+        return code_intelligence_summary(conn, target, manifest=capability)
+    provider_summary = _code_intelligence_provider_summary(capability)
+    selected_by_language = provider_summary.get("selected_by_language") if isinstance(provider_summary.get("selected_by_language"), Mapping) else {}
+    languages = list(provider_summary.get("languages") or [])
+    collected_at = utc_now()
+    with conn:
+        if not provider and not selected_by_language:
+            for language in languages:
+                _code_intelligence_insert_fact_conn(
+                    conn,
+                    snapshot_id=snapshot_id,
+                    query_kind="provider_availability",
+                    language=str(language),
+                    status="unavailable",
+                    source="language_server_detection",
+                    confidence=0.0,
+                    collected_at=collected_at,
+                    payload={"reason": "no_supported_language_server_on_path"},
+                )
+            return code_intelligence_summary(conn, target, manifest=capability)
+
+        symbol_rows = conn.execute(
+            """
+            SELECT node.node_id, node.path, node.name, node.is_stale, node.metadata_json,
+                   file_index.is_stale AS file_is_stale
+            FROM graph_nodes node
+            LEFT JOIN codebase_file_index file_index
+              ON file_index.snapshot_id = node.snapshot_id
+             AND file_index.path = node.path
+            WHERE node.snapshot_id = ?
+              AND node.graph_namespace = ?
+              AND node.kind = 'symbol'
+            ORDER BY node.path, node.name
+            LIMIT ?
+            """,
+            (snapshot_id, CODEBASE_GRAPH_NAMESPACE, int(max_symbols)),
+        ).fetchall()
+        diagnostic_files = sorted({str(row["path"] or "") for row in symbol_rows if str(row["path"] or "")})[:80]
+        for row in symbol_rows:
+            metadata = _json_cell(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            language = str(metadata.get("language") or "")
+            symbol_name = str(row["name"] or "")
+            owner_path = normalize_path_for_brief(str(metadata.get("owner_file_path") or row["path"] or ""))
+            stale = bool(int(row["is_stale"] or 0) or int(row["file_is_stale"] or 0))
+            info = selected_by_language.get(language) if isinstance(selected_by_language.get(language), Mapping) else {}
+            active_provider = provider or code_intelligence.provider_from_manifest(capability, language=language)
+            provider_info = active_provider.provider_info(language)
+            server_id = str(provider_info.get("server_id") or info.get("server_id") or "none")
+            server_version = str(provider_info.get("server_version") or info.get("version") or "")
+            if stale:
+                _code_intelligence_insert_fact_conn(
+                    conn,
+                    snapshot_id=snapshot_id,
+                    file_path=owner_path,
+                    symbol_node_id=str(row["node_id"]),
+                    symbol_name=symbol_name,
+                    query_kind="workspace_symbols",
+                    language=language,
+                    status="stale_file",
+                    source="code_intelligence_staleness",
+                    language_server_id=server_id,
+                    language_server_version=server_version,
+                    collected_at=collected_at,
+                    confidence=0.2,
+                    is_stale=True,
+                    payload={"reason": "file graph is stale; LSP evidence withheld until refresh"},
+                )
+                continue
+            result = active_provider.workspace_symbols(symbol_name)
+            status, confidence, payload = _code_intelligence_symbol_status(
+                symbol={"name": symbol_name},
+                symbol_metadata=metadata,
+                result=result,
+                owner_path=owner_path,
+            )
+            result_provider = result.provider if isinstance(result.provider, Mapping) else {}
+            _code_intelligence_insert_fact_conn(
+                conn,
+                snapshot_id=snapshot_id,
+                file_path=owner_path,
+                symbol_node_id=str(row["node_id"]),
+                symbol_name=symbol_name,
+                query_kind="workspace_symbols",
+                language=language,
+                status=status,
+                source="lsp_workspace_symbols",
+                language_server_id=str(result_provider.get("server_id") or server_id),
+                language_server_version=str(result_provider.get("server_version") or server_version),
+                collected_at=collected_at,
+                confidence=confidence,
+                is_stale=False,
+                payload={
+                    **payload,
+                    "query": symbol_name,
+                    "provider_status": str(result.status or ""),
+                    "symbol_qualified_name": str(metadata.get("qualified_name") or symbol_name),
+                },
+            )
+        if provider and diagnostic_files:
+            diagnostics = provider.diagnostics(diagnostic_files)
+            diag_provider = diagnostics.provider if isinstance(diagnostics.provider, Mapping) else provider.provider_info("")
+            for index, diagnostic in enumerate(diagnostics.diagnostics):
+                if not isinstance(diagnostic, Mapping):
+                    continue
+                file_path = normalize_path_for_brief(str(diagnostic.get("file_path") or diagnostic.get("path") or ""))
+                _code_intelligence_insert_fact_conn(
+                    conn,
+                    snapshot_id=snapshot_id,
+                    file_path=file_path,
+                    query_kind="diagnostics",
+                    language=str(diagnostic.get("language") or ""),
+                    status=str(diagnostic.get("severity") or "diagnostic"),
+                    source="lsp_diagnostics",
+                    language_server_id=str(diag_provider.get("server_id") or ""),
+                    language_server_version=str(diag_provider.get("server_version") or ""),
+                    collected_at=collected_at,
+                    confidence=float(diagnostic.get("confidence") or 0.9),
+                    payload={"diagnostic": dict(diagnostic), "index": index},
+                )
+            diagnostic_status = "failed" if any(str(item.get("severity") or "").lower() == "error" for item in diagnostics.diagnostics if isinstance(item, Mapping)) else "passed"
+            upsert_validation_receipt(
+                conn,
+                receipt_id=f"receipt:code-intelligence:{sha256_text(snapshot_id)[:16]}",
+                work_item_id=CONVEYOR_WORK_ITEM_ID,
+                stage="validation",
+                kind="code_intelligence_diagnostics",
+                command=f"{str(diag_provider.get('server_id') or 'code-intelligence')} diagnostics",
+                status=diagnostic_status if diagnostics.status == "ok" else "unknown",
+                started_at=collected_at,
+                finished_at=utc_now(),
+                payload={
+                    "source": "code_intelligence",
+                    "snapshot_id": snapshot_id,
+                    "provider": dict(diag_provider),
+                    "diagnostic_count": len(diagnostics.diagnostics),
+                    "diagnostics": diagnostics.diagnostics[:24],
+                    "provider_status": diagnostics.status,
+                    "error": diagnostics.error,
+                },
+            )
+    return code_intelligence_summary(conn, target, manifest=capability)
+
+
+def _code_intelligence_evidence_by_symbol_conn(conn: sqlite3.Connection, snapshot_id: str) -> dict[str, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT symbol_node_id, status, source, language_server_id,
+               language_server_version, collected_at, confidence, is_stale,
+               payload_json
+        FROM code_intelligence_facts
+        WHERE snapshot_id = ?
+          AND query_kind = 'workspace_symbols'
+          AND symbol_node_id <> ''
+        ORDER BY collected_at DESC
+        """,
+        (snapshot_id,),
+    ).fetchall()
+    priority = {
+        "confirmed": 6,
+        "ambiguous": 5,
+        "downgraded": 4,
+        "stale_file": 3,
+        "timeout": 2,
+        "unsupported": 1,
+        "unavailable": 1,
+    }
+    evidence: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        symbol_node_id = str(row["symbol_node_id"] or "")
+        status = str(row["status"] or "")
+        payload = _json_cell(row["payload_json"], {})
+        item = {
+            "status": status,
+            "source": str(row["source"] or ""),
+            "language_server_id": str(row["language_server_id"] or ""),
+            "language_server_version": str(row["language_server_version"] or ""),
+            "collected_at": str(row["collected_at"] or ""),
+            "confidence": float(row["confidence"] or 0),
+            "is_stale": bool(int(row["is_stale"] or 0)),
+            "payload": payload if isinstance(payload, dict) else {},
+        }
+        current = evidence.get(symbol_node_id)
+        if current is None or priority.get(status, 0) > priority.get(str(current.get("status") or ""), 0):
+            evidence[symbol_node_id] = item
+    return evidence
 
 
 def _upsert_graph_node_conn(conn: sqlite3.Connection, snapshot_id: str, node: Mapping[str, Any]) -> None:
@@ -2493,6 +4671,87 @@ def _file_node_map_for_snapshot(conn: sqlite3.Connection, snapshot_id: str) -> d
     return {str(row["path"]): str(row["node_id"]) for row in rows}
 
 
+def _semantic_resolution_node_index_conn(
+    conn: sqlite3.Connection,
+    snapshot_id: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT node_id, kind, path, name, digest, is_stale, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND (kind = 'symbol' OR kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile'))
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    nodes: dict[str, dict[str, Any]] = {}
+    file_node_by_rel: dict[str, str] = {}
+    for row in rows:
+        metadata = _json_cell(row["metadata_json"], {})
+        node = {
+            "node_id": str(row["node_id"] or ""),
+            "graph_namespace": CODEBASE_GRAPH_NAMESPACE,
+            "kind": str(row["kind"] or ""),
+            "path": str(row["path"] or ""),
+            "name": str(row["name"] or ""),
+            "digest": str(row["digest"] or ""),
+            "is_stale": int(row["is_stale"] or 0),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+            "facts": [],
+        }
+        nodes[str(node["node_id"])] = node
+        if str(node["kind"]) in GRAPH_FILE_NODE_KINDS and str(node["path"]):
+            file_node_by_rel[str(node["path"])] = str(node["node_id"])
+    return nodes, file_node_by_rel
+
+
+def _delete_codebase_semantic_reference_edges_conn(conn: sqlite3.Connection, snapshot_id: str) -> int:
+    edge_rows = conn.execute(
+        """
+        SELECT edge_id, metadata_json
+        FROM graph_edges
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind = 'references'
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    semantic_sources = {codebase_graph.SEMANTIC_REFERENCE_SOURCE, codebase_graph.CROSS_LANGUAGE_INTERFACE_SOURCE}
+    semantic_signals = set(codebase_graph.SEMANTIC_REFERENCE_SIGNAL_KINDS)
+    edge_ids: list[str] = []
+    for row in edge_rows:
+        metadata = _json_cell(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            continue
+        if str(metadata.get("source") or "") in semantic_sources or str(metadata.get("signal_kind") or "") in semantic_signals:
+            edge_ids.append(str(row["edge_id"]))
+    if not edge_ids:
+        return 0
+    conn.executemany(
+        "DELETE FROM graph_edge_facts WHERE snapshot_id = ? AND edge_id = ?",
+        [(snapshot_id, edge_id) for edge_id in edge_ids],
+    )
+    conn.executemany(
+        "DELETE FROM graph_edges WHERE snapshot_id = ? AND edge_id = ?",
+        [(snapshot_id, edge_id) for edge_id in edge_ids],
+    )
+    return len(edge_ids)
+
+
+def _rebuild_codebase_semantic_reference_edges_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    snapshot_id: str,
+) -> dict[str, int]:
+    deleted = _delete_codebase_semantic_reference_edges_conn(conn, snapshot_id)
+    nodes, file_node_by_rel = _semantic_resolution_node_index_conn(conn, snapshot_id)
+    edges = codebase_graph.semantic_resolution_edges(target, nodes=nodes, file_node_by_rel=file_node_by_rel)
+    for edge in edges:
+        _upsert_graph_edge_conn(conn, snapshot_id, edge)
+    return {"deleted_semantic_edge_count": deleted, "semantic_edge_count": len(edges)}
+
+
 def refresh_codebase_graph_changed_file_conn(
     conn: sqlite3.Connection,
     target: Path,
@@ -2519,6 +4778,70 @@ def refresh_codebase_graph_changed_file_conn(
     if node_row is None:
         return refresh_codebase_graph_conn(conn, target, capability=capability)
 
+    if not (target / rel).exists():
+        with conn:
+            deleted = _delete_codebase_file_graph_facts_conn(conn, snapshot_id, rel)
+            semantic_rebuild = _rebuild_codebase_semantic_reference_edges_conn(conn, target, snapshot_id)
+            stale_count = refresh_codebase_graph_staleness_conn(conn, target, snapshot_id=snapshot_id)
+            payload = _json_cell(row["payload_json"], {})
+            if not isinstance(payload, dict):
+                payload = {}
+            payload["partial_reindex"] = {
+                "path": rel,
+                "updated_at": utc_now(),
+                "deleted_file": True,
+                **deleted,
+                **semantic_rebuild,
+            }
+            inventory = codebase_graph.build_graph_inventory(target, limit=CODEBASE_GRAPH_SCAN_LIMIT)
+            payload.update(_codebase_graph_payload_inventory_fields(inventory))
+            payload["command_signature_digest"] = codebase_graph.codebase_command_signature_digest(
+                target,
+                capability=capability,
+            )
+            payload["node_counts"] = _graph_counts(conn, snapshot_id, "kind", "graph_nodes")
+            payload["edge_counts"] = _graph_counts(conn, snapshot_id, "kind", "graph_edges")
+            head_commit, dirty_count, dirty_digest = _current_codebase_graph_git_inputs(target)
+            partial_digest = sha256_text(
+                stable_json(
+                    {
+                        "snapshot_id": snapshot_id,
+                        "previous_digest": str(row["digest"] or ""),
+                        "path": rel,
+                        "deleted_file": True,
+                        "deleted": deleted,
+                    }
+                )
+            )
+            conn.execute(
+                """
+                UPDATE graph_snapshots
+                SET stale_node_count = ?,
+                    digest = ?,
+                    generated_at = ?,
+                    head_commit = ?,
+                    dirty_tracked_file_count = ?,
+                    dirty_tracked_files_digest = ?,
+                    indexed_file_count = ?,
+                    payload_json = ?
+                WHERE snapshot_id = ?
+                """,
+                (
+                    stale_count,
+                    partial_digest,
+                    utc_now(),
+                    head_commit,
+                    dirty_count,
+                    dirty_digest,
+                    sum(payload["node_counts"].get(kind, 0) for kind in GRAPH_FILE_NODE_KINDS)
+                    if isinstance(payload.get("node_counts"), dict)
+                    else 0,
+                    stable_json(payload),
+                    snapshot_id,
+                ),
+            )
+        return codebase_graph_summary(conn)
+
     file_node_by_rel = _file_node_map_for_snapshot(conn, snapshot_id)
     file_node = codebase_graph.file_node_for_path(target, rel)
     if str(file_node.get("node_id") or "") != str(node_row["node_id"]):
@@ -2536,7 +4859,7 @@ def refresh_codebase_graph_changed_file_conn(
         FROM graph_edges
         WHERE snapshot_id = ?
           AND graph_namespace = ?
-          AND kind IN ('imports', 'references', 'defines_module', 'resolved_to')
+          AND kind IN ('imports', 'references', 'defines_module', 'resolved_to', 'owns_symbol')
         """,
         (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
     ).fetchall()
@@ -2545,6 +4868,18 @@ def refresh_codebase_graph_changed_file_conn(
         metadata = _json_cell(edge_row["metadata_json"], {})
         if isinstance(metadata, dict) and str(metadata.get("source_path") or "") == rel:
             delete_edge_ids.append(str(edge_row["edge_id"]))
+    delete_node_rows = conn.execute(
+        """
+        SELECT node_id
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind = 'symbol'
+          AND path = ?
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE, rel),
+    ).fetchall()
+    delete_node_ids = [str(row["node_id"]) for row in delete_node_rows]
 
     with conn:
         _upsert_graph_node_conn(conn, snapshot_id, file_node)
@@ -2557,10 +4892,20 @@ def refresh_codebase_graph_changed_file_conn(
                 "DELETE FROM graph_edges WHERE snapshot_id = ? AND edge_id = ?",
                 [(snapshot_id, edge_id) for edge_id in delete_edge_ids],
             )
+        if delete_node_ids:
+            conn.executemany(
+                "DELETE FROM graph_node_facts WHERE snapshot_id = ? AND node_id = ?",
+                [(snapshot_id, node_id) for node_id in delete_node_ids],
+            )
+            conn.executemany(
+                "DELETE FROM graph_nodes WHERE snapshot_id = ? AND node_id = ?",
+                [(snapshot_id, node_id) for node_id in delete_node_ids],
+            )
         for node in fragment["nodes"]:
             _upsert_graph_node_conn(conn, snapshot_id, node)
         for edge in fragment["edges"]:
             _upsert_graph_edge_conn(conn, snapshot_id, edge)
+        semantic_rebuild = _rebuild_codebase_semantic_reference_edges_conn(conn, target, snapshot_id)
         stale_count = refresh_codebase_graph_staleness_conn(conn, target, snapshot_id=snapshot_id)
         payload = _json_cell(row["payload_json"], {})
         if not isinstance(payload, dict):
@@ -2570,6 +4915,9 @@ def refresh_codebase_graph_changed_file_conn(
             "updated_at": utc_now(),
             "edge_count": len(fragment["edges"]),
             "deleted_edge_count": len(delete_edge_ids),
+            "node_count": len(fragment["nodes"]),
+            "deleted_node_count": len(delete_node_ids),
+            **semantic_rebuild,
         }
         inventory = codebase_graph.build_graph_inventory(target, limit=CODEBASE_GRAPH_SCAN_LIMIT)
         payload.update(_codebase_graph_payload_inventory_fields(inventory))
@@ -2725,13 +5073,18 @@ def _codebase_graph_inventory_diff(
 def _codebase_graph_file_changes_conn(conn: sqlite3.Connection, target: Path, snapshot_id: str) -> list[dict[str, str]]:
     rows = conn.execute(
         """
-        SELECT path, kind, digest
-        FROM graph_nodes
-        WHERE snapshot_id = ?
-          AND graph_namespace = ?
-          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
-          AND path <> ''
-        ORDER BY path
+        SELECT node.path, node.kind, node.digest,
+               file_index.content_hash AS indexed_content_hash,
+               file_index.extractor_version AS extractor_version
+        FROM graph_nodes node
+        LEFT JOIN codebase_file_index file_index
+          ON file_index.snapshot_id = node.snapshot_id
+         AND file_index.path = node.path
+        WHERE node.snapshot_id = ?
+          AND node.graph_namespace = ?
+          AND node.kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+          AND node.path <> ''
+        ORDER BY node.path
         """,
         (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
     ).fetchall()
@@ -2739,14 +5092,22 @@ def _codebase_graph_file_changes_conn(conn: sqlite3.Connection, target: Path, sn
     for row in rows:
         rel = str(row["path"] or "")
         current_digest = file_digest(target / rel)
-        if current_digest and current_digest != str(row["digest"] or ""):
+        stored_digest = str(row["digest"] or "")
+        indexed_content_hash = str(row["indexed_content_hash"] or stored_digest)
+        extractor_version = str(row["extractor_version"] or "")
+        extractor_changed = (
+            Path(rel).suffix.lower() in CODEBASE_GRAPH_PARTIAL_REINDEX_EXTENSIONS
+            and extractor_version != codebase_graph.SYMBOL_EXTRACTOR_VERSION
+        )
+        if current_digest and (current_digest != stored_digest or current_digest != indexed_content_hash or extractor_changed):
             changes.append(
                 {
                     "path": rel,
                     "kind": str(row["kind"] or ""),
                     "extension": Path(rel).suffix.lower(),
                     "current_digest": current_digest,
-                    "snapshot_digest": str(row["digest"] or ""),
+                    "snapshot_digest": stored_digest,
+                    "extractor_version": extractor_version,
                 }
             )
     return changes
@@ -3013,7 +5374,7 @@ def _task_text_values(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, Mapping):
-        for key in ("id", "ticket_id", "work_item_id", "node_id"):
+        for key in ("id", "ticket_id", "work_item_id", "node_id", "path", "file", "symbol", "name"):
             text = str(value.get(key) or "").strip()
             if text:
                 return [text]
@@ -3029,6 +5390,21 @@ def _task_text_values(value: Any) -> list[str]:
     if "," in text:
         return [part.strip() for part in text.split(",") if part.strip()]
     return [text]
+
+
+def _task_metadata_values(payload: Mapping[str, Any], keys: tuple[str, ...]) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        if key in payload:
+            values.extend(_task_text_values(payload.get(key)))
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            unique.append(text)
+    return unique
 
 
 def _task_status_done(status: Any) -> bool:
@@ -3107,6 +5483,1222 @@ def _add_task_graph_edge(edges: dict[str, dict[str, Any]], edge: Mapping[str, An
         edges[edge_id] = dict(edge)
 
 
+def _execution_dag_node_id(task_id: str, action_type: str) -> str:
+    digest = sha256_text(stable_json({"task_id": task_id, "action_type": action_type}))
+    return f"dag-node:{digest[:24]}"
+
+
+def _execution_dag_edge_id(
+    source_node_id: str,
+    target_node_id: str,
+    dependency_kind: str,
+    dependency_mode: str,
+) -> str:
+    digest = sha256_text(
+        stable_json(
+            {
+                "source": source_node_id,
+                "target": target_node_id,
+                "dependency_kind": dependency_kind,
+                "dependency_mode": dependency_mode,
+            }
+        )
+    )
+    return f"dag-edge:{digest[:24]}"
+
+
+def _execution_dag_status(value: Any, default: str = "pending") -> str:
+    text = str(value or default).strip().lower().replace(" ", "_").replace("-", "_")
+    return text or default
+
+
+def _execution_dag_canonical_action(action_type: Any) -> str:
+    action = _execution_dag_status(action_type, "")
+    return EXECUTION_DAG_LEGACY_ACTION_ALIASES.get(action, action)
+
+
+def _execution_dag_action_matches(action_type: Any, *expected: str) -> bool:
+    canonical = _execution_dag_canonical_action(action_type)
+    return canonical in {_execution_dag_canonical_action(item) for item in expected}
+
+
+def _copy_action_capability(action_type: str, capability: Mapping[str, Any]) -> dict[str, Any]:
+    copied: dict[str, Any] = {}
+    for key, value in capability.items():
+        copied[key] = list(value) if isinstance(value, list) else value
+    canonical = _execution_dag_canonical_action(action_type)
+    copied["action_type"] = canonical
+    copied["canonical_action_type"] = canonical
+    copied["legacy_aliases"] = [
+        alias for alias, target in sorted(EXECUTION_DAG_LEGACY_ACTION_ALIASES.items()) if target == canonical
+    ]
+    return copied
+
+
+def _execution_dag_action_capability(action_type: Any) -> dict[str, Any]:
+    canonical = _execution_dag_canonical_action(action_type)
+    if canonical in EXECUTION_DAG_ACTION_CAPABILITIES:
+        return _copy_action_capability(canonical, EXECUTION_DAG_ACTION_CAPABILITIES[canonical])
+    if canonical in EXECUTION_DAG_SYSTEM_ACTION_CAPABILITIES:
+        return _copy_action_capability(canonical, EXECUTION_DAG_SYSTEM_ACTION_CAPABILITIES[canonical])
+    return {
+        "action_type": canonical,
+        "canonical_action_type": canonical,
+        "role_family": EXECUTION_DAG_OWNER_BY_ACTION.get(canonical, "planner"),
+        "prompt_base": EXECUTION_DAG_OWNER_BY_ACTION.get(canonical, "planner"),
+        "permissions": [],
+        "required_inputs": [],
+        "outputs": [],
+        "lease_behavior": "unknown",
+        "execution_mode": "read_only",
+        "required_by_default": False,
+        "optional_by_default": True,
+        "parallelizable": False,
+        "serialized": False,
+        "legacy_aliases": [],
+    }
+
+
+def execution_dag_action_capabilities() -> dict[str, dict[str, Any]]:
+    return {
+        action: _execution_dag_action_capability(action)
+        for action in EXECUTION_DAG_CANONICAL_ACTION_TYPES
+    }
+
+
+def execution_dag_action_capability(action_type: Any) -> dict[str, Any]:
+    return _execution_dag_action_capability(action_type)
+
+
+def _execution_dag_owner(action_type: str, owner_role: str = "") -> str:
+    if owner_role:
+        return str(owner_role).strip() or "planner"
+    action = _execution_dag_status(action_type, "")
+    capability = _execution_dag_action_capability(action)
+    return str(EXECUTION_DAG_OWNER_BY_ACTION.get(action) or capability.get("role_family") or "planner").strip() or "planner"
+
+
+def _execution_dag_terminal(status: Any) -> bool:
+    return _execution_dag_status(status, "") in EXECUTION_DAG_TERMINAL_STATUSES
+
+
+def _execution_dag_pending(status: Any) -> bool:
+    normalized = _execution_dag_status(status, "")
+    return not normalized or normalized in EXECUTION_DAG_READY_STATUSES or normalized in EXECUTION_DAG_ACTIVE_STATUSES
+
+
+def _json_list_cell(value: Any) -> list[Any]:
+    decoded = _json_cell(value, [])
+    return decoded if isinstance(decoded, list) else []
+
+
+def upsert_execution_dag_node(
+    conn: sqlite3.Connection,
+    *,
+    node_id: str = "",
+    task_id: str,
+    action_type: str,
+    status: str,
+    owner_role: str = "",
+    worktree_id: str = "",
+    worktree_path: str = "",
+    patch_id: str = "",
+    patch_path: str = "",
+    confidence: float = 1.0,
+    attempt_count: int = 0,
+    created_at: str = "",
+    updated_at: str = "",
+    started_at: str = "",
+    finished_at: str = "",
+    blocker_reason: str = "",
+    validation_receipt_refs: list[str] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    action = _execution_dag_status(action_type, "ticket")
+    if action not in EXECUTION_DAG_NODE_ACTION_TYPES:
+        action = "ticket"
+    now = utc_now()
+    resolved_node_id = node_id or _execution_dag_node_id(task_id, action)
+    refs = [str(item) for item in (validation_receipt_refs or []) if str(item).strip()]
+    row = conn.execute(
+        "SELECT created_at, attempt_count FROM execution_dag_nodes WHERE node_id = ?",
+        (resolved_node_id,),
+    ).fetchone()
+    existing_created_at = str(row["created_at"]) if row is not None else ""
+    if row is not None and not attempt_count:
+        attempt_count = int(row["attempt_count"] or 0)
+    conn.execute(
+        """
+        INSERT INTO execution_dag_nodes(
+            node_id, task_id, action_type, status, owner_role, worktree_id, worktree_path,
+            patch_id, patch_path, confidence, attempt_count, created_at, updated_at,
+            started_at, finished_at, blocker_reason, validation_receipt_refs_json, metadata_json
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(node_id) DO UPDATE SET
+            task_id=excluded.task_id,
+            action_type=excluded.action_type,
+            status=excluded.status,
+            owner_role=excluded.owner_role,
+            worktree_id=excluded.worktree_id,
+            worktree_path=excluded.worktree_path,
+            patch_id=excluded.patch_id,
+            patch_path=excluded.patch_path,
+            confidence=excluded.confidence,
+            attempt_count=excluded.attempt_count,
+            updated_at=excluded.updated_at,
+            started_at=excluded.started_at,
+            finished_at=excluded.finished_at,
+            blocker_reason=excluded.blocker_reason,
+            validation_receipt_refs_json=excluded.validation_receipt_refs_json,
+            metadata_json=excluded.metadata_json
+        """,
+        (
+            resolved_node_id,
+            str(task_id or ""),
+            action,
+            _execution_dag_status(status),
+            _execution_dag_owner(action, owner_role),
+            str(worktree_id or ""),
+            str(worktree_path or ""),
+            str(patch_id or ""),
+            str(patch_path or ""),
+            float(confidence),
+            int(attempt_count or 0),
+            created_at or existing_created_at or now,
+            updated_at or now,
+            str(started_at or ""),
+            str(finished_at or ""),
+            str(blocker_reason or ""),
+            stable_json(refs),
+            stable_json(dict(metadata or {})),
+        ),
+    )
+    return execution_dag_node_row_to_dict(
+        conn.execute("SELECT * FROM execution_dag_nodes WHERE node_id = ?", (resolved_node_id,)).fetchone()
+    )
+
+
+def upsert_execution_dag_edge(
+    conn: sqlite3.Connection,
+    *,
+    source_node_id: str,
+    target_node_id: str,
+    dependency_kind: str,
+    reason: str = "",
+    confidence: float = 1.0,
+    dependency_mode: str = "hard",
+    edge_id: str = "",
+    created_at: str = "",
+    updated_at: str = "",
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    kind = _execution_dag_status(dependency_kind, "depends_on")
+    if kind not in EXECUTION_DAG_DEPENDENCY_KINDS:
+        kind = "depends_on"
+    mode = _execution_dag_status(dependency_mode, "hard")
+    if mode not in EXECUTION_DAG_DEPENDENCY_MODES:
+        mode = "hard"
+    resolved_edge_id = edge_id or _execution_dag_edge_id(source_node_id, target_node_id, kind, mode)
+    now = utc_now()
+    row = conn.execute(
+        "SELECT created_at FROM execution_dag_edges WHERE edge_id = ?",
+        (resolved_edge_id,),
+    ).fetchone()
+    conn.execute(
+        """
+        INSERT INTO execution_dag_edges(
+            edge_id, source_node_id, target_node_id, dependency_kind, reason,
+            confidence, dependency_mode, created_at, updated_at, metadata_json
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(edge_id) DO UPDATE SET
+            source_node_id=excluded.source_node_id,
+            target_node_id=excluded.target_node_id,
+            dependency_kind=excluded.dependency_kind,
+            reason=excluded.reason,
+            confidence=excluded.confidence,
+            dependency_mode=excluded.dependency_mode,
+            updated_at=excluded.updated_at,
+            metadata_json=excluded.metadata_json
+        """,
+        (
+            resolved_edge_id,
+            source_node_id,
+            target_node_id,
+            kind,
+            str(reason or ""),
+            float(confidence),
+            mode,
+            created_at or (str(row["created_at"]) if row is not None else "") or now,
+            updated_at or now,
+            stable_json(dict(metadata or {})),
+        ),
+    )
+    return execution_dag_edge_row_to_dict(
+        conn.execute("SELECT * FROM execution_dag_edges WHERE edge_id = ?", (resolved_edge_id,)).fetchone()
+    )
+
+
+def execution_dag_node_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    metadata = _json_cell(row["metadata_json"], {})
+    action_type = str(row["action_type"] or "")
+    capability = _execution_dag_action_capability(action_type)
+    return {
+        "id": str(row["node_id"]),
+        "node_id": str(row["node_id"]),
+        "task_id": str(row["task_id"] or ""),
+        "ticket_id": str(row["task_id"] or ""),
+        "action_type": action_type,
+        "canonical_action_type": str(capability.get("canonical_action_type") or action_type),
+        "status": str(row["status"] or ""),
+        "owner_role": str(row["owner_role"] or ""),
+        "role_family": str(capability.get("role_family") or row["owner_role"] or ""),
+        "action_capability": capability,
+        "lease_behavior": str(capability.get("lease_behavior") or ""),
+        "required_by_default": bool(capability.get("required_by_default")),
+        "optional_by_default": bool(capability.get("optional_by_default")),
+        "worktree": {
+            "id": str(row["worktree_id"] or ""),
+            "path": str(row["worktree_path"] or ""),
+        },
+        "patch": {
+            "id": str(row["patch_id"] or ""),
+            "path": str(row["patch_path"] or ""),
+        },
+        "confidence": float(row["confidence"] or 0),
+        "attempt_count": int(row["attempt_count"] or 0),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+        "started_at": str(row["started_at"] or ""),
+        "finished_at": str(row["finished_at"] or ""),
+        "blocker_reason": str(row["blocker_reason"] or ""),
+        "validation_receipt_refs": [str(item) for item in _json_list_cell(row["validation_receipt_refs_json"])],
+        "metadata": metadata if isinstance(metadata, dict) else {},
+    }
+
+
+def execution_dag_edge_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    metadata = _json_cell(row["metadata_json"], {})
+    return {
+        "id": str(row["edge_id"]),
+        "edge_id": str(row["edge_id"]),
+        "source": str(row["source_node_id"] or ""),
+        "target": str(row["target_node_id"] or ""),
+        "source_node_id": str(row["source_node_id"] or ""),
+        "target_node_id": str(row["target_node_id"] or ""),
+        "dependency_kind": str(row["dependency_kind"] or ""),
+        "reason": str(row["reason"] or ""),
+        "confidence": float(row["confidence"] or 0),
+        "dependency_mode": str(row["dependency_mode"] or "hard"),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+        "metadata": metadata if isinstance(metadata, dict) else {},
+    }
+
+
+def execution_dag_nodes_conn(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM execution_dag_nodes
+        ORDER BY task_id ASC, action_type ASC, node_id ASC
+        """
+    ).fetchall()
+    return [execution_dag_node_row_to_dict(row) for row in rows]
+
+
+def execution_dag_edges_conn(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM execution_dag_edges
+        ORDER BY dependency_mode DESC, dependency_kind ASC, source_node_id ASC, target_node_id ASC
+        """
+    ).fetchall()
+    return [execution_dag_edge_row_to_dict(row) for row in rows]
+
+
+def _execution_dag_digest(nodes: list[Mapping[str, Any]], edges: list[Mapping[str, Any]]) -> str:
+    stable_nodes = [
+        {
+            "node_id": node.get("node_id"),
+            "task_id": node.get("task_id"),
+            "action_type": node.get("action_type"),
+            "status": node.get("status"),
+            "owner_role": node.get("owner_role"),
+            "worktree": node.get("worktree"),
+            "patch": node.get("patch"),
+            "confidence": node.get("confidence"),
+            "attempt_count": node.get("attempt_count"),
+            "blocker_reason": node.get("blocker_reason"),
+            "validation_receipt_refs": node.get("validation_receipt_refs"),
+            "metadata": node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {},
+        }
+        for node in nodes
+    ]
+    stable_edges = [
+        {
+            "edge_id": edge.get("edge_id"),
+            "source": edge.get("source"),
+            "target": edge.get("target"),
+            "dependency_kind": edge.get("dependency_kind"),
+            "reason": edge.get("reason"),
+            "confidence": edge.get("confidence"),
+            "dependency_mode": edge.get("dependency_mode"),
+            "metadata": edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {},
+        }
+        for edge in edges
+    ]
+    return sha256_text(stable_json({"nodes": stable_nodes, "edges": stable_edges}))
+
+
+def _execution_dag_node_brief(node: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+    summary = str(metadata.get("summary") or metadata.get("title") or metadata.get("reason") or "")
+    if len(summary) > 140:
+        summary = summary[:137].rstrip() + "..."
+    capability = (
+        node.get("action_capability")
+        if isinstance(node.get("action_capability"), Mapping)
+        else _execution_dag_action_capability(node.get("action_type"))
+    )
+    return {
+        "node_id": str(node.get("node_id") or ""),
+        "id": str(node.get("task_id") or node.get("node_id") or ""),
+        "task_id": str(node.get("task_id") or ""),
+        "action_type": str(node.get("action_type") or ""),
+        "canonical_action_type": str(capability.get("canonical_action_type") or node.get("action_type") or ""),
+        "status": str(node.get("status") or ""),
+        "owner_role": str(node.get("owner_role") or ""),
+        "role_family": str(capability.get("role_family") or node.get("owner_role") or ""),
+        "lease_behavior": str(capability.get("lease_behavior") or ""),
+        "required_by_default": bool(capability.get("required_by_default")),
+        "optional_by_default": bool(capability.get("optional_by_default")),
+        "summary": summary,
+        "confidence": float(node.get("confidence") or 0),
+        "attempt_count": int(node.get("attempt_count") or 0),
+        "blocker_reason": str(node.get("blocker_reason") or ""),
+        "validation_receipt_refs": list(node.get("validation_receipt_refs") or []),
+    }
+
+
+def execution_dag_read_model(conn: sqlite3.Connection) -> dict[str, Any]:
+    nodes = execution_dag_nodes_conn(conn)
+    edges = execution_dag_edges_conn(conn)
+    nodes_by_id = {str(node.get("node_id") or ""): node for node in nodes}
+    hard_dependencies: dict[str, list[dict[str, Any]]] = {}
+    hard_blockers: dict[str, list[dict[str, Any]]] = {}
+    advisory_edges: list[dict[str, Any]] = []
+    for edge in edges:
+        target_id = str(edge.get("target") or "")
+        source_id = str(edge.get("source") or "")
+        source_node = nodes_by_id.get(source_id, {"node_id": source_id, "status": "unknown", "metadata": {}})
+        if str(edge.get("dependency_mode") or "hard") != "hard":
+            advisory_edges.append(edge)
+            continue
+        if str(edge.get("dependency_kind") or "") == "blocks":
+            hard_blockers.setdefault(target_id, []).append({"edge": edge, "node": source_node})
+        else:
+            hard_dependencies.setdefault(target_id, []).append({"edge": edge, "node": source_node})
+
+    ready: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    active: list[dict[str, Any]] = []
+    terminal: list[dict[str, Any]] = []
+    by_ticket: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes:
+        node_id = str(node.get("node_id") or "")
+        status = _execution_dag_status(node.get("status"), "")
+        by_ticket.setdefault(str(node.get("task_id") or ""), []).append(_execution_dag_node_brief(node))
+        blocking_reasons: list[dict[str, Any]] = []
+        if status in EXECUTION_DAG_BLOCKED_STATUSES:
+            blocking_reasons.append(
+                {
+                    "kind": "status",
+                    "status": status,
+                    "reason": str(node.get("blocker_reason") or ""),
+                }
+            )
+        for dependency in hard_dependencies.get(node_id, []):
+            dependency_node = dependency["node"]
+            dependency_status = _execution_dag_status(dependency_node.get("status"), "")
+            if not _execution_dag_terminal(dependency_status):
+                blocking_reasons.append(
+                    {
+                        "kind": "dependency",
+                        "status": dependency_status or "unknown",
+                        "reason": str((dependency.get("edge") or {}).get("reason") or ""),
+                        "dependency": _execution_dag_node_brief(dependency_node),
+                    }
+                )
+        for blocker in hard_blockers.get(node_id, []):
+            blocker_node = blocker["node"]
+            blocker_status = _execution_dag_status(blocker_node.get("status"), "")
+            if _execution_dag_pending(blocker_status) or blocker_status in EXECUTION_DAG_BLOCKED_STATUSES:
+                blocking_reasons.append(
+                    {
+                        "kind": "blocker",
+                        "status": blocker_status or "pending",
+                        "reason": str((blocker.get("edge") or {}).get("reason") or blocker_node.get("blocker_reason") or ""),
+                        "blocker": _execution_dag_node_brief(blocker_node),
+                    }
+                )
+        brief = _execution_dag_node_brief(node)
+        if status in EXECUTION_DAG_ACTIVE_STATUSES:
+            active.append(brief)
+        if _execution_dag_terminal(status):
+            terminal.append(brief)
+            continue
+        if blocking_reasons:
+            brief["blocked_reasons"] = blocking_reasons[:6]
+            blocked.append(brief)
+            continue
+        if status in EXECUTION_DAG_READY_STATUSES:
+            brief["ready_reason"] = "dependencies_resolved"
+            ready.append(brief)
+
+    node_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    for node in nodes:
+        action = str(node.get("action_type") or "")
+        node_counts[action] = node_counts.get(action, 0) + 1
+        status = str(node.get("status") or "")
+        status_counts[status] = status_counts.get(status, 0) + 1
+    edge_counts: dict[str, int] = {}
+    for edge in edges:
+        kind = str(edge.get("dependency_kind") or "")
+        edge_counts[kind] = edge_counts.get(kind, 0) + 1
+    digest = _execution_dag_digest(nodes, edges)
+    progress_nodes = [*active, *ready, *blocked, *terminal]
+    primary_node = progress_nodes[0] if progress_nodes else {}
+    return {
+        "schema_version": 1,
+        "authority": "sqlite",
+        "projection": EXECUTION_DAG_PROJECTION_NAME,
+        "digest": digest,
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "node_counts": node_counts,
+        "edge_counts": edge_counts,
+        "status_counts": status_counts,
+        "nodes": nodes,
+        "edges": edges,
+        "ready_nodes": ready[:20],
+        "blocked_nodes": blocked[:20],
+        "active_nodes": active[:20],
+        "terminal_nodes": terminal[:20],
+        "advisory_edges": advisory_edges[:20],
+        "by_ticket": by_ticket,
+        "primary_progress_node": primary_node,
+        "action_capabilities": execution_dag_action_capabilities(),
+        "policy": {
+            "canonical_scheduler_state": "execution_dag",
+            "scheduler_basis": "dag_action_capabilities",
+            "canonical_action_types": list(EXECUTION_DAG_CANONICAL_ACTION_TYPES),
+            "legacy_action_aliases": dict(EXECUTION_DAG_LEGACY_ACTION_ALIASES),
+            "hard_dependencies_block_scheduling": True,
+            "advisory_dependencies_are_context": True,
+            "integration_serialized": True,
+            "optional_specialization_blocks_only_with_hard_dependency": True,
+        },
+    }
+
+
+def execution_dag_summary(conn: sqlite3.Connection) -> dict[str, Any]:
+    model = execution_dag_read_model(conn)
+    return {
+        "schema_version": 1,
+        "authority": "sqlite",
+        "projection": EXECUTION_DAG_PROJECTION_NAME,
+        "digest": model["digest"],
+        "node_count": model["node_count"],
+        "edge_count": model["edge_count"],
+        "node_counts": model["node_counts"],
+        "edge_counts": model["edge_counts"],
+        "status_counts": model["status_counts"],
+        "ready_node_count": len(model["ready_nodes"]),
+        "blocked_node_count": len(model["blocked_nodes"]),
+        "active_node_count": len(model["active_nodes"]),
+        "primary_progress_node": model["primary_progress_node"],
+    }
+
+
+def _dag_edge(
+    conn: sqlite3.Connection,
+    source: str,
+    target: str,
+    kind: str,
+    reason: str,
+    *,
+    mode: str = "hard",
+    confidence: float = 1.0,
+    source_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not source or not target or source == target:
+        return {}
+    return upsert_execution_dag_edge(
+        conn,
+        source_node_id=source,
+        target_node_id=target,
+        dependency_kind=kind,
+        reason=reason,
+        dependency_mode=mode,
+        confidence=confidence,
+        metadata={"source": "runtime_materializer", **dict(source_metadata or {})},
+    )
+
+
+def _ticket_has_verification_evidence(ticket: Mapping[str, Any], receipt_refs: list[str] | None = None) -> bool:
+    if receipt_refs:
+        return True
+    for key in ("evidence", "checks_run", "related_commits", "validation_evidence"):
+        if _task_text_values(ticket.get(key)):
+            return True
+    return False
+
+
+def _ticket_action_status(ticket_status: str, action: str) -> str:
+    status = _execution_dag_status(ticket_status, "pending")
+    canonical = _execution_dag_canonical_action(action)
+    if action == "ticket":
+        return status
+    if status == "done":
+        return "done" if action != "completion" else "complete"
+    if status == "candidate_done":
+        if canonical in {"orchestrate", "decompose", "scope", "build"}:
+            return "done"
+        if canonical in {"review", "validate"}:
+            return "ready"
+        return "waiting"
+    if status == "in_progress":
+        if canonical in {"orchestrate", "decompose", "scope"}:
+            return "done"
+        return "running" if canonical == "build" else "waiting"
+    if status == "blocked":
+        return "blocked" if canonical in {"build", "review", "validate", "integrate"} or action == "completion" else "done"
+    if canonical in {"orchestrate", "decompose"}:
+        return "done"
+    if canonical == "scope":
+        return "ready"
+    if canonical == "build":
+        return "ready"
+    return "waiting"
+
+
+def _default_action_for_stage(stage: str) -> str:
+    normalized = _execution_dag_status(stage, "")
+    if normalized in {"intake", "planning"}:
+        return "decompose"
+    if normalized in {"discovery", "decomposition"}:
+        return "scope"
+    if normalized == "implementation":
+        return "build"
+    if normalized == "review":
+        return "review"
+    if normalized == "validation":
+        return "validate"
+    if normalized == "integration":
+        return "integrate"
+    if normalized in {"handoff", "continuation"}:
+        return "completion"
+    return "decompose"
+
+
+def _runtime_action_statuses_from_conveyor(state: Mapping[str, Any]) -> dict[str, str]:
+    stage, stage_status, _owner_role = infer_conveyor_stage(state)
+    current = _default_action_for_stage(stage)
+    order = ["orchestrate", "decompose", "scope", "build", "review", "validate", "integrate", "completion"]
+    statuses = {action: "waiting" for action in order}
+    try:
+        index = order.index(current)
+    except ValueError:
+        index = 1
+    for action in order[:index]:
+        statuses[action] = "done"
+    normalized_stage_status = _execution_dag_status(stage_status, "ready")
+    if normalized_stage_status in {"running", "blocked", "waiting", "closed"}:
+        statuses[current] = "complete" if normalized_stage_status == "closed" and current == "completion" else normalized_stage_status
+    else:
+        statuses[current] = "ready"
+    return statuses
+
+
+def _validation_receipt_refs_by_task(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    refs: dict[str, list[str]] = {}
+    rows = conn.execute("SELECT receipt_id, work_item_id, payload_json FROM validation_receipts ORDER BY receipt_id").fetchall()
+    for row in rows:
+        payload = _json_cell(row["payload_json"], {})
+        task_id = ""
+        if isinstance(payload, dict):
+            task_id = str(payload.get("ticket_id") or payload.get("task_id") or "")
+            nested = payload.get("payload")
+            if not task_id and isinstance(nested, dict):
+                task_id = str(nested.get("ticket_id") or nested.get("task_id") or "")
+        if not task_id:
+            task_id = CONVEYOR_TASK_ID if str(row["work_item_id"] or "") == CONVEYOR_WORK_ITEM_ID else str(row["work_item_id"] or "")
+        refs.setdefault(task_id, []).append(str(row["receipt_id"]))
+    return refs
+
+
+def _worker_patch_handoffs_by_task_conn(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+    rows = conn.execute(
+        """
+        SELECT patch.patch_id,
+               patch.status,
+               patch.queued_at,
+               patch.integrated_at,
+               patch.payload_json AS patch_payload_json,
+               worker.role AS worker_role,
+               worker.payload_json AS worker_payload_json
+        FROM worker_patches patch
+        LEFT JOIN worker_agents worker ON worker.worker_id = patch.worker_id
+        WHERE patch.status IN ('queued', 'validated', 'integrated')
+        ORDER BY patch.queued_at DESC, patch.created_at DESC, patch.patch_id
+        """
+    ).fetchall()
+    by_task: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        patch_payload = _json_cell(row["patch_payload_json"], {})
+        worker_payload = _json_cell(row["worker_payload_json"], {})
+        patch_payload = patch_payload if isinstance(patch_payload, Mapping) else {}
+        worker_payload = worker_payload if isinstance(worker_payload, Mapping) else {}
+        role = str(row["worker_role"] or patch_payload.get("role") or worker_payload.get("role") or "")
+        if role != "builder":
+            continue
+        task_id = str(worker_payload.get("task_id") or patch_payload.get("task_id") or "").strip()
+        if not task_id:
+            continue
+        by_task.setdefault(task_id, []).append(
+            {
+                "patch_id": str(row["patch_id"] or ""),
+                "status": str(row["status"] or ""),
+                "queued_at": str(row["queued_at"] or ""),
+                "integrated_at": str(row["integrated_at"] or ""),
+                "source": "worker_patches",
+            }
+        )
+    return by_task
+
+
+def _ticket_dag_signal_policy(ticket: Mapping[str, Any]) -> dict[str, Any]:
+    summary_text = " ".join(
+        str(ticket.get(key) or "")
+        for key in ("summary", "title", "description", "reason")
+        if str(ticket.get(key) or "").strip()
+    )
+    explicit_paths = _impact_explicit_task_paths(ticket)
+    path_mentions = _impact_path_mentions(summary_text)
+    explicit_symbols = set(
+        _task_metadata_values(
+            ticket,
+            (
+                "symbol",
+                "symbols",
+                "target_symbol",
+                "target_symbols",
+                "component",
+                "components",
+                "function",
+                "functions",
+                "class",
+                "classes",
+            ),
+        )
+    )
+    identifier_mentions = _impact_identifier_mentions(summary_text)
+    symbol_like_mentions = {
+        item
+        for item in identifier_mentions
+        if "." in item or any(char.isupper() for char in item[1:])
+    }
+    execution_mode = str(ticket.get("execution_mode") or "").strip().lower()
+    action_kind = str(ticket.get("action_kind") or ticket.get("kind") or "").strip().lower()
+    read_only = bool(ticket.get("read_only")) or execution_mode == "read_only" or any(
+        token in action_kind for token in ("inspect", "scope", "research", "analysis", "read_only", "read-only", "review_context")
+    )
+    integration_only = str(ticket.get("owner_role") or ticket.get("role") or "").strip().lower() == "integrator" or "integrat" in action_kind
+    direct_signal = bool(explicit_paths or path_mentions or explicit_symbols or symbol_like_mentions)
+    configured_confidence = ticket.get("confidence", ticket.get("impact_confidence", ticket.get("ownership_confidence")))
+    try:
+        confidence = float(configured_confidence)
+    except (TypeError, ValueError):
+        confidence = 0.9 if direct_signal else 0.6
+    high_confidence_write = (
+        not read_only
+        and direct_signal
+        and confidence >= PARALLEL_WRITE_TOUCH_CONFIDENCE_THRESHOLD
+    )
+    shared_ownership = bool(
+        ticket.get("shared_ownership")
+        or ticket.get("shared_owner")
+        or ticket.get("ownership_shared")
+        or ticket.get("multi_owner")
+    )
+    requires_scope = bool(ticket.get("requires_scope") or ticket.get("scope_required")) or read_only or not high_confidence_write
+    requires_review = bool(ticket.get("requires_review") or ticket.get("review_required")) or shared_ownership or confidence < PARALLEL_WRITE_TOUCH_CONFIDENCE_THRESHOLD
+    requires_audit = bool(ticket.get("requires_audit") or ticket.get("audit_required"))
+    return {
+        "confidence": round(max(0.0, min(1.0, confidence)), 4),
+        "direct_write_signal": direct_signal,
+        "high_confidence_write": high_confidence_write,
+        "requires_scope": requires_scope,
+        "requires_review": requires_review and not read_only,
+        "requires_audit": requires_audit,
+        "read_only": read_only,
+        "integration_only": integration_only,
+        "explicit_paths": sorted(explicit_paths),
+        "path_mentions": sorted(path_mentions),
+        "explicit_symbols": sorted(explicit_symbols),
+        "symbol_mentions": sorted(symbol_like_mentions),
+        "shared_ownership": shared_ownership,
+        "fast_path_reason": (
+            "direct path or symbol ownership signal meets write threshold"
+            if high_confidence_write
+            else "scope required until direct ownership confidence is established"
+        ),
+    }
+
+
+def _ticket_dag_action_plan(ticket_status: str, policy: Mapping[str, Any]) -> list[str]:
+    status = _execution_dag_status(ticket_status, "pending")
+    if bool(policy.get("integration_only")):
+        return ["decompose", "integrate", "completion"]
+    if bool(policy.get("read_only")):
+        return ["decompose", "scope", "completion"]
+    actions = ["decompose"]
+    if bool(policy.get("requires_scope")):
+        actions.append("scope")
+    actions.append("build")
+    if bool(policy.get("requires_review")):
+        actions.append("review")
+    if bool(policy.get("requires_audit")):
+        actions.append("audit")
+    actions.extend(["validate", "integrate", "completion"])
+    if status == "candidate_done" and "review" not in actions:
+        actions.insert(actions.index("validate"), "review")
+    return actions
+
+
+def materialize_execution_dag_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    state: Mapping[str, Any] | None = None,
+    *,
+    event_id: int | None = None,
+    event_type: str = "",
+) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    state = state or {}
+    now = utc_now()
+    active_node_ids: set[str] = set()
+    active_edge_ids: set[str] = set()
+
+    def keep(node: dict[str, Any]) -> dict[str, Any]:
+        node_id = str(node.get("node_id") or "")
+        if node_id:
+            active_node_ids.add(node_id)
+        return node
+
+    def keep_edge(edge: dict[str, Any]) -> dict[str, Any]:
+        edge_id = str(edge.get("edge_id") or "")
+        if edge_id:
+            active_edge_ids.add(edge_id)
+        return edge
+
+    receipt_refs = _validation_receipt_refs_by_task(conn)
+    worker_patch_handoffs_by_task = _worker_patch_handoffs_by_task_conn(conn)
+    active = state.get("active_role_run") if isinstance(state.get("active_role_run"), dict) else {}
+    last_decision = state.get("last_decision") if isinstance(state.get("last_decision"), dict) else {}
+    default_statuses = _runtime_action_statuses_from_conveyor(state)
+    default_ticket = keep(
+        upsert_execution_dag_node(
+            conn,
+            task_id=CONVEYOR_TASK_ID,
+            action_type="ticket",
+            status=_execution_dag_status(state.get("status"), "active"),
+            owner_role="planner",
+            confidence=1.0,
+            metadata={
+                "source": "runtime_materializer",
+                "title": "Default automation task",
+                "event_id": event_id,
+                "event_type": event_type,
+                "compatibility_projection": CONVEYOR_PROJECTION_NAME,
+            },
+        )
+    )
+    previous_node_id = str(default_ticket["node_id"])
+    for action in ["orchestrate", "decompose", "scope", "build", "review", "validate", "integrate", "completion"]:
+        role = _execution_dag_owner(action)
+        action_state = default_statuses[action]
+        worktree_id = ""
+        run_status = _execution_dag_status(active.get("status"), "")
+        if str(active.get("role") or "") == role and run_status in EXECUTION_DAG_ACTIVE_STATUSES:
+            action_state = "running"
+            worktree_id = str(active.get("worktree_id") or active.get("role") or "")
+        refs = receipt_refs.get(CONVEYOR_TASK_ID, []) if _execution_dag_action_matches(action, "validate") else []
+        node = keep(
+            upsert_execution_dag_node(
+                conn,
+                task_id=CONVEYOR_TASK_ID,
+                action_type=action,
+                status=action_state,
+                owner_role=role,
+                worktree_id=worktree_id,
+                confidence=0.85 if action in {"orchestrate", "decompose"} else 0.8,
+                attempt_count=int(
+                    conn.execute(
+                        "SELECT COUNT(*) AS count FROM runs WHERE task_id = ? AND owner_role = ?",
+                        (CONVEYOR_TASK_ID, role),
+                    ).fetchone()["count"]
+                    or 0
+                ),
+                started_at=str(active.get("started_at") or "") if worktree_id else "",
+                validation_receipt_refs=refs,
+                metadata={
+                    "source": "runtime_materializer",
+                    "title": f"Default {action} action",
+                    "decision": last_decision if isinstance(last_decision, dict) else {},
+                    "event_id": event_id,
+                    "event_type": event_type,
+                    "action_capability": _execution_dag_action_capability(action),
+                },
+            )
+        )
+        keep_edge(_dag_edge(conn, previous_node_id, str(node["node_id"]), "depends_on", f"{action} follows prior DAG action"))
+        previous_node_id = str(node["node_id"])
+
+    run = conn.execute("SELECT * FROM ticket_runs ORDER BY updated_at DESC LIMIT 1").fetchone()
+    if run is not None:
+        run_id = str(run["run_id"] or "ticket-run")
+        rows = conn.execute(
+            "SELECT * FROM ticket_items WHERE run_id = ? ORDER BY position ASC, ticket_id ASC",
+            (run_id,),
+        ).fetchall()
+        previous_ticket_completion = ""
+        ticket_node_ids: dict[str, str] = {}
+        ticket_action_nodes: dict[str, dict[str, str]] = {}
+        ticket_completion_nodes: dict[str, str] = {}
+        ticket_dependencies: list[tuple[str, str]] = []
+        for row in rows:
+            ticket = _ticket_payload_from_row(row)
+            ticket_id = str(ticket.get("id") or "").strip()
+            if not ticket_id:
+                continue
+            ticket_status = _execution_dag_status(ticket.get("status"), "pending")
+            blocker = str(ticket.get("blocker") or "")
+            ticket_receipt_refs = receipt_refs.get(ticket_id, [])
+            ticket_has_evidence = _ticket_has_verification_evidence(ticket, ticket_receipt_refs)
+            ticket_node = keep(
+                upsert_execution_dag_node(
+                    conn,
+                    task_id=ticket_id,
+                    action_type="ticket",
+                    status=ticket_status,
+                    owner_role="planner",
+                    confidence=1.0,
+                    blocker_reason=blocker if ticket_status == "blocked" else "",
+                    metadata={
+                        "source": "ticket_items",
+                        "summary": str(ticket.get("summary") or ""),
+                        "run_id": run_id,
+                        "position": int(ticket.get("position") or 0),
+                        "ticket": ticket,
+                    },
+                )
+            )
+            ticket_node_ids[ticket_id] = str(ticket_node["node_id"])
+            for dependency_id in _task_text_values(ticket.get("depends_on")):
+                if dependency_id:
+                    ticket_dependencies.append((ticket_id, dependency_id))
+            previous = str(ticket_node["node_id"])
+            policy = _ticket_dag_signal_policy(ticket)
+            scope_evidence_policy = _scope_evidence_policy_for_ticket_conn(conn, ticket_id)
+            scope_dag_node_id = _execution_dag_node_id(ticket_id, "scope")
+            scope_fanout_outcome = _scope_fanout_outcome_for_ticket_conn(conn, ticket_id, dag_node_id=scope_dag_node_id)
+            scope_fanout_exhausted = (
+                not scope_evidence_policy
+                and not bool(policy.get("read_only"))
+                and str(scope_fanout_outcome.get("status") or "") == "exhausted"
+                and int(scope_fanout_outcome.get("attempt_count") or 0) >= SCOPE_FANOUT_MAX_COMPLETED_ATTEMPTS
+            )
+            if scope_evidence_policy:
+                evidence_confidence = max(
+                    float(policy.get("confidence") or 0),
+                    float(scope_evidence_policy.get("max_confidence") or 0),
+                )
+                policy = {
+                    **dict(policy),
+                    "confidence": round(evidence_confidence, 4),
+                    "direct_write_signal": True,
+                    "high_confidence_write": evidence_confidence >= PARALLEL_WRITE_TOUCH_CONFIDENCE_THRESHOLD,
+                    "requires_scope": False,
+                    "scope_evidence_promoted": True,
+                    "scope_evidence": scope_evidence_policy,
+                    "fast_path_reason": "normalized read-only scope evidence meets write promotion threshold",
+                }
+            elif scope_fanout_exhausted:
+                policy = {
+                    **dict(policy),
+                    "scope_fanout_exhausted": True,
+                    "scope_fanout_outcome": scope_fanout_outcome,
+                    "fast_path_reason": "bounded read-only scope fanout produced no promotable evidence; serialized builder fallback is allowed",
+                }
+            action_plan = _ticket_dag_action_plan(ticket_status, policy)
+            per_ticket_nodes: dict[str, str] = {}
+            for action in action_plan:
+                refs = ticket_receipt_refs if _execution_dag_action_matches(action, "validate") else []
+                action_status = _ticket_action_status(ticket_status, action)
+                missing_done_evidence = ticket_status == "done" and not ticket_has_evidence
+                if action == "scope" and bool(policy.get("requires_scope")) and ticket_status not in {"done", "candidate_done", "in_progress", "blocked"}:
+                    action_status = "scope_exhausted" if scope_fanout_exhausted else "ready"
+                if action == "build" and bool(policy.get("requires_scope")) and ticket_status not in {"done", "candidate_done", "in_progress", "blocked"}:
+                    action_status = "ready" if scope_fanout_exhausted else "waiting"
+                if action == "build" and ticket_status == "in_progress" and worker_patch_handoffs_by_task.get(ticket_id):
+                    action_status = "done"
+                if action == "review" and ticket_status not in {"done", "candidate_done"}:
+                    action_status = "waiting"
+                if action == "integrate" and bool(policy.get("integration_only")) and ticket_status not in {"done", "candidate_done", "blocked"}:
+                    action_status = "ready"
+                if missing_done_evidence and action == "completion":
+                    action_status = "waiting"
+                node = keep(
+                    upsert_execution_dag_node(
+                        conn,
+                        task_id=ticket_id,
+                        action_type=action,
+                        status=action_status,
+                        owner_role=_execution_dag_owner(action),
+                        confidence=float(policy.get("confidence") or 0.9),
+                        blocker_reason=(
+                            blocker
+                            if ticket_status == "blocked" and (_execution_dag_action_matches(action, "build", "review", "validate", "integrate") or action == "completion")
+                            else "ticket marked done without verification evidence"
+                            if missing_done_evidence and action == "completion"
+                            else ""
+                        ),
+                        validation_receipt_refs=refs,
+                        metadata={
+                            "source": "ticket_items",
+                            "summary": str(ticket.get("summary") or ""),
+                            "run_id": run_id,
+                            "ticket_status": ticket_status,
+                            "ticket": ticket,
+                            "worker_patch_handoffs": worker_patch_handoffs_by_task.get(ticket_id, []) if action == "build" else [],
+                            "owner_role": str(ticket.get("owner_role") or ticket.get("role") or _execution_dag_owner(action)),
+                            "action_kind": str(ticket.get("action_kind") or ticket.get("kind") or ""),
+                            "execution_mode": str(ticket.get("execution_mode") or ""),
+                            "read_only": bool(policy.get("read_only")),
+                            "paths": sorted(set([*policy.get("explicit_paths", []), *policy.get("path_mentions", [])])),
+                            "symbols": sorted(set([*policy.get("explicit_symbols", []), *policy.get("symbol_mentions", [])])),
+                            "dag_fast_path": bool(policy.get("high_confidence_write")),
+                            "requires_scope": bool(policy.get("requires_scope")),
+                            "requires_review": bool(policy.get("requires_review")),
+                            "requires_audit": bool(policy.get("requires_audit")),
+                            "integration_only": bool(policy.get("integration_only")),
+                            "direct_write_signal": bool(policy.get("direct_write_signal")),
+                            "scope_evidence_promoted": bool(policy.get("scope_evidence_promoted")),
+                            "scope_evidence": policy.get("scope_evidence") if isinstance(policy.get("scope_evidence"), Mapping) else {},
+                            "scope_fanout_exhausted": bool(policy.get("scope_fanout_exhausted")),
+                            "scope_fanout_outcome": policy.get("scope_fanout_outcome") if isinstance(policy.get("scope_fanout_outcome"), Mapping) else {},
+                            "scheduler_basis": "dag_action_capabilities",
+                            "fast_path_reason": str(policy.get("fast_path_reason") or ""),
+                            "action_capability": _execution_dag_action_capability(action),
+                        },
+                    )
+                )
+                per_ticket_nodes[action] = str(node["node_id"])
+                keep_edge(_dag_edge(conn, previous, str(node["node_id"]), "depends_on", f"{action} follows prior ticket action"))
+                previous = str(node["node_id"])
+            if previous_ticket_completion:
+                keep_edge(
+                    _dag_edge(
+                        conn,
+                        previous_ticket_completion,
+                        str(ticket_node["node_id"]),
+                        "depends_on",
+                        "ticket order dependency from current ticket run",
+                        mode="advisory",
+                        confidence=0.65,
+                    )
+                )
+            previous_ticket_completion = per_ticket_nodes.get("completion", "")
+            ticket_action_nodes[ticket_id] = dict(per_ticket_nodes)
+            ticket_completion_nodes[ticket_id] = previous_ticket_completion
+            blocker_node = keep(
+                upsert_execution_dag_node(
+                    conn,
+                    task_id=ticket_id,
+                    action_type="blocker",
+                    status="pending" if blocker and ticket_status == "blocked" else "resolved",
+                    owner_role="planner",
+                    confidence=1.0,
+                    blocker_reason=blocker,
+                    metadata={
+                        "source": "ticket_items.blocker",
+                        "summary": blocker,
+                        "run_id": run_id,
+                    },
+                )
+            )
+            if blocker:
+                keep_edge(
+                    _dag_edge(
+                        conn,
+                        str(blocker_node["node_id"]),
+                        per_ticket_nodes.get("build") or per_ticket_nodes.get("scope") or str(ticket_node["node_id"]),
+                        "blocks",
+                        blocker,
+                    )
+                )
+        for ticket_id, dependency_id in ticket_dependencies:
+            target_node_id = ticket_node_ids.get(ticket_id, "")
+            source_node_id = ticket_completion_nodes.get(dependency_id, "")
+            if source_node_id and target_node_id:
+                dependency_targets = [
+                    target_node_id,
+                    *[
+                        node_id
+                        for node_id in ticket_action_nodes.get(ticket_id, {}).values()
+                        if node_id and node_id != target_node_id
+                    ],
+                ]
+                for dependency_target in dependency_targets:
+                    keep_edge(
+                        _dag_edge(
+                            conn,
+                            source_node_id,
+                            dependency_target,
+                            "depends_on",
+                            f"{ticket_id} waits for dependency {dependency_id} to complete with evidence",
+                            mode="hard",
+                            confidence=1.0,
+                            source_metadata={
+                                "source": "ticket_items.depends_on",
+                                "ticket_id": ticket_id,
+                                "depends_on": dependency_id,
+                                "dependency_contract": "done_with_evidence",
+                            },
+                        )
+                    )
+            elif target_node_id:
+                missing_node = keep(
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id=f"dag-node:missing-dependency:{sha256_text(stable_json({'ticket_id': ticket_id, 'depends_on': dependency_id}))[:20]}",
+                        task_id=ticket_id,
+                        action_type="blocker",
+                        status="pending",
+                        owner_role="planner",
+                        confidence=1.0,
+                        blocker_reason=f"missing ticket dependency: {dependency_id}",
+                        metadata={
+                            "source": "ticket_items.depends_on.missing",
+                            "summary": f"Missing dependency {dependency_id}",
+                            "ticket_id": ticket_id,
+                            "depends_on": dependency_id,
+                        },
+                    )
+                )
+                dependency_targets = [
+                    target_node_id,
+                    *[
+                        node_id
+                        for node_id in ticket_action_nodes.get(ticket_id, {}).values()
+                        if node_id and node_id != target_node_id
+                    ],
+                ]
+                for dependency_target in dependency_targets:
+                    keep_edge(
+                        _dag_edge(
+                            conn,
+                            str(missing_node["node_id"]),
+                            dependency_target,
+                            "blocks",
+                            f"missing ticket dependency: {dependency_id}",
+                            mode="hard",
+                            confidence=1.0,
+                            source_metadata={
+                                "source": "ticket_items.depends_on.missing",
+                                "ticket_id": ticket_id,
+                                "depends_on": dependency_id,
+                            },
+                        )
+                    )
+
+    for row in conn.execute("SELECT * FROM blockers ORDER BY updated_at DESC, blocker_id ASC LIMIT 100").fetchall():
+        task_id = str(row["task_id"] or CONVEYOR_TASK_ID)
+        summary = str(row["summary"] or "")
+        blocker_node = keep(
+            upsert_execution_dag_node(
+                conn,
+                node_id=f"dag-node:blocker:{sha256_text(str(row['blocker_id']))[:24]}",
+                task_id=task_id,
+                action_type="blocker",
+                status=str(row["status"] or "open"),
+                owner_role="planner",
+                confidence=1.0,
+                blocker_reason=summary,
+                metadata={
+                    "source": "blockers",
+                    "blocker_id": str(row["blocker_id"]),
+                    "kind": str(row["kind"] or ""),
+                    "summary": summary,
+                },
+            )
+        )
+        target_node_id = _execution_dag_node_id(task_id, "build")
+        if task_id == CONVEYOR_TASK_ID:
+            target_node_id = _execution_dag_node_id(CONVEYOR_TASK_ID, "decompose")
+        if conn.execute("SELECT 1 FROM execution_dag_nodes WHERE node_id = ?", (target_node_id,)).fetchone():
+            keep_edge(_dag_edge(conn, str(blocker_node["node_id"]), target_node_id, "blocks", summary or str(row["kind"] or "blocker")))
+
+    generated_source_patterns = [
+        '%"source":"runtime_materializer"%',
+        '%"source":"ticket_items"%',
+        '%"source":"ticket_items.blocker"%',
+        '%"source":"ticket_items.depends_on.missing"%',
+        '%"source":"blockers"%',
+    ]
+    if active_node_ids:
+        placeholders = ",".join("?" for _ in active_node_ids)
+        source_clause = " OR ".join("metadata_json LIKE ?" for _ in generated_source_patterns)
+        conn.execute(
+            f"""
+            DELETE FROM execution_dag_nodes
+            WHERE node_id NOT IN ({placeholders})
+              AND ({source_clause})
+            """,
+            (*sorted(active_node_ids), *generated_source_patterns),
+        )
+    generated_edge_source_patterns = [
+        '%"source":"runtime_materializer"%',
+        '%"source":"ticket_items.depends_on"%',
+        '%"source":"ticket_items.depends_on.missing"%',
+    ]
+    if active_edge_ids:
+        placeholders = ",".join("?" for _ in active_edge_ids)
+        source_clause = " OR ".join("metadata_json LIKE ?" for _ in generated_edge_source_patterns)
+        conn.execute(
+            f"""
+            DELETE FROM execution_dag_edges
+            WHERE edge_id NOT IN ({placeholders})
+              AND ({source_clause})
+            """,
+            (*sorted(active_edge_ids), *generated_edge_source_patterns),
+        )
+
+    model = execution_dag_read_model(conn)
+    payload = {**model, "generated_at": now}
+    replace_projection(conn, name=EXECUTION_DAG_PROJECTION_NAME, payload=payload, event_id=event_id)
+    return payload
+
+
 def _ticket_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
     payload = _json_cell(row["payload_json"], {})
     ticket = dict(payload) if isinstance(payload, dict) else {}
@@ -3182,6 +6774,40 @@ def _task_graph_ticket_nodes(
                 "action_kind": str(ticket.get("action_kind") or ticket.get("kind") or ""),
                 "execution_mode": str(ticket.get("execution_mode") or ""),
                 "read_only": bool(ticket.get("read_only")),
+                "paths": _task_metadata_values(
+                    ticket,
+                    (
+                        "path",
+                        "paths",
+                        "file",
+                        "files",
+                        "target_path",
+                        "target_paths",
+                        "touch_path",
+                        "touch_paths",
+                        "affected_path",
+                        "affected_paths",
+                        "allowed_path",
+                        "allowed_paths",
+                        "write_path",
+                        "write_paths",
+                    ),
+                ),
+                "symbols": _task_metadata_values(
+                    ticket,
+                    (
+                        "symbol",
+                        "symbols",
+                        "target_symbol",
+                        "target_symbols",
+                        "component",
+                        "components",
+                        "function",
+                        "functions",
+                        "class",
+                        "classes",
+                    ),
+                ),
                 "requires_approval": bool(
                     ticket.get("requires_approval")
                     or ticket.get("approval_required")
@@ -3539,11 +7165,98 @@ def _task_graph_conveyor_nodes(
     return work_node
 
 
+def _task_graph_execution_dag_nodes(
+    conn: sqlite3.Connection,
+    nodes: dict[str, dict[str, Any]],
+    edges: dict[str, dict[str, Any]],
+) -> None:
+    dag_nodes = execution_dag_nodes_conn(conn)
+    dag_node_to_task_node: dict[str, str] = {}
+    for node in dag_nodes:
+        action = str(node.get("action_type") or "")
+        canonical_action = _execution_dag_canonical_action(action)
+        task_id = str(node.get("task_id") or "")
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+        if action == "blocker":
+            kind = "blocker"
+        elif canonical_action == "validate":
+            kind = "validation_plan"
+        elif action == "ticket":
+            kind = "work_item" if task_id == CONVEYOR_TASK_ID else "ticket"
+        else:
+            kind = "work_item"
+        task_node = _task_graph_node(
+            kind,
+            f"execution-dag:{node['node_id']}",
+            name=str(metadata.get("summary") or metadata.get("title") or task_id or node["node_id"]),
+            status=str(node.get("status") or ""),
+            metadata={
+                **metadata,
+                "source": "execution_dag_nodes",
+                "dag_node_id": str(node["node_id"]),
+                "task_id": task_id,
+                "ticket_id": task_id if task_id != CONVEYOR_TASK_ID else "",
+                "work_item_id": task_id if task_id == CONVEYOR_TASK_ID else "",
+                "action_type": action,
+                "canonical_action_type": canonical_action,
+                "action_kind": f"{canonical_action}_work" if action != "ticket" else "implement_ready_ticket",
+                "owner_role": str(node.get("owner_role") or ""),
+                "role_family": str(node.get("role_family") or ""),
+                "status": str(node.get("status") or ""),
+                "confidence": float(node.get("confidence") or 0),
+                "attempt_count": int(node.get("attempt_count") or 0),
+                "blocker_reason": str(node.get("blocker_reason") or ""),
+                "validation_receipt_refs": list(node.get("validation_receipt_refs") or []),
+            },
+            facts=[
+                _task_graph_fact("source", "execution_dag_nodes"),
+                _task_graph_fact("action_type", action),
+                _task_graph_fact("status", str(node.get("status") or "")),
+            ],
+        )
+        task_node = _add_task_graph_node(nodes, task_node)
+        dag_node_to_task_node[str(node["node_id"])] = str(task_node.get("node_id") or "")
+
+    for edge in execution_dag_edges_conn(conn):
+        source = dag_node_to_task_node.get(str(edge.get("source") or ""))
+        target = dag_node_to_task_node.get(str(edge.get("target") or ""))
+        if not source or not target:
+            continue
+        kind = str(edge.get("dependency_kind") or "")
+        mode = str(edge.get("dependency_mode") or "hard")
+        if kind == "blocks":
+            graph_from, graph_to = source, target
+            graph_kind = "blocks"
+        else:
+            graph_from, graph_to = target, source
+            graph_kind = "depends_on"
+        _add_task_graph_edge(
+            edges,
+            _task_graph_edge(
+                graph_kind,
+                graph_from,
+                graph_to,
+                key=f"execution-dag:{edge.get('edge_id')}",
+                metadata={
+                    "source": "execution_dag_edges",
+                    "dag_edge_id": str(edge.get("edge_id") or ""),
+                    "dependency_kind": kind,
+                    "dependency_mode": mode,
+                    "reason": str(edge.get("reason") or ""),
+                    "confidence": float(edge.get("confidence") or 0),
+                },
+                facts=[
+                    _task_graph_fact("source", "execution_dag_edges"),
+                    _task_graph_fact("dependency_mode", mode),
+                ],
+            ),
+        )
+
+
 def build_task_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: dict[str, dict[str, Any]] = {}
-    ticket_nodes = _task_graph_ticket_nodes(conn, nodes, edges)
-    _task_graph_conveyor_nodes(conn, nodes, edges, ticket_nodes)
+    _task_graph_ticket_nodes(conn, nodes, edges)
     node_list = sorted(nodes.values(), key=lambda item: (str(item.get("kind") or ""), str(item.get("name") or "")))
     edge_list = sorted(edges.values(), key=lambda item: (str(item.get("kind") or ""), str(item.get("edge_id") or "")))
     node_counts: dict[str, int] = {}
@@ -4112,6 +7825,254 @@ def _impact_path_mentions(value: Any) -> set[str]:
     return mentions
 
 
+def _impact_explicit_task_paths(metadata: Mapping[str, Any]) -> set[str]:
+    values: list[str] = []
+    for key in (
+        "paths",
+        "path",
+        "files",
+        "file",
+        "target_paths",
+        "target_path",
+        "touch_paths",
+        "touch_path",
+        "affected_paths",
+        "affected_path",
+        "allowed_paths",
+        "allowed_path",
+        "write_paths",
+        "write_path",
+    ):
+        if key in metadata:
+            values.extend(_task_text_values(metadata.get(key)))
+    paths: set[str] = set()
+    for value in values:
+        normalized = normalize_path_for_brief(str(value or "").strip("`'\"()[]{}:,;"))
+        if normalized:
+            paths.add(normalized)
+    return paths
+
+
+def _impact_identifier_mentions(text: str) -> set[str]:
+    mentions: set[str] = set()
+    for raw in re.findall(r"(?<![A-Za-z0-9_$])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)(?![A-Za-z0-9_$])", text):
+        if len(raw) < 3:
+            continue
+        lowered = raw.lower()
+        if lowered in {"add", "and", "class", "def", "fix", "for", "from", "new", "test", "the", "this", "with"}:
+            continue
+        mentions.add(raw)
+        mentions.add(lowered)
+    return mentions
+
+
+def _impact_explicit_task_symbols(metadata: Mapping[str, Any], task_text: str) -> set[str]:
+    values: list[str] = []
+    for key in (
+        "symbols",
+        "symbol",
+        "target_symbols",
+        "target_symbol",
+        "components",
+        "component",
+        "functions",
+        "function",
+        "classes",
+        "class",
+    ):
+        if key in metadata:
+            values.extend(_task_text_values(metadata.get(key)))
+    mentions = _impact_identifier_mentions(task_text)
+    for value in values:
+        text = str(value or "").strip("`'\"()[]{}:,;")
+        if text:
+            mentions.add(text)
+            mentions.add(text.lower())
+    return mentions
+
+
+def _symbol_resolution_kind(metadata: Mapping[str, Any]) -> str:
+    value = str(metadata.get("resolution_kind") or "exact").strip().lower()
+    return value if value in {"exact", "inferred", "ambiguous", "unresolved", "stale"} else "inferred"
+
+
+def _symbol_owner_aliases(symbol: Mapping[str, Any], metadata: Mapping[str, Any]) -> list[tuple[str, str]]:
+    exact_values = {
+        str(symbol.get("name") or "").strip(),
+        str(metadata.get("qualified_name") or "").strip(),
+    }
+    aliases: dict[str, str] = {}
+    for value in exact_values:
+        if not value:
+            continue
+        aliases[value] = "exact"
+        lowered = value.lower()
+        if lowered and lowered != value:
+            aliases.setdefault(lowered, "inferred")
+        for separator in (".", "::"):
+            if separator in value:
+                tail = value.rsplit(separator, 1)[-1]
+                if tail:
+                    aliases.setdefault(tail, "inferred")
+                    aliases.setdefault(tail.lower(), "inferred")
+    return sorted(aliases.items())
+
+
+def _symbol_owner_match_index(
+    symbol_nodes: list[dict[str, Any]],
+    file_by_path: Mapping[str, Mapping[str, Any]],
+    code_intelligence_evidence: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    symbol_owner_matches: dict[str, list[dict[str, Any]]] = {}
+    code_intelligence_evidence = code_intelligence_evidence if isinstance(code_intelligence_evidence, Mapping) else {}
+    for symbol in symbol_nodes:
+        metadata = symbol.get("metadata") if isinstance(symbol.get("metadata"), Mapping) else {}
+        if _symbol_resolution_kind(metadata) == "unresolved":
+            continue
+        owner_path = normalize_path_for_brief(str(metadata.get("owner_file_path") or symbol.get("path") or ""))
+        owner = file_by_path.get(owner_path)
+        if not owner:
+            continue
+        owner_stale = bool(int(owner.get("is_stale") or 0))
+        symbol_stale = bool(int(symbol.get("is_stale") or 0))
+        for alias, alias_resolution in _symbol_owner_aliases(symbol, metadata):
+            symbol_owner_matches.setdefault(alias, []).append(
+                {
+                    "symbol": symbol,
+                    "owner": owner,
+                    "alias_resolution": alias_resolution,
+                    "symbol_resolution": _symbol_resolution_kind(metadata),
+                    "is_stale": owner_stale or symbol_stale,
+                    "code_intelligence": code_intelligence_evidence.get(str(symbol.get("node_id") or "")) or {},
+                }
+            )
+    return symbol_owner_matches
+
+
+def _symbol_match_resolution_items(
+    symbol_mentions: set[str],
+    symbol_owner_matches: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    symbol_matches_by_owner: dict[str, dict[str, Any]] = {}
+    for mention in sorted(symbol_mentions):
+        matches = [match for match in symbol_owner_matches.get(mention, []) if isinstance(match, Mapping)]
+        if not matches:
+            continue
+        owner_ids = {
+            str((match.get("owner") if isinstance(match.get("owner"), Mapping) else {}).get("node_id") or "")
+            for match in matches
+        }
+        owner_ids.discard("")
+        lsp_confirmed_owner_ids = {
+            str((match.get("owner") if isinstance(match.get("owner"), Mapping) else {}).get("node_id") or "")
+            for match in matches
+            if isinstance(match.get("code_intelligence"), Mapping)
+            and str((match.get("code_intelligence") or {}).get("status") or "") == "confirmed"
+        }
+        lsp_confirmed_owner_ids.discard("")
+        ambiguous = len(owner_ids) > 1
+        for match in matches:
+            owner = match.get("owner") if isinstance(match.get("owner"), Mapping) else {}
+            symbol = match.get("symbol") if isinstance(match.get("symbol"), Mapping) else {}
+            owner_id = str(owner.get("node_id") or "")
+            if not owner_id:
+                continue
+            symbol_metadata = symbol.get("metadata") if isinstance(symbol.get("metadata"), Mapping) else {}
+            qualified_name = str(symbol_metadata.get("qualified_name") or symbol.get("name") or mention)
+            symbol_resolution = str(match.get("symbol_resolution") or _symbol_resolution_kind(symbol_metadata))
+            alias_resolution = str(match.get("alias_resolution") or "inferred")
+            is_stale = bool(match.get("is_stale"))
+            lsp_evidence = match.get("code_intelligence") if isinstance(match.get("code_intelligence"), Mapping) else {}
+            lsp_status = str(lsp_evidence.get("status") or "")
+            lsp_payload = lsp_evidence.get("payload") if isinstance(lsp_evidence.get("payload"), Mapping) else {}
+            resolution_quality = symbol_resolution
+            signal_kind = "exact_symbol"
+            source = "symbol_owner_match"
+            confidence = 0.94
+            write_candidate = True
+            reason = f"exact symbol owner match `{qualified_name}`"
+            if is_stale:
+                resolution_quality = "stale"
+                signal_kind = "stale_symbol"
+                source = "symbol_owner_match_stale"
+                confidence = 0.5
+                write_candidate = False
+                reason = f"stale symbol fact `{qualified_name}` needs graph refresh before write ownership"
+            elif lsp_status == "confirmed" and (not ambiguous or owner_id in lsp_confirmed_owner_ids):
+                resolution_quality = "exact"
+                signal_kind = "exact_symbol"
+                source = "symbol_owner_match_lsp_confirmed" if not ambiguous else "symbol_owner_match_lsp_disambiguated"
+                confidence = max(0.96, float(lsp_evidence.get("confidence") or 0.0))
+                write_candidate = True
+                reason = f"LSP confirmed symbol owner `{qualified_name}` via {str(lsp_evidence.get('language_server_id') or 'language server')}"
+            elif lsp_status == "downgraded" or (ambiguous and lsp_confirmed_owner_ids and owner_id not in lsp_confirmed_owner_ids):
+                resolution_quality = "inferred" if not ambiguous else "ambiguous"
+                signal_kind = "lsp_downgraded_symbol"
+                source = "symbol_owner_match_lsp_downgraded"
+                confidence = min(0.49, float(lsp_evidence.get("confidence") or 0.49))
+                write_candidate = False
+                reason = f"LSP did not confirm symbol owner `{qualified_name}`; extractor match is advisory"
+            elif lsp_status == "ambiguous":
+                resolution_quality = "ambiguous"
+                signal_kind = "ambiguous_symbol"
+                source = "symbol_owner_match_lsp_ambiguous"
+                confidence = 0.56
+                write_candidate = False
+                reason = f"LSP reported ambiguous symbol owner candidates for `{mention}`"
+            elif lsp_status == "timeout":
+                resolution_quality = symbol_resolution
+                signal_kind = "exact_symbol" if not ambiguous and symbol_resolution == "exact" and alias_resolution == "exact" else "inferred_symbol"
+                source = "symbol_owner_match_lsp_timeout" if signal_kind == "exact_symbol" else "symbol_owner_match_inferred"
+                confidence = 0.9 if signal_kind == "exact_symbol" else 0.58
+                write_candidate = signal_kind == "exact_symbol"
+                reason = f"LSP verification timed out for `{qualified_name}`; using extractor confidence"
+            elif ambiguous:
+                resolution_quality = "ambiguous"
+                signal_kind = "ambiguous_symbol"
+                source = "symbol_owner_match_ambiguous"
+                confidence = 0.54
+                write_candidate = False
+                reason = f"ambiguous symbol owner match `{mention}` across {len(owner_ids)} files"
+            elif symbol_resolution != "exact":
+                resolution_quality = symbol_resolution
+                signal_kind = f"{symbol_resolution}_symbol"
+                source = f"symbol_owner_match_{symbol_resolution}"
+                confidence = 0.52
+                write_candidate = False
+                reason = f"{symbol_resolution} symbol fact `{qualified_name}` is advisory"
+            elif alias_resolution != "exact":
+                resolution_quality = "inferred"
+                signal_kind = "inferred_symbol"
+                source = "symbol_owner_match_inferred"
+                confidence = 0.62
+                write_candidate = False
+                reason = f"inferred symbol owner match `{qualified_name}` from mention `{mention}`"
+            item = {
+                "owner": owner,
+                "confidence": confidence,
+                "reason": reason,
+                "source": source,
+                "signal_kind": signal_kind,
+                "write_candidate": write_candidate,
+                "symbol_name": str(symbol.get("name") or mention),
+                "qualified_name": qualified_name,
+                "symbol_node_id": str(symbol.get("node_id") or ""),
+                "symbol_resolution": resolution_quality,
+                "symbol_match_kind": alias_resolution,
+                "symbol_is_stale": is_stale,
+                "lsp_status": lsp_status,
+                "lsp_source": str(lsp_evidence.get("source") or ""),
+                "lsp_language_server_id": str(lsp_evidence.get("language_server_id") or ""),
+                "lsp_language_server_version": str(lsp_evidence.get("language_server_version") or ""),
+                "lsp_collected_at": str(lsp_evidence.get("collected_at") or ""),
+                "lsp_candidate_count": int(lsp_payload.get("candidate_count") or 0) if isinstance(lsp_payload, Mapping) else 0,
+            }
+            current = symbol_matches_by_owner.get(owner_id)
+            if current is None or float(item.get("confidence") or 0) > float(current.get("confidence") or 0):
+                symbol_matches_by_owner[owner_id] = item
+    return symbol_matches_by_owner
+
+
 def _impact_node_text(node: Mapping[str, Any]) -> str:
     metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
     parts = [
@@ -4178,6 +8139,9 @@ def _impact_candidate(
     confidence: float,
     reason: str,
     source: str,
+    signal_kind: str = "",
+    write_candidate: bool = False,
+    extra_metadata: Mapping[str, Any] | None = None,
 ) -> None:
     task = _impact_add_node(nodes, task_node)
     target = _impact_add_node(nodes, target_node)
@@ -4190,7 +8154,12 @@ def _impact_candidate(
         "target_kind": str(target.get("kind") or ""),
         "target_path": str(target.get("path") or ""),
         "target_name": str(target.get("name") or ""),
+        "signal_kind": str(signal_kind or source),
+        "write_candidate": bool(write_candidate),
+        "scoping_only": not bool(write_candidate),
     }
+    if isinstance(extra_metadata, Mapping):
+        metadata.update({str(key): value for key, value in extra_metadata.items()})
     _impact_add_edge(
         edges,
         _impact_graph_edge(
@@ -4223,6 +8192,154 @@ def _impact_candidate(
             )
 
 
+def _codebase_adjacency_signal(edge_kind: str, metadata: Mapping[str, Any]) -> dict[str, Any] | None:
+    edge_kind = str(edge_kind or "")
+    signal_kind = str(metadata.get("signal_kind") or "")
+    source = str(metadata.get("source") or "")
+    confidence = float(metadata.get("confidence") or 0.0)
+    if edge_kind == "imports":
+        raw_import = str(metadata.get("raw_import") or metadata.get("module") or "")
+        return {
+            "source": "import_adjacency",
+            "signal_kind": "import_adjacency",
+            "confidence": confidence or 0.78,
+            "penalty": 0.22,
+            "max_confidence": 0.74,
+            "reference": raw_import,
+            "reason": "",
+            "resolution_kind": "exact" if bool(metadata.get("resolved")) else "inferred",
+            "dependency_mode": "advisory",
+            "metadata": {},
+        }
+    if edge_kind != "references":
+        return None
+    semantic_sources = {codebase_graph.SEMANTIC_REFERENCE_SOURCE, codebase_graph.CROSS_LANGUAGE_INTERFACE_SOURCE}
+    semantic_signals = set(codebase_graph.SEMANTIC_REFERENCE_SIGNAL_KINDS)
+    if signal_kind not in semantic_signals and source not in semantic_sources:
+        return None
+    if signal_kind == "interface_bridge":
+        return {
+            "source": "interface_bridge",
+            "signal_kind": "interface_bridge",
+            "confidence": confidence or 0.62,
+            "penalty": 0.28,
+            "max_confidence": 0.68,
+            "reference": str(metadata.get("reference") or metadata.get("matched_reference") or ""),
+            "reason": str(metadata.get("reason") or ""),
+            "resolution_kind": str(metadata.get("resolution_kind") or "inferred"),
+            "dependency_mode": str(metadata.get("dependency_mode") or "advisory"),
+            "metadata": {
+                "interface_kind": str(metadata.get("interface_kind") or ""),
+                "matched_terms": list(metadata.get("matched_terms") or []) if isinstance(metadata.get("matched_terms"), list) else [],
+                "reference_details": list(metadata.get("reference_details") or []) if isinstance(metadata.get("reference_details"), list) else [],
+            },
+        }
+    if signal_kind == "ambiguous_symbol_reference":
+        return {
+            "source": "semantic_reference",
+            "signal_kind": "ambiguous_semantic_reference",
+            "confidence": confidence or 0.44,
+            "penalty": 0.38,
+            "max_confidence": 0.54,
+            "reference": str(metadata.get("reference") or metadata.get("matched_reference") or ""),
+            "reason": str(metadata.get("reason") or ""),
+            "resolution_kind": "ambiguous",
+            "dependency_mode": "advisory",
+            "metadata": {
+                "symbol_name": str(metadata.get("symbol_name") or ""),
+                "qualified_name": str(metadata.get("qualified_name") or ""),
+                "symbol_node_id": str(metadata.get("symbol_node_id") or ""),
+                "reference_details": list(metadata.get("reference_details") or []) if isinstance(metadata.get("reference_details"), list) else [],
+            },
+        }
+    return {
+        "source": "semantic_reference",
+        "signal_kind": "semantic_reference",
+        "confidence": confidence or 0.72,
+        "penalty": 0.18,
+        "max_confidence": 0.74,
+        "reference": str(metadata.get("reference") or metadata.get("matched_reference") or ""),
+        "reason": str(metadata.get("reason") or ""),
+        "resolution_kind": str(metadata.get("resolution_kind") or "exact"),
+        "dependency_mode": str(metadata.get("dependency_mode") or "advisory"),
+        "metadata": {
+            "symbol_name": str(metadata.get("symbol_name") or ""),
+            "qualified_name": str(metadata.get("qualified_name") or ""),
+            "symbol_node_id": str(metadata.get("symbol_node_id") or ""),
+            "symbol_resolution": str(metadata.get("resolution_kind") or "exact"),
+            "reference_details": list(metadata.get("reference_details") or []) if isinstance(metadata.get("reference_details"), list) else [],
+        },
+    }
+
+
+def _codebase_adjacency_neighbors_conn(
+    conn: sqlite3.Connection,
+    snapshot_id: str,
+    code_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    neighbors: dict[str, list[dict[str, Any]]] = {}
+    for row in conn.execute(
+        """
+        SELECT kind, from_node_id, to_node_id, metadata_json
+        FROM graph_edges
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind IN ('imports', 'references')
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall():
+        source_id = str(row["from_node_id"] or "")
+        target_id = str(row["to_node_id"] or "")
+        if source_id not in code_by_id or target_id not in code_by_id:
+            continue
+        metadata = _json_cell(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        signal = _codebase_adjacency_signal(str(row["kind"] or ""), metadata)
+        if signal is None:
+            continue
+        edge_source_path = str(metadata.get("source_path") or code_by_id[source_id].get("path") or "")
+        edge_target_path = str(metadata.get("target_path") or code_by_id[target_id].get("path") or "")
+        for from_id, to_id in ((source_id, target_id), (target_id, source_id)):
+            reverse = from_id == target_id
+            record = dict(signal)
+            extra_metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+            record["metadata"] = dict(extra_metadata)
+            record["node_id"] = to_id
+            record["edge_kind"] = str(row["kind"] or "")
+            record["edge_source_path"] = edge_source_path
+            record["edge_target_path"] = edge_target_path
+            record["reverse"] = reverse
+            if reverse:
+                record["reason"] = str(record.get("reason") or f"adjacent via `{edge_source_path}`")
+            neighbors.setdefault(from_id, []).append(record)
+    return neighbors
+
+
+def _adjacency_context_confidence(primary_confidence: float, adjacency: Mapping[str, Any]) -> float:
+    edge_confidence = float(adjacency.get("confidence") or 0.0)
+    penalty = float(adjacency.get("penalty") or 0.22)
+    max_confidence = float(adjacency.get("max_confidence") or 0.74)
+    candidates = [max(0.2, float(primary_confidence) - penalty), max_confidence]
+    if edge_confidence > 0:
+        candidates.append(edge_confidence)
+    return max(0.2, min(candidates))
+
+
+def _adjacency_context_reason(source_node: Mapping[str, Any], adjacency: Mapping[str, Any]) -> str:
+    source_path = str(source_node.get("path") or source_node.get("name") or "")
+    existing = str(adjacency.get("reason") or "")
+    if existing:
+        return existing
+    signal_kind = str(adjacency.get("signal_kind") or "")
+    reference = str(adjacency.get("reference") or "")
+    if signal_kind == "interface_bridge":
+        return f"cross-language interface adjacency for `{source_path}`"
+    if signal_kind in {"semantic_reference", "ambiguous_semantic_reference"}:
+        return f"semantic reference adjacency for `{source_path}`" + (f" via `{reference}`" if reference else "")
+    return f"import adjacency for `{source_path}`"
+
+
 def _impact_score_path_mentions(task_text: str, code_node: Mapping[str, Any]) -> tuple[float, str]:
     path = normalize_path_for_brief(str(code_node.get("path") or ""))
     if not path:
@@ -4230,6 +8347,16 @@ def _impact_score_path_mentions(task_text: str, code_node: Mapping[str, Any]) ->
     for mention in sorted(_impact_path_mentions(task_text), key=len, reverse=True):
         if path == mention or path.endswith("/" + mention) or mention.endswith("/" + path):
             return 0.98, f"path mention `{mention}`"
+    return 0.0, ""
+
+
+def _impact_score_explicit_paths(explicit_paths: set[str], code_node: Mapping[str, Any]) -> tuple[float, str]:
+    path = normalize_path_for_brief(str(code_node.get("path") or ""))
+    if not path:
+        return 0.0, ""
+    for mention in sorted(explicit_paths, key=len, reverse=True):
+        if path == mention or path.endswith("/" + mention) or mention.endswith("/" + path):
+            return 0.99, f"authored path metadata `{mention}`"
     return 0.0, ""
 
 
@@ -4247,12 +8374,12 @@ def _impact_score_keywords(task_terms: set[str], code_node: Mapping[str, Any]) -
     if not matches:
         return 0.0, ""
     kind = str(code_node.get("kind") or "")
-    base = 0.36 + min(0.32, 0.12 * len(set(matches)))
+    base = 0.28 + min(0.18, 0.06 * len(set(matches)))
     if kind in {"file", "test_file"}:
-        base += 0.08
+        base += 0.06
     elif kind in {"config_file", "doc_file", "lockfile"}:
         base += 0.02
-    return min(0.86, base), "keyword match: " + ", ".join(sorted(set(matches))[:4])
+    return min(0.58, base), "keyword-only advisory match: " + ", ".join(sorted(set(matches))[:4])
 
 
 def _impact_score_command(task_text: str, task_terms: set[str], code_node: Mapping[str, Any], *, has_test_candidate: bool) -> tuple[float, str]:
@@ -4319,6 +8446,15 @@ def build_impact_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str,
         """,
         (codebase_snapshot_id, CODEBASE_GRAPH_NAMESPACE),
     ).fetchall()
+    symbol_rows = conn.execute(
+        """
+        SELECT node_id, kind, path, name, digest, is_stale, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ? AND graph_namespace = ?
+          AND kind = 'symbol'
+        """,
+        (codebase_snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
     task_rows = conn.execute(
         """
         SELECT node_id, kind, path, name, digest, is_stale, metadata_json
@@ -4333,11 +8469,23 @@ def build_impact_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str,
         for row in code_rows
         if _impact_context_path_allowed(row["path"])
     ]
+    symbol_nodes = [
+        _impact_copy_graph_node(row, source_namespace=CODEBASE_GRAPH_NAMESPACE, source_snapshot_id=codebase_snapshot_id)
+        for row in symbol_rows
+        if _impact_context_path_allowed(row["path"])
+    ]
+    code_intelligence_evidence = _code_intelligence_evidence_by_symbol_conn(conn, codebase_snapshot_id)
     task_nodes = [
         _impact_copy_graph_node(row, source_namespace=TASK_GRAPH_NAMESPACE, source_snapshot_id=task_snapshot_id)
         for row in task_rows
     ]
     code_by_id = {str(node["node_id"]): node for node in code_nodes}
+    file_by_path = {
+        normalize_path_for_brief(str(node.get("path") or "")): node
+        for node in code_nodes
+        if str(node.get("kind") or "") in GRAPH_FILE_NODE_KINDS and str(node.get("path") or "")
+    }
+    symbol_owner_matches = _symbol_owner_match_index(symbol_nodes, file_by_path, code_intelligence_evidence)
     test_edges: dict[str, list[str]] = {}
     for row in conn.execute(
         """
@@ -4351,29 +8499,45 @@ def build_impact_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str,
         source_id = str(row["to_node_id"])
         if test_id in code_by_id and source_id in code_by_id:
             test_edges.setdefault(source_id, []).append(test_id)
+    adjacency_neighbors = _codebase_adjacency_neighbors_conn(conn, codebase_snapshot_id, code_by_id)
 
     nodes: dict[str, dict[str, Any]] = {}
     edges: dict[str, dict[str, Any]] = {}
-    primary_candidate_ids_by_task: dict[str, list[tuple[str, float, str]]] = {}
+    primary_candidate_ids_by_task: dict[str, list[tuple[str, float, str, str, bool]]] = {}
     for task_node in task_nodes:
         task_kind = str(task_node.get("kind") or "")
         if task_kind not in {"ticket", "work_item"}:
             continue
+        metadata = task_node.get("metadata") if isinstance(task_node.get("metadata"), Mapping) else {}
         task_text = _impact_node_text(task_node)
         task_terms = _impact_terms(task_text)
-        primary_candidates: list[tuple[str, float, str]] = []
+        explicit_paths = _impact_explicit_task_paths(metadata)
+        symbol_mentions = _impact_explicit_task_symbols(metadata, task_text)
+        primary_candidates: list[tuple[str, float, str, str, bool]] = []
         for code_node in code_nodes:
             kind = str(code_node.get("kind") or "")
             if kind == "command":
                 continue
+            explicit_path_confidence, explicit_path_reason = _impact_score_explicit_paths(explicit_paths, code_node)
             path_confidence, path_reason = _impact_score_path_mentions(task_text, code_node)
             keyword_confidence, keyword_reason = _impact_score_keywords(task_terms, code_node)
-            confidence = path_confidence
-            reason = path_reason
-            source = "path_mention" if path_confidence else "keyword_path_match"
+            confidence = explicit_path_confidence
+            reason = explicit_path_reason
+            source = "authored_path_metadata" if explicit_path_confidence else ""
+            signal_kind = "direct_path" if explicit_path_confidence else ""
+            write_candidate = bool(explicit_path_confidence)
+            if path_confidence > confidence:
+                confidence = path_confidence
+                reason = path_reason
+                source = "path_mention"
+                signal_kind = "direct_path"
+                write_candidate = True
             if keyword_confidence > confidence:
                 confidence = keyword_confidence
                 reason = keyword_reason
+                source = "keyword_advisory"
+                signal_kind = "keyword_only"
+                write_candidate = False
             if confidence <= 0:
                 continue
             _impact_candidate(
@@ -4384,15 +8548,122 @@ def build_impact_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str,
                 confidence=confidence,
                 reason=reason,
                 source=source,
+                signal_kind=signal_kind,
+                write_candidate=write_candidate,
             )
-            primary_candidates.append((str(code_node["node_id"]), confidence, reason))
+            primary_candidates.append((str(code_node["node_id"]), confidence, reason, signal_kind, write_candidate))
+        symbol_matches_by_owner = _symbol_match_resolution_items(symbol_mentions, symbol_owner_matches)
+        for owner_id, item in sorted(symbol_matches_by_owner.items()):
+            owner = item.get("owner") if isinstance(item.get("owner"), Mapping) else {}
+            confidence = float(item.get("confidence") or 0.0)
+            signal_kind = str(item.get("signal_kind") or "inferred_symbol")
+            write_candidate = bool(item.get("write_candidate"))
+            _impact_candidate(
+                nodes,
+                edges,
+                task_node,
+                owner,
+                confidence=confidence,
+                reason=str(item.get("reason") or "symbol owner match"),
+                source=str(item.get("source") or "symbol_owner_match"),
+                signal_kind=signal_kind,
+                write_candidate=write_candidate,
+                extra_metadata={
+                    "symbol_name": str(item.get("symbol_name") or ""),
+                    "qualified_name": str(item.get("qualified_name") or ""),
+                    "symbol_node_id": str(item.get("symbol_node_id") or ""),
+                    "symbol_resolution": str(item.get("symbol_resolution") or ""),
+                    "symbol_match_kind": str(item.get("symbol_match_kind") or ""),
+                    "symbol_is_stale": bool(item.get("symbol_is_stale")),
+                    "lsp_status": str(item.get("lsp_status") or ""),
+                    "lsp_source": str(item.get("lsp_source") or ""),
+                    "lsp_language_server_id": str(item.get("lsp_language_server_id") or ""),
+                    "lsp_language_server_version": str(item.get("lsp_language_server_version") or ""),
+                    "lsp_collected_at": str(item.get("lsp_collected_at") or ""),
+                    "lsp_candidate_count": int(item.get("lsp_candidate_count") or 0),
+                },
+            )
+            primary_candidates.append((owner_id, confidence, str(item.get("reason") or ""), signal_kind, write_candidate))
+        task_public_id = _task_graph_node_public_id(task_node)
+        for evidence in _accepted_scope_evidence_for_task_conn(conn, task_id=task_public_id, limit=IMPACT_CONTEXT_PACK_LIMIT):
+            owner_id = str(evidence.get("owner_node_id") or "")
+            owner = code_by_id.get(owner_id) or file_by_path.get(normalize_path_for_brief(str(evidence.get("candidate_path") or "")))
+            if not owner and _scope_evidence_signal_kind(evidence) == "creation_path":
+                owner = _scope_evidence_creation_node(evidence)
+            if not owner:
+                continue
+            confidence = float(evidence.get("normalized_confidence") or 0.0)
+            signal_kind = _scope_evidence_signal_kind(evidence)
+            reason = _scope_evidence_reason(evidence)
+            _impact_candidate(
+                nodes,
+                edges,
+                task_node,
+                owner,
+                confidence=confidence,
+                reason=reason,
+                source="scope_evidence",
+                signal_kind=signal_kind,
+                write_candidate=True,
+                extra_metadata=_scope_evidence_context_metadata(evidence),
+            )
+            primary_candidates.append((str(owner.get("node_id") or owner_id), confidence, reason, signal_kind, True))
+            for test_path in list(evidence.get("likely_tests") or [])[:SYMBOL_CONTEXT_TEST_LIMIT]:
+                test_node = file_by_path.get(normalize_path_for_brief(str(test_path or "")))
+                if not test_node:
+                    continue
+                _impact_candidate(
+                    nodes,
+                    edges,
+                    task_node,
+                    test_node,
+                    confidence=max(0.2, confidence - 0.18),
+                    reason=f"scope evidence likely test for `{owner.get('path') or owner.get('name')}`",
+                    source="scope_evidence_likely_test",
+                    signal_kind="test_proximity",
+                    write_candidate=False,
+                    extra_metadata={"scope_evidence_id": str(evidence.get("evidence_id") or "")},
+                )
         primary_candidate_ids_by_task[str(task_node["node_id"])] = primary_candidates
 
     for task_node in task_nodes:
         task_id = str(task_node.get("node_id") or "")
         primary_candidates = primary_candidate_ids_by_task.get(task_id, [])
-        has_test_candidate = any(str(code_by_id.get(node_id, {}).get("kind") or "") == "test_file" for node_id, _confidence, _reason in primary_candidates)
-        for source_node_id, confidence, _reason in primary_candidates:
+        direct_candidates = [
+            (node_id, confidence, reason, signal_kind, write_candidate)
+            for node_id, confidence, reason, signal_kind, write_candidate in primary_candidates
+            if write_candidate
+        ]
+        has_test_candidate = any(str(code_by_id.get(node_id, {}).get("kind") or "") == "test_file" for node_id, _confidence, _reason, _signal_kind, _write_candidate in primary_candidates)
+        for source_node_id, confidence, _reason, _signal_kind, _write_candidate in direct_candidates:
+            source_node = code_by_id.get(source_node_id)
+            if not source_node:
+                continue
+            for adjacency in adjacency_neighbors.get(source_node_id, []):
+                adjacent_node_id = str(adjacency.get("node_id") or "")
+                adjacent_node = code_by_id.get(adjacent_node_id)
+                if not adjacent_node:
+                    continue
+                extra_metadata = adjacency.get("metadata") if isinstance(adjacency.get("metadata"), Mapping) else {}
+                _impact_candidate(
+                    nodes,
+                    edges,
+                    task_node,
+                    adjacent_node,
+                    confidence=_adjacency_context_confidence(confidence, adjacency),
+                    reason=_adjacency_context_reason(source_node, adjacency),
+                    source=str(adjacency.get("source") or "import_adjacency"),
+                    signal_kind=str(adjacency.get("signal_kind") or "import_adjacency"),
+                    write_candidate=False,
+                    extra_metadata={
+                        **dict(extra_metadata),
+                        "reference": str(adjacency.get("reference") or ""),
+                        "resolution_kind": str(adjacency.get("resolution_kind") or ""),
+                        "dependency_mode": str(adjacency.get("dependency_mode") or "advisory"),
+                        "edge_source_path": str(adjacency.get("edge_source_path") or ""),
+                        "edge_target_path": str(adjacency.get("edge_target_path") or ""),
+                    },
+                )
             for test_node_id in test_edges.get(source_node_id, []):
                 test_node = code_by_id[test_node_id]
                 _impact_candidate(
@@ -4400,9 +8671,11 @@ def build_impact_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str,
                     edges,
                     task_node,
                     test_node,
-                    confidence=max(0.2, confidence - 0.1),
+                    confidence=max(0.2, confidence - 0.18),
                     reason=f"test proximity for `{code_by_id[source_node_id].get('path') or code_by_id[source_node_id].get('name')}`",
                     source="test_proximity",
+                    signal_kind="test_proximity",
+                    write_candidate=False,
                 )
                 has_test_candidate = True
         task_text = _impact_node_text(task_node)
@@ -4469,6 +8742,9 @@ def build_impact_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str,
     }
     for edge in list(edges.values()):
         if str(edge.get("kind") or "") != "likely_touches":
+            continue
+        metadata = edge.get("metadata") if isinstance(edge.get("metadata"), Mapping) else {}
+        if not bool(metadata.get("write_candidate")):
             continue
         from_id = str(edge.get("from_node_id") or "")
         to_id = str(edge.get("to_node_id") or "")
@@ -4690,12 +8966,34 @@ def _insert_impact_graph_conn(conn: sqlite3.Connection, graph: Mapping[str, Any]
 
 
 def refresh_impact_graph_conn(conn: sqlite3.Connection, target: Path) -> dict[str, Any]:
-    graph = build_impact_graph_conn(conn, target)
-    latest = _latest_impact_graph_snapshot_row(conn)
-    if latest is not None and str(latest["digest"]) == str(graph["digest"]):
+    started_at = utc_now()
+    started = time.perf_counter()
+    status = "ok"
+    payload: dict[str, Any] = {}
+    try:
+        graph = build_impact_graph_conn(conn, target)
+        latest = _latest_impact_graph_snapshot_row(conn)
+        if latest is not None and str(latest["digest"]) == str(graph["digest"]):
+            payload["refresh_mode"] = "unchanged"
+            return impact_graph_summary(conn)
+        _insert_impact_graph_conn(conn, graph)
+        payload["refresh_mode"] = "full"
+        payload["edge_count"] = len(graph.get("edges") if isinstance(graph.get("edges"), list) else [])
         return impact_graph_summary(conn)
-    _insert_impact_graph_conn(conn, graph)
-    return impact_graph_summary(conn)
+    except Exception as exc:
+        status = "error"
+        payload["error_type"] = exc.__class__.__name__
+        raise
+    finally:
+        record_runtime_phase_timing_conn(
+            conn,
+            phase="impact_scoring",
+            source="impact_graph.refresh",
+            started_at=started_at,
+            elapsed_ms=_elapsed_ms(started),
+            status=status,
+            payload=payload,
+        )
 
 
 def impact_graph_summary(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -4738,7 +9036,7 @@ def impact_graph_summary(conn: sqlite3.Connection) -> dict[str, Any]:
 def _context_pack_item_from_node(node: Mapping[str, Any], edge_metadata: Mapping[str, Any]) -> dict[str, Any]:
     kind = str(node.get("kind") or "")
     path = str(node.get("path") or "")
-    return {
+    item = {
         "node_id": str(node.get("node_id") or ""),
         "kind": kind,
         "category": _impact_code_category(kind),
@@ -4746,9 +9044,43 @@ def _context_pack_item_from_node(node: Mapping[str, Any], edge_metadata: Mapping
         "name": str(node.get("name") or ""),
         "confidence": round(float(edge_metadata.get("confidence") or 0), 4),
         "reason": _brief_text(edge_metadata.get("reason") or "", limit=180),
+        "source": str(edge_metadata.get("source") or ""),
+        "signal_kind": str(edge_metadata.get("signal_kind") or edge_metadata.get("source") or ""),
+        "write_candidate": bool(edge_metadata.get("write_candidate")),
+        "scoping_only": bool(edge_metadata.get("scoping_only", not bool(edge_metadata.get("write_candidate")))),
         "is_stale": bool(int(node.get("is_stale") or 0)),
         "raw_contents_included": False,
     }
+    for key in (
+        "symbol_name",
+        "qualified_name",
+        "symbol_node_id",
+        "symbol_resolution",
+        "symbol_match_kind",
+        "symbol_is_stale",
+        "reference",
+        "resolution_kind",
+        "dependency_mode",
+        "interface_kind",
+        "matched_terms",
+        "reference_details",
+        "edge_source_path",
+        "edge_target_path",
+        "lsp_status",
+        "lsp_source",
+        "lsp_language_server_id",
+        "lsp_language_server_version",
+        "lsp_collected_at",
+        "lsp_candidate_count",
+        "scope_evidence_id",
+        "creation_path",
+        "path_kind",
+        "path_exists",
+        "ownership_kind",
+    ):
+        if key in edge_metadata:
+            item[key] = edge_metadata.get(key)
+    return item
 
 
 def _context_pack_selected_task(
@@ -4838,6 +9170,429 @@ def _load_impact_snapshot_nodes_edges(conn: sqlite3.Connection, snapshot_id: str
             }
         )
     return nodes, edges
+
+
+def _symbol_context_item_key(item: Mapping[str, Any]) -> str:
+    return str(item.get("node_id") or item.get("symbol_node_id") or item.get("path") or item.get("name") or stable_json(item))
+
+
+def _bounded_symbol_context_items(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    unique: dict[str, dict[str, Any]] = {}
+    for item in items:
+        key = _symbol_context_item_key(item)
+        if not key:
+            continue
+        current = unique.get(key)
+        if current is None or float(item.get("confidence") or 0) > float(current.get("confidence") or 0):
+            unique[key] = item
+    return sorted(
+        unique.values(),
+        key=lambda item: (
+            0 if bool(item.get("direct_match") or item.get("write_candidate")) else 1,
+            -float(item.get("confidence") or 0),
+            str(item.get("path") or item.get("owner_file_path") or ""),
+            str(item.get("qualified_name") or item.get("name") or item.get("symbol_name") or ""),
+            str(item.get("reason") or ""),
+        ),
+    )[:limit]
+
+
+def _symbol_context_file_brief(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "node_id": str(item.get("node_id") or ""),
+        "path": str(item.get("path") or ""),
+        "name": str(item.get("name") or ""),
+        "category": str(item.get("category") or ""),
+        "confidence": float(item.get("confidence") or 0),
+        "reason": _brief_text(item.get("reason") or "", limit=180),
+        "source": str(item.get("source") or ""),
+        "signal_kind": str(item.get("signal_kind") or ""),
+        "write_candidate": bool(item.get("write_candidate")),
+        "scoping_only": bool(item.get("scoping_only")),
+        "is_stale": bool(item.get("is_stale")),
+    }
+
+
+def _symbol_context_symbol_brief_from_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol_node_id": str(item.get("symbol_node_id") or ""),
+        "symbol_name": str(item.get("symbol_name") or ""),
+        "qualified_name": str(item.get("qualified_name") or item.get("symbol_name") or ""),
+        "owner_file_path": str(item.get("path") or ""),
+        "confidence": float(item.get("confidence") or 0),
+        "reason": _brief_text(item.get("reason") or "", limit=180),
+        "source": str(item.get("source") or ""),
+        "signal_kind": str(item.get("signal_kind") or ""),
+        "symbol_resolution": str(item.get("symbol_resolution") or item.get("resolution_kind") or ""),
+        "symbol_match_kind": str(item.get("symbol_match_kind") or ""),
+        "direct_match": True,
+        "is_stale": bool(item.get("is_stale") or item.get("symbol_is_stale")),
+    }
+
+
+def _symbol_context_symbol_briefs_conn(
+    conn: sqlite3.Connection,
+    snapshot_id: str,
+    *,
+    symbol_node_ids: set[str],
+    owner_file_node_ids: set[str],
+    context_by_symbol_id: Mapping[str, Mapping[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not snapshot_id:
+        return []
+    clauses: list[str] = []
+    params: list[Any] = [snapshot_id, CODEBASE_GRAPH_NAMESPACE]
+    if symbol_node_ids:
+        placeholders = ",".join("?" for _ in sorted(symbol_node_ids))
+        clauses.append(f"symbol_node.node_id IN ({placeholders})")
+        params.extend(sorted(symbol_node_ids))
+    if owner_file_node_ids:
+        placeholders = ",".join("?" for _ in sorted(owner_file_node_ids))
+        clauses.append(f"owner_node.node_id IN ({placeholders})")
+        params.extend(sorted(owner_file_node_ids))
+    if not clauses:
+        return []
+    rows = conn.execute(
+        f"""
+        SELECT symbol_node.node_id AS symbol_node_id,
+               symbol_node.name AS symbol_name,
+               symbol_node.path AS symbol_path,
+               symbol_node.metadata_json AS symbol_metadata,
+               owner_node.node_id AS owner_node_id,
+               owner_node.path AS owner_file_path
+        FROM graph_edges ownership
+        JOIN graph_nodes owner_node
+          ON owner_node.snapshot_id = ownership.snapshot_id
+         AND owner_node.node_id = ownership.from_node_id
+        JOIN graph_nodes symbol_node
+          ON symbol_node.snapshot_id = ownership.snapshot_id
+         AND symbol_node.node_id = ownership.to_node_id
+        WHERE ownership.snapshot_id = ?
+          AND ownership.graph_namespace = ?
+          AND ownership.kind = 'owns_symbol'
+          AND ({' OR '.join(clauses)})
+        ORDER BY owner_node.path, symbol_node.name
+        LIMIT ?
+        """,
+        (*params, max(limit * 3, limit)),
+    ).fetchall()
+    briefs: list[dict[str, Any]] = []
+    for row in rows:
+        metadata = _json_cell(row["symbol_metadata"], {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        symbol_node_id = str(row["symbol_node_id"] or "")
+        context = context_by_symbol_id.get(symbol_node_id, {})
+        confidence = float(context.get("confidence") or metadata.get("confidence") or 0)
+        briefs.append(
+            {
+                "symbol_node_id": symbol_node_id,
+                "symbol_name": str(row["symbol_name"] or metadata.get("symbol_name") or ""),
+                "qualified_name": str(metadata.get("qualified_name") or row["symbol_name"] or ""),
+                "symbol_kind": str(metadata.get("symbol_kind") or ""),
+                "language": str(metadata.get("language") or ""),
+                "owner_file_node_id": str(row["owner_node_id"] or ""),
+                "owner_file_path": str(row["owner_file_path"] or metadata.get("owner_file_path") or row["symbol_path"] or ""),
+                "confidence": confidence,
+                "reason": _brief_text(context.get("reason") or f"owned symbol in `{row['owner_file_path']}`", limit=180),
+                "source": str(context.get("source") or metadata.get("source") or "symbol_ownership"),
+                "signal_kind": str(context.get("signal_kind") or "owned_symbol"),
+                "symbol_resolution": str(context.get("symbol_resolution") or metadata.get("resolution_kind") or "exact"),
+                "symbol_match_kind": str(context.get("symbol_match_kind") or ""),
+                "direct_match": bool(context),
+                "is_stale": bool(context.get("is_stale")),
+            }
+        )
+    return _bounded_symbol_context_items(briefs, limit)
+
+
+def _symbol_context_likely_tests_conn(
+    conn: sqlite3.Connection,
+    snapshot_id: str,
+    owner_file_node_ids: set[str],
+    context_by_node_id: Mapping[str, Mapping[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    test_items = [
+        _symbol_context_file_brief(item)
+        for item in context_by_node_id.values()
+        if str(item.get("category") or "") == "tests"
+    ]
+    if snapshot_id and owner_file_node_ids:
+        placeholders = ",".join("?" for _ in sorted(owner_file_node_ids))
+        rows = conn.execute(
+            f"""
+            SELECT test_node.node_id AS test_node_id,
+                   test_node.path AS test_path,
+                   source_node.path AS source_path,
+                   edge.metadata_json AS edge_metadata
+            FROM graph_edges edge
+            JOIN graph_nodes test_node
+              ON test_node.snapshot_id = edge.snapshot_id
+             AND test_node.node_id = edge.from_node_id
+            JOIN graph_nodes source_node
+              ON source_node.snapshot_id = edge.snapshot_id
+             AND source_node.node_id = edge.to_node_id
+            WHERE edge.snapshot_id = ?
+              AND edge.graph_namespace = ?
+              AND edge.kind = 'likely_tests'
+              AND edge.to_node_id IN ({placeholders})
+            ORDER BY source_node.path, test_node.path
+            LIMIT ?
+            """,
+            (snapshot_id, CODEBASE_GRAPH_NAMESPACE, *sorted(owner_file_node_ids), max(limit * 2, limit)),
+        ).fetchall()
+        for row in rows:
+            metadata = _json_cell(row["edge_metadata"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            test_items.append(
+                {
+                    "node_id": str(row["test_node_id"] or ""),
+                    "path": str(row["test_path"] or ""),
+                    "name": Path(str(row["test_path"] or "")).name,
+                    "category": "tests",
+                    "confidence": float(metadata.get("confidence") or 0.6),
+                    "reason": f"likely tests `{row['source_path']}` by naming/proximity",
+                    "source": "likely_tests",
+                    "signal_kind": "test_proximity",
+                    "source_path": str(row["source_path"] or ""),
+                    "write_candidate": False,
+                    "scoping_only": True,
+                    "is_stale": False,
+                }
+            )
+    return _bounded_symbol_context_items(test_items, limit)
+
+
+def _symbol_context_dependency_edges_conn(
+    conn: sqlite3.Connection,
+    snapshot_id: str,
+    file_node_ids: set[str],
+    context_by_node_id: Mapping[str, Mapping[str, Any]],
+    limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    neighbor_items = [
+        {
+            **_symbol_context_file_brief(item),
+            "reference": str(item.get("reference") or ""),
+            "dependency_mode": str(item.get("dependency_mode") or "advisory"),
+            "edge_source_path": str(item.get("edge_source_path") or ""),
+            "edge_target_path": str(item.get("edge_target_path") or ""),
+        }
+        for item in context_by_node_id.values()
+        if str(item.get("signal_kind") or "") in {"import_adjacency", "semantic_reference", "ambiguous_semantic_reference"}
+    ]
+    interface_items = [
+        {
+            **_symbol_context_file_brief(item),
+            "reference": str(item.get("reference") or ""),
+            "interface_kind": str(item.get("interface_kind") or ""),
+            "matched_terms": list(item.get("matched_terms") or []) if isinstance(item.get("matched_terms"), list) else [],
+            "dependency_mode": str(item.get("dependency_mode") or "advisory"),
+            "edge_source_path": str(item.get("edge_source_path") or ""),
+            "edge_target_path": str(item.get("edge_target_path") or ""),
+        }
+        for item in context_by_node_id.values()
+        if str(item.get("signal_kind") or "") == "interface_bridge"
+    ]
+    if snapshot_id and file_node_ids:
+        placeholders = ",".join("?" for _ in sorted(file_node_ids))
+        rows = conn.execute(
+            f"""
+            SELECT edge.kind,
+                   edge.from_node_id,
+                   edge.to_node_id,
+                   source_node.path AS source_path,
+                   target_node.path AS target_path,
+                   edge.metadata_json AS edge_metadata
+            FROM graph_edges edge
+            JOIN graph_nodes source_node
+              ON source_node.snapshot_id = edge.snapshot_id
+             AND source_node.node_id = edge.from_node_id
+            JOIN graph_nodes target_node
+              ON target_node.snapshot_id = edge.snapshot_id
+             AND target_node.node_id = edge.to_node_id
+            WHERE edge.snapshot_id = ?
+              AND edge.graph_namespace = ?
+              AND edge.kind IN ('imports', 'references')
+              AND (edge.from_node_id IN ({placeholders}) OR edge.to_node_id IN ({placeholders}))
+            ORDER BY edge.kind, source_node.path, target_node.path
+            LIMIT ?
+            """,
+            (snapshot_id, CODEBASE_GRAPH_NAMESPACE, *sorted(file_node_ids), *sorted(file_node_ids), max(limit * 4, limit)),
+        ).fetchall()
+        for row in rows:
+            metadata = _json_cell(row["edge_metadata"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            signal = _codebase_adjacency_signal(str(row["kind"] or ""), metadata)
+            if signal is None:
+                continue
+            source_path = str(row["source_path"] or metadata.get("source_path") or "")
+            target_path = str(row["target_path"] or metadata.get("target_path") or "")
+            source_in_scope = str(row["from_node_id"] or "") in file_node_ids
+            neighbor_path = target_path if source_in_scope else source_path
+            item = {
+                "node_id": str(row["to_node_id"] if source_in_scope else row["from_node_id"]),
+                "path": neighbor_path,
+                "name": Path(neighbor_path).name,
+                "category": "files",
+                "confidence": min(float(signal.get("confidence") or metadata.get("confidence") or 0.5), float(signal.get("max_confidence") or 0.74)),
+                "reason": _brief_text(signal.get("reason") or metadata.get("reason") or f"{signal.get('signal_kind')} edge with `{source_path if source_in_scope else target_path}`", limit=180),
+                "source": str(signal.get("source") or metadata.get("source") or ""),
+                "signal_kind": str(signal.get("signal_kind") or metadata.get("signal_kind") or ""),
+                "reference": str(signal.get("reference") or metadata.get("reference") or metadata.get("raw_import") or metadata.get("module") or ""),
+                "dependency_mode": str(signal.get("dependency_mode") or metadata.get("dependency_mode") or "advisory"),
+                "edge_source_path": source_path,
+                "edge_target_path": target_path,
+                "write_candidate": False,
+                "scoping_only": True,
+                "is_stale": False,
+            }
+            if item["signal_kind"] == "interface_bridge":
+                item.update(
+                    {
+                        "interface_kind": str(metadata.get("interface_kind") or ""),
+                        "matched_terms": list(metadata.get("matched_terms") or []) if isinstance(metadata.get("matched_terms"), list) else [],
+                    }
+                )
+                interface_items.append(item)
+            else:
+                neighbor_items.append(item)
+    return (
+        _bounded_symbol_context_items(neighbor_items, limit),
+        _bounded_symbol_context_items(interface_items, SYMBOL_CONTEXT_INTERFACE_LIMIT),
+    )
+
+
+def _symbol_context_excluded_candidates(excluded_items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for item in excluded_items:
+        confidence = float(item.get("confidence") or 0)
+        exclusion_reason = (
+            "below scoping/read-only confidence threshold"
+            if confidence < PARALLEL_SCOPING_READ_CONFIDENCE_THRESHOLD
+            else "omitted by deterministic context pack size bound"
+        )
+        candidates.append(
+            {
+                **_symbol_context_file_brief(item),
+                "exclusion_reason": exclusion_reason,
+            }
+        )
+    return _bounded_symbol_context_items(candidates, limit)
+
+
+def _symbol_aware_context_pack_conn(
+    conn: sqlite3.Connection,
+    *,
+    included_items: list[dict[str, Any]],
+    excluded_items: list[dict[str, Any]],
+    max_items: int,
+) -> dict[str, Any]:
+    codebase_row = _latest_codebase_graph_snapshot_row(conn)
+    codebase_snapshot_id = str(codebase_row["snapshot_id"]) if codebase_row is not None else ""
+    context_by_node_id = {
+        str(item.get("node_id") or ""): item
+        for item in included_items
+        if isinstance(item, Mapping) and str(item.get("node_id") or "")
+    }
+    file_node_ids = {
+        str(item.get("node_id") or "")
+        for item in included_items
+        if str(item.get("node_id") or "") and str(item.get("category") or "") in {"files", "tests", "configs", "docs"}
+    }
+    owner_file_node_ids = {
+        str(item.get("node_id") or "")
+        for item in included_items
+        if str(item.get("node_id") or "")
+        and str(item.get("category") or "") in {"files", "configs", "docs"}
+        and (
+            bool(item.get("write_candidate"))
+            or str(item.get("signal_kind") or "") in {"direct_path", "exact_symbol", "inferred_symbol", "ambiguous_symbol", "stale_symbol"}
+        )
+    }
+    symbol_node_ids = {
+        str(item.get("symbol_node_id") or "")
+        for item in included_items
+        if str(item.get("symbol_node_id") or "")
+    }
+    context_by_symbol_id = {
+        str(item.get("symbol_node_id") or ""): item
+        for item in included_items
+        if str(item.get("symbol_node_id") or "")
+    }
+    direct_symbols = [
+        _symbol_context_symbol_brief_from_item(item)
+        for item in included_items
+        if str(item.get("symbol_node_id") or "")
+    ]
+    direct_symbols.extend(
+        _symbol_context_symbol_briefs_conn(
+            conn,
+            codebase_snapshot_id,
+            symbol_node_ids=symbol_node_ids,
+            owner_file_node_ids=owner_file_node_ids,
+            context_by_symbol_id=context_by_symbol_id,
+            limit=SYMBOL_CONTEXT_DIRECT_SYMBOL_LIMIT,
+        )
+    )
+    owning_files = [
+        _symbol_context_file_brief(item)
+        for item in included_items
+        if str(item.get("category") or "") in {"files", "configs", "docs"}
+        and (
+            bool(item.get("write_candidate"))
+            or str(item.get("signal_kind") or "") in {"direct_path", "exact_symbol", "inferred_symbol", "ambiguous_symbol", "stale_symbol"}
+        )
+    ]
+    dependency_neighbors, interface_edges = _symbol_context_dependency_edges_conn(
+        conn,
+        codebase_snapshot_id,
+        file_node_ids=file_node_ids or owner_file_node_ids,
+        context_by_node_id=context_by_node_id,
+        limit=SYMBOL_CONTEXT_NEIGHBOR_LIMIT,
+    )
+    likely_tests = _symbol_context_likely_tests_conn(
+        conn,
+        codebase_snapshot_id,
+        owner_file_node_ids=owner_file_node_ids or file_node_ids,
+        context_by_node_id=context_by_node_id,
+        limit=SYMBOL_CONTEXT_TEST_LIMIT,
+    )
+    excluded = _symbol_context_excluded_candidates(excluded_items, SYMBOL_CONTEXT_EXCLUDED_LIMIT)
+    return {
+        "schema_version": 1,
+        "codebase_snapshot_id": codebase_snapshot_id,
+        "bounded": True,
+        "limits": {
+            "max_items": int(max_items or IMPACT_CONTEXT_PACK_LIMIT),
+            "direct_symbols": SYMBOL_CONTEXT_DIRECT_SYMBOL_LIMIT,
+            "owning_files": SYMBOL_CONTEXT_OWNING_FILE_LIMIT,
+            "likely_tests": SYMBOL_CONTEXT_TEST_LIMIT,
+            "dependency_neighbors": SYMBOL_CONTEXT_NEIGHBOR_LIMIT,
+            "interface_edges": SYMBOL_CONTEXT_INTERFACE_LIMIT,
+            "excluded_low_confidence_candidates": SYMBOL_CONTEXT_EXCLUDED_LIMIT,
+        },
+        "direct_symbols": _bounded_symbol_context_items(direct_symbols, SYMBOL_CONTEXT_DIRECT_SYMBOL_LIMIT),
+        "owning_files": _bounded_symbol_context_items(owning_files, SYMBOL_CONTEXT_OWNING_FILE_LIMIT),
+        "likely_tests": likely_tests,
+        "dependency_neighbors": dependency_neighbors,
+        "interface_edges": interface_edges,
+        "excluded_low_confidence_candidates": excluded,
+        "confidence_reasons": [
+            {
+                "path": str(item.get("path") or item.get("name") or ""),
+                "signal_kind": str(item.get("signal_kind") or ""),
+                "confidence": float(item.get("confidence") or 0),
+                "reason": _brief_text(item.get("reason") or "", limit=180),
+                "write_candidate": bool(item.get("write_candidate")),
+            }
+            for item in sorted(
+                included_items,
+                key=lambda value: (-float(value.get("confidence") or 0), str(value.get("path") or value.get("name") or "")),
+            )[: max(1, min(int(max_items or IMPACT_CONTEXT_PACK_LIMIT), IMPACT_CONTEXT_PACK_LIMIT))]
+        ],
+    }
 
 
 def _record_context_pack_read_receipts_conn(
@@ -4951,6 +9706,7 @@ def build_context_pack_conn(
             "artifacts": [],
             "stale_context_warning": "",
             "policy_notes": ["raw source contents are omitted by default"],
+            "symbol_context": _symbol_aware_context_pack_conn(conn, included_items=[], excluded_items=[], max_items=max_items),
         }
     snapshot_id = str(impact_row["snapshot_id"])
     nodes, edges = _load_impact_snapshot_nodes_edges(conn, snapshot_id)
@@ -4975,15 +9731,33 @@ def build_context_pack_conn(
                 continue
             confidence = 0.0
             reason = ""
+            source = ""
+            signal_kind = ""
+            write_candidate = False
             if path and any(path == mention or path.endswith("/" + mention) for mention in mentions):
                 confidence = 0.96
                 reason = "freeform path mention"
+                source = "path_mention"
+                signal_kind = "direct_path"
+                write_candidate = True
             else:
                 keyword_confidence, keyword_reason = _impact_score_keywords(terms, node)
                 confidence = keyword_confidence
                 reason = keyword_reason
+                source = "keyword_advisory" if keyword_confidence else ""
+                signal_kind = "keyword_only" if keyword_confidence else ""
             if confidence > 0:
-                item_by_node[str(node["node_id"])] = _context_pack_item_from_node(node, {"confidence": confidence, "reason": reason})
+                item_by_node[str(node["node_id"])] = _context_pack_item_from_node(
+                    node,
+                    {
+                        "confidence": confidence,
+                        "reason": reason,
+                        "source": source,
+                        "signal_kind": signal_kind,
+                        "write_candidate": write_candidate,
+                        "scoping_only": not write_candidate,
+                    },
+                )
     else:
         for edge in edges:
             kind = str(edge.get("kind") or "")
@@ -5013,14 +9787,17 @@ def build_context_pack_conn(
                 item_by_node[target_id] = item
 
     category_priority = {"files": 0, "tests": 1, "configs": 2, "commands": 3, "docs": 4, "artifacts": 5}
-    items = sorted(
+    pack_limit = max(1, int(max_items or IMPACT_CONTEXT_PACK_LIMIT))
+    ordered_items = sorted(
         item_by_node.values(),
         key=lambda item: (
             -float(item.get("confidence") or 0),
             category_priority.get(str(item.get("category") or ""), 99),
             str(item.get("path") or item.get("name") or ""),
         ),
-    )[: max(1, int(max_items or IMPACT_CONTEXT_PACK_LIMIT))]
+    )
+    items = ordered_items[:pack_limit]
+    excluded_items = ordered_items[pack_limit:]
     read_receipt_count = 0
     if record_read_receipt and selected_task_id:
         read_receipt_count = _record_context_pack_read_receipts_conn(
@@ -5053,10 +9830,11 @@ def build_context_pack_conn(
         "selected_task": selected_task_brief,
         "query": _brief_text(query, limit=180),
         "bounded": True,
-        "max_items": max_items,
+        "max_items": pack_limit,
         "item_count": len(items),
         "items": items,
         **by_category,
+        "symbol_context": _symbol_aware_context_pack_conn(conn, included_items=items, excluded_items=excluded_items, max_items=pack_limit),
         "stale_context_warning": "Relevant context includes stale file graph nodes." if stale_items else "",
         "policy_notes": _context_pack_policy_note(items, skipped_secret_count),
         "read_receipts_recorded": read_receipt_count,
@@ -5192,6 +9970,58 @@ def _latest_graph_node_row(
             return row
     return None
 
+def _module_owned_paths_conn(conn: sqlite3.Connection, module_node_id: str) -> list[str]:
+    module_node_id = str(module_node_id or "").strip()
+    if not module_node_id:
+        return []
+    row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        return []
+    rows = conn.execute(
+        """
+        SELECT DISTINCT source.path
+        FROM graph_edges edge
+        JOIN graph_nodes source
+          ON source.snapshot_id = edge.snapshot_id
+         AND source.node_id = edge.from_node_id
+        WHERE edge.snapshot_id = ?
+          AND edge.graph_namespace = ?
+          AND edge.kind = 'defines_module'
+          AND edge.to_node_id = ?
+          AND source.kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+        ORDER BY source.path
+        """,
+        (str(row["snapshot_id"]), CODEBASE_GRAPH_NAMESPACE, module_node_id),
+    ).fetchall()
+    return [normalize_path_for_brief(str(item["path"] or "")) for item in rows if str(item["path"] or "")]
+
+
+def _package_owned_paths_conn(conn: sqlite3.Connection, package_name: str) -> list[str]:
+    package_name = str(package_name or "").strip()
+    if not package_name:
+        return []
+    row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        return []
+    rows = conn.execute(
+        """
+        SELECT DISTINCT node.path
+        FROM graph_node_facts fact
+        JOIN graph_nodes node
+          ON node.snapshot_id = fact.snapshot_id
+         AND node.node_id = fact.node_id
+        WHERE fact.snapshot_id = ?
+          AND fact.graph_namespace = ?
+          AND fact.fact_key = 'package_name'
+          AND fact.fact_value = ?
+          AND node.kind = 'symbol'
+          AND node.path <> ''
+        ORDER BY node.path
+        """,
+        (str(row["snapshot_id"]), CODEBASE_GRAPH_NAMESPACE, package_name),
+    ).fetchall()
+    return [normalize_path_for_brief(str(item["path"] or "")) for item in rows if str(item["path"] or "")]
+
 
 def _lease_scope_descriptor_conn(conn: sqlite3.Connection, scope_kind: str, scope_node_id: str) -> dict[str, Any]:
     scope_kind = str(scope_kind or "").strip().lower()
@@ -5220,24 +10050,49 @@ def _lease_scope_descriptor_conn(conn: sqlite3.Connection, scope_kind: str, scop
                 "metadata": _json_cell(row["metadata_json"], {}),
             }
         return {"scope_kind": "repo", "scope_node_id": scope_node_id, "kind": "repo", "path": ".", "name": "repo", "metadata": {}}
+    if scope_kind == "package":
+        paths = _package_owned_paths_conn(conn, scope_node_id)
+        return {
+            "scope_kind": "package",
+            "scope_node_id": scope_node_id,
+            "kind": "package",
+            "path": "",
+            "name": scope_node_id,
+            "metadata": {"package_name": scope_node_id, "owned_paths": paths},
+            "owned_paths": paths,
+            "package_name": scope_node_id,
+        }
     row = _latest_graph_node_row(conn, scope_node_id)
     if row is None:
+        synthetic_path = _scope_evidence_path_from_scope_node_id(scope_node_id)
         return {
             "scope_kind": scope_kind,
             "scope_node_id": scope_node_id,
             "kind": scope_kind,
-            "path": "",
-            "name": scope_node_id,
-            "metadata": {},
+            "path": synthetic_path,
+            "name": synthetic_path or scope_node_id,
+            "metadata": {"synthetic_path_scope": True} if synthetic_path else {},
         }
     metadata = _json_cell(row["metadata_json"], {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    owned_paths: list[str] = []
+    if scope_kind == "module":
+        owned_paths = _module_owned_paths_conn(conn, scope_node_id)
+    elif scope_kind == "package":
+        owned_paths = _package_owned_paths_conn(conn, str(metadata.get("package_name") or row["name"] or scope_node_id))
+    if owned_paths:
+        metadata = {**metadata, "owned_paths": owned_paths}
     return {
         "scope_kind": scope_kind,
         "scope_node_id": scope_node_id,
         "kind": str(row["kind"] or scope_kind),
         "path": normalize_path_for_brief(str(row["path"] or "")),
         "name": str(row["name"] or ""),
-        "metadata": metadata if isinstance(metadata, dict) else {},
+        "metadata": metadata,
+        "owned_paths": owned_paths,
+        "package_name": str(metadata.get("package_name") or ""),
+        "module_name": str(metadata.get("module_name") or row["name"] or ""),
+        "language": str(metadata.get("language") or ""),
     }
 
 
@@ -5253,6 +10108,81 @@ def _path_under(path: str, directory: str) -> bool:
     return path == directory or path.startswith(directory.rstrip("/") + "/")
 
 
+def _lease_owned_paths(scope: Mapping[str, Any]) -> list[str]:
+    paths: list[str] = []
+    path = normalize_path_for_brief(str(scope.get("path") or ""))
+    if path:
+        paths.append(path)
+    metadata = scope.get("metadata") if isinstance(scope.get("metadata"), Mapping) else {}
+    for value in scope.get("owned_paths") if isinstance(scope.get("owned_paths"), list) else []:
+        normalized = normalize_path_for_brief(str(value or ""))
+        if normalized and normalized not in paths:
+            paths.append(normalized)
+    for value in metadata.get("owned_paths") if isinstance(metadata.get("owned_paths"), list) else []:
+        normalized = normalize_path_for_brief(str(value or ""))
+        if normalized and normalized not in paths:
+            paths.append(normalized)
+    return paths
+
+
+def _lease_paths_overlap(first_paths: list[str], second_paths: list[str]) -> tuple[bool, str]:
+    for first_path in first_paths:
+        for second_path in second_paths:
+            if not first_path or not second_path:
+                continue
+            if first_path == second_path:
+                return True, f"same owned path `{first_path}`"
+            if _path_under(first_path, second_path):
+                return True, f"`{first_path}` is under `{second_path}`"
+            if _path_under(second_path, first_path):
+                return True, f"`{second_path}` is under `{first_path}`"
+    return False, ""
+
+
+def _lease_scope_file_kind(scope: Mapping[str, Any]) -> str:
+    metadata = scope.get("metadata") if isinstance(scope.get("metadata"), Mapping) else {}
+    return str(scope.get("kind") or metadata.get("kind") or "").strip().lower()
+
+
+def _category_scope_matches_file(category_kind: str, file_scope: Mapping[str, Any]) -> bool:
+    file_kind = _lease_scope_file_kind(file_scope)
+    path = normalize_path_for_brief(str(file_scope.get("path") or ""))
+    if category_kind == "tests":
+        return file_kind == "test_file" or path.startswith(("test/", "tests/")) or "/test/" in path or "/tests/" in path
+    if category_kind == "docs":
+        return file_kind == "doc_file" or path.startswith(("doc/", "docs/")) or "/doc/" in path or "/docs/" in path
+    return False
+
+
+def _category_lease_overlap(category_scope: Mapping[str, Any], other_scope: Mapping[str, Any]) -> tuple[bool, str]:
+    category_kind = str(category_scope.get("scope_kind") or "").lower()
+    other_kind = str(other_scope.get("scope_kind") or "").lower()
+    category_path = normalize_path_for_brief(str(category_scope.get("path") or ""))
+    other_path = normalize_path_for_brief(str(other_scope.get("path") or ""))
+    category_label = "test" if category_kind == "tests" else "docs"
+    if other_kind in {"tests", "docs"}:
+        if category_kind != other_kind:
+            return False, ""
+        if category_path and other_path and (_path_under(category_path, other_path) or _path_under(other_path, category_path)):
+            return True, f"overlapping {category_label} ownership"
+        return False, ""
+    if other_kind == "directory":
+        if category_path and other_path and _path_under(category_path, other_path):
+            return True, f"{category_label} scope under leased directory"
+        return False, ""
+    if other_kind in {"file", "symbol"}:
+        if _category_scope_matches_file(category_kind, other_scope) and category_path and other_path and _path_under(other_path, category_path):
+            return True, f"{category_label} file under {category_label} ownership"
+        if _category_scope_matches_file(category_kind, other_scope) and not category_path:
+            return True, f"{category_label} file matches {category_label} ownership"
+        return False, ""
+    if other_kind in {"module", "package"}:
+        owned_paths = _lease_owned_paths(other_scope)
+        if category_path and any(_path_under(path, category_path) for path in owned_paths):
+            return True, f"{other_kind} owns files inside {category_label} scope"
+    return False, ""
+
+
 def _lease_scopes_overlap(first: Mapping[str, Any], second: Mapping[str, Any]) -> tuple[bool, str]:
     first_kind = str(first.get("scope_kind") or "").lower()
     second_kind = str(second.get("scope_kind") or "").lower()
@@ -5262,14 +10192,66 @@ def _lease_scopes_overlap(first: Mapping[str, Any], second: Mapping[str, Any]) -
     second_path = normalize_path_for_brief(str(second.get("path") or ""))
     if first_kind == "repo" or second_kind == "repo":
         return True, "repo lease overlaps all scopes"
+    if first_kind in {"tests", "docs"}:
+        return _category_lease_overlap(first, second)
+    if second_kind in {"tests", "docs"}:
+        overlaps, reason = _category_lease_overlap(second, first)
+        if reason == "test scope under leased directory":
+            reason = "directory contains leased test scope"
+        elif reason == "docs scope under leased directory":
+            reason = "directory contains leased docs scope"
+        return overlaps, reason
+    if first_kind == "symbol" and second_kind == "symbol":
+        if first_node and first_node == second_node:
+            return True, "same symbol node"
+        return False, ""
+    if first_kind == "module" and second_kind == "module":
+        if first_node and first_node == second_node:
+            return True, "same module node"
+        overlaps, reason = _lease_paths_overlap(_lease_owned_paths(first), _lease_owned_paths(second))
+        if overlaps:
+            return True, f"module ownership overlaps: {reason}"
+        return False, ""
+    if first_kind == "package" and second_kind == "package":
+        first_package = str(first.get("package_name") or first.get("name") or first_node)
+        second_package = str(second.get("package_name") or second.get("name") or second_node)
+        if first_package and first_package == second_package:
+            return True, "same package ownership"
+        overlaps, reason = _lease_paths_overlap(_lease_owned_paths(first), _lease_owned_paths(second))
+        if overlaps:
+            return True, f"package ownership overlaps: {reason}"
+        return False, ""
+    if {first_kind, second_kind} == {"module", "package"}:
+        overlaps, reason = _lease_paths_overlap(_lease_owned_paths(first), _lease_owned_paths(second))
+        if overlaps:
+            return True, f"module/package ownership overlaps: {reason}"
+        return False, ""
     if first_node and first_node == second_node:
         return True, "same graph node"
-    if first_kind == "module" and second_kind == "module" and first_node == second_node:
-        return True, "same module node"
     if first_kind == "command" or second_kind == "command":
         return (first_kind == second_kind and first_node == second_node), "same command node"
+    if first_kind == "symbol" and second_kind == "file" and first_path and first_path == second_path:
+        return True, "file lease overlaps symbol file"
+    if first_kind == "file" and second_kind == "symbol" and first_path and first_path == second_path:
+        return True, "symbol lease overlaps leased file"
+    if first_kind in {"module", "package"} and second_kind in {"file", "symbol"}:
+        if second_path and any(_path_under(second_path, owned_path) or _path_under(owned_path, second_path) for owned_path in _lease_owned_paths(first)):
+            return True, f"{second_kind} overlaps {first_kind} ownership"
+    if second_kind in {"module", "package"} and first_kind in {"file", "symbol"}:
+        if first_path and any(_path_under(first_path, owned_path) or _path_under(owned_path, first_path) for owned_path in _lease_owned_paths(second)):
+            return True, f"{first_kind} overlaps {second_kind} ownership"
+    if first_kind in {"module", "package"} and second_kind == "directory":
+        if second_path and any(_path_under(owned_path, second_path) for owned_path in _lease_owned_paths(first)):
+            return True, f"{first_kind} ownership under leased directory"
+    if second_kind in {"module", "package"} and first_kind == "directory":
+        if first_path and any(_path_under(owned_path, first_path) for owned_path in _lease_owned_paths(second)):
+            return True, f"directory contains {second_kind} ownership"
     if first_kind == "file" and second_kind == "file" and first_path and first_path == second_path:
         return True, "same file path"
+    if first_kind == "directory" and second_kind == "symbol" and second_path and _path_under(second_path, first_path):
+        return True, "symbol file under leased directory"
+    if first_kind == "symbol" and second_kind == "directory" and first_path and _path_under(first_path, second_path):
+        return True, "directory contains leased symbol file"
     if first_kind == "directory" and second_kind == "directory" and first_path and second_path:
         if _path_under(first_path, second_path) or _path_under(second_path, first_path):
             return True, "overlapping directories"
@@ -5347,7 +10329,7 @@ def list_conflicting_leases_conn(
     )
     conflicts: list[dict[str, Any]] = []
     for lease in active_resource_leases_conn(conn):
-        if task_id and str(lease.get("task_id") or "") == str(task_id):
+        if task_id and run_id and str(lease.get("task_id") or "") == str(task_id) and str(lease.get("run_id") or "") == str(run_id):
             continue
         overlaps, reason = _lease_scopes_overlap(candidate, lease.get("scope") if isinstance(lease.get("scope"), Mapping) else {})
         if overlaps:
@@ -5514,7 +10496,12 @@ def current_conflicting_resource_leases_conn(conn: sqlite3.Connection) -> list[d
     for index, first in enumerate(leases):
         first_scope = first.get("scope") if isinstance(first.get("scope"), Mapping) else {}
         for second in leases[index + 1 :]:
-            if str(first.get("task_id") or "") and str(first.get("task_id") or "") == str(second.get("task_id") or ""):
+            if (
+                str(first.get("task_id") or "")
+                and str(first.get("task_id") or "") == str(second.get("task_id") or "")
+                and str(first.get("run_id") or "")
+                and str(first.get("run_id") or "") == str(second.get("run_id") or "")
+            ):
                 continue
             second_scope = second.get("scope") if isinstance(second.get("scope"), Mapping) else {}
             overlaps, reason = _lease_scopes_overlap(first_scope, second_scope)
@@ -5570,6 +10557,195 @@ def _repo_node_id_conn(conn: sqlite3.Connection) -> str:
     return str(node["node_id"]) if node else ""
 
 
+def _latest_codebase_file_row_by_path_conn(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
+    normalized = normalize_path_for_brief(path)
+    if not normalized:
+        return None
+    row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        return None
+    return conn.execute(
+        """
+        SELECT *
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+          AND path = ?
+        LIMIT 1
+        """,
+        (str(row["snapshot_id"]), CODEBASE_GRAPH_NAMESPACE, normalized),
+    ).fetchone()
+
+
+def _symbol_resource_lease_info_conn(conn: sqlite3.Connection, touch: Mapping[str, Any]) -> dict[str, Any]:
+    symbol_node_id = str(touch.get("symbol_node_id") or "").strip()
+    file_path = normalize_path_for_brief(str(touch.get("path") or ""))
+    if not symbol_node_id:
+        return {"eligible": False, "reason": "no exact symbol ownership signal is attached to this write touch"}
+    reasons: list[str] = []
+    signal_kind = str(touch.get("signal_kind") or "").strip()
+    confidence = float(touch.get("confidence") or 0)
+    if signal_kind != "exact_symbol":
+        reasons.append(f"signal is `{signal_kind or 'unknown'}`, not exact_symbol")
+    if confidence < PARALLEL_WRITE_TOUCH_CONFIDENCE_THRESHOLD:
+        reasons.append(f"confidence {confidence:.2f} is below direct-write threshold {PARALLEL_WRITE_TOUCH_CONFIDENCE_THRESHOLD:.2f}")
+    symbol_row = _latest_graph_node_row(conn, symbol_node_id, namespaces=(CODEBASE_GRAPH_NAMESPACE,))
+    if symbol_row is None:
+        reasons.append("symbol node is not present in the latest codebase graph")
+        symbol_metadata: dict[str, Any] = {}
+    else:
+        symbol_metadata_raw = _json_cell(symbol_row["metadata_json"], {})
+        symbol_metadata = symbol_metadata_raw if isinstance(symbol_metadata_raw, dict) else {}
+        if bool(int(symbol_row["is_stale"] or 0)):
+            reasons.append("symbol graph node is stale")
+    file_row = _latest_graph_node_row(conn, str(touch.get("node_id") or ""), namespaces=(CODEBASE_GRAPH_NAMESPACE,))
+    if file_row is None:
+        file_row = _latest_codebase_file_row_by_path_conn(conn, file_path)
+    if file_row is None:
+        reasons.append("owning file node is not present in the latest codebase graph")
+        file_metadata: dict[str, Any] = {}
+    else:
+        file_metadata_raw = _json_cell(file_row["metadata_json"], {})
+        file_metadata = file_metadata_raw if isinstance(file_metadata_raw, dict) else {}
+        if bool(int(file_row["is_stale"] or 0)):
+            reasons.append("owning file graph node is stale")
+    resolution = str(touch.get("symbol_resolution") or symbol_metadata.get("resolution_kind") or "").strip().lower()
+    if resolution != "exact":
+        reasons.append(f"symbol resolution is `{resolution or 'unknown'}`")
+    if bool(touch.get("symbol_is_stale") or touch.get("is_stale")):
+        reasons.append("write touch is marked stale")
+    if bool(symbol_metadata.get("ambiguous")):
+        reasons.append("symbol identity is ambiguous")
+    if bool(symbol_metadata.get("unresolved")) or symbol_metadata.get("resolved") is False:
+        reasons.append("symbol identity is unresolved")
+    extractor_confidence = float(symbol_metadata.get("extractor_confidence") or symbol_metadata.get("confidence") or 0)
+    if extractor_confidence < SYMBOL_RESOURCE_LEASE_MIN_EXTRACTOR_CONFIDENCE:
+        reasons.append(
+            f"extractor confidence {extractor_confidence:.2f} is below symbol lease threshold {SYMBOL_RESOURCE_LEASE_MIN_EXTRACTOR_CONFIDENCE:.2f}"
+        )
+    parser_confidence = float(file_metadata.get("parser_confidence") or 0)
+    if parser_confidence < SYMBOL_RESOURCE_LEASE_MIN_PARSER_CONFIDENCE:
+        reasons.append(
+            f"parser confidence {parser_confidence:.2f} is below symbol lease threshold {SYMBOL_RESOURCE_LEASE_MIN_PARSER_CONFIDENCE:.2f}"
+        )
+    owner_path = normalize_path_for_brief(
+        str(symbol_metadata.get("owner_file_path") or symbol_metadata.get("file_path") or file_path or (symbol_row["path"] if symbol_row is not None else ""))
+    )
+    if file_path and owner_path and file_path != owner_path:
+        reasons.append(f"symbol owner path `{owner_path}` does not match write touch `{file_path}`")
+    qualified_name = str(symbol_metadata.get("qualified_name") or touch.get("qualified_name") or touch.get("symbol_name") or "")
+    return {
+        "eligible": not reasons,
+        "reason": "; ".join(reasons),
+        "scope_kind": "symbol",
+        "scope_node_id": symbol_node_id,
+        "path": owner_path or file_path,
+        "name": qualified_name or str(touch.get("symbol_name") or symbol_node_id),
+        "symbol_node_id": symbol_node_id,
+        "symbol_name": str(symbol_metadata.get("symbol_name") or touch.get("symbol_name") or ""),
+        "qualified_name": qualified_name,
+        "symbol_kind": str(symbol_metadata.get("symbol_kind") or ""),
+        "language": str(symbol_metadata.get("language") or ""),
+        "extractor_confidence": extractor_confidence,
+        "parser_confidence": parser_confidence,
+        "resolution_kind": resolution,
+        "source": str(symbol_metadata.get("source") or touch.get("source") or ""),
+        "package_name": str(symbol_metadata.get("package_name") or ""),
+        "module_name": str(symbol_metadata.get("module_name") or ""),
+    }
+
+
+def _module_resource_lease_info_conn(conn: sqlite3.Connection, touch: Mapping[str, Any]) -> dict[str, Any]:
+    path = normalize_path_for_brief(str(touch.get("path") or ""))
+    node_id = str(touch.get("node_id") or "")
+    confidence = float(touch.get("confidence") or 0)
+    if confidence < MODULE_RESOURCE_LEASE_MIN_CONFIDENCE:
+        return {
+            "eligible": False,
+            "reason": f"confidence {confidence:.2f} is below module lease threshold {MODULE_RESOURCE_LEASE_MIN_CONFIDENCE:.2f}",
+        }
+    if not path:
+        return {"eligible": False, "reason": "no file path is attached to this write touch"}
+    row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        return {"eligible": False, "reason": "codebase graph snapshot is unavailable"}
+    module_row = conn.execute(
+        """
+        SELECT module.node_id, module.name, module.metadata_json, source.metadata_json AS source_metadata_json
+        FROM graph_edges edge
+        JOIN graph_nodes source
+          ON source.snapshot_id = edge.snapshot_id
+         AND source.node_id = edge.from_node_id
+        JOIN graph_nodes module
+          ON module.snapshot_id = edge.snapshot_id
+         AND module.node_id = edge.to_node_id
+        WHERE edge.snapshot_id = ?
+          AND edge.graph_namespace = ?
+          AND edge.kind = 'defines_module'
+          AND module.kind = 'module'
+          AND (source.node_id = ? OR source.path = ?)
+        ORDER BY module.name
+        LIMIT 1
+        """,
+        (str(row["snapshot_id"]), CODEBASE_GRAPH_NAMESPACE, node_id, path),
+    ).fetchone()
+    if module_row is None:
+        return {"eligible": False, "reason": "file does not define a graph module in the current snapshot"}
+    source_metadata = _json_cell(module_row["source_metadata_json"], {})
+    source_metadata = source_metadata if isinstance(source_metadata, dict) else {}
+    parser_confidence = float(source_metadata.get("parser_confidence") or 0)
+    if parser_confidence and parser_confidence < SYMBOL_RESOURCE_LEASE_MIN_PARSER_CONFIDENCE:
+        return {
+            "eligible": False,
+            "reason": f"parser confidence {parser_confidence:.2f} is below module lease threshold {SYMBOL_RESOURCE_LEASE_MIN_PARSER_CONFIDENCE:.2f}",
+        }
+    module_metadata = _json_cell(module_row["metadata_json"], {})
+    module_metadata = module_metadata if isinstance(module_metadata, dict) else {}
+    owned_paths = _module_owned_paths_conn(conn, str(module_row["node_id"]))
+    return {
+        "eligible": True,
+        "scope_kind": "module",
+        "scope_node_id": str(module_row["node_id"]),
+        "path": path,
+        "name": str(module_row["name"] or module_metadata.get("module_name") or path),
+        "module_node_id": str(module_row["node_id"]),
+        "module_name": str(module_metadata.get("module_name") or module_row["name"] or ""),
+        "package_name": str(module_metadata.get("package_name") or ""),
+        "language": str(module_metadata.get("language") or ""),
+        "owned_paths": owned_paths or [path],
+        "parser_confidence": parser_confidence,
+    }
+
+
+def _package_name_for_path_conn(conn: sqlite3.Connection, path: str) -> str:
+    normalized = normalize_path_for_brief(path)
+    if not normalized:
+        return ""
+    row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        return ""
+    fact = conn.execute(
+        """
+        SELECT fact.fact_value
+        FROM graph_node_facts fact
+        JOIN graph_nodes node
+          ON node.snapshot_id = fact.snapshot_id
+         AND node.node_id = fact.node_id
+        WHERE fact.snapshot_id = ?
+          AND fact.graph_namespace = ?
+          AND fact.fact_key = 'package_name'
+          AND fact.fact_value <> ''
+          AND node.kind = 'symbol'
+          AND node.path = ?
+        ORDER BY fact.confidence DESC, fact.fact_value
+        LIMIT 1
+        """,
+        (str(row["snapshot_id"]), CODEBASE_GRAPH_NAMESPACE, normalized),
+    ).fetchone()
+    return str(fact["fact_value"] or "") if fact else ""
+
+
 def lease_suggestions_for_next_action_conn(
     conn: sqlite3.Connection,
     target: Path,
@@ -5612,15 +10788,20 @@ def lease_suggestions_for_next_action_conn(
         if not directory_node:
             continue
         confidence = max(float(item.get("confidence") or 0) for item in group)
+        direct_group = [item for item in group if bool(item.get("write_candidate"))]
         suggestion = {
             "scope_kind": "directory",
             "scope_node_id": directory_node["node_id"],
             "path": directory_node.get("path") or directory,
             "task_id": task_id,
-            "recommended": True,
-            "caution": False,
+            "recommended": bool(direct_group),
+            "caution": not bool(direct_group),
             "confidence": round(confidence, 4),
-            "reason": f"{len(group)} relevant context files under `{directory}`",
+            "reason": (
+                f"{len(direct_group)} direct write context file(s) under `{directory}`"
+                if direct_group
+                else f"{len(group)} advisory context file(s) under `{directory}`; direct path or exact symbol signal required for write lease"
+            ),
         }
         suggestion["conflicts"] = list_conflicting_leases_conn(
             conn,
@@ -5630,24 +10811,78 @@ def lease_suggestions_for_next_action_conn(
         )
         suggestions.append(suggestion)
 
+    symbol_covered_file_node_ids: set[str] = set()
+    for item in file_like:
+        if not bool(item.get("write_candidate")) or str(item.get("signal_kind") or "") != "exact_symbol":
+            continue
+        symbol_info = _symbol_resource_lease_info_conn(conn, item)
+        if not bool(symbol_info.get("eligible")):
+            continue
+        suggestion = {
+            "scope_kind": "symbol",
+            "scope_node_id": str(symbol_info.get("scope_node_id") or ""),
+            "path": str(symbol_info.get("path") or item.get("path") or ""),
+            "name": str(symbol_info.get("name") or item.get("name") or ""),
+            "task_id": task_id,
+            "recommended": True,
+            "caution": False,
+            "confidence": round(float(item.get("confidence") or 0), 4),
+            "reason": _brief_text(f"exact fresh symbol ownership `{symbol_info.get('name')}` in `{symbol_info.get('path')}`", limit=180),
+            "symbol_node_id": str(symbol_info.get("symbol_node_id") or ""),
+            "symbol_name": str(symbol_info.get("symbol_name") or ""),
+            "qualified_name": str(symbol_info.get("qualified_name") or ""),
+            "symbol_kind": str(symbol_info.get("symbol_kind") or ""),
+            "language": str(symbol_info.get("language") or ""),
+            "owner_file_path": str(symbol_info.get("path") or ""),
+            "symbol_lease_eligible": True,
+            "extractor_confidence": float(symbol_info.get("extractor_confidence") or 0),
+            "parser_confidence": float(symbol_info.get("parser_confidence") or 0),
+        }
+        suggestion["conflicts"] = list_conflicting_leases_conn(
+            conn,
+            scope_kind="symbol",
+            scope_node_id=str(suggestion["scope_node_id"]),
+            task_id=task_id,
+        )
+        suggestions.append(suggestion)
+        symbol_covered_file_node_ids.add(str(item.get("node_id") or ""))
+
     covered_dirs = {
         str(suggestion.get("path") or "")
         for suggestion in suggestions
         if suggestion.get("scope_kind") == "directory" and suggestion.get("recommended")
     }
     for item in file_like:
+        if str(item.get("node_id") or "") in symbol_covered_file_node_ids:
+            continue
         path = str(item.get("path") or "")
         if any(_path_under(path, directory) for directory in covered_dirs):
             continue
+        write_candidate = bool(item.get("write_candidate"))
+        symbol_info = _symbol_resource_lease_info_conn(conn, item) if write_candidate and str(item.get("symbol_node_id") or "") else {}
+        fallback_reason = str(symbol_info.get("reason") or "") if symbol_info and not bool(symbol_info.get("eligible")) else ""
         suggestion = {
             "scope_kind": "file",
             "scope_node_id": str(item.get("node_id") or ""),
             "path": path,
             "task_id": task_id,
-            "recommended": True,
-            "caution": False,
+            "recommended": write_candidate,
+            "caution": not write_candidate,
             "confidence": round(float(item.get("confidence") or 0), 4),
-            "reason": _brief_text(item.get("reason") or "likely touched by next task", limit=180),
+            "reason": _brief_text(
+                (f"file-level fallback for symbol ownership: {fallback_reason}" if fallback_reason else item.get("reason"))
+                or (
+                    "direct write candidate"
+                    if write_candidate
+                    else "advisory context only; direct path or exact symbol signal required for write lease"
+                ),
+                limit=180,
+            ),
+            "symbol_node_id": str(item.get("symbol_node_id") or ""),
+            "symbol_name": str(item.get("symbol_name") or ""),
+            "qualified_name": str(item.get("qualified_name") or ""),
+            "symbol_lease_eligible": False if fallback_reason else bool(item.get("symbol_node_id")),
+            "symbol_lease_fallback_reason": _brief_text(fallback_reason, limit=180),
         }
         suggestion["conflicts"] = list_conflicting_leases_conn(
             conn,
@@ -5697,7 +10932,7 @@ def lease_suggestions_for_next_action_conn(
         suggestions,
         key=lambda item: (
             0 if item.get("recommended") else 1,
-            0 if item.get("scope_kind") == "directory" else 1,
+            {"symbol": 0, "file": 1, "directory": 2, "command": 3, "module": 4, "repo": 5}.get(str(item.get("scope_kind") or ""), 9),
             -float(item.get("confidence") or 0),
             str(item.get("path") or item.get("name") or ""),
         ),
@@ -5744,6 +10979,32 @@ def _scheduler_candidate_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
+def _compact_scheduler_candidate_payload(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    item = dict(candidate)
+    preview = item.get("context_pack_preview")
+    if isinstance(preview, Mapping):
+        item["context_pack_preview"] = _compact_context_pack_preview(
+            preview,
+            context_pack_id=str(item.get("context_pack_id") or ""),
+        )
+    if isinstance(item.get("likely_touches"), list):
+        item["likely_touches"] = list(item.get("likely_touches") or [])[:8]
+    if isinstance(item.get("required_leases"), list):
+        item["required_leases"] = list(item.get("required_leases") or [])[:8]
+    if isinstance(item.get("lease_conflicts_considered"), list):
+        item["lease_conflicts_considered"] = list(item.get("lease_conflicts_considered") or [])[:8]
+    if isinstance(item.get("skipped_candidates"), list):
+        item["skipped_candidates"] = list(item.get("skipped_candidates") or [])[:8]
+    if isinstance(item.get("integration_preflight"), Mapping):
+        preflight = dict(item.get("integration_preflight") or {})
+        if isinstance(preflight.get("safe_order"), list):
+            preflight["safe_order"] = list(preflight.get("safe_order") or [])[:8]
+        if isinstance(preflight.get("safe_patch_ids"), list):
+            preflight["safe_patch_ids"] = list(preflight.get("safe_patch_ids") or [])[:20]
+        item["integration_preflight"] = preflight
+    return item
+
+
 def write_scheduler_decision_conn(
     conn: sqlite3.Connection,
     *,
@@ -5764,7 +11025,7 @@ def write_scheduler_decision_conn(
     legacy_payload = dict(legacy_result or {})
     rows: list[dict[str, Any]] = []
     for index, candidate in enumerate(candidates):
-        item = dict(candidate)
+        item = _compact_scheduler_candidate_payload(candidate)
         state = str(item.get("state") or "")
         if not state:
             state = "selected" if selected_task_id and str(item.get("task_id") or "") == selected_task_id else "ready"
@@ -6022,10 +11283,10 @@ def _budget_row(
 def default_parallelism_budgets_from_control(control: Mapping[str, Any]) -> list[dict[str, Any]]:
     worker = control.get("worker") if isinstance(control.get("worker"), Mapping) else {}
     agents_allowed = bool(worker.get("agents_allowed", True))
-    write_allowed = bool(worker.get("write_workers_allowed")) and agents_allowed
-    max_write = _nonnegative_int(worker.get("max_write_worker_count"), 0, maximum=10)
-    if not write_allowed:
-        max_write = 0
+    write_allowed = True
+    max_write = _nonnegative_int(worker.get("max_write_worker_count"), PARALLELISM_BUDGET_WRITE_CONCURRENT, maximum=10)
+    if max_write <= 0:
+        max_write = PARALLELISM_BUDGET_WRITE_CONCURRENT
     read_only_max = PARALLELISM_BUDGET_READ_ONLY_CONCURRENT if agents_allowed else 0
     budgets = [
         _budget_row(
@@ -6386,19 +11647,164 @@ def classify_validation_command(command: str, *, exclusive: bool = False) -> str
     lowered = str(command or "").strip().lower()
     if not lowered:
         return "unknown"
-    if any(token in lowered for token in ("repair_environment", "repair environment", "npm install", "npm ci", "pip install", "bundle install")):
+    if any(
+        token in lowered
+        for token in (
+            "repair_environment",
+            "repair environment",
+            "npm install",
+            "npm ci",
+            "pnpm install",
+            "yarn install",
+            "pip install",
+            "bundle install",
+        )
+    ):
         return "environment_repair"
     if any(token in lowered for token in ("git clean", "git reset", "rm -rf", "prisma migrate", "db:migrate", "migrate deploy")):
         return "exclusive"
-    if any(token in lowered for token in ("playwright", "cypress", "selenium", "browser")):
+    if any(
+        token in lowered
+        for token in ("docker compose", "docker-compose", "dev server", "serve ", "npm start", "pnpm start", "yarn start", "validate_starter_kit.sh")
+    ):
+        return "resource_heavy"
+    if any(token in lowered for token in ("playwright", "cypress", "selenium", "browser", "e2e")):
         return "browser"
-    if any(token in lowered for token in ("build", "tsc", "vite build", "next build", "cargo build")):
+    if any(token in lowered for token in ("markdownlint", "vale", "lychee", "mdformat", "doctest", "docs/", " docs", "mkdocs")):
+        return "docs_check"
+    if any(
+        token in lowered
+        for token in (
+            "check_required_files.py",
+            "preflight_parallelization_readiness.py",
+            "summarize_worker_outputs.py",
+            "state_brief.py",
+            "ticket_run.py",
+        )
+    ):
+        return "generated_helper"
+    if any(token in lowered for token in ("typecheck", "type-check", "tsc --noemit", "tsc --noemit", "tsc --no-emit", "mypy", "pyright", "pyre", "py_compile")):
+        return "typecheck"
+    if any(token in lowered for token in ("lint", "ruff", "eslint", "flake8", "pylint", "clippy", "go vet")):
+        return "lint"
+    if "smoke" in lowered:
+        return "smoke"
+    if any(token in lowered for token in ("build", "vite build", "next build", "cargo build", "go build", "webpack", "rollup")):
         return "build"
     if any(token in lowered for token in ("pytest", "unittest", "npm test", "pnpm test", "yarn test", "vitest", "jest", "cargo test", "go test")):
-        return "test"
-    if any(token in lowered for token in ("lint", "typecheck", "type-check", "mypy", "ruff", "eslint", "check", "py_compile")):
+        return "unit_test"
+    if any(token in lowered for token in ("check",)):
         return "read_only_check"
     return "unknown"
+
+
+def _validation_command_family(command: str, classification: str) -> str:
+    classification = str(classification or "unknown").strip()
+    if classification in {"unit_test", "test"}:
+        lowered = str(command or "").lower()
+        if "pytest" in lowered or "unittest" in lowered:
+            return "python_tests"
+        if any(token in lowered for token in ("vitest", "jest", "npm test", "pnpm test", "yarn test", "node --test")):
+            return "javascript_tests"
+        if "go test" in lowered:
+            return "go_tests"
+        if "cargo test" in lowered:
+            return "rust_tests"
+        return "unit_tests"
+    if classification in {"lint", "typecheck", "docs_check", "generated_helper", "read_only_check", "smoke"}:
+        return classification
+    if classification in {"build", "browser", "resource_heavy"}:
+        return "resource_heavy"
+    if classification in {"environment_repair", "setup"}:
+        return "setup"
+    if classification == "exclusive":
+        return "exclusive"
+    return "unknown"
+
+
+def _validation_classification_reason(command: str, classification: str) -> str:
+    classification = str(classification or "unknown").strip()
+    if classification in VALIDATION_PARALLEL_SAFE_CLASSIFICATIONS:
+        return f"{classification} command is read-only or patch-scoped enough for validation fanout"
+    if classification in {"build", "browser", "resource_heavy"}:
+        return f"{classification} command may consume shared local resources, so it runs in the serial validation lane"
+    if classification in {"setup", "environment_repair"}:
+        return "setup or dependency repair may mutate local caches, so it runs in the serial validation lane"
+    if classification == "exclusive":
+        return "command is explicitly exclusive"
+    return "unknown command safety; serialized conservatively"
+
+
+def _validation_command_requires_serial(command: str, classification: str, *, explicit_exclusive: bool = False) -> bool:
+    if explicit_exclusive:
+        return True
+    classification = str(classification or "unknown").strip()
+    if classification in VALIDATION_SERIAL_CLASSIFICATIONS:
+        return True
+    if classification not in VALIDATION_PARALLEL_SAFE_CLASSIFICATIONS:
+        return True
+    lowered = str(command or "").lower()
+    if any(token in lowered for token in ("--watch", " watch", " --serve", " --dev", " start")):
+        return True
+    return False
+
+
+def _validation_local_cache_probe(target: Path, cwd: Path, command: str, classification: str) -> dict[str, Any]:
+    """Detect reusable ignored local setup state without installing anything."""
+
+    command_text = str(command or "")
+    lowered = command_text.lower()
+    classification = str(classification or "unknown")
+    probes: list[dict[str, Any]] = []
+
+    def rel(path: Path) -> str:
+        try:
+            return path.relative_to(target).as_posix()
+        except ValueError:
+            return str(path)
+
+    if classification in {"unit_test", "test", "typecheck", "lint", "read_only_check"} and any(
+        token in lowered for token in ("pytest", "python", "mypy", "ruff")
+    ):
+        for venv_dir in [target_path(target, "target/automation_venvs") / "root", target / ".venv"]:
+            python_path = venv_dir / "bin" / "python"
+            if python_path.exists():
+                probes.append(
+                    {
+                        "cache_kind": "python_venv",
+                        "path": rel(venv_dir),
+                        "safe_to_reuse": True,
+                        "reason": "target-local Python venv is already present",
+                    }
+                )
+                break
+
+    if classification in {"unit_test", "test", "lint", "typecheck", "smoke", "docs_check", "generated_helper"} and any(
+        token in lowered for token in ("npm", "pnpm", "yarn", "node", "eslint", "tsc", "vitest", "jest")
+    ):
+        package_dir = cwd if (cwd / "package.json").exists() else target if (target / "package.json").exists() else None
+        if package_dir is not None:
+            node_modules = package_dir / "node_modules"
+            if node_modules.exists():
+                probes.append(
+                    {
+                        "cache_kind": "node_modules",
+                        "path": rel(node_modules),
+                        "safe_to_reuse": True,
+                        "reason": "target-local node_modules cache is already present",
+                    }
+                )
+
+    detected = next((item for item in probes if item.get("safe_to_reuse")), None)
+    return {
+        "schema_version": 1,
+        "detected": bool(detected),
+        "cache_kind": str(detected.get("cache_kind") or "") if detected else "",
+        "path": str(detected.get("path") or "") if detected else "",
+        "safe_to_reuse": bool(detected.get("safe_to_reuse")) if detected else False,
+        "reason": str(detected.get("reason") or "") if detected else "no reusable target-local setup cache detected",
+        "probes": probes[:4],
+    }
 
 
 def _validation_command_spec(raw: Any, *, index: int, target: Path, default_plan_id: str) -> dict[str, Any]:
@@ -6408,9 +11814,10 @@ def _validation_command_spec(raw: Any, *, index: int, target: Path, default_plan
     else:
         data = {}
         command = str(raw or "").strip()
+    explicit_exclusive = bool(data.get("exclusive"))
     classification = str(data.get("classification") or data.get("kind") or "").strip()
     if classification not in VALIDATION_COMMAND_CLASSIFICATIONS:
-        classification = classify_validation_command(command, exclusive=bool(data.get("exclusive")))
+        classification = classify_validation_command(command, exclusive=explicit_exclusive)
     cwd_text = str(data.get("cwd") or ".").strip() or "."
     cwd = Path(cwd_text)
     if not cwd.is_absolute():
@@ -6418,9 +11825,28 @@ def _validation_command_spec(raw: Any, *, index: int, target: Path, default_plan
     required = bool(data.get("required", True))
     gate_id = str(data.get("gate_id") or f"gate:{index}:{sha256_text(command)[:12]}")
     plan_id = str(data.get("plan_id") or default_plan_id)
-    resource_profile = str(data.get("resource_profile") or classification or "unknown")
+    command_family = _validation_command_family(command, classification)
+    requires_serial = _validation_command_requires_serial(command, classification, explicit_exclusive=explicit_exclusive)
+    resource_profile = str(
+        data.get("resource_profile")
+        or ("resource_heavy" if classification in {"build", "browser", "resource_heavy"} else command_family or classification or "unknown")
+    )
     timeout_seconds = _nonnegative_int(data.get("timeout_seconds"), 300, maximum=24 * 60 * 60)
+    cache_probe = _validation_local_cache_probe(target, cwd, command, classification)
+    planning_evidence = {
+        "schema_version": 1,
+        "classification": classification,
+        "command_family": command_family,
+        "classification_reason": _validation_classification_reason(command, classification),
+        "parallel_safe": not requires_serial,
+        "run_lane": "serial" if requires_serial else "parallel",
+        "resource_profile": resource_profile,
+        "exclusive_requested": explicit_exclusive,
+        "exclusive_inferred": requires_serial and not explicit_exclusive,
+        "setup_cache": cache_probe,
+    }
     return {
+        "target": str(target),
         "command": command,
         "cwd": str(cwd),
         "required": required,
@@ -6429,7 +11855,10 @@ def _validation_command_spec(raw: Any, *, index: int, target: Path, default_plan
         "gate_id": gate_id,
         "resource_profile": resource_profile,
         "timeout_seconds": timeout_seconds,
-        "exclusive": bool(data.get("exclusive")) or classification in {"exclusive", "environment_repair", "unknown"},
+        "exclusive": requires_serial,
+        "run_lane": "serial" if requires_serial else "parallel",
+        "command_family": command_family,
+        "planning_evidence": planning_evidence,
         "payload": data.get("payload") if isinstance(data.get("payload"), Mapping) else {},
     }
 
@@ -6478,9 +11907,679 @@ def _validation_environment_digest() -> str:
     return sha256_text(stable_json({"keys": sorted(observed), "values": observed}))
 
 
+def _validation_plan_paths(values: Any) -> list[str]:
+    paths: list[str] = []
+    for value in _task_text_values(values):
+        normalized = normalize_path_for_brief(str(value or "").strip("`'\"()[]{}:,;"))
+        if normalized and normalized not in paths:
+            paths.append(normalized)
+    return sorted(paths)
+
+
+def _validation_plan_path_language(path: str) -> str:
+    return str(LANGUAGE_BY_EXTENSION.get(Path(path).suffix.lower()) or "").strip()
+
+
+def _validation_plan_interface_kind(path: str) -> str:
+    lowered = normalize_path_for_brief(path).lower()
+    suffix = Path(lowered).suffix
+    if suffix in VALIDATION_INTERFACE_SUFFIXES:
+        return suffix.lstrip(".")
+    name = Path(lowered).name
+    if suffix in {".yaml", ".yml", ".json"} and any(hint in lowered for hint in VALIDATION_INTERFACE_NAME_HINTS):
+        if "openapi" in lowered or "swagger" in lowered:
+            return "openapi"
+        if "graphql" in lowered:
+            return "graphql"
+        return "schema"
+    if any(part in {"api", "routes", "schema", "schemas", "contracts"} for part in Path(lowered).parts):
+        if any(hint in name for hint in VALIDATION_INTERFACE_NAME_HINTS):
+            return "shared_interface"
+    return ""
+
+
+def _validation_plan_command_candidates(
+    conn: sqlite3.Connection,
+    target: Path | None,
+    context_pack: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    candidates_by_command: dict[str, dict[str, Any]] = {}
+
+    def add_candidate(command: str, *, kind: str = "", source: str = "", confidence: float = 0.75) -> None:
+        command_text = str(command or "").strip()
+        if not command_text:
+            return
+        classification = classify_validation_command(command_text)
+        current = candidates_by_command.get(command_text)
+        if current is None:
+            candidates_by_command[command_text] = {
+                "command": command_text,
+                "kind": kind or classification,
+                "source": source,
+                "classification": classification,
+                "confidence": round(float(confidence or 0.75), 4),
+            }
+            return
+        kinds = {part for part in str(current.get("kind") or "").split(",") if part}
+        if kind:
+            kinds.add(kind)
+        if kinds:
+            current["kind"] = ",".join(sorted(kinds))
+        sources = {part for part in str(current.get("source") or "").split(",") if part}
+        if source:
+            sources.add(source)
+        if sources:
+            current["source"] = ",".join(sorted(sources))
+        current["confidence"] = max(float(current.get("confidence") or 0), float(confidence or 0))
+
+    capability = latest_capability_manifest(conn)
+    if not capability and target is not None:
+        capability = refresh_capability_manifest_conn(conn, target)
+    capability_commands = capability.get("commands") if isinstance(capability, Mapping) else []
+    if isinstance(capability_commands, list):
+        for item in capability_commands:
+            if isinstance(item, Mapping):
+                add_candidate(
+                    str(item.get("command") or ""),
+                    kind=str(item.get("kind") or ""),
+                    source=str(item.get("source") or "capability_manifest"),
+                    confidence=0.86,
+                )
+
+    pack_commands = []
+    if isinstance(context_pack, Mapping):
+        pack_commands = context_pack.get("commands") if isinstance(context_pack.get("commands"), list) else []
+        if not pack_commands and isinstance(context_pack.get("items"), list):
+            pack_commands = [
+                item
+                for item in context_pack.get("items") or []
+                if isinstance(item, Mapping) and str(item.get("category") or "") == "commands"
+            ]
+    for item in pack_commands:
+        if not isinstance(item, Mapping):
+            continue
+        add_candidate(
+            str(item.get("name") or item.get("command") or ""),
+            kind=str(item.get("kind") or ""),
+            source=str(item.get("source") or "context_pack"),
+            confidence=float(item.get("confidence") or 0.72),
+        )
+
+    return sorted(
+        candidates_by_command.values(),
+        key=lambda item: (
+            0
+            if item.get("classification") in {"unit_test", "test"}
+            else 1
+            if item.get("classification") in {"lint", "typecheck", "read_only_check", "docs_check", "generated_helper"}
+            else 2,
+            str(item.get("command") or ""),
+        ),
+    )
+
+
+def _validation_plan_likely_tests_for_paths_conn(
+    conn: sqlite3.Connection,
+    paths: list[str],
+    context_pack: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    tests_by_path: dict[str, dict[str, Any]] = {}
+    symbol_context = context_pack.get("symbol_context") if isinstance(context_pack, Mapping) and isinstance(context_pack.get("symbol_context"), Mapping) else {}
+    for item in symbol_context.get("likely_tests") or []:
+        if not isinstance(item, Mapping):
+            continue
+        path = normalize_path_for_brief(str(item.get("path") or ""))
+        if not path:
+            continue
+        tests_by_path[path] = {
+            "path": path,
+            "source_path": normalize_path_for_brief(str(item.get("source_path") or "")),
+            "confidence": round(float(item.get("confidence") or 0.6), 4),
+            "reason": _brief_text(item.get("reason") or "test proximity", limit=180),
+        }
+
+    if paths:
+        row = _latest_codebase_graph_snapshot_row(conn)
+        snapshot_id = str(row["snapshot_id"]) if row is not None else ""
+        if snapshot_id:
+            placeholders = ",".join("?" for _ in paths)
+            rows = conn.execute(
+                f"""
+                SELECT test_node.path AS test_path,
+                       source_node.path AS source_path,
+                       edge.metadata_json AS edge_metadata
+                FROM graph_edges edge
+                JOIN graph_nodes test_node
+                  ON test_node.snapshot_id = edge.snapshot_id
+                 AND test_node.node_id = edge.from_node_id
+                JOIN graph_nodes source_node
+                  ON source_node.snapshot_id = edge.snapshot_id
+                 AND source_node.node_id = edge.to_node_id
+                WHERE edge.snapshot_id = ?
+                  AND edge.graph_namespace = ?
+                  AND edge.kind = 'likely_tests'
+                  AND source_node.path IN ({placeholders})
+                ORDER BY source_node.path, test_node.path
+                LIMIT ?
+                """,
+                (snapshot_id, CODEBASE_GRAPH_NAMESPACE, *paths, max(VALIDATION_PLAN_TARGETED_TEST_LIMIT * 3, 8)),
+            ).fetchall()
+            for row_item in rows:
+                test_path = normalize_path_for_brief(str(row_item["test_path"] or ""))
+                if not test_path:
+                    continue
+                metadata = _json_cell(row_item["edge_metadata"], {})
+                metadata = metadata if isinstance(metadata, dict) else {}
+                tests_by_path[test_path] = {
+                    "path": test_path,
+                    "source_path": normalize_path_for_brief(str(row_item["source_path"] or metadata.get("source_path_hint") or "")),
+                    "confidence": round(float(metadata.get("confidence") or 0.6), 4),
+                    "reason": _brief_text(metadata.get("reason") or "test file naming/proximity", limit=180),
+                }
+    return sorted(tests_by_path.values(), key=lambda item: (-float(item.get("confidence") or 0), str(item.get("path") or "")))[:VALIDATION_PLAN_TARGETED_TEST_LIMIT]
+
+
+def _validation_plan_targeted_test_command(command: str, test_path: str) -> tuple[str, str]:
+    command_text = str(command or "").strip()
+    path = normalize_path_for_brief(test_path)
+    if not command_text or not path or path in command_text:
+        return command_text, "base_test_command"
+    lowered = command_text.lower()
+    quoted = shlex.quote(path)
+    if "pytest" in lowered:
+        return f"{command_text} {quoted}", "pytest_test_path"
+    if "unittest" in lowered:
+        module = Path(path).with_suffix("").as_posix().replace("/", ".")
+        return f"{command_text} {shlex.quote(module)}", "unittest_module"
+    if lowered.startswith("go test") and path.endswith("_test.go"):
+        package = Path(path).parent.as_posix() or "."
+        package_arg = "." if package == "." else f"./{package}"
+        if "./..." in command_text:
+            return command_text.replace("./...", package_arg), "go_package"
+        return f"{command_text} {package_arg}", "go_package"
+    if "cargo test" in lowered and path.endswith(".rs"):
+        return f"{command_text} {shlex.quote(Path(path).stem)}", "cargo_test_name"
+    if any(token in lowered for token in ("vitest", "jest", "node --test")):
+        if re.search(r"\b(?:npm|pnpm|yarn)\s+run\s+", lowered) or lowered.startswith(("npm test", "pnpm test", "yarn test")):
+            return f"{command_text} -- {quoted}", "js_test_path"
+        return f"{command_text} {quoted}", "js_test_path"
+    return command_text, "package_test"
+
+
+def _validation_plan_command_payload(
+    *,
+    selection_kind: str,
+    selection_reason: str,
+    selection_reasons: list[str],
+    selected_paths: list[str],
+    impacted_paths: list[str],
+    escalation_reasons: list[str],
+    confidence: float,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "selection_kind": selection_kind,
+        "selection_reason": _brief_text(selection_reason, limit=220),
+        "selection_reasons": [_brief_text(reason, limit=220) for reason in selection_reasons if str(reason or "")],
+        "selected_paths": selected_paths[:8],
+        "impacted_paths": impacted_paths[:12],
+        "escalation_reasons": escalation_reasons[:8],
+        "selection_confidence": round(float(confidence or 0), 4),
+    }
+
+
+def _validation_plan_add_command(
+    commands_by_key: dict[str, dict[str, Any]],
+    *,
+    command: str,
+    classification: str,
+    selection_kind: str,
+    selection_reason: str,
+    selected_paths: list[str],
+    impacted_paths: list[str],
+    escalation_reasons: list[str],
+    confidence: float,
+    required: bool = True,
+    exclusive: bool = False,
+) -> None:
+    command_text = str(command or "").strip()
+    if not command_text:
+        return
+    classification = classification if classification in VALIDATION_COMMAND_CLASSIFICATIONS else classify_validation_command(command_text)
+    existing = commands_by_key.get(command_text)
+    reason = _brief_text(selection_reason, limit=220)
+    if existing is None:
+        gate_digest = sha256_text(stable_json({"command": command_text, "selection_kind": selection_kind, "paths": selected_paths}))[:16]
+        commands_by_key[command_text] = {
+            "command": command_text,
+            "classification": classification,
+            "required": bool(required),
+            "exclusive": _validation_command_requires_serial(command_text, classification, explicit_exclusive=bool(exclusive)),
+            "gate_id": f"gate:dag-validation:{gate_digest}",
+            "selection_kind": selection_kind,
+            "selection_reason": reason,
+            "selection_reasons": [reason] if reason else [],
+            "confidence": round(float(confidence or 0), 4),
+            "payload": _validation_plan_command_payload(
+                selection_kind=selection_kind,
+                selection_reason=reason,
+                selection_reasons=[reason] if reason else [],
+                selected_paths=selected_paths,
+                impacted_paths=impacted_paths,
+                escalation_reasons=escalation_reasons,
+                confidence=confidence,
+            ),
+        }
+        return
+    existing["confidence"] = max(float(existing.get("confidence") or 0), round(float(confidence or 0), 4))
+    existing["required"] = bool(existing.get("required", True)) or bool(required)
+    existing["exclusive"] = bool(existing.get("exclusive")) or bool(exclusive)
+    reasons = [str(item) for item in existing.get("selection_reasons") or [] if str(item)]
+    if reason and reason not in reasons:
+        reasons.append(reason)
+    existing["selection_reasons"] = reasons[:8]
+    existing["selection_reason"] = reasons[0] if reasons else ""
+    paths = [str(item) for item in selected_paths if str(item)]
+    payload = existing.get("payload") if isinstance(existing.get("payload"), Mapping) else {}
+    existing["payload"] = _validation_plan_command_payload(
+        selection_kind=str(existing.get("selection_kind") or selection_kind),
+        selection_reason=str(existing.get("selection_reason") or reason),
+        selection_reasons=reasons,
+        selected_paths=sorted({*list(payload.get("selected_paths") or []), *paths}),
+        impacted_paths=impacted_paths,
+        escalation_reasons=escalation_reasons,
+        confidence=float(existing.get("confidence") or confidence),
+    )
+
+
+def _validation_plan_sort_commands(commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    priority = {
+        "likely_test": 0,
+        "package_test": 1,
+        "typecheck": 2,
+        "interface_contract": 3,
+        "build": 4,
+        "broad_validation": 5,
+    }
+    return sorted(
+        commands,
+        key=lambda item: (
+            priority.get(str(item.get("selection_kind") or ""), 99),
+            0 if bool(item.get("required", True)) else 1,
+            str(item.get("command") or ""),
+        ),
+    )[:VALIDATION_PLAN_MAX_COMMANDS]
+
+
+def build_symbol_aware_validation_plan_conn(
+    conn: sqlite3.Connection,
+    target: Path | None,
+    *,
+    dag_node: Mapping[str, Any] | None = None,
+    paths: list[str] | None = None,
+    context_pack: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Choose validation commands from symbol/file/interface impact without project-specific assumptions."""
+
+    target = target.expanduser().resolve() if target is not None else None
+    metadata = dag_node.get("metadata") if isinstance(dag_node, Mapping) and isinstance(dag_node.get("metadata"), Mapping) else {}
+    metadata_paths = _validation_plan_paths(metadata.get("paths") or metadata.get("changed_files") or metadata.get("affected_paths"))
+    impacted_paths = sorted({*_validation_plan_paths(paths or []), *metadata_paths})
+    node_confidence = float(dag_node.get("confidence") or metadata.get("confidence") or 0) if isinstance(dag_node, Mapping) else 0.0
+
+    pack = context_pack if isinstance(context_pack, Mapping) else None
+    if pack is None and target is not None and isinstance(dag_node, Mapping):
+        try:
+            pack = _parallel_context_pack_for_dag_node_conn(conn, target, dag_node, metadata=metadata, max_items=IMPACT_CONTEXT_PACK_LIMIT)
+        except (sqlite3.Error, OSError, ValueError):
+            pack = None
+
+    symbol_context = pack.get("symbol_context") if isinstance(pack, Mapping) and isinstance(pack.get("symbol_context"), Mapping) else {}
+    owning_paths = [
+        normalize_path_for_brief(str(item.get("path") or ""))
+        for item in symbol_context.get("owning_files") or []
+        if isinstance(item, Mapping) and str(item.get("path") or "")
+    ]
+    impacted_paths = sorted({*impacted_paths, *owning_paths})
+    likely_tests = _validation_plan_likely_tests_for_paths_conn(conn, impacted_paths, pack)
+    commands = _validation_plan_command_candidates(conn, target, pack)
+    command_by_class: dict[str, list[dict[str, Any]]] = {}
+    for command in commands:
+        command_by_class.setdefault(str(command.get("classification") or "unknown"), []).append(command)
+
+    interface_paths = [path for path in impacted_paths if _validation_plan_interface_kind(path)]
+    interface_edges = [
+        dict(item)
+        for item in symbol_context.get("interface_edges") or []
+        if isinstance(item, Mapping)
+    ]
+    dependency_neighbors = [
+        dict(item)
+        for item in symbol_context.get("dependency_neighbors") or []
+        if isinstance(item, Mapping)
+    ]
+    languages = sorted({language for language in (_validation_plan_path_language(path) for path in impacted_paths) if language})
+    for edge in [*interface_edges, *dependency_neighbors]:
+        for key in ("edge_source_path", "edge_target_path", "path"):
+            language = _validation_plan_path_language(str(edge.get(key) or ""))
+            if language and language not in languages:
+                languages.append(language)
+    languages = sorted(set(languages))
+
+    escalation_reasons: list[str] = []
+    if node_confidence and node_confidence < PARALLEL_WRITE_TOUCH_CONFIDENCE_THRESHOLD:
+        escalation_reasons.append(f"low_confidence:{node_confidence:.2f}")
+    if interface_paths or interface_edges:
+        escalation_reasons.append("shared_interface_impact")
+    if len(languages) > 1 and (interface_paths or interface_edges):
+        escalation_reasons.append("cross_language_interface_impact")
+    if str((pack or {}).get("stale_context_warning") or ""):
+        escalation_reasons.append("stale_symbol_or_file_context")
+    low_confidence_items = [
+        item
+        for item in symbol_context.get("confidence_reasons") or []
+        if isinstance(item, Mapping) and float(item.get("confidence") or 0) < PARALLEL_SCOPING_READ_CONFIDENCE_THRESHOLD
+    ]
+    if low_confidence_items:
+        escalation_reasons.append("low_confidence_impact_signal")
+    if symbol_context.get("excluded_low_confidence_candidates"):
+        escalation_reasons.append("excluded_low_confidence_candidates")
+    escalation_reasons = sorted(set(escalation_reasons))
+    strategy = "broader" if escalation_reasons else "targeted"
+
+    selection_reasons: list[str] = []
+    if impacted_paths:
+        selection_reasons.append("impacted paths: " + ", ".join(impacted_paths[:6]))
+    if likely_tests:
+        selection_reasons.append("likely tests mapped from file/symbol impact")
+    if interface_paths or interface_edges:
+        selection_reasons.append("shared interface impact requires contract or broader checks")
+    if escalation_reasons:
+        selection_reasons.append("broader validation escalation: " + ", ".join(escalation_reasons[:5]))
+    if not commands:
+        selection_reasons.append("no repository validation commands are configured")
+
+    selected_by_command: dict[str, dict[str, Any]] = {}
+    test_commands = [*command_by_class.get("unit_test", []), *command_by_class.get("test", [])]
+    read_only_commands = [
+        *command_by_class.get("typecheck", []),
+        *command_by_class.get("lint", []),
+        *command_by_class.get("docs_check", []),
+        *command_by_class.get("generated_helper", []),
+        *command_by_class.get("read_only_check", []),
+        *command_by_class.get("smoke", []),
+    ]
+    build_commands = [*command_by_class.get("build", []), *command_by_class.get("resource_heavy", [])]
+    contract_commands = [
+        command
+        for command in commands
+        if any(token in str(command.get("command") or "").lower() for token in ("contract", "schema", "openapi", "swagger", "graphql", "proto", "prisma", "db", "database"))
+    ]
+
+    if likely_tests and test_commands:
+        base = test_commands[0]
+        for test in likely_tests:
+            test_path = normalize_path_for_brief(str(test.get("path") or ""))
+            targeted_command, targeting_kind = _validation_plan_targeted_test_command(str(base.get("command") or ""), test_path)
+            reason = f"{targeting_kind} selected for likely test `{test_path}`"
+            source_path = str(test.get("source_path") or "")
+            if source_path:
+                reason += f" covering `{source_path}`"
+            _validation_plan_add_command(
+                selected_by_command,
+                command=targeted_command,
+                classification="unit_test",
+                selection_kind="likely_test",
+                selection_reason=reason,
+                selected_paths=[test_path],
+                impacted_paths=impacted_paths,
+                escalation_reasons=escalation_reasons,
+                confidence=max(float(base.get("confidence") or 0.75), float(test.get("confidence") or 0.6)),
+            )
+
+    if strategy == "broader" and test_commands:
+        for command in test_commands[:2]:
+            _validation_plan_add_command(
+                selected_by_command,
+                command=str(command.get("command") or ""),
+                classification=str(command.get("classification") or "unit_test"),
+                selection_kind="package_test",
+                selection_reason="package-level test command selected because impact confidence or interface scope requires broader validation",
+                selected_paths=[],
+                impacted_paths=impacted_paths,
+                escalation_reasons=escalation_reasons,
+                confidence=float(command.get("confidence") or 0.78),
+            )
+
+    if read_only_commands and (strategy == "broader" or symbol_context.get("direct_symbols") or impacted_paths):
+        for command in read_only_commands[:2]:
+            _validation_plan_add_command(
+                selected_by_command,
+                command=str(command.get("command") or ""),
+                classification=str(command.get("classification") or "read_only_check"),
+                selection_kind="typecheck",
+                selection_reason="read-only check selected for impacted files and symbols",
+                selected_paths=[],
+                impacted_paths=impacted_paths,
+                escalation_reasons=escalation_reasons,
+                confidence=float(command.get("confidence") or 0.78),
+            )
+
+    if interface_paths or interface_edges:
+        interface_sources = interface_paths[:]
+        interface_sources.extend(
+            normalize_path_for_brief(str(item.get("edge_source_path") or item.get("edge_target_path") or item.get("path") or ""))
+            for item in interface_edges
+        )
+        interface_sources = sorted({path for path in interface_sources if path})
+        for command in (contract_commands or build_commands or test_commands)[:2]:
+            _validation_plan_add_command(
+                selected_by_command,
+                command=str(command.get("command") or ""),
+                classification=str(command.get("classification") or classify_validation_command(str(command.get("command") or ""))),
+                selection_kind="interface_contract",
+                selection_reason="contract/interface validation selected for shared interface impact",
+                selected_paths=interface_sources,
+                impacted_paths=impacted_paths,
+                escalation_reasons=escalation_reasons,
+                confidence=max(float(command.get("confidence") or 0.78), 0.82),
+            )
+
+    if build_commands and strategy == "broader":
+        for command in build_commands[:1]:
+            _validation_plan_add_command(
+                selected_by_command,
+                command=str(command.get("command") or ""),
+                classification="build",
+                selection_kind="build",
+                selection_reason="build command selected for broader validation scope",
+                selected_paths=[],
+                impacted_paths=impacted_paths,
+                escalation_reasons=escalation_reasons,
+                confidence=float(command.get("confidence") or 0.78),
+            )
+
+    if not selected_by_command and commands:
+        fallback_pool = [*test_commands[:1], *read_only_commands[:1], *build_commands[:1]] or commands[:VALIDATION_PLAN_BROAD_COMMAND_LIMIT]
+        for command in fallback_pool[:VALIDATION_PLAN_BROAD_COMMAND_LIMIT]:
+            command_text = str(command.get("command") or "")
+            _validation_plan_add_command(
+                selected_by_command,
+                command=command_text,
+                classification=str(command.get("classification") or classify_validation_command(command_text)),
+                selection_kind="broad_validation" if strategy == "broader" else "package_test",
+                selection_reason="fallback validation command selected from repository capability manifest",
+                selected_paths=[],
+                impacted_paths=impacted_paths,
+                escalation_reasons=escalation_reasons,
+                confidence=float(command.get("confidence") or 0.72),
+            )
+
+    selected_commands = _validation_plan_sort_commands(list(selected_by_command.values()))
+    return {
+        "schema_version": 1,
+        "strategy": strategy,
+        "selected_by": "symbol_aware_validation_planner",
+        "impacted_paths": impacted_paths[:24],
+        "impacted_languages": languages,
+        "likely_tests": likely_tests,
+        "interface_paths": interface_paths,
+        "interface_edges": interface_edges[:SYMBOL_CONTEXT_INTERFACE_LIMIT],
+        "dependency_neighbors": dependency_neighbors[:VALIDATION_PLAN_TARGETED_TEST_LIMIT],
+        "commands": selected_commands,
+        "command_count": len(selected_commands),
+        "selection_reasons": selection_reasons,
+        "escalation_reasons": escalation_reasons,
+        "low_confidence_items": [
+            {
+                "path": str(item.get("path") or ""),
+                "signal_kind": str(item.get("signal_kind") or ""),
+                "confidence": float(item.get("confidence") or 0),
+                "reason": _brief_text(item.get("reason") or "", limit=180),
+            }
+            for item in low_confidence_items[:6]
+        ],
+        "context_snapshot_id": str(symbol_context.get("codebase_snapshot_id") or ""),
+    }
+
+
+def _execution_dag_node_by_id_conn(conn: sqlite3.Connection, node_id: str) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM execution_dag_nodes WHERE node_id = ?", (node_id,)).fetchone()
+    return execution_dag_node_row_to_dict(row) if row is not None else {}
+
+
+def _ensure_validation_plan_for_dag_node_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    node_id: str,
+) -> dict[str, Any]:
+    node = _execution_dag_node_by_id_conn(conn, node_id)
+    if not node or _execution_dag_canonical_action(node.get("action_type")) != "validate":
+        return {}
+    metadata = dict(node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {})
+    existing_plan = metadata.get("validation_plan") if isinstance(metadata.get("validation_plan"), Mapping) else {}
+    existing_commands = existing_plan.get("commands") if isinstance(existing_plan.get("commands"), list) else None
+    capability = latest_capability_manifest(conn) or refresh_capability_manifest_conn(conn, target)
+    configured_commands = capability.get("commands") if isinstance(capability, Mapping) else []
+    if existing_commands is not None and (existing_commands or not configured_commands):
+        return dict(existing_plan)
+    plan = build_symbol_aware_validation_plan_conn(conn, target, dag_node=node)
+    metadata["validation_plan"] = plan
+    metadata["validation_commands"] = list(plan.get("commands") or [])
+    metadata["validation_selection_reasons"] = list(plan.get("selection_reasons") or [])
+    upsert_execution_dag_node(
+        conn,
+        node_id=str(node.get("node_id") or ""),
+        task_id=str(node.get("task_id") or ""),
+        action_type=str(node.get("action_type") or "validate"),
+        status=str(node.get("status") or "ready"),
+        owner_role=str(node.get("owner_role") or "hardener"),
+        worktree_id=str((node.get("worktree") if isinstance(node.get("worktree"), Mapping) else {}).get("id") or ""),
+        worktree_path=str((node.get("worktree") if isinstance(node.get("worktree"), Mapping) else {}).get("path") or ""),
+        patch_id=str((node.get("patch") if isinstance(node.get("patch"), Mapping) else {}).get("id") or ""),
+        patch_path=str((node.get("patch") if isinstance(node.get("patch"), Mapping) else {}).get("path") or ""),
+        confidence=float(node.get("confidence") or 0.0),
+        attempt_count=int(node.get("attempt_count") or 0),
+        started_at=str(node.get("started_at") or ""),
+        finished_at=str(node.get("finished_at") or ""),
+        blocker_reason=str(node.get("blocker_reason") or ""),
+        validation_receipt_refs=list(node.get("validation_receipt_refs") or []),
+        metadata=metadata,
+    )
+    return plan
+
+
 def _validation_log_path(target: Path, job_id: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "-", job_id).strip("-") or "validation-job"
     return target_path(target, "target/validation_jobs") / f"{safe}.log"
+
+
+def _validation_failure_root_cause(
+    command: str,
+    output: str,
+    diagnostics: list[Mapping[str, Any]] | None = None,
+) -> tuple[str, str, str]:
+    lowered = output.lower()
+    diagnostics = diagnostics or []
+    for item in diagnostics:
+        kind = str(item.get("kind") or "")
+        name = str(item.get("name") or "")
+        if kind == "missing_pytest" or (name == "pytest" and "pytest" in command):
+            return "verification_environment_failure", "missing_pytest", "Missing pytest in the validation environment."
+        if kind in {"missing_python_module", "missing_command", "missing_node_module", "missing_node_dependencies"}:
+            label = name or kind
+            return "verification_environment_failure", kind, f"Missing local validation dependency `{label}`."
+    if any(marker in lowered for marker in ("no module named pytest", "pytest: command not found", "pytest: not found")):
+        return "verification_environment_failure", "missing_pytest", "Missing pytest in the validation environment."
+    if any(marker in lowered for marker in ("assertionerror", "expected", "received", "failures:")):
+        return "verification_failure", "test_assertion_failure", _brief_text(output, limit=240)
+    if re.search(r"(command not found|not found:|no such file or directory|could not determine executable)", lowered):
+        return "verification_environment_failure", "missing_package_executable", _brief_text(output, limit=240)
+    return "verification_failure", "other", _brief_text(output, limit=240)
+
+
+def _validation_failure_signature(command: str, reason: str, category: str, root_cause: str) -> str:
+    normalized = re.sub(r"\s+", " ", f"{command}\n{root_cause}".lower()).strip()
+    digest = sha256_text(normalized)[:12]
+    return f"{reason}:{category}:{digest}"
+
+
+def _validation_result_with_environment_repair(spec: Mapping[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    if int(result.get("exit_code") or 0) == 0:
+        return result
+    target_text = str(spec.get("target") or "")
+    command = str(spec.get("command") or "")
+    if not target_text or not command:
+        return result
+    target = Path(target_text).expanduser().resolve()
+    cwd = Path(str(spec.get("cwd") or ".")).expanduser().resolve()
+    if cwd != target:
+        return result
+    output = (str(result.get("stdout") or "") + "\n" + str(result.get("stderr") or "")).strip()
+    try:
+        from diffmogger.runtime import repair_environment
+    except Exception:  # pragma: no cover - defensive import fallback.
+        return result
+    diagnostics = repair_environment.diagnose_failure(command, int(result.get("exit_code") or 0), output)
+    if not diagnostics:
+        return result
+    repaired = repair_environment.diagnose_and_repair(
+        target,
+        command,
+        int(result.get("exit_code") or 0),
+        output,
+        rerun=True,
+    )
+    final_output = str(repaired.final_output or "")
+    final_diagnostics = (
+        repair_environment.diagnose_failure(str(repaired.final_command or command), int(repaired.final_exit_code or 0), final_output)
+        if repaired.final_exit_code not in (None, 0)
+        else diagnostics
+    )
+    reason, category, root_cause = _validation_failure_root_cause(
+        str(repaired.final_command or command),
+        final_output or output,
+        final_diagnostics,
+    )
+    if repaired.final_exit_code not in (None, 0) and not repaired.environment_failure:
+        reason, category, root_cause = _validation_failure_root_cause(str(repaired.final_command or command), final_output or output, [])
+    merged = dict(result)
+    merged["initial_exit_code"] = int(result.get("exit_code") or 0)
+    merged["initial_stdout"] = str(result.get("stdout") or "")
+    merged["initial_stderr"] = str(result.get("stderr") or "")
+    merged["environment_repair"] = repaired.to_json()
+    merged["environment_failure"] = bool(repaired.environment_failure)
+    merged["repair_performed"] = bool(repaired.repair_performed)
+    merged["failure_reason"] = reason
+    merged["failure_category"] = category
+    merged["failure_root_cause"] = root_cause
+    merged["validation_failure_signature"] = _validation_failure_signature(command, reason, category, root_cause)
+    if repaired.final_exit_code is not None:
+        merged["exit_code"] = int(repaired.final_exit_code)
+        merged["stdout"] = ""
+        merged["stderr"] = final_output
+        merged["finished_at"] = utc_now()
+    return merged
 
 
 def _run_validation_command(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -6510,7 +12609,7 @@ def _run_validation_command(spec: Mapping[str, Any]) -> dict[str, Any]:
         stderr = f"{exc.__class__.__name__}: {exc}"
     finished_at = utc_now()
     duration = max(0.0, time.monotonic() - started_monotonic)
-    return {
+    result = {
         "started_at": started_at,
         "finished_at": finished_at,
         "duration_seconds": duration,
@@ -6518,6 +12617,7 @@ def _run_validation_command(spec: Mapping[str, Any]) -> dict[str, Any]:
         "stdout": stdout,
         "stderr": stderr,
     }
+    return _validation_result_with_environment_repair(spec, result)
 
 
 def _validation_job_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -6599,6 +12699,21 @@ def validation_job_read_model_conn(conn: sqlite3.Connection, *, limit: int = 20)
         str(row["status"]): int(row["count"])
         for row in conn.execute("SELECT status, COUNT(*) AS count FROM validation_jobs GROUP BY status").fetchall()
     }
+    classification_counts: dict[str, int] = {}
+    run_lane_counts: dict[str, int] = {}
+    setup_cache_detected_count = 0
+    for row in conn.execute("SELECT payload_json FROM validation_jobs").fetchall():
+        payload = _json_cell(row["payload_json"], {})
+        if not isinstance(payload, Mapping):
+            continue
+        classification = str(payload.get("classification") or "unknown")
+        lane = str(payload.get("run_lane") or ("serial" if payload.get("exclusive") else "parallel"))
+        classification_counts[classification] = classification_counts.get(classification, 0) + 1
+        run_lane_counts[lane] = run_lane_counts.get(lane, 0) + 1
+        planning = payload.get("planning_evidence") if isinstance(payload.get("planning_evidence"), Mapping) else {}
+        setup_cache = planning.get("setup_cache") if isinstance(planning.get("setup_cache"), Mapping) else {}
+        if setup_cache.get("detected"):
+            setup_cache_detected_count += 1
     latest_group = _latest_validation_execution_group_conn(conn)
     latest_group_payload = latest_group.get("payload") if isinstance(latest_group.get("payload"), Mapping) else {}
     latest_group_id = str(latest_group.get("execution_group_id") or "")
@@ -6634,6 +12749,11 @@ def validation_job_read_model_conn(conn: sqlite3.Connection, *, limit: int = 20)
             "job_count": sum(counts.values()),
             "active_count": len(active),
             "counts": counts,
+            "classification_counts": dict(sorted(classification_counts.items())),
+            "run_lane_counts": dict(sorted(run_lane_counts.items())),
+            "parallel_job_count": int(run_lane_counts.get("parallel") or 0),
+            "serial_job_count": int(run_lane_counts.get("serial") or 0),
+            "setup_cache_detected_count": setup_cache_detected_count,
             "failed_required_count": failed_required,
             "failed_optional_count": failed_optional,
             "latest_execution_group": latest_group,
@@ -6661,25 +12781,49 @@ def _persist_validation_job_result_conn(
     command = str(spec.get("command") or "")
     stdout = str(result.get("stdout") or "")
     stderr = str(result.get("stderr") or "")
+    repair = result.get("environment_repair") if isinstance(result.get("environment_repair"), Mapping) else {}
+    initial_stdout = str(result.get("initial_stdout") or "")
+    initial_stderr = str(result.get("initial_stderr") or "")
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_text = "\n".join(
-        [
-            f"$ {command}",
-            f"cwd={spec.get('cwd') or ''}",
-            f"classification={spec.get('classification') or 'unknown'}",
-            f"required={'yes' if required else 'no'}",
-            f"started_at={result.get('started_at') or ''}",
-            f"finished_at={result.get('finished_at') or ''}",
-            f"duration_seconds={float(result.get('duration_seconds') or 0):.3f}",
-            f"exit={exit_code}",
-            "",
-            "## stdout",
-            stdout,
-            "",
-            "## stderr",
-            stderr,
-        ]
-    ).rstrip() + "\n"
+    log_lines = [
+        f"$ {command}",
+        f"cwd={spec.get('cwd') or ''}",
+        f"classification={spec.get('classification') or 'unknown'}",
+        f"required={'yes' if required else 'no'}",
+        f"started_at={result.get('started_at') or ''}",
+        f"finished_at={result.get('finished_at') or ''}",
+        f"duration_seconds={float(result.get('duration_seconds') or 0):.3f}",
+        f"exit={exit_code}",
+        "",
+        "## stdout",
+        stdout,
+        "",
+        "## stderr",
+        stderr,
+    ]
+    if repair:
+        log_lines.extend(
+            [
+                "",
+                "## environment repair",
+                f"initial_exit={result.get('initial_exit_code')}",
+                f"environment_failure={str(bool(result.get('environment_failure'))).lower()}",
+                f"repair_performed={str(bool(result.get('repair_performed'))).lower()}",
+                f"final_command={repair.get('final_command') or ''}",
+                f"final_exit={repair.get('final_exit_code')}",
+                f"failure_signature={result.get('validation_failure_signature') or ''}",
+                "diagnostics=" + stable_json(repair.get("diagnostics") or []),
+                "repairs=" + stable_json(repair.get("repairs") or []),
+                "blocked_reason=" + str(repair.get("blocked_reason") or ""),
+                "",
+                "### initial stdout",
+                initial_stdout,
+                "",
+                "### initial stderr",
+                initial_stderr,
+            ]
+        )
+    log_text = "\n".join(log_lines).rstrip() + "\n"
     log_path.write_text(log_text, encoding="utf-8")
     rel_log = target_rel(target, log_path.relative_to(target) if log_path.is_relative_to(target) else str(log_path))
     artifact_id = f"artifact:validation-log:{sha256_text(job_id)[:20]}"
@@ -6713,9 +12857,27 @@ def _persist_validation_job_result_conn(
         "required": required,
         "classification": str(spec.get("classification") or "unknown"),
         "exclusive": bool(spec.get("exclusive")),
+        "run_lane": str(spec.get("run_lane") or ("serial" if spec.get("exclusive") else "parallel")),
+        "command_family": str(spec.get("command_family") or ""),
+        "resource_profile": str(spec.get("resource_profile") or ""),
+        "planning_evidence": dict(spec.get("planning_evidence") or {})
+        if isinstance(spec.get("planning_evidence"), Mapping)
+        else {},
         "duration_seconds": float(result.get("duration_seconds") or 0),
         "environment_digest": _validation_environment_digest(),
     }
+    if repair:
+        payload["environment_repair"] = dict(repair)
+        payload["initial_exit_code"] = int(result.get("initial_exit_code") or 0)
+        payload["environment_failure"] = bool(result.get("environment_failure"))
+        payload["repair_performed"] = bool(result.get("repair_performed"))
+        payload["failure_reason"] = str(result.get("failure_reason") or "")
+        payload["failure_category"] = str(result.get("failure_category") or "")
+        payload["failure_root_cause"] = str(result.get("failure_root_cause") or "")
+        payload["validation_failure_signature"] = str(result.get("validation_failure_signature") or "")
+    spec_payload = spec.get("payload") if isinstance(spec.get("payload"), Mapping) else {}
+    if spec_payload:
+        payload["selection"] = dict(spec_payload)
     conn.execute(
         """
         UPDATE validation_jobs
@@ -6752,6 +12914,39 @@ def _persist_validation_job_result_conn(
     return _validation_job_row_to_dict(row) if row else {}
 
 
+def _validation_plan_evidence_summary(specs: list[Mapping[str, Any]]) -> dict[str, Any]:
+    classification_counts: dict[str, int] = {}
+    lane_counts: dict[str, int] = {"parallel": 0, "serial": 0}
+    resource_profile_counts: dict[str, int] = {}
+    setup_cache_detected = 0
+    for spec in specs:
+        classification = str(spec.get("classification") or "unknown")
+        lane = str(spec.get("run_lane") or ("serial" if spec.get("exclusive") else "parallel"))
+        resource_profile = str(spec.get("resource_profile") or classification or "unknown")
+        classification_counts[classification] = classification_counts.get(classification, 0) + 1
+        lane_counts[lane] = lane_counts.get(lane, 0) + 1
+        resource_profile_counts[resource_profile] = resource_profile_counts.get(resource_profile, 0) + 1
+        evidence = spec.get("planning_evidence") if isinstance(spec.get("planning_evidence"), Mapping) else {}
+        setup_cache = evidence.get("setup_cache") if isinstance(evidence.get("setup_cache"), Mapping) else {}
+        if setup_cache.get("detected"):
+            setup_cache_detected += 1
+    return {
+        "schema_version": 1,
+        "classification_counts": dict(sorted(classification_counts.items())),
+        "run_lane_counts": {key: lane_counts.get(key, 0) for key in sorted(lane_counts)},
+        "resource_profile_counts": dict(sorted(resource_profile_counts.items())),
+        "setup_cache_detected_count": setup_cache_detected,
+        "serial_reason_kinds": sorted(
+            {
+                str((spec.get("planning_evidence") if isinstance(spec.get("planning_evidence"), Mapping) else {}).get("classification_reason") or "")
+                for spec in specs
+                if str(spec.get("run_lane") or "") == "serial"
+            }
+            - {""}
+        )[:8],
+    }
+
+
 def run_parallel_validation_conn(
     conn: sqlite3.Connection,
     target: Path,
@@ -6760,16 +12955,37 @@ def run_parallel_validation_conn(
     selected_by: str = "runtime",
     plan_id: str = "",
 ) -> dict[str, Any]:
+    phase_started_at = utc_now()
+    phase_started = time.perf_counter()
+
+    def finish_validation_timing(status: str, payload: Mapping[str, Any] | None = None) -> None:
+        record_runtime_phase_timing_conn(
+            conn,
+            phase="validation",
+            source="validation.parallel",
+            run_id=plan_id,
+            started_at=phase_started_at,
+            elapsed_ms=_elapsed_ms(phase_started),
+            status=status,
+            payload=payload,
+        )
+
     target = target.expanduser().resolve()
     control = ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
     ensure_parallelism_budgets_conn(conn, control)
+    validation_plan: dict[str, Any] = {}
     if commands is None:
-        capability = latest_capability_manifest(conn) or refresh_capability_manifest_conn(conn, target)
-        commands = [
-            {"command": item.get("command"), "required": True, "classification": classify_validation_command(str(item.get("command") or ""))}
-            for item in capability.get("commands", [])
-            if isinstance(item, Mapping) and str(item.get("command") or "").strip()
-        ]
+        if plan_id:
+            validation_plan = _ensure_validation_plan_for_dag_node_conn(conn, target, plan_id)
+            if validation_plan and isinstance(validation_plan.get("commands"), list):
+                commands = list(validation_plan.get("commands") or [])
+        if commands is None:
+            capability = latest_capability_manifest(conn) or refresh_capability_manifest_conn(conn, target)
+            commands = [
+                {"command": item.get("command"), "required": True, "classification": classify_validation_command(str(item.get("command") or ""))}
+                for item in capability.get("commands", [])
+                if isinstance(item, Mapping) and str(item.get("command") or "").strip()
+            ]
     plan_id = plan_id or f"validation-plan:{sha256_text(stable_json(commands or []))[:16]}"
     specs = [
         _validation_command_spec(raw, index=index, target=target, default_plan_id=plan_id)
@@ -6777,11 +12993,14 @@ def run_parallel_validation_conn(
     ]
     specs = [spec for spec in specs if str(spec.get("command") or "")]
     if not specs:
+        finish_validation_timing("skipped", {"reason": "no_validation_commands"})
         return {"status": "skipped", "reason": "No validation commands were provided.", "jobs": [], "validation_job_summary": {"aggregate_status": "not_run"}}
     parallel_specs = [spec for spec in specs if not bool(spec.get("exclusive"))]
     serial_specs = [spec for spec in specs if bool(spec.get("exclusive"))]
+    plan_evidence_summary = _validation_plan_evidence_summary(specs)
     budget_check = can_start_execution_group(conn, "validation", item_count=1, owner_role="")
     if not bool(budget_check.get("allowed")):
+        finish_validation_timing("blocked", {"reason": "budget_blocked"})
         return {"status": "blocked", "reason": "; ".join(str(item) for item in budget_check.get("reasons", [])), "budget_check": budget_check, "jobs": []}
     budget = budget_check.get("budget") if isinstance(budget_check.get("budget"), Mapping) else {}
     active_counts = budget_check.get("active_counts") if isinstance(budget_check.get("active_counts"), Mapping) else {}
@@ -6800,7 +13019,13 @@ def run_parallel_validation_conn(
             phase="validation",
             status="ACTIVE",
             run_id=group_id,
-            payload={"execution_group_id": group_id, "command_count": len(specs), "parallel_count": len(parallel_specs), "serial_count": len(serial_specs)},
+            payload={
+                "execution_group_id": group_id,
+                "command_count": len(specs),
+                "parallel_count": len(parallel_specs),
+                "serial_count": len(serial_specs),
+                "planning_evidence": plan_evidence_summary,
+            },
         ),
     )
     with conn:
@@ -6826,7 +13051,17 @@ def run_parallel_validation_conn(
                 started_at,
                 selected_by,
                 "parallel validation run",
-                stable_json({"schema_version": 1, "plan_id": plan_id, "parallel_count": len(parallel_specs), "serial_count": len(serial_specs)}),
+                stable_json(
+                    {
+                        "schema_version": 1,
+                        "plan_id": plan_id,
+                        "validation_plan_strategy": str(validation_plan.get("strategy") or ""),
+                        "validation_plan_reasons": list(validation_plan.get("selection_reasons") or [])[:6],
+                        "parallel_count": len(parallel_specs),
+                        "serial_count": len(serial_specs),
+                        "planning_evidence": plan_evidence_summary,
+                    }
+                ),
             ),
         )
         for index, spec in enumerate(specs, start=1):
@@ -6852,7 +13087,20 @@ def run_parallel_validation_conn(
                     str(spec.get("gate_id") or ""),
                     str(spec.get("plan_id") or ""),
                     "parallel validation" if not spec.get("exclusive") else "serial validation",
-                    stable_json({"job_id": job_id, "classification": spec.get("classification"), "required": spec.get("required")}),
+                    stable_json(
+                        {
+                            "job_id": job_id,
+                            "classification": spec.get("classification"),
+                            "run_lane": spec.get("run_lane"),
+                            "command_family": spec.get("command_family"),
+                            "resource_profile": spec.get("resource_profile"),
+                            "required": spec.get("required"),
+                            "planning_evidence": spec.get("planning_evidence")
+                            if isinstance(spec.get("planning_evidence"), Mapping)
+                            else {},
+                            "selection": spec.get("payload") if isinstance(spec.get("payload"), Mapping) else {},
+                        }
+                    ),
                 ),
             )
             conn.execute(
@@ -6881,7 +13129,20 @@ def run_parallel_validation_conn(
                     str(spec.get("cwd") or ""),
                     started_at,
                     str(spec.get("resource_profile") or ""),
-                    stable_json({"schema_version": 1, "required": bool(spec.get("required", True)), "classification": spec.get("classification"), "exclusive": bool(spec.get("exclusive"))}),
+                    stable_json(
+                        {
+                            "schema_version": 1,
+                            "required": bool(spec.get("required", True)),
+                            "classification": spec.get("classification"),
+                            "exclusive": bool(spec.get("exclusive")),
+                            "run_lane": spec.get("run_lane"),
+                            "command_family": spec.get("command_family"),
+                            "planning_evidence": spec.get("planning_evidence")
+                            if isinstance(spec.get("planning_evidence"), Mapping)
+                            else {},
+                            "selection": spec.get("payload") if isinstance(spec.get("payload"), Mapping) else {},
+                        }
+                    ),
                 ),
             )
     results_by_job: dict[str, dict[str, Any]] = {}
@@ -6937,10 +13198,13 @@ def run_parallel_validation_conn(
                     {
                         "schema_version": 1,
                         "plan_id": plan_id,
+                        "validation_plan_strategy": str(validation_plan.get("strategy") or ""),
+                        "validation_plan_reasons": list(validation_plan.get("selection_reasons") or [])[:6],
                         "aggregate_status": aggregate_status,
                         "job_count": len(jobs),
                         "parallel_count": len(parallel_specs),
                         "serial_count": len(serial_specs),
+                        "planning_evidence": plan_evidence_summary,
                     }
                 ),
                 group_id,
@@ -6955,10 +13219,25 @@ def run_parallel_validation_conn(
                 phase="validation",
                 status="ACTIVE",
                 run_id=group_id,
-                payload={"execution_group_id": group_id, "aggregate_status": aggregate_status, "job_count": len(jobs)},
+                payload={
+                    "execution_group_id": group_id,
+                    "aggregate_status": aggregate_status,
+                    "job_count": len(jobs),
+                    "planning_evidence": plan_evidence_summary,
+                },
             ),
         )
     read_model = validation_job_read_model_conn(conn)
+    finish_validation_timing(
+        aggregate_status,
+        {
+            "execution_group_id": group_id,
+            "job_count": len(jobs),
+            "parallel_job_count": len(parallel_specs),
+            "serial_job_count": len(serial_specs),
+            "planning_evidence": plan_evidence_summary,
+        },
+    )
     return {
         "status": aggregate_status,
         "execution_group_id": group_id,
@@ -6966,6 +13245,7 @@ def run_parallel_validation_conn(
         "jobs": jobs,
         "parallel_job_count": len(parallel_specs),
         "serial_job_count": len(serial_specs),
+        "planning_evidence": plan_evidence_summary,
         "budget_check": budget_check,
         "validation_job_summary": read_model["validation_job_summary"],
     }
@@ -7020,8 +13300,46 @@ def _worker_report_path(target: Path, run_id: str, role_slug: str) -> Path:
     return target_path(target, "target/agent_runs") / run_id / f"worker_{role_slug}.md"
 
 
+def _reported_worker_report_path(target: Path, output: str) -> Path | None:
+    target = target.expanduser().resolve()
+    for raw_line in str(output or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("WORKER_REPORT ") or "path=" not in line:
+            continue
+        path_text = line.split("path=", 1)[1]
+        for delimiter in (" run_id=", " role=", " mode="):
+            if delimiter in path_text:
+                path_text = path_text.split(delimiter, 1)[0]
+                break
+        path_text = path_text.strip().strip("'\"")
+        if not path_text:
+            continue
+        path = Path(path_text).expanduser()
+        if not path.is_absolute():
+            path = target / path
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(target)
+        except (OSError, ValueError):
+            continue
+        return resolved
+    return None
+
+
 def _worker_report_artifact_id(worker_id: str) -> str:
     return f"artifact:worker-report:{sha256_text(worker_id)[:20]}"
+
+
+def _run_worker_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    command_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    if command_runner is None:
+        return subprocess.run(command, cwd=cwd, text=True, capture_output=True, timeout=timeout, check=False)
+    return command_runner(command, cwd=cwd, timeout=timeout)
 
 
 def _worker_context_items(item: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -7041,9 +13359,93 @@ def _worker_context_items(item: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "reason": str(raw.get("reason") or ""),
                 "confidence": float(raw.get("confidence") or 0),
                 "is_stale": bool(raw.get("is_stale")),
+                "source": str(raw.get("source") or ""),
+                "signal_kind": str(raw.get("signal_kind") or ""),
+                "write_candidate": bool(raw.get("write_candidate")),
+                "scoping_only": bool(raw.get("scoping_only")),
+                "symbol_resolution": str(raw.get("symbol_resolution") or ""),
+                "symbol_match_kind": str(raw.get("symbol_match_kind") or ""),
             }
         )
     return compact
+
+
+def _worker_symbol_context(item: Mapping[str, Any]) -> dict[str, Any]:
+    payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+    context_pack = payload.get("context_pack_preview") if isinstance(payload.get("context_pack_preview"), Mapping) else {}
+    symbol_context = context_pack.get("symbol_context") if isinstance(context_pack.get("symbol_context"), Mapping) else {}
+    return dict(symbol_context) if symbol_context else {}
+
+
+def _worker_scope_evidence(item: Mapping[str, Any]) -> dict[str, Any]:
+    payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+    evidence = payload.get("scope_evidence") if isinstance(payload.get("scope_evidence"), Mapping) else {}
+    return dict(evidence) if evidence else {}
+
+
+def _worker_symbol_context_lines(symbol_context: Mapping[str, Any]) -> list[str]:
+    if not isinstance(symbol_context, Mapping) or not symbol_context:
+        return []
+
+    def compact_label(entry: Mapping[str, Any]) -> str:
+        return str(
+            entry.get("qualified_name")
+            or entry.get("symbol_name")
+            or entry.get("path")
+            or entry.get("owner_file_path")
+            or entry.get("name")
+            or entry.get("node_id")
+            or ""
+        )
+
+    def line_for(entry: Mapping[str, Any], *, prefix: str) -> str:
+        label = compact_label(entry)
+        path = str(entry.get("path") or entry.get("owner_file_path") or "").strip()
+        confidence = float(entry.get("confidence") or 0)
+        reason = _brief_text(entry.get("reason") or entry.get("exclusion_reason") or "", limit=160)
+        signal = str(entry.get("signal_kind") or entry.get("source") or "").strip()
+        parts = [f"- {label}" if label else "- unnamed"]
+        if path and path != label:
+            parts.append(f"path={path}")
+        if signal:
+            parts.append(f"signal={signal}")
+        parts.append(f"confidence={confidence:.2f}")
+        if reason:
+            parts.append(f"reason={reason}")
+        return f"{prefix}{' | '.join(parts)}"
+
+    lines = ["", "Symbol-aware context:"]
+    sections = [
+        ("Direct symbols", "direct_symbols", SYMBOL_CONTEXT_DIRECT_SYMBOL_LIMIT),
+        ("Owning files", "owning_files", SYMBOL_CONTEXT_OWNING_FILE_LIMIT),
+        ("Likely tests", "likely_tests", SYMBOL_CONTEXT_TEST_LIMIT),
+        ("Dependency neighbors", "dependency_neighbors", SYMBOL_CONTEXT_NEIGHBOR_LIMIT),
+        ("Interface edges", "interface_edges", SYMBOL_CONTEXT_INTERFACE_LIMIT),
+        ("Excluded low-confidence candidates", "excluded_low_confidence_candidates", SYMBOL_CONTEXT_EXCLUDED_LIMIT),
+    ]
+    emitted = False
+    for title, key, limit in sections:
+        entries = symbol_context.get(key) if isinstance(symbol_context.get(key), list) else []
+        if not entries:
+            continue
+        emitted = True
+        lines.append(f"{title}:")
+        for entry in entries[:limit]:
+            if not isinstance(entry, Mapping):
+                continue
+            if key == "interface_edges":
+                source_path = str(entry.get("edge_source_path") or "").strip()
+                target_path = str(entry.get("edge_target_path") or entry.get("path") or "").strip()
+                reference = str(entry.get("reference") or entry.get("interface_kind") or "").strip()
+                confidence = float(entry.get("confidence") or 0)
+                reason = _brief_text(entry.get("reason") or "", limit=160)
+                edge_label = f"{source_path} -> {target_path}" if source_path or target_path else compact_label(entry)
+                lines.append(f"- {edge_label} | reference={reference} | confidence={confidence:.2f} | reason={reason}")
+            else:
+                lines.append(line_for(entry, prefix=""))
+    if not emitted:
+        lines.append("- No symbol-level signals were available in the bounded pack.")
+    return lines
 
 
 def _worker_allowed_paths(item: Mapping[str, Any]) -> list[str]:
@@ -7064,6 +13466,8 @@ def _worker_assignment_prompt(group: Mapping[str, Any], item: Mapping[str, Any],
     payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
     context_pack = payload.get("context_pack_preview") if isinstance(payload.get("context_pack_preview"), Mapping) else {}
     context_items = _worker_context_items(item)
+    symbol_context = _worker_symbol_context(item)
+    scope_evidence = _worker_scope_evidence(item)
     lines = [
         "You are a bounded read-only worker launched from a Diffmogger execution group.",
         "",
@@ -7087,13 +13491,51 @@ def _worker_assignment_prompt(group: Mapping[str, Any], item: Mapping[str, Any],
         for context_item in context_items:
             label = context_item.get("path") or context_item.get("name") or context_item.get("node_id")
             lines.append(
-                f"- {label} | category={context_item.get('category')} | confidence={float(context_item.get('confidence') or 0):.2f} | stale={'yes' if context_item.get('is_stale') else 'no'} | reason={context_item.get('reason')}"
+                f"- {label} | category={context_item.get('category')} | signal={context_item.get('signal_kind') or context_item.get('source')} | confidence={float(context_item.get('confidence') or 0):.2f} | stale={'yes' if context_item.get('is_stale') else 'no'} | reason={context_item.get('reason')}"
             )
     else:
         lines.append("- No bounded context paths were available; inspect only metadata needed for the assignment.")
     stale_warning = str(context_pack.get("stale_context_warning") or "").strip()
     if stale_warning:
         lines.extend(["", f"Stale context warning: {stale_warning}"])
+    lines.extend(_worker_symbol_context_lines(symbol_context))
+    if scope_evidence:
+        lines.extend(
+            [
+                "",
+                "Scope evidence mission:",
+                "- Gather ownership evidence that could later justify or reject a write scope.",
+                "- Identify likely source paths, likely symbols, validation hints, and risk notes.",
+                "- Include confidence and reasons for each finding; leave canonical state updates to the parent run.",
+                "- Include a fenced JSON block with a `scope_evidence_records` array. Each record may include `candidate_path`, `candidate_symbol`, `confidence`, `stale_context_warning`, `likely_tests`, and `reasons`.",
+            ]
+        )
+        for key, label in (
+            ("ownership_evidence", "Ownership evidence"),
+            ("likely_paths", "Likely paths"),
+            ("likely_symbols", "Likely symbols"),
+            ("validation_hints", "Validation hints"),
+            ("risk_notes", "Risk notes"),
+        ):
+            values = scope_evidence.get(key) if isinstance(scope_evidence.get(key), list) else []
+            lines.append(f"{label}:")
+            if values:
+                for value in values[:IMPACT_CONTEXT_PACK_LIMIT]:
+                    if isinstance(value, Mapping):
+                        compact = _format_key_values(
+                            {
+                                "path": value.get("path"),
+                                "name": value.get("name") or value.get("symbol") or value.get("command"),
+                                "signal": value.get("signal_kind") or value.get("source"),
+                                "confidence": value.get("confidence"),
+                                "reason": value.get("reason"),
+                            }
+                        )
+                        lines.append(f"- {compact}")
+                    else:
+                        lines.append(f"- {_brief_text(value, limit=180)}")
+            else:
+                lines.append("- None recorded yet; inspect read-only and report what evidence is missing.")
     allowed_paths = contract.get("allowed_paths") if isinstance(contract.get("allowed_paths"), list) else []
     lines.extend(
         [
@@ -7112,10 +13554,13 @@ def _worker_assignment_prompt(group: Mapping[str, Any], item: Mapping[str, Any],
 
 def _worker_contract_payload(item: Mapping[str, Any]) -> dict[str, Any]:
     allowed_paths = _worker_allowed_paths(item)
+    symbol_context = _worker_symbol_context(item)
+    scope_evidence = _worker_scope_evidence(item)
+    expected_output = SCOPE_EVIDENCE_WORKER_EXPECTED_OUTPUT if scope_evidence else WORKER_CONTRACT_EXPECTED_OUTPUT
     return {
         "allowed_paths": allowed_paths,
         "denied_actions": list(WORKER_CONTRACT_DENIED_ACTIONS),
-        "expected_output": WORKER_CONTRACT_EXPECTED_OUTPUT,
+        "expected_output": expected_output,
         "no_spawn_workers": True,
         "no_network": True,
         "no_credentials": True,
@@ -7124,6 +13569,10 @@ def _worker_contract_payload(item: Mapping[str, Any]) -> dict[str, Any]:
             "mode": "read_only",
             "context_policy": "raw source contents are not embedded by default",
             "allowed_path_count": len(allowed_paths),
+            "symbol_context_available": bool(symbol_context),
+            "symbol_context": symbol_context,
+            "scope_evidence_required": bool(scope_evidence),
+            "scope_evidence": scope_evidence,
         },
     }
 
@@ -7388,6 +13837,968 @@ def _record_worker_report_artifact_conn(
     return artifact_id
 
 
+def _json_scope_evidence_payloads_from_report(text: str) -> list[Any]:
+    payloads: list[Any] = []
+    for match in re.finditer(r"```(?:json|scope[-_\s]*evidence)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL):
+        candidate = match.group(1).strip()
+        if not candidate or not any(token in candidate for token in ("scope_evidence", "candidate_path", "candidate_symbol", "likely_tests")):
+            continue
+        try:
+            payloads.append(json.loads(candidate))
+        except json.JSONDecodeError:
+            continue
+    stripped = text.strip()
+    if stripped.startswith(("{", "[")) and any(token in stripped for token in ("scope_evidence", "candidate_path", "candidate_symbol", "likely_tests")):
+        try:
+            payloads.append(json.loads(stripped))
+        except json.JSONDecodeError:
+            pass
+    return payloads
+
+
+def _scope_evidence_raw_records(payload: Any) -> list[Mapping[str, Any]]:
+    if isinstance(payload, list):
+        return [item for raw in payload for item in _scope_evidence_raw_records(raw)]
+    if not isinstance(payload, Mapping):
+        return []
+    records: list[Mapping[str, Any]] = []
+    for key in ("scope_evidence_records", "records", "ownership_evidence"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            records.extend(item for raw in value for item in _scope_evidence_raw_records(raw))
+    nested = payload.get("scope_evidence")
+    if isinstance(nested, (Mapping, list)):
+        records.extend(_scope_evidence_raw_records(nested))
+    candidate_keys = {
+        "candidate_path",
+        "candidate_paths",
+        "path",
+        "owner_path",
+        "candidate_symbol",
+        "candidate_symbols",
+        "symbol",
+        "qualified_name",
+    }
+    if any(key in payload for key in candidate_keys):
+        records.append(payload)
+    return records
+
+
+def _scope_evidence_text_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, Mapping):
+        for key in ("path", "test_path", "symbol", "qualified_name", "name", "command", "reason"):
+            text = str(value.get(key) or "").strip()
+            if text:
+                return [text]
+        return []
+    if isinstance(value, (list, tuple, set)):
+        values: list[str] = []
+        for item in value:
+            for text in _scope_evidence_text_values(item):
+                if text not in values:
+                    values.append(text)
+        return values
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _scope_evidence_candidate_values(raw: Mapping[str, Any], keys: tuple[str, ...]) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        for value in _scope_evidence_text_values(raw.get(key)):
+            normalized = normalize_path_for_brief(value) if "path" in key else value.strip()
+            if normalized and normalized not in values:
+                values.append(normalized)
+    return values
+
+
+def _scope_evidence_confidence(raw: Mapping[str, Any]) -> float:
+    value = raw.get("confidence", raw.get("ownership_confidence", raw.get("score")))
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence > 1.0 and confidence <= 100.0:
+        confidence = confidence / 100.0
+    return round(max(0.0, min(1.0, confidence)), 4)
+
+
+def _scope_evidence_string_list(raw: Mapping[str, Any], keys: tuple[str, ...], *, limit: int = IMPACT_CONTEXT_PACK_LIMIT) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        for value in _scope_evidence_text_values(raw.get(key)):
+            compact = _brief_text(value, limit=220)
+            if compact and compact not in values:
+                values.append(compact)
+    return values[:limit]
+
+
+def _scope_evidence_path_scope_node_id(path: str) -> str:
+    normalized = normalize_path_for_brief(path)
+    return f"path:{normalized}" if normalized else ""
+
+
+def _scope_evidence_path_from_scope_node_id(scope_node_id: str) -> str:
+    text = str(scope_node_id or "").strip()
+    if text.startswith("path:"):
+        return normalize_path_for_brief(text.removeprefix("path:"))
+    return ""
+
+
+def _scope_evidence_path_kind(raw: Mapping[str, Any], candidate_path: str, raw_candidate_path: str = "") -> str:
+    explicit = str(raw.get("path_kind") or raw.get("candidate_path_kind") or raw.get("ownership_kind") or "").strip().lower()
+    if explicit in {"directory", "dir", "folder", "package"}:
+        return "directory"
+    if explicit in {"file", "source", "test", "tests", "doc", "docs", "config"}:
+        return explicit
+    raw_text = str(raw_candidate_path or raw.get("candidate_path") or raw.get("path") or "")
+    if raw_text.rstrip() != raw_text.rstrip("/\\"):
+        return "directory"
+    path = normalize_path_for_brief(candidate_path)
+    if path.startswith(("tests/", "test/")) or "/tests/" in path or "/test/" in path:
+        return "tests"
+    if path.startswith(("docs/", "doc/")) or "/docs/" in path or "/doc/" in path or Path(path).suffix.lower() in {".md", ".mdx", ".rst", ".txt"}:
+        return "docs"
+    if Path(path).name in {"pyproject.toml", "package.json", "tsconfig.json", "Cargo.toml"}:
+        return "config"
+    return "file"
+
+
+def _scope_evidence_creation_path_allowed(candidate_path: str, raw_candidate_path: str = "") -> bool:
+    raw_path = str(raw_candidate_path or candidate_path or "").strip()
+    if not raw_path or raw_path.startswith(("~", "/", "\\")) or re.match(r"^[A-Za-z]:", raw_path):
+        return False
+    path = str(candidate_path or raw_path).strip()
+    normalized = normalize_path_for_brief(path)
+    if not normalized or normalized in {".", ".."}:
+        return False
+    parts = [part for part in Path(normalized).parts if part and part != "."]
+    if not parts or any(part == ".." for part in parts):
+        return False
+    blocked_parts = {
+        ".agentic",
+        ".diffmogger",
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+        "target",
+    }
+    if any(part in blocked_parts for part in parts):
+        return False
+    return _impact_context_path_allowed(normalized)
+
+
+def _scope_evidence_creation_requested(raw: Mapping[str, Any], *, candidate_path: str, raw_candidate_path: str, reasons: list[str]) -> bool:
+    signal_values = [
+        raw.get("evidence_kind"),
+        raw.get("signal_kind"),
+        raw.get("scope_kind"),
+        raw.get("ownership_kind"),
+        raw.get("path_kind"),
+    ]
+    normalized_signals = {
+        re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+        for value in signal_values
+        if str(value or "").strip()
+    }
+    if normalized_signals.intersection({"creation_path", "create_path", "new_path", "new_file", "new_directory", "new_folder"}):
+        return True
+    if bool(raw.get("creates") or raw.get("creation_path")):
+        return True
+    if isinstance(raw.get("path_exists"), bool) and not bool(raw.get("path_exists")):
+        return True
+    text = " ".join([str(raw_candidate_path or candidate_path), *reasons]).lower()
+    creation_terms = ("create", "new ", "new-", "add ", "scaffold", "generate", "introduce", "set up", "bootstrap")
+    return any(term in text for term in creation_terms)
+
+
+def _scope_evidence_creation_node(record: Mapping[str, Any]) -> dict[str, Any]:
+    path = normalize_path_for_brief(str(record.get("candidate_path") or ""))
+    payload = record.get("payload") if isinstance(record.get("payload"), Mapping) else {}
+    path_kind = str(payload.get("path_kind") or "")
+    node_id = str(record.get("owner_node_id") or _scope_evidence_path_scope_node_id(path))
+    kind = "test_file" if path_kind == "tests" else "doc_file" if path_kind == "docs" else "config_file" if path_kind == "config" else "directory" if path_kind == "directory" else "file"
+    metadata = {
+        "source": "scope_evidence",
+        "scope_evidence_id": str(record.get("evidence_id") or ""),
+        "creation_path": True,
+        "path_kind": path_kind,
+        "path_exists": False,
+    }
+    return {
+        "node_id": node_id,
+        "kind": kind,
+        "path": path,
+        "name": path or node_id,
+        "digest": sha256_text(stable_json({"kind": kind, "path": path, "source": "scope_evidence"})),
+        "is_stale": 0,
+        "metadata": metadata,
+        "facts": [
+            _impact_graph_fact("source", "scope_evidence"),
+            _impact_graph_fact("creation_path", "true", value_type="boolean", source="scope_evidence"),
+        ],
+    }
+
+
+def _scope_evidence_current_code_index_conn(conn: sqlite3.Connection, target: Path) -> dict[str, Any]:
+    row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        capability = refresh_capability_manifest_conn(conn, target)
+        ensure_codebase_graph_conn(conn, target, capability=capability)
+        row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        return {"snapshot_id": "", "files_by_path": {}, "symbols_by_key": {}}
+    snapshot_id = str(row["snapshot_id"])
+    file_rows = conn.execute(
+        """
+        SELECT node_id, kind, path, name, digest, is_stale, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ? AND graph_namespace = ?
+          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile')
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    files_by_path: dict[str, dict[str, Any]] = {}
+    for file_row in file_rows:
+        path = normalize_path_for_brief(str(file_row["path"] or ""))
+        if not path or not _impact_context_path_allowed(path):
+            continue
+        metadata = _json_cell(file_row["metadata_json"], {})
+        files_by_path[path] = {
+            "node_id": str(file_row["node_id"] or ""),
+            "kind": str(file_row["kind"] or ""),
+            "path": path,
+            "name": str(file_row["name"] or ""),
+            "digest": str(file_row["digest"] or ""),
+            "is_stale": bool(file_row["is_stale"]),
+            "metadata": metadata if isinstance(metadata, Mapping) else {},
+        }
+    symbol_rows = conn.execute(
+        """
+        SELECT symbol_node.node_id AS symbol_node_id,
+               symbol_node.name AS symbol_name,
+               symbol_node.path AS symbol_path,
+               symbol_node.is_stale AS symbol_is_stale,
+               symbol_node.metadata_json AS symbol_metadata_json,
+               owner_node.node_id AS owner_node_id,
+               owner_node.path AS owner_path,
+               owner_node.kind AS owner_kind,
+               owner_node.is_stale AS owner_is_stale
+        FROM graph_edges edge
+        JOIN graph_nodes owner_node
+          ON owner_node.snapshot_id = edge.snapshot_id
+         AND owner_node.node_id = edge.from_node_id
+         AND owner_node.graph_namespace = edge.graph_namespace
+        JOIN graph_nodes symbol_node
+          ON symbol_node.snapshot_id = edge.snapshot_id
+         AND symbol_node.node_id = edge.to_node_id
+         AND symbol_node.graph_namespace = edge.graph_namespace
+        WHERE edge.snapshot_id = ?
+          AND edge.graph_namespace = ?
+          AND edge.kind = 'owns_symbol'
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    symbols_by_key: dict[str, list[dict[str, Any]]] = {}
+    for symbol_row in symbol_rows:
+        owner_path = normalize_path_for_brief(str(symbol_row["owner_path"] or symbol_row["symbol_path"] or ""))
+        if not owner_path or not _impact_context_path_allowed(owner_path):
+            continue
+        metadata = _json_cell(symbol_row["symbol_metadata_json"], {})
+        metadata = metadata if isinstance(metadata, Mapping) else {}
+        qualified_name = str(metadata.get("qualified_name") or symbol_row["symbol_name"] or "").strip()
+        symbol_name = str(metadata.get("symbol_name") or symbol_row["symbol_name"] or "").strip()
+        symbol = {
+            "symbol_node_id": str(symbol_row["symbol_node_id"] or ""),
+            "symbol_name": symbol_name,
+            "qualified_name": qualified_name,
+            "owner_node_id": str(symbol_row["owner_node_id"] or ""),
+            "owner_path": owner_path,
+            "owner_kind": str(symbol_row["owner_kind"] or ""),
+            "symbol_is_stale": bool(symbol_row["symbol_is_stale"]),
+            "owner_is_stale": bool(symbol_row["owner_is_stale"]),
+            "metadata": metadata,
+        }
+        for key in {qualified_name, symbol_name, qualified_name.split(".")[-1] if qualified_name else ""}:
+            normalized = key.strip()
+            if normalized:
+                symbols_by_key.setdefault(normalized, []).append(symbol)
+    return {"snapshot_id": snapshot_id, "files_by_path": files_by_path, "symbols_by_key": symbols_by_key}
+
+
+def _normalize_scope_evidence_record(
+    raw: Mapping[str, Any],
+    *,
+    code_index: Mapping[str, Any],
+    task_id: str,
+    graph_task_node_id: str,
+    dag_node_id: str,
+    execution_group_id: str,
+    execution_group_item_id: str,
+    worker_id: str,
+    worker_run_id: str,
+    report_artifact_id: str,
+    created_at: str,
+) -> dict[str, Any]:
+    path_keys = ("candidate_path", "candidate_paths", "path", "owner_path", "owner_file_path")
+    raw_paths = [value for key in path_keys for value in _scope_evidence_text_values(raw.get(key))]
+    paths = _scope_evidence_candidate_values(raw, path_keys)
+    symbols = _scope_evidence_candidate_values(raw, ("candidate_symbol", "candidate_symbols", "symbol", "symbols", "qualified_name"))
+    raw_candidate_path = raw_paths[0] if raw_paths else paths[0] if paths else ""
+    candidate_path = normalize_path_for_brief(raw_candidate_path)
+    candidate_symbol = symbols[0] if symbols else ""
+    confidence = _scope_evidence_confidence(raw)
+    stale_warning = _brief_text(raw.get("stale_context_warning") or raw.get("stale_warning") or "", limit=240)
+    if isinstance(raw.get("stale_context"), bool) and bool(raw.get("stale_context")) and not stale_warning:
+        stale_warning = "worker reported stale context"
+    reasons = _scope_evidence_string_list(raw, ("reasons", "reason", "evidence", "notes"))
+    likely_tests = _scope_evidence_string_list(raw, ("likely_tests", "tests", "validation_hints", "test_paths"))
+    files_by_path = code_index.get("files_by_path") if isinstance(code_index.get("files_by_path"), Mapping) else {}
+    symbols_by_key = code_index.get("symbols_by_key") if isinstance(code_index.get("symbols_by_key"), Mapping) else {}
+
+    rejection_reason = ""
+    symbol_rejection_reason = ""
+    owner_node_id = ""
+    symbol_node_id = ""
+    symbol_metadata: Mapping[str, Any] = {}
+    if candidate_symbol:
+        symbol_matches = [dict(item) for item in symbols_by_key.get(candidate_symbol, []) if isinstance(item, Mapping)]
+        if candidate_path:
+            symbol_matches = [item for item in symbol_matches if normalize_path_for_brief(str(item.get("owner_path") or "")) == candidate_path]
+        if len(symbol_matches) == 1:
+            symbol = symbol_matches[0]
+            symbol_node_id = str(symbol.get("symbol_node_id") or "")
+            owner_node_id = str(symbol.get("owner_node_id") or "")
+            candidate_path = candidate_path or normalize_path_for_brief(str(symbol.get("owner_path") or ""))
+            symbol_metadata = symbol.get("metadata") if isinstance(symbol.get("metadata"), Mapping) else {}
+            if bool(symbol.get("symbol_is_stale")) or bool(symbol.get("owner_is_stale")):
+                symbol_rejection_reason = "stale_context"
+        elif len(symbol_matches) > 1:
+            symbol_rejection_reason = "ambiguous_symbol"
+        else:
+            symbol_rejection_reason = "unresolved_symbol"
+
+    file_node = files_by_path.get(candidate_path) if candidate_path else None
+    creation_requested = (
+        bool(candidate_path)
+        and not isinstance(file_node, Mapping)
+        and _scope_evidence_creation_requested(
+            raw,
+            candidate_path=candidate_path,
+            raw_candidate_path=raw_candidate_path,
+            reasons=reasons,
+        )
+    )
+    creation_allowed = creation_requested and _scope_evidence_creation_path_allowed(candidate_path, raw_candidate_path)
+    path_kind = _scope_evidence_path_kind(raw, candidate_path, raw_candidate_path)
+    if not candidate_path and symbol_rejection_reason:
+        rejection_reason = rejection_reason or symbol_rejection_reason
+    elif not candidate_path:
+        rejection_reason = rejection_reason or "missing_candidate_path"
+    elif creation_requested and not creation_allowed:
+        rejection_reason = rejection_reason or "unsafe_candidate_path"
+    elif not _impact_context_path_allowed(candidate_path):
+        rejection_reason = rejection_reason or "unsafe_candidate_path"
+    elif not isinstance(file_node, Mapping):
+        if creation_allowed:
+            owner_node_id = owner_node_id or _scope_evidence_path_scope_node_id(candidate_path)
+        else:
+            rejection_reason = rejection_reason or "unknown_candidate_path"
+    else:
+        owner_node_id = owner_node_id or str(file_node.get("node_id") or "")
+        if bool(file_node.get("is_stale")):
+            rejection_reason = rejection_reason or "stale_context"
+    if symbol_rejection_reason and not creation_allowed:
+        rejection_reason = rejection_reason or symbol_rejection_reason
+    if stale_warning:
+        rejection_reason = rejection_reason or "stale_context"
+    status = "accepted"
+    if rejection_reason:
+        status = "rejected"
+    elif confidence < SCOPE_EVIDENCE_PROMOTION_CONFIDENCE_THRESHOLD:
+        status = "advisory"
+        rejection_reason = "confidence_below_promotion_threshold"
+
+    evidence_id = "scope-evidence:" + sha256_text(
+        stable_json(
+            {
+                "task_id": task_id,
+                "dag_node_id": dag_node_id,
+                "worker_id": worker_id,
+                "report_artifact_id": report_artifact_id,
+                "candidate_path": candidate_path,
+                "candidate_symbol": candidate_symbol,
+                "confidence": confidence,
+            }
+        )
+    )[:24]
+    signal_kind = (
+        "creation_path"
+        if creation_allowed and status == "accepted"
+        else "exact_symbol"
+        if symbol_node_id and status == "accepted"
+        else "direct_path"
+        if status == "accepted"
+        else "scope_evidence"
+    )
+    payload = {
+        "schema_version": 1,
+        "authority": "sqlite",
+        "promotion_threshold": SCOPE_EVIDENCE_PROMOTION_CONFIDENCE_THRESHOLD,
+        "signal_kind": signal_kind,
+        "path_kind": path_kind,
+        "creation_path": bool(creation_allowed and status == "accepted"),
+        "creation_requested": bool(creation_requested),
+        "creation_path_allowed": bool(creation_allowed),
+        "symbol_rejection_reason": symbol_rejection_reason,
+        "raw_record": {str(key): value for key, value in raw.items()},
+        "symbol_metadata": dict(symbol_metadata),
+        "write_promotion_eligible": status == "accepted",
+    }
+    return {
+        "evidence_id": evidence_id,
+        "task_id": task_id,
+        "graph_task_node_id": graph_task_node_id,
+        "dag_node_id": dag_node_id,
+        "execution_group_id": execution_group_id,
+        "execution_group_item_id": execution_group_item_id,
+        "worker_id": worker_id,
+        "worker_run_id": worker_run_id,
+        "report_artifact_id": report_artifact_id,
+        "codebase_snapshot_id": str(code_index.get("snapshot_id") or ""),
+        "candidate_path": candidate_path,
+        "owner_node_id": owner_node_id,
+        "candidate_symbol": candidate_symbol,
+        "symbol_node_id": symbol_node_id,
+        "confidence": confidence,
+        "normalized_confidence": confidence if status == "accepted" else 0.0,
+        "status": status,
+        "rejection_reason": rejection_reason,
+        "stale_context_warning": stale_warning,
+        "likely_tests": likely_tests,
+        "reasons": reasons,
+        "created_at": created_at,
+        "payload": payload,
+    }
+
+
+def _insert_scope_evidence_record_conn(conn: sqlite3.Connection, record: Mapping[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO scope_evidence_records(
+            evidence_id, task_id, graph_task_node_id, dag_node_id,
+            execution_group_id, execution_group_item_id, worker_id, worker_run_id,
+            report_artifact_id, codebase_snapshot_id, candidate_path, owner_node_id,
+            candidate_symbol, symbol_node_id, confidence, normalized_confidence,
+            status, rejection_reason, stale_context_warning, likely_tests_json,
+            reasons_json, created_at, payload_json
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(evidence_id) DO UPDATE SET
+            graph_task_node_id=excluded.graph_task_node_id,
+            dag_node_id=excluded.dag_node_id,
+            execution_group_id=excluded.execution_group_id,
+            execution_group_item_id=excluded.execution_group_item_id,
+            worker_id=excluded.worker_id,
+            worker_run_id=excluded.worker_run_id,
+            report_artifact_id=excluded.report_artifact_id,
+            codebase_snapshot_id=excluded.codebase_snapshot_id,
+            candidate_path=excluded.candidate_path,
+            owner_node_id=excluded.owner_node_id,
+            candidate_symbol=excluded.candidate_symbol,
+            symbol_node_id=excluded.symbol_node_id,
+            confidence=excluded.confidence,
+            normalized_confidence=excluded.normalized_confidence,
+            status=excluded.status,
+            rejection_reason=excluded.rejection_reason,
+            stale_context_warning=excluded.stale_context_warning,
+            likely_tests_json=excluded.likely_tests_json,
+            reasons_json=excluded.reasons_json,
+            created_at=excluded.created_at,
+            payload_json=excluded.payload_json
+        """,
+        (
+            str(record.get("evidence_id") or ""),
+            str(record.get("task_id") or ""),
+            str(record.get("graph_task_node_id") or ""),
+            str(record.get("dag_node_id") or ""),
+            str(record.get("execution_group_id") or ""),
+            str(record.get("execution_group_item_id") or ""),
+            str(record.get("worker_id") or ""),
+            str(record.get("worker_run_id") or ""),
+            str(record.get("report_artifact_id") or ""),
+            str(record.get("codebase_snapshot_id") or ""),
+            normalize_path_for_brief(str(record.get("candidate_path") or "")),
+            str(record.get("owner_node_id") or ""),
+            str(record.get("candidate_symbol") or ""),
+            str(record.get("symbol_node_id") or ""),
+            float(record.get("confidence") or 0),
+            float(record.get("normalized_confidence") or 0),
+            str(record.get("status") or "advisory"),
+            str(record.get("rejection_reason") or ""),
+            str(record.get("stale_context_warning") or ""),
+            stable_json(list(record.get("likely_tests") or [])),
+            stable_json(list(record.get("reasons") or [])),
+            str(record.get("created_at") or utc_now()),
+            stable_json(record.get("payload") if isinstance(record.get("payload"), Mapping) else {}),
+        ),
+    )
+
+
+def record_scope_evidence_from_report_text_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    report_text: str,
+    task_id: str,
+    graph_task_node_id: str = "",
+    dag_node_id: str = "",
+    execution_group_id: str = "",
+    execution_group_item_id: str = "",
+    worker_id: str = "",
+    worker_run_id: str = "",
+    report_artifact_id: str = "",
+) -> dict[str, Any]:
+    payloads = _json_scope_evidence_payloads_from_report(report_text)
+    raw_records = [record for payload in payloads for record in _scope_evidence_raw_records(payload)]
+    if not raw_records:
+        return {"status": "skipped", "reason_kind": "no_structured_scope_evidence", "record_count": 0}
+    code_index = _scope_evidence_current_code_index_conn(conn, target)
+    created_at = utc_now()
+    records = [
+        _normalize_scope_evidence_record(
+            raw,
+            code_index=code_index,
+            task_id=task_id,
+            graph_task_node_id=graph_task_node_id,
+            dag_node_id=dag_node_id,
+            execution_group_id=execution_group_id,
+            execution_group_item_id=execution_group_item_id,
+            worker_id=worker_id,
+            worker_run_id=worker_run_id,
+            report_artifact_id=report_artifact_id,
+            created_at=created_at,
+        )
+        for raw in raw_records[:IMPACT_CONTEXT_PACK_LIMIT]
+    ]
+    with conn:
+        for record in records:
+            _insert_scope_evidence_record_conn(conn, record)
+    accepted = [record for record in records if record.get("status") == "accepted"]
+    return {
+        "status": "recorded",
+        "record_count": len(records),
+        "accepted_count": len(accepted),
+        "rejected_count": len([record for record in records if record.get("status") == "rejected"]),
+        "advisory_count": len([record for record in records if record.get("status") == "advisory"]),
+        "evidence_ids": [str(record.get("evidence_id") or "") for record in records],
+        "accepted_evidence_ids": [str(record.get("evidence_id") or "") for record in accepted],
+    }
+
+
+def record_scope_evidence_from_worker_report_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    worker_id: str,
+    report_path: Path,
+    report_artifact_id: str = "",
+) -> dict[str, Any]:
+    if not worker_id or not report_path.exists():
+        return {"status": "skipped", "reason_kind": "missing_worker_report", "record_count": 0}
+    worker_row = conn.execute("SELECT * FROM worker_agents WHERE worker_id = ?", (worker_id,)).fetchone()
+    if worker_row is None:
+        return {"status": "skipped", "reason_kind": "unknown_worker", "record_count": 0}
+    worker_payload = _json_cell(worker_row["payload_json"], {})
+    worker_payload = worker_payload if isinstance(worker_payload, Mapping) else {}
+    item_id = str(worker_payload.get("item_id") or "")
+    item_row = conn.execute("SELECT * FROM execution_group_items WHERE item_id = ?", (item_id,)).fetchone() if item_id else None
+    item_payload = _json_cell(item_row["payload_json"], {}) if item_row is not None else {}
+    item_payload = item_payload if isinstance(item_payload, Mapping) else {}
+    task_id = str((item_row["task_id"] if item_row is not None else "") or worker_payload.get("task_id") or "")
+    dag_node_id = str(worker_payload.get("dag_node_id") or item_payload.get("dag_node_id") or "")
+    graph_task_node_id = str((item_row["graph_task_node_id"] if item_row is not None else "") or worker_payload.get("graph_task_node_id") or "")
+    report_text = report_path.read_text(encoding="utf-8", errors="replace")
+    return record_scope_evidence_from_report_text_conn(
+        conn,
+        target,
+        report_text=report_text,
+        task_id=task_id,
+        graph_task_node_id=graph_task_node_id,
+        dag_node_id=dag_node_id,
+        execution_group_id=str(worker_row["execution_group_id"] or ""),
+        execution_group_item_id=item_id,
+        worker_id=worker_id,
+        worker_run_id=str(worker_row["run_id"] or ""),
+        report_artifact_id=report_artifact_id or str(worker_row["report_artifact_id"] or ""),
+    )
+
+
+def _scope_evidence_record_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    payload = _json_cell(row["payload_json"], {})
+    return {
+        "evidence_id": str(row["evidence_id"]),
+        "task_id": str(row["task_id"] or ""),
+        "graph_task_node_id": str(row["graph_task_node_id"] or ""),
+        "dag_node_id": str(row["dag_node_id"] or ""),
+        "execution_group_id": str(row["execution_group_id"] or ""),
+        "execution_group_item_id": str(row["execution_group_item_id"] or ""),
+        "worker_id": str(row["worker_id"] or ""),
+        "worker_run_id": str(row["worker_run_id"] or ""),
+        "report_artifact_id": str(row["report_artifact_id"] or ""),
+        "codebase_snapshot_id": str(row["codebase_snapshot_id"] or ""),
+        "candidate_path": str(row["candidate_path"] or ""),
+        "owner_node_id": str(row["owner_node_id"] or ""),
+        "candidate_symbol": str(row["candidate_symbol"] or ""),
+        "symbol_node_id": str(row["symbol_node_id"] or ""),
+        "confidence": float(row["confidence"] or 0),
+        "normalized_confidence": float(row["normalized_confidence"] or 0),
+        "status": str(row["status"] or ""),
+        "rejection_reason": str(row["rejection_reason"] or ""),
+        "stale_context_warning": str(row["stale_context_warning"] or ""),
+        "likely_tests": _json_cell(row["likely_tests_json"], []),
+        "reasons": _json_cell(row["reasons_json"], []),
+        "created_at": str(row["created_at"] or ""),
+        "payload": payload if isinstance(payload, dict) else {},
+    }
+
+
+def _scope_evidence_signal_kind(record: Mapping[str, Any]) -> str:
+    payload = record.get("payload") if isinstance(record.get("payload"), Mapping) else {}
+    signal_kind = str(payload.get("signal_kind") or "").strip()
+    if signal_kind:
+        return signal_kind
+    return "exact_symbol" if str(record.get("symbol_node_id") or "") else "direct_path"
+
+
+def _scope_evidence_reason(record: Mapping[str, Any]) -> str:
+    reasons = record.get("reasons") if isinstance(record.get("reasons"), list) else []
+    reason = str(reasons[0] if reasons else "").strip()
+    if reason:
+        return _brief_text(reason, limit=180)
+    path = str(record.get("candidate_path") or "")
+    symbol = str(record.get("candidate_symbol") or "")
+    if symbol and path:
+        return f"normalized read-only scope evidence for `{symbol}` in `{path}`"
+    if path:
+        return f"normalized read-only scope evidence for `{path}`"
+    return "normalized read-only scope evidence"
+
+
+def _scope_evidence_context_metadata(record: Mapping[str, Any]) -> dict[str, Any]:
+    payload = record.get("payload") if isinstance(record.get("payload"), Mapping) else {}
+    return {
+        "scope_evidence_id": str(record.get("evidence_id") or ""),
+        "scope_evidence_status": str(record.get("status") or ""),
+        "scope_evidence_worker_id": str(record.get("worker_id") or ""),
+        "scope_evidence_report_artifact_id": str(record.get("report_artifact_id") or ""),
+        "scope_evidence_likely_tests": list(record.get("likely_tests") or [])[:SYMBOL_CONTEXT_TEST_LIMIT],
+        "symbol_name": str(record.get("candidate_symbol") or "").split(".")[-1],
+        "qualified_name": str(record.get("candidate_symbol") or ""),
+        "symbol_node_id": str(record.get("symbol_node_id") or ""),
+        "symbol_resolution": "exact" if str(record.get("symbol_node_id") or "") else "",
+        "symbol_match_kind": "scope_evidence" if str(record.get("symbol_node_id") or "") else "",
+        "symbol_is_stale": False,
+        "creation_path": bool(payload.get("creation_path")),
+        "path_kind": str(payload.get("path_kind") or ""),
+        "path_exists": False if bool(payload.get("creation_path")) else "",
+    }
+
+
+def scope_evidence_records_conn(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str = "",
+    statuses: set[str] | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    clauses: list[str] = []
+    if task_id:
+        clauses.append("task_id = ?")
+        params.append(task_id)
+    if statuses:
+        placeholders = ",".join("?" for _ in sorted(statuses))
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(sorted(statuses))
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM scope_evidence_records
+        {where}
+        ORDER BY normalized_confidence DESC, created_at DESC, evidence_id
+        LIMIT ?
+        """,
+        (*params, max(1, int(limit or 50))),
+    ).fetchall()
+    return [_scope_evidence_record_row_to_dict(row) for row in rows]
+
+
+def _scope_fanout_outcome_id(task_id: str, dag_node_id: str) -> str:
+    digest = sha256_text(stable_json({"task_id": task_id, "dag_node_id": dag_node_id}))
+    return f"scope-fanout-outcome:{digest[:24]}"
+
+
+def _scope_fanout_top_rejection_reasons_conn(
+    conn: sqlite3.Connection,
+    *,
+    execution_group_item_id: str,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    if not execution_group_item_id:
+        return []
+    rows = conn.execute(
+        """
+        SELECT rejection_reason, COUNT(*) AS count
+        FROM scope_evidence_records
+        WHERE execution_group_item_id = ?
+          AND rejection_reason <> ''
+        GROUP BY rejection_reason
+        ORDER BY count DESC, rejection_reason ASC
+        LIMIT ?
+        """,
+        (execution_group_item_id, max(1, int(limit or 5))),
+    ).fetchall()
+    return [{"reason_kind": str(row["rejection_reason"] or ""), "count": int(row["count"] or 0)} for row in rows]
+
+
+def _scope_fanout_evidence_counts_conn(conn: sqlite3.Connection, *, execution_group_item_id: str) -> dict[str, int]:
+    counts = {"accepted": 0, "advisory": 0, "rejected": 0, "record_count": 0}
+    if not execution_group_item_id:
+        return counts
+    rows = conn.execute(
+        """
+        SELECT status, COUNT(*) AS count
+        FROM scope_evidence_records
+        WHERE execution_group_item_id = ?
+        GROUP BY status
+        """,
+        (execution_group_item_id,),
+    ).fetchall()
+    for row in rows:
+        status = str(row["status"] or "")
+        count = int(row["count"] or 0)
+        counts["record_count"] += count
+        if status in counts:
+            counts[status] += count
+    return counts
+
+
+def _scope_fanout_outcome_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    payload = _json_cell(row["payload_json"], {})
+    top_reasons = _json_cell(row["top_rejection_reasons_json"], [])
+    return {
+        "outcome_id": str(row["outcome_id"] or ""),
+        "task_id": str(row["task_id"] or ""),
+        "graph_task_node_id": str(row["graph_task_node_id"] or ""),
+        "dag_node_id": str(row["dag_node_id"] or ""),
+        "execution_group_id": str(row["execution_group_id"] or ""),
+        "status": str(row["status"] or ""),
+        "attempt_count": int(row["attempt_count"] or 0),
+        "worker_count": int(row["worker_count"] or 0),
+        "completed_worker_count": int(row["completed_worker_count"] or 0),
+        "failed_worker_count": int(row["failed_worker_count"] or 0),
+        "report_count": int(row["report_count"] or 0),
+        "evidence_record_count": int(row["evidence_record_count"] or 0),
+        "accepted_count": int(row["accepted_count"] or 0),
+        "advisory_count": int(row["advisory_count"] or 0),
+        "rejected_count": int(row["rejected_count"] or 0),
+        "top_rejection_reasons": top_reasons if isinstance(top_reasons, list) else [],
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+        "payload": payload if isinstance(payload, dict) else {},
+    }
+
+
+def _upsert_scope_fanout_outcome_conn(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    graph_task_node_id: str,
+    dag_node_id: str,
+    execution_group_id: str,
+    status: str,
+    completed_attempt_increment: int,
+    worker_count: int,
+    completed_worker_count: int,
+    failed_worker_count: int,
+    report_count: int,
+    evidence_record_count: int,
+    accepted_count: int,
+    advisory_count: int,
+    rejected_count: int,
+    top_rejection_reasons: list[Mapping[str, Any]],
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    outcome_id = _scope_fanout_outcome_id(task_id, dag_node_id or _execution_dag_node_id(task_id, "scope"))
+    now = utc_now()
+    existing = conn.execute(
+        "SELECT created_at, attempt_count FROM scope_fanout_outcomes WHERE outcome_id = ?",
+        (outcome_id,),
+    ).fetchone()
+    created_at = str(existing["created_at"] or "") if existing is not None else now
+    attempt_count = int(existing["attempt_count"] or 0) if existing is not None else 0
+    attempt_count += max(0, int(completed_attempt_increment or 0))
+    conn.execute(
+        """
+        INSERT INTO scope_fanout_outcomes(
+            outcome_id, task_id, graph_task_node_id, dag_node_id, execution_group_id,
+            status, attempt_count, worker_count, completed_worker_count,
+            failed_worker_count, report_count, evidence_record_count, accepted_count,
+            advisory_count, rejected_count, top_rejection_reasons_json,
+            created_at, updated_at, payload_json
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(outcome_id) DO UPDATE SET
+            graph_task_node_id=excluded.graph_task_node_id,
+            execution_group_id=excluded.execution_group_id,
+            status=excluded.status,
+            attempt_count=excluded.attempt_count,
+            worker_count=excluded.worker_count,
+            completed_worker_count=excluded.completed_worker_count,
+            failed_worker_count=excluded.failed_worker_count,
+            report_count=excluded.report_count,
+            evidence_record_count=excluded.evidence_record_count,
+            accepted_count=excluded.accepted_count,
+            advisory_count=excluded.advisory_count,
+            rejected_count=excluded.rejected_count,
+            top_rejection_reasons_json=excluded.top_rejection_reasons_json,
+            updated_at=excluded.updated_at,
+            payload_json=excluded.payload_json
+        """,
+        (
+            outcome_id,
+            task_id,
+            graph_task_node_id,
+            dag_node_id,
+            execution_group_id,
+            status,
+            attempt_count,
+            worker_count,
+            completed_worker_count,
+            failed_worker_count,
+            report_count,
+            evidence_record_count,
+            accepted_count,
+            advisory_count,
+            rejected_count,
+            stable_json([dict(item) for item in top_rejection_reasons[:5] if isinstance(item, Mapping)]),
+            created_at,
+            now,
+            stable_json(dict(payload)),
+        ),
+    )
+    row = conn.execute("SELECT * FROM scope_fanout_outcomes WHERE outcome_id = ?", (outcome_id,)).fetchone()
+    return _scope_fanout_outcome_row_to_dict(row)
+
+
+def scope_fanout_outcomes_conn(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str = "",
+    statuses: set[str] | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    clauses: list[str] = []
+    if task_id:
+        clauses.append("task_id = ?")
+        params.append(task_id)
+    if statuses:
+        placeholders = ",".join("?" for _ in sorted(statuses))
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(sorted(statuses))
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM scope_fanout_outcomes
+        {where}
+        ORDER BY updated_at DESC, outcome_id
+        LIMIT ?
+        """,
+        (*params, max(1, int(limit or 50))),
+    ).fetchall()
+    return [_scope_fanout_outcome_row_to_dict(row) for row in rows]
+
+
+def _scope_fanout_outcome_for_ticket_conn(conn: sqlite3.Connection, ticket_id: str, *, dag_node_id: str = "") -> dict[str, Any]:
+    if not ticket_id:
+        return {}
+    clauses = ["task_id = ?"]
+    params: list[Any] = [ticket_id]
+    if dag_node_id:
+        clauses.append("(dag_node_id = ? OR dag_node_id = '')")
+        params.append(dag_node_id)
+    row = conn.execute(
+        f"""
+        SELECT *
+        FROM scope_fanout_outcomes
+        WHERE {' AND '.join(clauses)}
+        ORDER BY updated_at DESC, outcome_id
+        LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+    return _scope_fanout_outcome_row_to_dict(row)
+
+
+def _accepted_scope_evidence_for_task_conn(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    graph_task_node_id: str = "",
+    dag_node_id: str = "",
+    limit: int = IMPACT_CONTEXT_PACK_LIMIT,
+) -> list[dict[str, Any]]:
+    clauses = ["status = 'accepted'", "normalized_confidence >= ?"]
+    params: list[Any] = [SCOPE_EVIDENCE_PROMOTION_CONFIDENCE_THRESHOLD]
+    if task_id:
+        clauses.append("task_id = ?")
+        params.append(task_id)
+    if graph_task_node_id:
+        clauses.append("(graph_task_node_id = ? OR graph_task_node_id = '' OR graph_task_node_id IS NULL)")
+        params.append(graph_task_node_id)
+    if dag_node_id:
+        clauses.append("(dag_node_id = ? OR dag_node_id = '' OR dag_node_id IS NULL)")
+        params.append(dag_node_id)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM scope_evidence_records
+        WHERE {' AND '.join(clauses)}
+        ORDER BY normalized_confidence DESC, created_at DESC, evidence_id
+        LIMIT ?
+        """,
+        (*params, max(1, int(limit or IMPACT_CONTEXT_PACK_LIMIT))),
+    ).fetchall()
+    return [_scope_evidence_record_row_to_dict(row) for row in rows]
+
+
+def _scope_evidence_policy_for_ticket_conn(conn: sqlite3.Connection, ticket_id: str) -> dict[str, Any]:
+    records = _accepted_scope_evidence_for_task_conn(conn, task_id=ticket_id, limit=IMPACT_CONTEXT_PACK_LIMIT)
+    if not records:
+        return {}
+    return {
+        "accepted_count": len(records),
+        "max_confidence": max(float(record.get("normalized_confidence") or 0) for record in records),
+        "evidence_ids": [str(record.get("evidence_id") or "") for record in records],
+        "paths": sorted({str(record.get("candidate_path") or "") for record in records if str(record.get("candidate_path") or "")}),
+        "symbols": sorted({str(record.get("candidate_symbol") or "") for record in records if str(record.get("candidate_symbol") or "")}),
+    }
+
+
 def record_worker_report_disposition_conn(
     conn: sqlite3.Connection,
     worker_id: str,
@@ -7420,6 +14831,91 @@ def record_worker_report_disposition_conn(
     return _worker_agent_row_to_dict(conn.execute("SELECT * FROM worker_agents WHERE worker_id = ?", (worker_id,)).fetchone())
 
 
+def _record_scope_fanout_outcomes_for_group_conn(
+    conn: sqlite3.Connection,
+    *,
+    execution_group_id: str,
+    group_status: str,
+    workers: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM execution_group_items
+        WHERE execution_group_id = ?
+        ORDER BY item_id
+        """,
+        (execution_group_id,),
+    ).fetchall()
+    workers_by_item: dict[str, list[Mapping[str, Any]]] = {}
+    for worker in workers:
+        payload = worker.get("payload") if isinstance(worker.get("payload"), Mapping) else {}
+        item_id = str(payload.get("item_id") or "")
+        if item_id:
+            workers_by_item.setdefault(item_id, []).append(worker)
+    outcomes: list[dict[str, Any]] = []
+    with conn:
+        for row in rows:
+            item_id = str(row["item_id"] or "")
+            payload = _json_cell(row["payload_json"], {})
+            payload = payload if isinstance(payload, Mapping) else {}
+            task_id = str(row["task_id"] or payload.get("task_id") or "")
+            dag_node_id = str(payload.get("dag_node_id") or "")
+            graph_task_node_id = str(row["graph_task_node_id"] or payload.get("graph_task_node_id") or "")
+            if not task_id or not dag_node_id:
+                continue
+            item_workers = [worker for worker in workers_by_item.get(item_id, []) if isinstance(worker, Mapping)]
+            worker_count = len(item_workers)
+            completed_worker_count = sum(1 for worker in item_workers if str(worker.get("status") or "") == "completed")
+            failed_worker_count = sum(1 for worker in item_workers if str(worker.get("status") or "") not in {"", "completed"})
+            report_count = sum(1 for worker in item_workers if str(worker.get("report_artifact_id") or ""))
+            evidence_counts = _scope_fanout_evidence_counts_conn(conn, execution_group_item_id=item_id)
+            accepted_count = int(evidence_counts.get("accepted") or 0)
+            advisory_count = int(evidence_counts.get("advisory") or 0)
+            rejected_count = int(evidence_counts.get("rejected") or 0)
+            evidence_record_count = int(evidence_counts.get("record_count") or 0)
+            top_reasons = _scope_fanout_top_rejection_reasons_conn(conn, execution_group_item_id=item_id)
+            valid_completed_report = completed_worker_count > 0 and report_count > 0
+            if accepted_count > 0:
+                status = "promoted"
+            elif valid_completed_report and str(group_status or "") == "completed":
+                status = "exhausted"
+            elif failed_worker_count > 0 or str(group_status or "") == "failed":
+                status = "failed"
+            else:
+                status = "skipped"
+            outcomes.append(
+                _upsert_scope_fanout_outcome_conn(
+                    conn,
+                    task_id=task_id,
+                    graph_task_node_id=graph_task_node_id,
+                    dag_node_id=dag_node_id,
+                    execution_group_id=execution_group_id,
+                    status=status,
+                    completed_attempt_increment=1 if valid_completed_report else 0,
+                    worker_count=worker_count,
+                    completed_worker_count=completed_worker_count,
+                    failed_worker_count=failed_worker_count,
+                    report_count=report_count,
+                    evidence_record_count=evidence_record_count,
+                    accepted_count=accepted_count,
+                    advisory_count=advisory_count,
+                    rejected_count=rejected_count,
+                    top_rejection_reasons=top_reasons,
+                    payload={
+                        "schema_version": 1,
+                        "authority": "sqlite",
+                        "max_completed_attempts": SCOPE_FANOUT_MAX_COMPLETED_ATTEMPTS,
+                        "execution_group_item_id": item_id,
+                        "group_status": str(group_status or ""),
+                        "serial_fallback_allowed": status == "exhausted",
+                        "worker_text_authorizes_writes": False,
+                    },
+                )
+            )
+    return outcomes
+
+
 def launch_read_only_execution_group_conn(
     conn: sqlite3.Connection,
     target: Path,
@@ -7431,15 +14927,32 @@ def launch_read_only_execution_group_conn(
     max_workers: int = 2,
     command_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> dict[str, Any]:
+    phase_started_at = utc_now()
+    phase_started = time.perf_counter()
+
+    def finish_worker_launch_timing(status: str, payload: Mapping[str, Any] | None = None) -> None:
+        record_runtime_phase_timing_conn(
+            conn,
+            phase="worker_launch",
+            source="worker.read_only_launch",
+            run_id=run_id,
+            started_at=phase_started_at,
+            elapsed_ms=_elapsed_ms(phase_started),
+            status=status,
+            payload=payload,
+        )
+
     target = target.expanduser().resolve()
     selected_group = dict(group or {})
     if not selected_group:
         selected_group = _execution_group_by_id_conn(conn, execution_group_id) if execution_group_id else _latest_read_only_execution_group_conn(conn)
     if not selected_group:
+        finish_worker_launch_timing("skipped", {"reason_kind": "no_read_only_group"})
         return {"status": "skipped", "reason_kind": "no_read_only_group", "reason": "No proposed read-only execution group is available."}
     group_id = str(selected_group.get("execution_group_id") or "")
     payload = selected_group.get("payload") if isinstance(selected_group.get("payload"), Mapping) else {}
     if str(payload.get("execution_mode") or "") != "read_only":
+        finish_worker_launch_timing("skipped", {"execution_group_id": group_id, "reason_kind": "not_read_only"})
         return {
             "status": "skipped",
             "execution_group_id": group_id,
@@ -7449,6 +14962,7 @@ def launch_read_only_execution_group_conn(
     existing = worker_agents_conn(conn, mode="read_only", limit=50)
     existing_for_group = [worker for worker in existing if worker.get("execution_group_id") == group_id]
     if existing_for_group:
+        finish_worker_launch_timing("skipped", {"execution_group_id": group_id, "reason_kind": "already_launched", "worker_count": len(existing_for_group)})
         return {
             "status": "already_launched",
             "execution_group_id": group_id,
@@ -7461,6 +14975,7 @@ def launch_read_only_execution_group_conn(
     items = items[:max_workers]
     budget_check = can_start_execution_group(conn, "read_only", item_count=len(items), owner_role="")
     if not bool(budget_check.get("allowed")):
+        finish_worker_launch_timing("blocked", {"execution_group_id": group_id, "reason_kind": "budget_blocked"})
         return {
             "status": "blocked",
             "execution_group_id": group_id,
@@ -7473,6 +14988,7 @@ def launch_read_only_execution_group_conn(
     budget = budget_check.get("budget") if isinstance(budget_check.get("budget"), Mapping) else {}
     timeout = max(60, int(budget.get("max_runtime_seconds") or PARALLELISM_BUDGET_DEFAULT_RUNTIME_SECONDS))
     launched_workers: list[dict[str, Any]] = []
+    worker_specs: list[dict[str, Any]] = []
     with conn:
         conn.execute(
             """
@@ -7490,16 +15006,20 @@ def launch_read_only_execution_group_conn(
         report_path = _worker_report_path(target, run_id, role_slug)
         contract = _worker_contract_payload(item)
         assignment = _worker_assignment_prompt(selected_group, item, contract)
+        symbol_context = _worker_symbol_context(item)
         worker_payload = {
             "schema_version": 1,
             "item_id": str(item.get("item_id") or ""),
             "task_id": str(item.get("task_id") or ""),
+            "dag_node_id": str(item.get("dag_node_id") or (item.get("payload") if isinstance(item.get("payload"), Mapping) else {}).get("dag_node_id") or ""),
             "graph_task_node_id": str(item.get("graph_task_node_id") or ""),
             "assignment_summary": str(item.get("reason") or ""),
             "report_path": str(report_path),
             "finding_disposition_required": False,
             "disposition_status": "not_ready",
             "context_policy": "raw source contents are not embedded by default",
+            "symbol_context_available": bool(symbol_context),
+            "symbol_context": symbol_context,
         }
         with conn:
             conn.execute(
@@ -7578,9 +15098,28 @@ def launch_read_only_execution_group_conn(
             "--role",
             role_slug,
             "--read-only",
+            "--report-path",
+            str(report_path),
             "--prompt",
             assignment,
         ]
+        worker_specs.append(
+            {
+                "worker_id": worker_id,
+                "item_id": str(item.get("item_id") or ""),
+                "role_slug": role_slug,
+                "report_path": report_path,
+                "assignment": assignment,
+                "worker_payload": worker_payload,
+                "command": command,
+            }
+        )
+
+    def execute_read_only_worker(spec: Mapping[str, Any]) -> dict[str, Any]:
+        role_slug = str(spec.get("role_slug") or "")
+        report_path = Path(str(spec.get("report_path") or ""))
+        assignment = str(spec.get("assignment") or "")
+        command = [str(part) for part in spec.get("command", [])] if isinstance(spec.get("command"), list) else []
         failure_reason = ""
         status = "completed"
         if not helper_path.exists() and command_runner is None:
@@ -7596,10 +15135,7 @@ def launch_read_only_execution_group_conn(
             )
         else:
             try:
-                if command_runner is None:
-                    result = subprocess.run(command, cwd=target, text=True, capture_output=True, timeout=timeout, check=False)
-                else:
-                    result = command_runner(command, cwd=target, timeout=timeout)
+                result = _run_worker_command(command, cwd=target, timeout=timeout, command_runner=command_runner)
             except Exception as exc:  # pragma: no cover - defensive launcher behavior.
                 status = "failed"
                 failure_reason = f"{exc.__class__.__name__}: {exc}"
@@ -7613,16 +15149,30 @@ def launch_read_only_execution_group_conn(
                 )
             else:
                 return_code = int(getattr(result, "returncode", 1) or 0)
+                reported_path = _reported_worker_report_path(
+                    target,
+                    "\n".join(
+                        [
+                            str(getattr(result, "stdout", "") or ""),
+                            str(getattr(result, "stderr", "") or ""),
+                        ]
+                    ),
+                )
+                real_report_path = report_path if report_path.exists() else reported_path if reported_path is not None and reported_path.exists() else None
+                if real_report_path is not None:
+                    report_path = real_report_path
                 if return_code == 127:
                     status = "unavailable"
                     failure_reason = "Codex CLI worker unavailable"
                 elif return_code != 0:
                     status = "failed"
                     failure_reason = f"worker helper exited with code {return_code}"
-                elif not report_path.exists():
+                elif real_report_path is not None:
+                    status = "completed"
+                else:
                     status = "failed"
                     failure_reason = "worker helper exited successfully without writing the assigned report"
-                if status != "completed" and not report_path.exists():
+                if status != "completed" and real_report_path is None and not report_path.exists():
                     _write_worker_status_report(
                         report_path,
                         run_id=run_id,
@@ -7631,6 +15181,43 @@ def launch_read_only_execution_group_conn(
                         assignment=assignment,
                         reason=failure_reason,
                     )
+        return {
+            "worker_id": str(spec.get("worker_id") or ""),
+            "item_id": str(spec.get("item_id") or ""),
+            "report_path": str(report_path),
+            "worker_payload": dict(spec.get("worker_payload") if isinstance(spec.get("worker_payload"), Mapping) else {}),
+            "status": status,
+            "failure_reason": failure_reason,
+        }
+
+    results_by_worker: dict[str, dict[str, Any]] = {}
+    if worker_specs:
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(worker_specs))) as executor:
+            future_by_worker = {
+                executor.submit(execute_read_only_worker, spec): str(spec.get("worker_id") or "")
+                for spec in worker_specs
+            }
+            for future in as_completed(future_by_worker):
+                worker_id = future_by_worker[future]
+                try:
+                    results_by_worker[worker_id] = future.result()
+                except Exception as exc:  # pragma: no cover - defensive launcher behavior.
+                    results_by_worker[worker_id] = {
+                        "worker_id": worker_id,
+                        "item_id": "",
+                        "report_path": "",
+                        "worker_payload": {},
+                        "status": "failed",
+                        "failure_reason": f"{exc.__class__.__name__}: {exc}",
+                    }
+
+    for spec in worker_specs:
+        worker_id = str(spec.get("worker_id") or "")
+        result = results_by_worker.get(worker_id, {})
+        status = str(result.get("status") or "failed")
+        failure_reason = str(result.get("failure_reason") or "")
+        report_path = Path(str(result.get("report_path") or spec.get("report_path") or ""))
+        worker_payload = dict(result.get("worker_payload") if isinstance(result.get("worker_payload"), Mapping) else spec.get("worker_payload") if isinstance(spec.get("worker_payload"), Mapping) else {})
         finished_at = utc_now()
         report_artifact_id = _record_worker_report_artifact_conn(
             conn,
@@ -7639,12 +15226,24 @@ def launch_read_only_execution_group_conn(
             run_id=run_id,
             report_path=report_path,
         )
+        scope_evidence_result = (
+            record_scope_evidence_from_worker_report_conn(
+                conn,
+                target,
+                worker_id=worker_id,
+                report_path=report_path,
+                report_artifact_id=report_artifact_id,
+            )
+            if report_artifact_id
+            else {"status": "skipped", "record_count": 0}
+        )
         worker_payload.update(
             {
                 "report_path": str(report_path),
                 "finding_disposition_required": bool(report_artifact_id),
                 "disposition_status": "pending" if report_artifact_id else "not_ready",
                 "return_status": status,
+                "scope_evidence_ingest": scope_evidence_result,
             }
         )
         with conn:
@@ -7659,7 +15258,7 @@ def launch_read_only_execution_group_conn(
             )
             conn.execute(
                 "UPDATE execution_group_items SET status = ?, reason = ? WHERE item_id = ?",
-                (status, failure_reason or "worker report recorded", str(item.get("item_id") or "")),
+                (status, failure_reason or "worker report recorded", str(spec.get("item_id") or result.get("item_id") or "")),
             )
         launched_row = conn.execute("SELECT * FROM worker_agents WHERE worker_id = ?", (worker_id,)).fetchone()
         if launched_row is not None:
@@ -7679,6 +15278,12 @@ def launch_read_only_execution_group_conn(
     failed_count = sum(1 for worker in launched_workers if worker.get("status") != "completed")
     finished_at = utc_now()
     group_status = "completed" if failed_count == 0 else "failed"
+    scope_fanout_outcomes = _record_scope_fanout_outcomes_for_group_conn(
+        conn,
+        execution_group_id=group_id,
+        group_status=group_status,
+        workers=launched_workers,
+    )
     group_payload = {
         **dict(payload),
         "worker_run_id": run_id,
@@ -7686,6 +15291,7 @@ def launch_read_only_execution_group_conn(
         "failed_worker_count": failed_count,
         "worker_summary_path": summary_path,
         "worker_finding_disposition_required": bool(launched_workers),
+        "scope_fanout_outcomes": scope_fanout_outcomes[:PARALLEL_DRY_RUN_GROUP_ITEM_LIMIT],
     }
     with conn:
         conn.execute(
@@ -7713,6 +15319,15 @@ def launch_read_only_execution_group_conn(
                 },
             ),
         )
+    finish_worker_launch_timing(
+        group_status,
+        {
+            "execution_group_id": group_id,
+            "worker_count": len(launched_workers),
+            "failed_worker_count": failed_count,
+            "mode": "read_only",
+        },
+    )
     return {
         "status": group_status,
         "execution_group_id": group_id,
@@ -7790,6 +15405,7 @@ def _write_worker_contract_payload(item: Mapping[str, Any], leases: list[dict[st
         "target/automation_worktrees/",
         ".diffmogger/runtime/orchestration.sqlite3",
     ]
+    symbol_context = _worker_symbol_context(item)
     validation_commands: list[str] = []
     payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
     raw_validation_commands = payload.get("validation_commands") if isinstance(payload.get("validation_commands"), list) else []
@@ -7825,6 +15441,8 @@ def _write_worker_contract_payload(item: Mapping[str, Any], leases: list[dict[st
             "mode": "write",
             "lease_ids": [str(lease.get("lease_id") or "") for lease in leases],
             "context_policy": "raw source contents are not embedded by default",
+            "symbol_context_available": bool(symbol_context),
+            "symbol_context": symbol_context,
         },
     }
 
@@ -7839,6 +15457,7 @@ def _write_worker_assignment_prompt(
     payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
     context_pack = payload.get("context_pack_preview") if isinstance(payload.get("context_pack_preview"), Mapping) else {}
     context_items = _worker_context_items(item)
+    symbol_context = _worker_symbol_context(item)
     lines = [
         "You are a bounded write worker launched from a Diffmogger execution group.",
         "",
@@ -7864,13 +15483,14 @@ def _write_worker_assignment_prompt(
         for context_item in context_items:
             label = context_item.get("path") or context_item.get("name") or context_item.get("node_id")
             lines.append(
-                f"- {label} | category={context_item.get('category')} | confidence={float(context_item.get('confidence') or 0):.2f} | stale={'yes' if context_item.get('is_stale') else 'no'} | reason={context_item.get('reason')}"
+                f"- {label} | category={context_item.get('category')} | signal={context_item.get('signal_kind') or context_item.get('source')} | confidence={float(context_item.get('confidence') or 0):.2f} | stale={'yes' if context_item.get('is_stale') else 'no'} | reason={context_item.get('reason')}"
             )
     else:
         lines.append("- No bounded context paths were available; do not broaden the write scope.")
     stale_warning = str(context_pack.get("stale_context_warning") or "").strip()
     if stale_warning:
         lines.extend(["", f"Stale context warning: {stale_warning}"])
+    lines.extend(_worker_symbol_context_lines(symbol_context))
     lines.extend(
         [
             "",
@@ -7991,7 +15611,1081 @@ def worker_patches_conn(conn: sqlite3.Connection, *, statuses: set[str] | None =
     return [_worker_patch_row_to_dict(row) for row in rows]
 
 
-def worker_patch_read_model_conn(conn: sqlite3.Connection, *, limit: int = 20) -> dict[str, Any]:
+def _target_relative_or_text(target: Path, value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        try:
+            return path.resolve().relative_to(target.resolve()).as_posix()
+        except ValueError:
+            return path.as_posix()
+    return target_rel(target, text)
+
+
+def _resolve_manifest_sidecar_path(target: Path, value: Any, default: Path | None = None) -> Path:
+    text = str(value or "").strip()
+    if not text:
+        return default or target
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        return path
+    return target_path(target, text)
+
+
+def _manifest_action_payload(target: Path, manifest: Mapping[str, Any], key: str) -> dict[str, Any]:
+    path = _resolve_manifest_sidecar_path(target, manifest.get(key))
+    if not path.exists():
+        return {}
+    return read_json_file(path)
+
+
+def _manifest_task_id(target: Path, manifest: Mapping[str, Any]) -> str:
+    for key in ("task_id", "ticket_id"):
+        value = str(manifest.get(key) or "").strip()
+        if value:
+            return value
+    for key in ("ticket_ids", "tickets", "ticket_cluster"):
+        value = manifest.get(key)
+        if isinstance(value, list):
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    return text
+        elif isinstance(value, str) and value.strip():
+            return value.strip()
+    for action_key in ("ticket_state_actions_path", "runtime_state_actions_path"):
+        payload = _manifest_action_payload(target, manifest, action_key)
+        actions = payload.get("actions") if isinstance(payload.get("actions"), list) else []
+        for action in actions:
+            if not isinstance(action, Mapping):
+                continue
+            ticket = action.get("ticket") if isinstance(action.get("ticket"), Mapping) else {}
+            ticket_id = str(action.get("ticket_id") or ticket.get("id") or "").strip()
+            if ticket_id:
+                return ticket_id
+    haystack = "\n".join(
+        [
+            str(manifest.get("summary") or ""),
+            "\n".join(str(item) for item in manifest.get("changed_files") or []),
+            "\n".join(str(item) for item in manifest.get("runtime_state_changed_files") or []),
+        ]
+    )
+    match = re.search(r"\b[A-Z][A-Z0-9]+-\d+\b", haystack)
+    return match.group(0) if match else ""
+
+
+def _source_dag_node_for_role_manifest_conn(conn: sqlite3.Connection, *, role: str, task_id: str) -> str:
+    if not task_id:
+        return ""
+    role_actions = {
+        "planner": ("scope", "decompose", "orchestrate"),
+        "builder": ("build",),
+        "hardener": ("review", "validate", "audit"),
+    }
+    actions = role_actions.get(role, ())
+    if not actions:
+        return ""
+    placeholders = ",".join("?" for _ in actions)
+    row = conn.execute(
+        f"""
+        SELECT node_id
+        FROM execution_dag_nodes
+        WHERE task_id = ?
+          AND action_type IN ({placeholders})
+        ORDER BY
+          CASE status
+            WHEN 'running' THEN 0
+            WHEN 'ready' THEN 1
+            WHEN 'done' THEN 2
+            ELSE 3
+          END,
+          node_id
+        LIMIT 1
+        """,
+        (task_id, *actions),
+    ).fetchone()
+    return str(row["node_id"] or "") if row is not None else ""
+
+
+def sync_queued_role_manifests_into_worker_patches_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    selected_by: str = "role_manifest_queue_sync",
+    limit: int = 50,
+) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    queue_root = target_path(target, "target/automation_queue")
+    imported: list[str] = []
+    updated: list[str] = []
+    skipped: list[dict[str, str]] = []
+    considered = 0
+    now = utc_now()
+    for role in ROLE_MANIFEST_QUEUE_ROLES:
+        role_root = queue_root / role
+        if not role_root.exists():
+            continue
+        for manifest_path in sorted(role_root.glob("*/manifest.json")):
+            if considered >= max(1, int(limit or 50)):
+                break
+            manifest = read_json_file(manifest_path)
+            if str(manifest.get("status") or "") != "queued":
+                continue
+            considered += 1
+            run_id = str(manifest.get("run_id") or manifest_path.parent.name).strip()
+            manifest_role = str(manifest.get("role") or role).strip() or role
+            if manifest_role not in ROLE_MANIFEST_QUEUE_ROLES:
+                skipped.append({"manifest_path": _target_relative_or_text(target, manifest_path), "reason": "unsupported_role"})
+                continue
+            patch_path = _resolve_manifest_sidecar_path(target, manifest.get("patch_path"), manifest_path.parent / "changes.patch")
+            patch_rel = _target_relative_or_text(target, patch_path)
+            manifest_rel = _target_relative_or_text(target, manifest_path)
+            changed_files = [
+                normalize_path_for_brief(str(item))
+                for key in ("changed_files", "runtime_state_changed_files")
+                for item in (manifest.get(key) if isinstance(manifest.get(key), list) else [])
+                if normalize_path_for_brief(str(item))
+            ]
+            changed_files = sorted(dict.fromkeys(changed_files))
+            try:
+                runtime_state_action_count = int(manifest.get("runtime_state_action_count") or 0)
+            except (TypeError, ValueError):
+                runtime_state_action_count = 0
+            patch_has_content = patch_path.exists() and patch_path.is_file() and patch_path.stat().st_size > 0
+            if not patch_has_content and not changed_files and runtime_state_action_count == 0:
+                skipped.append({"manifest_path": manifest_rel, "reason": "empty_queued_manifest"})
+                continue
+            task_id = _manifest_task_id(target, manifest)
+            source_dag_node_id = str(manifest.get("dag_node_id") or manifest.get("source_dag_node_id") or "").strip()
+            if not source_dag_node_id:
+                source_dag_node_id = _source_dag_node_for_role_manifest_conn(conn, role=manifest_role, task_id=task_id)
+            worker_id = str(manifest.get("worker_id") or "").strip()
+            if not worker_id:
+                worker_id = f"role-manifest:{manifest_role}:{run_id}"
+            execution_group_id = str(manifest.get("execution_group_id") or "").strip()
+            if not execution_group_id:
+                execution_group_id = f"serial-role:{manifest_role}:{run_id}"
+            patch_id = str(manifest.get("patch_id") or "").strip()
+            if not patch_id:
+                if str(manifest.get("worker_id") or "").strip():
+                    patch_id = f"worker-patch:{sha256_text(worker_id + ':' + run_id)[:20]}"
+                else:
+                    patch_id = f"role-patch:{sha256_text(manifest_rel)[:20]}"
+            existing = conn.execute("SELECT status FROM worker_patches WHERE patch_id = ?", (patch_id,)).fetchone()
+            if existing is not None and str(existing["status"] or "") != "queued":
+                skipped.append({"manifest_path": manifest_rel, "patch_id": patch_id, "reason": f"already_{existing['status']}"})
+                continue
+            created_at = str(manifest.get("created_at") or now)
+            summary_path = manifest_path.parent / "summary.md"
+            payload = {
+                "schema_version": 1,
+                "source": "role_manifest_queue",
+                "role": manifest_role,
+                "run_id": run_id,
+                "task_id": task_id,
+                "dag_node_id": source_dag_node_id,
+                "summary": str(manifest.get("summary") or "")[:2000],
+                "runtime_state_actions_path": _target_relative_or_text(target, manifest.get("runtime_state_actions_path")),
+                "ticket_state_actions_path": _target_relative_or_text(target, manifest.get("ticket_state_actions_path")),
+                "runtime_state_status": str(manifest.get("runtime_state_status") or ""),
+                "runtime_state_action_count": runtime_state_action_count,
+            }
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO worker_agents(
+                        worker_id, execution_group_id, run_id, mode, role, status,
+                        context_pack_id, started_at, finished_at, report_artifact_id,
+                        failure_reason, payload_json
+                    )
+                    VALUES(?, ?, ?, 'write', ?, 'completed', '', ?, ?, ?, '', ?)
+                    ON CONFLICT(worker_id) DO UPDATE SET
+                        execution_group_id=excluded.execution_group_id,
+                        run_id=excluded.run_id,
+                        mode=excluded.mode,
+                        role=excluded.role,
+                        status=excluded.status,
+                        started_at=excluded.started_at,
+                        finished_at=excluded.finished_at,
+                        report_artifact_id=excluded.report_artifact_id,
+                        failure_reason='',
+                        payload_json=excluded.payload_json
+                    """,
+                    (
+                        worker_id,
+                        execution_group_id,
+                        run_id,
+                        manifest_role,
+                        created_at,
+                        created_at,
+                        _target_relative_or_text(target, summary_path),
+                        stable_json(payload),
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO worker_patches(
+                        patch_id, worker_id, execution_group_id, status, manifest_path,
+                        patch_path, changed_files_json, base_commit, leases_json,
+                        validation_evidence_json, conflict_signature, created_at,
+                        queued_at, integrated_at, payload_json
+                    )
+                    VALUES(?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, '', ?, ?, '', ?)
+                    ON CONFLICT(patch_id) DO UPDATE SET
+                        worker_id=excluded.worker_id,
+                        execution_group_id=excluded.execution_group_id,
+                        status=excluded.status,
+                        manifest_path=excluded.manifest_path,
+                        patch_path=excluded.patch_path,
+                        changed_files_json=excluded.changed_files_json,
+                        base_commit=excluded.base_commit,
+                        leases_json=excluded.leases_json,
+                        validation_evidence_json=excluded.validation_evidence_json,
+                        queued_at=excluded.queued_at,
+                        payload_json=excluded.payload_json
+                    """,
+                    (
+                        patch_id,
+                        worker_id,
+                        execution_group_id,
+                        manifest_rel,
+                        patch_rel,
+                        stable_json(changed_files),
+                        str(manifest.get("base_commit") or ""),
+                        stable_json(manifest.get("required_leases") if isinstance(manifest.get("required_leases"), list) else []),
+                        stable_json(manifest.get("checks_run") if isinstance(manifest.get("checks_run"), list) else []),
+                        created_at,
+                        created_at,
+                        stable_json(payload),
+                    ),
+                )
+                if source_dag_node_id:
+                    node_status = conn.execute(
+                        "SELECT status FROM execution_dag_nodes WHERE node_id = ?",
+                        (source_dag_node_id,),
+                    ).fetchone()
+                    if node_status is not None and str(node_status["status"] or "") not in EXECUTION_DAG_TERMINAL_STATUSES:
+                        update_execution_dag_node_status_conn(conn, source_dag_node_id, status="done", selected_by=selected_by)
+            (updated if existing is not None else imported).append(patch_id)
+    if imported or updated:
+        append_event(
+            conn,
+            StateEvent(
+                stream_id="stream:execution-dag:role-manifest-sync",
+                event_type="execution_dag.role_manifests_synced",
+                actor_role=selected_by,
+                phase="scheduler",
+                status="ACTIVE",
+                payload={
+                    "imported_count": len(imported),
+                    "updated_count": len(updated),
+                    "skipped_count": len(skipped),
+                    "patch_ids": [*imported, *updated],
+                },
+            ),
+        )
+    return {
+        "status": "synced" if imported or updated else "skipped",
+        "imported_count": len(imported),
+        "updated_count": len(updated),
+        "skipped_count": len(skipped),
+        "patch_ids": [*imported, *updated],
+        "skipped": skipped,
+    }
+
+
+def _lineage_elapsed_seconds(started_at: Any, finished_at: Any) -> float:
+    start = _parse_state_datetime(started_at)
+    finish = _parse_state_datetime(finished_at)
+    if start is None or finish is None or finish < start:
+        return 0.0
+    return round((finish - start).total_seconds(), 3)
+
+
+def _lineage_unique_paths(values: Any) -> list[str]:
+    paths: list[str] = []
+    for value in _task_text_values(values):
+        path = normalize_path_for_brief(str(value or ""))
+        if path and path not in paths:
+            paths.append(path)
+    return sorted(paths)
+
+
+def _lineage_symbol_item(value: Mapping[str, Any], *, path: str = "", confidence: float = 0.0, source: str = "") -> dict[str, Any]:
+    symbol_node_id = str(value.get("symbol_node_id") or value.get("node_id") or value.get("scope_node_id") or "")
+    symbol_name = str(value.get("symbol_name") or value.get("name") or "")
+    qualified_name = str(value.get("qualified_name") or value.get("name") or symbol_name or "")
+    return {
+        "symbol_node_id": symbol_node_id,
+        "symbol_name": symbol_name,
+        "qualified_name": qualified_name,
+        "path": normalize_path_for_brief(str(value.get("owner_file_path") or value.get("path") or path or "")),
+        "confidence": round(float(value.get("confidence") or confidence or 0), 4),
+        "source": str(value.get("source") or source or ""),
+        "resolution": str(value.get("symbol_resolution") or value.get("resolution_kind") or ""),
+    }
+
+
+def _lineage_dedupe_symbols(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_key: dict[str, dict[str, Any]] = {}
+    for value in values:
+        key = str(value.get("symbol_node_id") or value.get("qualified_name") or value.get("symbol_name") or "")
+        if not key:
+            continue
+        current = by_key.get(key)
+        if current is None or float(value.get("confidence") or 0) > float(current.get("confidence") or 0):
+            by_key[key] = dict(value)
+    return sorted(by_key.values(), key=lambda item: (str(item.get("path") or ""), str(item.get("qualified_name") or item.get("symbol_name") or "")))[:24]
+
+
+def _lineage_predicted_impact_from_worker_inputs(
+    item: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    acquired_leases: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+    touches = payload.get("likely_touches") if isinstance(payload.get("likely_touches"), list) else item.get("likely_touches") if isinstance(item.get("likely_touches"), list) else []
+    context_pack = payload.get("context_pack_preview") if isinstance(payload.get("context_pack_preview"), Mapping) else item.get("context_pack_preview") if isinstance(item.get("context_pack_preview"), Mapping) else {}
+    symbol_context = context_pack.get("symbol_context") if isinstance(context_pack.get("symbol_context"), Mapping) else {}
+    files: list[str] = []
+    symbols: list[dict[str, Any]] = []
+    for path in _lineage_unique_paths(contract.get("allowed_paths")):
+        files.append(path)
+    for touch in touches:
+        if not isinstance(touch, Mapping):
+            continue
+        path = normalize_path_for_brief(str(touch.get("path") or ""))
+        if path:
+            files.append(path)
+        if str(touch.get("symbol_node_id") or touch.get("qualified_name") or touch.get("symbol_name") or ""):
+            symbols.append(_lineage_symbol_item(touch, path=path, source="likely_touches"))
+    for lease in acquired_leases:
+        scope_kind = str(lease.get("scope_kind") or "")
+        path = normalize_path_for_brief(str(lease.get("owner_file_path") or lease.get("path") or ""))
+        if path:
+            files.append(path)
+        if scope_kind == "symbol" or str(lease.get("symbol_node_id") or lease.get("qualified_name") or lease.get("symbol_name") or ""):
+            symbols.append(_lineage_symbol_item(lease, path=path, source="resource_lease"))
+    for item_value in symbol_context.get("direct_symbols") or []:
+        if isinstance(item_value, Mapping):
+            symbols.append(_lineage_symbol_item(item_value, source="symbol_context"))
+    for item_value in symbol_context.get("owning_files") or []:
+        if isinstance(item_value, Mapping):
+            path = normalize_path_for_brief(str(item_value.get("path") or ""))
+            if path:
+                files.append(path)
+    return {
+        "files": sorted({path for path in files if path})[:24],
+        "symbols": _lineage_dedupe_symbols(symbols),
+        "source": "execution_group_item",
+    }
+
+
+def _lineage_actual_symbols_for_files_conn(conn: sqlite3.Connection, files: list[str]) -> list[dict[str, Any]]:
+    paths = _lineage_unique_paths(files)
+    if not paths:
+        return []
+    row = _latest_codebase_graph_snapshot_row(conn)
+    snapshot_id = str(row["snapshot_id"]) if row is not None else ""
+    if not snapshot_id:
+        return []
+    placeholders = ",".join("?" for _ in paths)
+    rows = conn.execute(
+        f"""
+        SELECT node_id, path, name, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ?
+          AND graph_namespace = ?
+          AND kind = 'symbol'
+          AND path IN ({placeholders})
+        ORDER BY path, name
+        LIMIT 100
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE, *paths),
+    ).fetchall()
+    symbols: list[dict[str, Any]] = []
+    for row_item in rows:
+        metadata = _json_cell(row_item["metadata_json"], {})
+        metadata = metadata if isinstance(metadata, Mapping) else {}
+        symbols.append(
+            {
+                "symbol_node_id": str(row_item["node_id"] or ""),
+                "symbol_name": str(metadata.get("name") or row_item["name"] or ""),
+                "qualified_name": str(metadata.get("qualified_name") or row_item["name"] or ""),
+                "path": normalize_path_for_brief(str(row_item["path"] or "")),
+                "kind": str(metadata.get("symbol_kind") or ""),
+                "confidence": float(metadata.get("confidence") or metadata.get("extractor_confidence") or 0.75),
+                "source": "codebase_graph",
+            }
+        )
+    return _lineage_dedupe_symbols(symbols)
+
+
+def _lineage_prediction_accuracy(predicted_files: list[str], actual_files: list[str], predicted_symbols: list[dict[str, Any]], actual_symbols: list[dict[str, Any]]) -> dict[str, Any]:
+    predicted_file_set = set(_lineage_unique_paths(predicted_files))
+    actual_file_set = set(_lineage_unique_paths(actual_files))
+    predicted_symbol_set = {
+        str(item.get("symbol_node_id") or item.get("qualified_name") or item.get("symbol_name") or "")
+        for item in predicted_symbols
+        if isinstance(item, Mapping) and str(item.get("symbol_node_id") or item.get("qualified_name") or item.get("symbol_name") or "")
+    }
+    actual_symbol_set = {
+        str(item.get("symbol_node_id") or item.get("qualified_name") or item.get("symbol_name") or "")
+        for item in actual_symbols
+        if isinstance(item, Mapping) and str(item.get("symbol_node_id") or item.get("qualified_name") or item.get("symbol_name") or "")
+    }
+
+    def score(predicted: set[str], actual: set[str]) -> dict[str, Any]:
+        matched = predicted & actual
+        precision = len(matched) / len(predicted) if predicted else (1.0 if not actual else 0.0)
+        recall = len(matched) / len(actual) if actual else (1.0 if not predicted else 0.0)
+        f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+        return {
+            "predicted_count": len(predicted),
+            "actual_count": len(actual),
+            "matched_count": len(matched),
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "f1": round(f1, 4),
+            "missing": sorted(actual - predicted)[:12],
+            "unexpected": sorted(predicted - actual)[:12],
+        }
+
+    files = score(predicted_file_set, actual_file_set)
+    symbols = score(predicted_symbol_set, actual_symbol_set)
+    overall = round((files["f1"] + symbols["f1"]) / 2, 4) if predicted_symbol_set or actual_symbol_set else float(files["f1"])
+    return {
+        "schema_version": 1,
+        "files": files,
+        "symbols": symbols,
+        "overall_f1": overall,
+        "file_exact_match": predicted_file_set == actual_file_set,
+        "symbol_exact_match": predicted_symbol_set == actual_symbol_set,
+    }
+
+
+def _worker_patch_lineage_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    return {
+        "lineage_id": str(row["lineage_id"]),
+        "patch_id": str(row["patch_id"] or ""),
+        "worker_id": str(row["worker_id"] or ""),
+        "execution_group_id": str(row["execution_group_id"] or ""),
+        "task_id": str(row["task_id"] or ""),
+        "source_dag_node_id": str(row["source_dag_node_id"] or ""),
+        "status": str(row["status"] or ""),
+        "predicted_files": _json_cell(row["predicted_files_json"], []),
+        "predicted_symbols": _json_cell(row["predicted_symbols_json"], []),
+        "actual_files": _json_cell(row["actual_files_json"], []),
+        "actual_symbols": _json_cell(row["actual_symbols_json"], []),
+        "validations": _json_cell(row["validations_json"], []),
+        "conflicts": _json_cell(row["conflicts_json"], []),
+        "repair_node_ids": _json_cell(row["repair_node_ids_json"], []),
+        "integration_result": str(row["integration_result"] or ""),
+        "started_at": str(row["started_at"] or ""),
+        "finished_at": str(row["finished_at"] or ""),
+        "elapsed_seconds": float(row["elapsed_seconds"] or 0),
+        "prediction_accuracy": _json_cell(row["prediction_accuracy_json"], {}),
+        "telemetry": _json_cell(row["telemetry_json"], {}),
+        "updated_at": str(row["updated_at"] or ""),
+        "payload": _json_cell(row["payload_json"], {}),
+    }
+
+
+def upsert_worker_patch_lineage_conn(
+    conn: sqlite3.Connection,
+    *,
+    patch_id: str,
+    worker_id: str = "",
+    execution_group_id: str = "",
+    task_id: str = "",
+    source_dag_node_id: str = "",
+    status: str = "",
+    predicted_files: list[str] | None = None,
+    predicted_symbols: list[dict[str, Any]] | None = None,
+    actual_files: list[str] | None = None,
+    actual_symbols: list[dict[str, Any]] | None = None,
+    validations: list[dict[str, Any]] | None = None,
+    conflicts: list[dict[str, Any]] | None = None,
+    repair_node_ids: list[str] | None = None,
+    integration_result: str = "",
+    started_at: str = "",
+    finished_at: str = "",
+    elapsed_seconds: float | None = None,
+    telemetry: Mapping[str, Any] | None = None,
+    payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    patch_id = str(patch_id or "")
+    if not patch_id:
+        return {}
+    existing_row = conn.execute("SELECT * FROM worker_patch_lineage WHERE patch_id = ?", (patch_id,)).fetchone()
+    existing = _worker_patch_lineage_row_to_dict(existing_row)
+    predicted_files = _lineage_unique_paths(predicted_files if predicted_files is not None else existing.get("predicted_files", []))
+    predicted_symbols = _lineage_dedupe_symbols(predicted_symbols if predicted_symbols is not None else existing.get("predicted_symbols", []))
+    actual_files = _lineage_unique_paths(actual_files if actual_files is not None else existing.get("actual_files", []))
+    actual_symbols = _lineage_dedupe_symbols(actual_symbols if actual_symbols is not None else existing.get("actual_symbols", []))
+    validations = list(validations if validations is not None else existing.get("validations", []))
+    conflicts = list(conflicts if conflicts is not None else existing.get("conflicts", []))
+    repair_node_ids = sorted({str(item) for item in (repair_node_ids if repair_node_ids is not None else existing.get("repair_node_ids", [])) if str(item)})
+    started = str(started_at or existing.get("started_at") or "")
+    finished = str(finished_at or existing.get("finished_at") or "")
+    elapsed = float(elapsed_seconds if elapsed_seconds is not None else existing.get("elapsed_seconds") or 0)
+    if elapsed <= 0:
+        elapsed = _lineage_elapsed_seconds(started, finished)
+    merged_telemetry = dict(existing.get("telemetry") if isinstance(existing.get("telemetry"), Mapping) else {})
+    if isinstance(telemetry, Mapping):
+        merged_telemetry.update(dict(telemetry))
+    merged_payload = dict(existing.get("payload") if isinstance(existing.get("payload"), Mapping) else {})
+    if isinstance(payload, Mapping):
+        merged_payload.update(dict(payload))
+    accuracy = _lineage_prediction_accuracy(predicted_files, actual_files, predicted_symbols, actual_symbols)
+    now = utc_now()
+    lineage_id = str(existing.get("lineage_id") or f"worker-patch-lineage:{sha256_text(patch_id)[:24]}")
+    conn.execute(
+        """
+        INSERT INTO worker_patch_lineage(
+            lineage_id, patch_id, worker_id, execution_group_id, task_id, source_dag_node_id,
+            status, predicted_files_json, predicted_symbols_json, actual_files_json,
+            actual_symbols_json, validations_json, conflicts_json, repair_node_ids_json,
+            integration_result, started_at, finished_at, elapsed_seconds,
+            prediction_accuracy_json, telemetry_json, updated_at, payload_json
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(patch_id) DO UPDATE SET
+            worker_id=excluded.worker_id,
+            execution_group_id=excluded.execution_group_id,
+            task_id=excluded.task_id,
+            source_dag_node_id=excluded.source_dag_node_id,
+            status=excluded.status,
+            predicted_files_json=excluded.predicted_files_json,
+            predicted_symbols_json=excluded.predicted_symbols_json,
+            actual_files_json=excluded.actual_files_json,
+            actual_symbols_json=excluded.actual_symbols_json,
+            validations_json=excluded.validations_json,
+            conflicts_json=excluded.conflicts_json,
+            repair_node_ids_json=excluded.repair_node_ids_json,
+            integration_result=excluded.integration_result,
+            started_at=excluded.started_at,
+            finished_at=excluded.finished_at,
+            elapsed_seconds=excluded.elapsed_seconds,
+            prediction_accuracy_json=excluded.prediction_accuracy_json,
+            telemetry_json=excluded.telemetry_json,
+            updated_at=excluded.updated_at,
+            payload_json=excluded.payload_json
+        """,
+        (
+            lineage_id,
+            patch_id,
+            worker_id or str(existing.get("worker_id") or ""),
+            execution_group_id or str(existing.get("execution_group_id") or ""),
+            task_id or str(existing.get("task_id") or ""),
+            source_dag_node_id or str(existing.get("source_dag_node_id") or ""),
+            status or str(existing.get("status") or "observed"),
+            stable_json(predicted_files),
+            stable_json(predicted_symbols),
+            stable_json(actual_files),
+            stable_json(actual_symbols),
+            stable_json(validations),
+            stable_json(conflicts),
+            stable_json(repair_node_ids),
+            integration_result or str(existing.get("integration_result") or ""),
+            started,
+            finished,
+            elapsed,
+            stable_json(accuracy),
+            stable_json(merged_telemetry),
+            now,
+            stable_json(merged_payload),
+        ),
+    )
+    row = conn.execute("SELECT * FROM worker_patch_lineage WHERE patch_id = ?", (patch_id,)).fetchone()
+    return _worker_patch_lineage_row_to_dict(row)
+
+
+def _lineage_merged_validations(existing: list[Any], jobs: list[Any]) -> list[dict[str, Any]]:
+    by_key: dict[str, dict[str, Any]] = {}
+    for item in [*existing, *jobs]:
+        if not isinstance(item, Mapping):
+            continue
+        job_id = str(item.get("job_id") or "")
+        key = job_id or sha256_text(stable_json(item))[:16]
+        by_key[key] = {
+            "job_id": job_id,
+            "execution_group_id": str(item.get("execution_group_id") or ""),
+            "plan_id": str(item.get("plan_id") or ""),
+            "gate_id": str(item.get("gate_id") or ""),
+            "command": str(item.get("command") or ""),
+            "status": str(item.get("status") or ""),
+            "receipt_ref": f"receipt:{job_id}" if job_id else str(item.get("receipt_ref") or ""),
+            "classification": str((item.get("payload") if isinstance(item.get("payload"), Mapping) else {}).get("classification") or ""),
+        }
+    return [by_key[key] for key in sorted(by_key)][:24]
+
+
+def worker_patch_lineage_conn(conn: sqlite3.Connection, *, patch_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if patch_id:
+        clauses.append("patch_id = ?")
+        params.append(str(patch_id))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM worker_patch_lineage
+        {where}
+        ORDER BY updated_at DESC, patch_id
+        LIMIT ?
+        """,
+        (*params, max(1, int(limit or 50))),
+    ).fetchall()
+    return [_worker_patch_lineage_row_to_dict(row) for row in rows]
+
+
+def patch_lineage_summary_conn(conn: sqlite3.Connection, *, limit: int = 50) -> dict[str, Any]:
+    lineages = worker_patch_lineage_conn(conn, limit=limit)
+    total = len(lineages)
+    conflict_count = sum(1 for item in lineages if item.get("conflicts"))
+    failed_validation_count = sum(
+        1
+        for item in lineages
+        if any(str(validation.get("status") or "") == "failed" for validation in item.get("validations") or [] if isinstance(validation, Mapping))
+    )
+    retry_count = sum(1 for item in lineages if item.get("repair_node_ids"))
+    integrated_count = sum(1 for item in lineages if str(item.get("integration_result") or "") == "integrated")
+    elapsed_total = round(sum(float(item.get("elapsed_seconds") or 0) for item in lineages), 3)
+    group_elapsed: dict[str, list[float]] = {}
+    for item in lineages:
+        group_id = str(item.get("execution_group_id") or "")
+        if group_id:
+            group_elapsed.setdefault(group_id, []).append(float(item.get("elapsed_seconds") or 0))
+    wall_clock_savings = 0.0
+    for values in group_elapsed.values():
+        if len(values) > 1:
+            wall_clock_savings += max(0.0, sum(values) - max(values))
+    file_f1_values = [
+        float(((item.get("prediction_accuracy") if isinstance(item.get("prediction_accuracy"), Mapping) else {}).get("files") or {}).get("f1") or 0)
+        for item in lineages
+    ]
+    symbol_f1_values = [
+        float(((item.get("prediction_accuracy") if isinstance(item.get("prediction_accuracy"), Mapping) else {}).get("symbols") or {}).get("f1") or 0)
+        for item in lineages
+    ]
+    overall_f1_values = [
+        float((item.get("prediction_accuracy") if isinstance(item.get("prediction_accuracy"), Mapping) else {}).get("overall_f1") or 0)
+        for item in lineages
+    ]
+
+    def rate(count: int) -> float:
+        return round(count / total, 4) if total else 0.0
+
+    def average(values: list[float]) -> float:
+        return round(sum(values) / len(values), 4) if values else 0.0
+
+    return {
+        "schema_version": 1,
+        "lineage_count": total,
+        "prediction_accuracy": {
+            "average_file_f1": average(file_f1_values),
+            "average_symbol_f1": average(symbol_f1_values),
+            "average_overall_f1": average(overall_f1_values),
+        },
+        "telemetry": {
+            "conflict_rate": rate(conflict_count),
+            "validation_failure_rate": rate(failed_validation_count),
+            "retry_rate": rate(retry_count),
+            "integration_success_rate": rate(integrated_count),
+            "integrated_patch_count": integrated_count,
+            "wall_clock_savings_seconds": round(wall_clock_savings, 3),
+            "elapsed_seconds_total": elapsed_total,
+        },
+        "latest": lineages[: min(limit, 20)],
+    }
+
+
+def _git_changed_paths_since_base(target: Path, base_commit: str) -> tuple[list[str], str]:
+    base_commit = str(base_commit or "").strip()
+    if not base_commit:
+        return [], ""
+    result = subprocess.run(
+        ["git", "diff", "--name-only", f"{base_commit}..HEAD"],
+        cwd=target,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return [], result.stderr.strip() or result.stdout.strip() or "git diff failed"
+    return [normalize_path_for_brief(line) for line in result.stdout.splitlines() if normalize_path_for_brief(line)], ""
+
+
+def _preflight_path_overlap(first: list[str], second: list[str]) -> bool:
+    for left in first:
+        left_path = normalize_path_for_brief(str(left)).rstrip("/")
+        if not left_path:
+            continue
+        for right in second:
+            right_path = normalize_path_for_brief(str(right)).rstrip("/")
+            if not right_path:
+                continue
+            if left_path == right_path or left_path.startswith(right_path + "/") or right_path.startswith(left_path + "/"):
+                return True
+    return False
+
+
+def _worker_patch_integration_nodes_conn(conn: sqlite3.Connection, patch_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
+    if not patch_ids:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM execution_dag_nodes
+        WHERE action_type IN ('integrate', 'integration')
+        ORDER BY created_at ASC, node_id ASC
+        """
+    ).fetchall()
+    by_patch: dict[str, list[dict[str, Any]]] = {patch_id: [] for patch_id in patch_ids}
+    for row in rows:
+        node = execution_dag_node_row_to_dict(row)
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+        patch = node.get("patch") if isinstance(node.get("patch"), Mapping) else {}
+        patch_id = str(patch.get("id") or metadata.get("patch_id") or "")
+        if patch_id in by_patch:
+            by_patch[patch_id].append(node)
+    return by_patch
+
+
+def _worker_patch_dependency_node_ids_conn(conn: sqlite3.Connection, integration_node_ids: list[str]) -> list[str]:
+    if not integration_node_ids:
+        return []
+    placeholders = ",".join("?" for _ in integration_node_ids)
+    rows = conn.execute(
+        f"""
+        SELECT source_node_id
+        FROM execution_dag_edges
+        WHERE target_node_id IN ({placeholders})
+        ORDER BY source_node_id
+        """,
+        tuple(integration_node_ids),
+    ).fetchall()
+    return sorted({str(row["source_node_id"] or "") for row in rows if str(row["source_node_id"] or "")})
+
+
+def _worker_patch_lease_conflicts(record: Mapping[str, Any], prior_records: list[Mapping[str, Any]]) -> list[dict[str, str]]:
+    conflicts: list[dict[str, str]] = []
+    leases = [lease for lease in record.get("leases", []) if isinstance(lease, Mapping)]
+    if not leases:
+        return conflicts
+    for prior in prior_records:
+        prior_leases = [lease for lease in prior.get("leases", []) if isinstance(lease, Mapping)]
+        if not prior_leases:
+            continue
+        for lease in leases:
+            for prior_lease in prior_leases:
+                overlaps, reason = _lease_scopes_overlap(lease, prior_lease)
+                if overlaps:
+                    conflicts.append(
+                        {
+                            "patch_id": str(prior.get("patch_id") or ""),
+                            "reason": reason or "lease scopes overlap",
+                        }
+                    )
+                    break
+            if conflicts and conflicts[-1].get("patch_id") == str(prior.get("patch_id") or ""):
+                break
+    return conflicts
+
+
+def _worker_patch_preflight_payload(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "worker_id": str(record.get("worker_id") or ""),
+        "execution_group_id": str(record.get("execution_group_id") or ""),
+        "manifest_path": str(record.get("manifest_path") or ""),
+        "patch_path": str(record.get("patch_path") or ""),
+        "queued_at": str(record.get("queued_at") or ""),
+        "created_at": str(record.get("created_at") or ""),
+        "safe_to_integrate": bool(record.get("safe_to_integrate")),
+        "safe_to_order": bool(record.get("safe_to_order")),
+    }
+
+
+def _persist_worker_patch_integration_preflight_conn(
+    conn: sqlite3.Connection,
+    records: list[Mapping[str, Any]],
+    *,
+    generated_at: str,
+) -> None:
+    patch_ids = [str(record.get("patch_id") or "") for record in records if str(record.get("patch_id") or "")]
+    with conn:
+        if patch_ids:
+            placeholders = ",".join("?" for _ in patch_ids)
+            conn.execute(
+                f"DELETE FROM worker_patch_integration_preflight WHERE patch_id NOT IN ({placeholders})",
+                tuple(patch_ids),
+            )
+        else:
+            conn.execute("DELETE FROM worker_patch_integration_preflight")
+        for record in records:
+            patch_id = str(record.get("patch_id") or "")
+            if not patch_id:
+                continue
+            conn.execute(
+                """
+                INSERT INTO worker_patch_integration_preflight(
+                    preflight_id, patch_id, status, reason_kind, safe_order,
+                    ready_to_integrate, can_proceed_after_validation,
+                    missing_metadata, stale_base, changed_files_json, leases_json,
+                    conflict_patch_ids_json, dependency_node_ids_json, reasons_json,
+                    base_commit, head_commit, predicted_at, payload_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(patch_id) DO UPDATE SET
+                    status=excluded.status,
+                    reason_kind=excluded.reason_kind,
+                    safe_order=excluded.safe_order,
+                    ready_to_integrate=excluded.ready_to_integrate,
+                    can_proceed_after_validation=excluded.can_proceed_after_validation,
+                    missing_metadata=excluded.missing_metadata,
+                    stale_base=excluded.stale_base,
+                    changed_files_json=excluded.changed_files_json,
+                    leases_json=excluded.leases_json,
+                    conflict_patch_ids_json=excluded.conflict_patch_ids_json,
+                    dependency_node_ids_json=excluded.dependency_node_ids_json,
+                    reasons_json=excluded.reasons_json,
+                    base_commit=excluded.base_commit,
+                    head_commit=excluded.head_commit,
+                    predicted_at=excluded.predicted_at,
+                    payload_json=excluded.payload_json
+                """,
+                (
+                    str(record.get("preflight_id") or f"worker-patch-preflight:{sha256_text(patch_id)[:24]}"),
+                    patch_id,
+                    str(record.get("status") or "unknown"),
+                    str(record.get("reason_kind") or ""),
+                    int(record.get("safe_order") or 0),
+                    1 if bool(record.get("ready_to_integrate")) else 0,
+                    1 if bool(record.get("can_proceed_after_validation")) else 0,
+                    1 if bool(record.get("missing_metadata")) else 0,
+                    1 if bool(record.get("stale_base")) else 0,
+                    stable_json(record.get("changed_files") if isinstance(record.get("changed_files"), list) else []),
+                    stable_json(record.get("leases") if isinstance(record.get("leases"), list) else []),
+                    stable_json(record.get("conflict_patch_ids") if isinstance(record.get("conflict_patch_ids"), list) else []),
+                    stable_json(record.get("dependency_node_ids") if isinstance(record.get("dependency_node_ids"), list) else []),
+                    stable_json(record.get("reasons") if isinstance(record.get("reasons"), list) else []),
+                    str(record.get("base_commit") or ""),
+                    str(record.get("head_commit") or ""),
+                    generated_at,
+                    stable_json(_worker_patch_preflight_payload(record)),
+                ),
+            )
+
+
+def worker_patch_integration_preflight_conn(
+    conn: sqlite3.Connection,
+    target: Path | None = None,
+    *,
+    limit: int = 20,
+    persist: bool = True,
+) -> dict[str, Any]:
+    generated_at = utc_now()
+    queued = worker_patches_conn(conn, statuses={"queued"}, limit=limit)
+    queued = sorted(
+        queued,
+        key=lambda item: (
+            str(item.get("queued_at") or item.get("created_at") or ""),
+            str(item.get("patch_id") or ""),
+        ),
+    )
+    patch_ids = {str(patch.get("patch_id") or "") for patch in queued if str(patch.get("patch_id") or "")}
+    ready_patch_ids = ready_integration_patch_ids_conn(conn)
+    integration_nodes_by_patch = _worker_patch_integration_nodes_conn(conn, patch_ids)
+    head_commit = _git_head_or_empty(target) if target is not None else ""
+    changed_since_base_cache: dict[str, tuple[list[str], str]] = {}
+    records: list[dict[str, Any]] = []
+    orderable_records: list[dict[str, Any]] = []
+    safe_order = 0
+
+    def add_reason(record: dict[str, Any], kind: str, reason: str, *, severity: str = "block") -> None:
+        record["reasons"].append({"kind": kind, "severity": severity, "reason": _brief_text(reason, limit=220)})
+
+    for patch in queued:
+        patch_id = str(patch.get("patch_id") or "")
+        if not patch_id:
+            continue
+        changed_files = sorted(
+            {
+                normalize_path_for_brief(str(path))
+                for path in (patch.get("changed_files") if isinstance(patch.get("changed_files"), list) else [])
+                if normalize_path_for_brief(str(path))
+            }
+        )
+        leases = [dict(lease) for lease in (patch.get("leases") if isinstance(patch.get("leases"), list) else []) if isinstance(lease, Mapping)]
+        payload = patch.get("payload") if isinstance(patch.get("payload"), Mapping) else {}
+        runtime_state_action_count = int(payload.get("runtime_state_action_count") or 0) if str(payload.get("runtime_state_action_count") or "").isdigit() else 0
+        metadata_only_patch = runtime_state_action_count > 0 and not changed_files
+        integration_nodes = integration_nodes_by_patch.get(patch_id, [])
+        integration_node_ids = [str(node.get("node_id") or "") for node in integration_nodes if str(node.get("node_id") or "")]
+        dependency_node_ids = _worker_patch_dependency_node_ids_conn(conn, integration_node_ids)
+        record: dict[str, Any] = {
+            "preflight_id": f"worker-patch-preflight:{sha256_text(patch_id)[:24]}",
+            "patch_id": patch_id,
+            "worker_id": str(patch.get("worker_id") or ""),
+            "execution_group_id": str(patch.get("execution_group_id") or ""),
+            "manifest_path": str(patch.get("manifest_path") or ""),
+            "patch_path": str(patch.get("patch_path") or ""),
+            "changed_files": changed_files,
+            "leases": leases,
+            "base_commit": str(patch.get("base_commit") or ""),
+            "head_commit": head_commit,
+            "queued_at": str(patch.get("queued_at") or ""),
+            "created_at": str(patch.get("created_at") or ""),
+            "ready_to_integrate": patch_id in ready_patch_ids,
+            "dependency_node_ids": dependency_node_ids,
+            "integration_node_ids": integration_node_ids,
+            "conflict_patch_ids": [],
+            "reasons": [],
+            "missing_metadata": False,
+            "stale_base": False,
+            "safe_order": 0,
+            "safe_to_order": False,
+            "safe_to_integrate": False,
+            "can_proceed_after_validation": False,
+            "status": "unknown",
+            "reason_kind": "",
+        }
+        if not changed_files and not metadata_only_patch:
+            record["missing_metadata"] = True
+            add_reason(record, "missing_changed_files", "Patch has no normalized changed-file metadata.")
+        if not str(patch.get("patch_path") or "").strip() and not metadata_only_patch:
+            record["missing_metadata"] = True
+            add_reason(record, "missing_patch_path", "Patch has no patch artifact path metadata.")
+        if not integration_nodes:
+            add_reason(record, "missing_integration_dag_node", "Patch has not been reconciled into an integration DAG node.", severity="warn")
+        elif patch_id not in ready_patch_ids:
+            add_reason(record, "dag_dependencies_pending", "Patch integration DAG node is waiting on review, validation, or upstream dependencies.", severity="info")
+        base_commit = str(patch.get("base_commit") or "").strip()
+        if target is not None and base_commit and head_commit and base_commit != head_commit and changed_files:
+            if base_commit not in changed_since_base_cache:
+                changed_since_base_cache[base_commit] = _git_changed_paths_since_base(target, base_commit)
+            changed_since_base, git_error = changed_since_base_cache[base_commit]
+            if git_error:
+                record["stale_base"] = True
+                add_reason(record, "base_commit_unavailable", f"Could not compare patch base against current HEAD: {git_error}")
+            elif _preflight_path_overlap(changed_files, changed_since_base):
+                record["stale_base"] = True
+                add_reason(record, "stale_base_changed_files", "Patch base is behind current HEAD and touched files changed since that base.")
+            else:
+                add_reason(record, "base_advanced_without_touch_overlap", "Patch base is behind current HEAD but touched files do not overlap changes since base.", severity="info")
+
+        if record["missing_metadata"]:
+            record["status"] = "missing_metadata"
+        elif record["stale_base"]:
+            record["status"] = "stale_base"
+        elif not integration_nodes:
+            record["status"] = "waiting_dag_handoff"
+        elif not record["ready_to_integrate"]:
+            record["status"] = "waiting_validation"
+            record["can_proceed_after_validation"] = True
+        else:
+            record["status"] = "safe"
+            record["can_proceed_after_validation"] = True
+
+        if record["status"] in {"safe", "waiting_validation"}:
+            path_conflict_ids = [
+                str(prior.get("patch_id") or "")
+                for prior in orderable_records
+                if _preflight_path_overlap(changed_files, prior.get("changed_files") if isinstance(prior.get("changed_files"), list) else [])
+            ]
+            lease_conflicts = _worker_patch_lease_conflicts(record, orderable_records)
+            lease_conflict_ids = [str(item.get("patch_id") or "") for item in lease_conflicts if str(item.get("patch_id") or "")]
+            conflict_patch_ids = sorted({*path_conflict_ids, *lease_conflict_ids} - {""})
+            if conflict_patch_ids:
+                record["status"] = "likely_conflict"
+                record["reason_kind"] = "overlapping_worker_patch_surface"
+                record["conflict_patch_ids"] = conflict_patch_ids
+                record["can_proceed_after_validation"] = False
+                add_reason(
+                    record,
+                    "overlapping_worker_patch_surface",
+                    f"Patch overlaps queued patch(es): {', '.join(conflict_patch_ids[:4])}.",
+                )
+            else:
+                safe_order += 1
+                record["safe_order"] = safe_order
+                record["safe_to_order"] = True
+                record["safe_to_integrate"] = record["status"] == "safe"
+                orderable_records.append(record)
+        if not record["reason_kind"]:
+            blocking_reason = next(
+                (reason for reason in record["reasons"] if isinstance(reason, Mapping) and str(reason.get("severity") or "") == "block"),
+                {},
+            )
+            first_reason = blocking_reason or (record["reasons"][0] if record["reasons"] else {})
+            record["reason_kind"] = str(first_reason.get("kind") or record["status"] or "")
+        records.append(record)
+
+    if persist:
+        _persist_worker_patch_integration_preflight_conn(conn, records, generated_at=generated_at)
+
+    safe_order_records = [
+        {
+            "patch_id": record.get("patch_id"),
+            "safe_order": record.get("safe_order"),
+            "status": record.get("status"),
+            "ready_to_integrate": record.get("ready_to_integrate"),
+            "can_proceed_after_validation": record.get("can_proceed_after_validation"),
+            "changed_files": record.get("changed_files"),
+            "reason_kind": record.get("reason_kind"),
+        }
+        for record in records
+        if bool(record.get("safe_to_order"))
+    ]
+    likely_conflicts = [record for record in records if str(record.get("status") or "") == "likely_conflict"]
+    safe_patch_ids = [str(record.get("patch_id") or "") for record in records if bool(record.get("safe_to_integrate"))]
+    proceed_after_validation_patch_ids = [
+        str(record.get("patch_id") or "")
+        for record in records
+        if bool(record.get("can_proceed_after_validation"))
+    ]
+    return {
+        "schema_version": 1,
+        "authority": "sqlite_runtime_read_model",
+        "generated_at": generated_at,
+        "head_commit": head_commit,
+        "queued_patch_count": len(records),
+        "ready_patch_count": len([record for record in records if bool(record.get("ready_to_integrate"))]),
+        "safe_count": len(safe_patch_ids),
+        "likely_conflict_count": len(likely_conflicts),
+        "missing_metadata_count": len([record for record in records if bool(record.get("missing_metadata"))]),
+        "stale_base_count": len([record for record in records if bool(record.get("stale_base"))]),
+        "dependency_pending_count": len([record for record in records if str(record.get("status") or "") in {"waiting_validation", "waiting_dag_handoff"}]),
+        "safe_patch_ids": safe_patch_ids,
+        "ready_patch_ids": sorted(ready_patch_ids.intersection(patch_ids)),
+        "proceed_after_validation_patch_ids": proceed_after_validation_patch_ids,
+        "blocked_patch_ids": [
+            str(record.get("patch_id") or "")
+            for record in records
+            if str(record.get("status") or "") in {"missing_metadata", "stale_base", "likely_conflict"}
+        ],
+        "safe_order": safe_order_records,
+        "likely_conflicts": [
+            {
+                "patch_id": record.get("patch_id"),
+                "conflict_patch_ids": record.get("conflict_patch_ids"),
+                "reason_kind": record.get("reason_kind"),
+                "changed_files": record.get("changed_files"),
+            }
+            for record in likely_conflicts
+        ],
+        "records": records,
+    }
+
+
+def worker_patch_read_model_conn(conn: sqlite3.Connection, target: Path | None = None, *, limit: int = 20) -> dict[str, Any]:
     active_write_workers = worker_agents_conn(conn, mode="write", statuses={"queued", "running"}, limit=limit)
     queued = worker_patches_conn(conn, statuses={"queued"}, limit=limit)
     conflicts = worker_patches_conn(conn, statuses={"conflict"}, limit=limit)
@@ -8007,6 +16701,7 @@ def worker_patch_read_model_conn(conn: sqlite3.Connection, *, limit: int = 20) -
         for patch in queued[:limit]
     ]
     lease_conflicts = current_conflicting_resource_leases_conn(conn)
+    integration_preflight = worker_patch_integration_preflight_conn(conn, target=target, limit=limit)
     return {
         "active_write_workers": active_write_workers,
         "queued_worker_patches": queued,
@@ -8017,7 +16712,1113 @@ def worker_patch_read_model_conn(conn: sqlite3.Connection, *, limit: int = 20) -
             "conflicts": lease_conflicts[:6],
         },
         "integration_backlog_from_parallel_workers": backlog,
+        "worker_patch_integration_preflight": integration_preflight,
     }
+
+
+def _dag_node_exists_conn(conn: sqlite3.Connection, node_id: str) -> bool:
+    if not node_id:
+        return False
+    return conn.execute("SELECT 1 FROM execution_dag_nodes WHERE node_id = ?", (node_id,)).fetchone() is not None
+
+
+def _dag_patch_paths_overlap(first: list[str], second: list[str]) -> bool:
+    for left in first:
+        left_path = normalize_path_for_brief(left).rstrip("/")
+        if not left_path:
+            continue
+        for right in second:
+            right_path = normalize_path_for_brief(right).rstrip("/")
+            if not right_path:
+                continue
+            if left_path == right_path or left_path.startswith(right_path + "/") or right_path.startswith(left_path + "/"):
+                return True
+    return False
+
+
+def _worker_patch_review_groups(patches: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    groups: list[list[dict[str, Any]]] = []
+    for patch in sorted(patches, key=lambda item: (str(item.get("execution_group_id") or ""), str(item.get("patch_id") or ""))):
+        paths = [normalize_path_for_brief(str(path)) for path in patch.get("changed_files") or [] if str(path or "")]
+        placed = False
+        for group in groups:
+            if str(group[0].get("execution_group_id") or "") != str(patch.get("execution_group_id") or ""):
+                continue
+            existing_paths = [
+                normalize_path_for_brief(str(path))
+                for item in group
+                for path in (item.get("changed_files") or [])
+                if str(path or "")
+            ]
+            if _dag_patch_paths_overlap(existing_paths, paths):
+                continue
+            group.append(patch)
+            placed = True
+            break
+        if not placed:
+            groups.append([patch])
+    return groups
+
+
+def _common_task_id_or_group(prefix: str, task_ids: list[str], digest_source: Mapping[str, Any]) -> str:
+    unique = sorted({task_id for task_id in task_ids if task_id})
+    if len(unique) == 1:
+        return unique[0]
+    return f"{prefix}:{sha256_text(stable_json(digest_source))[:16]}"
+
+
+def _upsert_worker_review_validation_handoff_conn(
+    conn: sqlite3.Connection,
+    patches: list[dict[str, Any]],
+    *,
+    selected_by: str,
+    target: Path | None = None,
+) -> dict[str, Any]:
+    patch_ids = sorted(str(patch.get("patch_id") or "") for patch in patches if str(patch.get("patch_id") or ""))
+    if not patch_ids:
+        return {"review_node": {}, "validation_node": {}, "integration_nodes": [], "edges": []}
+    source_node_ids = sorted({str(patch.get("source_dag_node_id") or "") for patch in patches if str(patch.get("source_dag_node_id") or "")})
+    worker_ids = sorted({str(patch.get("worker_id") or "") for patch in patches if str(patch.get("worker_id") or "")})
+    execution_group_ids = sorted({str(patch.get("execution_group_id") or "") for patch in patches if str(patch.get("execution_group_id") or "")})
+    task_ids = [str(patch.get("task_id") or "") for patch in patches if str(patch.get("task_id") or "")]
+    changed_files = sorted(
+        {
+            normalize_path_for_brief(str(path))
+            for patch in patches
+            for path in (patch.get("changed_files") or [])
+            if str(path or "")
+        }
+    )
+    group_digest_source = {
+        "patch_ids": patch_ids,
+        "source_dag_node_ids": source_node_ids,
+        "execution_group_ids": execution_group_ids,
+        "changed_files": changed_files,
+    }
+    task_id = _common_task_id_or_group("review", task_ids, group_digest_source)
+    review_node_id = f"dag-node:worker-review:{sha256_text(stable_json(group_digest_source))[:24]}"
+    validation_node_id = f"dag-node:worker-validation:{sha256_text(review_node_id)[:24]}"
+    review_node = upsert_execution_dag_node(
+        conn,
+        node_id=review_node_id,
+        task_id=task_id,
+        action_type="review",
+        status="ready",
+        owner_role="hardener",
+        confidence=0.9,
+        metadata={
+            "source": "worker_patches",
+            "scheduler_action": "reconcile_worker_results",
+            "selected_by": selected_by,
+            "summary": f"Review {len(patch_ids)} worker patch(es)",
+            "execution_mode": "read_only",
+            "patch_ids": patch_ids,
+            "worker_ids": worker_ids,
+            "execution_group_ids": execution_group_ids,
+            "covered_task_ids": sorted(set(task_ids)),
+            "covered_builder_node_ids": source_node_ids,
+            "paths": changed_files,
+        },
+    )
+    validation_metadata: dict[str, Any] = {
+        "source": "worker_patches",
+        "scheduler_action": "reconcile_worker_results",
+        "selected_by": selected_by,
+        "summary": f"Validate {len(patch_ids)} reviewed worker patch(es)",
+        "execution_mode": "validation",
+        "patch_ids": patch_ids,
+        "worker_ids": worker_ids,
+        "execution_group_ids": execution_group_ids,
+        "covered_task_ids": sorted(set(task_ids)),
+        "covered_builder_node_ids": source_node_ids,
+        "review_node_id": review_node_id,
+        "paths": changed_files,
+        "retry_limit": int(default_stage_contracts()["validation"]["retry_policy"]["max_attempts"]),
+    }
+    if target is not None:
+        validation_plan = build_symbol_aware_validation_plan_conn(
+            conn,
+            target,
+            dag_node={
+                "node_id": validation_node_id,
+                "task_id": task_id,
+                "action_type": "validate",
+                "status": "ready",
+                "owner_role": "hardener",
+                "confidence": 0.88,
+                "metadata": validation_metadata,
+            },
+        )
+        validation_metadata["validation_plan"] = validation_plan
+        validation_metadata["validation_commands"] = list(validation_plan.get("commands") or [])
+        validation_metadata["validation_selection_reasons"] = list(validation_plan.get("selection_reasons") or [])
+    validation_node = upsert_execution_dag_node(
+        conn,
+        node_id=validation_node_id,
+        task_id=task_id,
+        action_type="validate",
+        status="ready",
+        owner_role="hardener",
+        confidence=0.88,
+        metadata=validation_metadata,
+    )
+    integration_nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    for source_node_id in source_node_ids:
+        if _dag_node_exists_conn(conn, source_node_id):
+            edges.append(
+                upsert_execution_dag_edge(
+                    conn,
+                    source_node_id=source_node_id,
+                    target_node_id=review_node_id,
+                    dependency_kind="reviews",
+                    reason="completed builder work produced review context",
+                    dependency_mode="advisory",
+                    confidence=0.94,
+                )
+            )
+    edges.append(
+        upsert_execution_dag_edge(
+            conn,
+            source_node_id=review_node_id,
+            target_node_id=validation_node_id,
+            dependency_kind="validates",
+            reason="validation runs after review accepts the worker output",
+            confidence=0.94,
+        )
+    )
+    for patch in patches:
+        patch_id = str(patch.get("patch_id") or "")
+        source_node_id = str(patch.get("source_dag_node_id") or "")
+        integration_node = upsert_execution_dag_node(
+            conn,
+            node_id=f"dag-node:worker-integration:{sha256_text(patch_id)[:24]}",
+            task_id=str(patch.get("task_id") or task_id or patch_id),
+            action_type="integrate",
+            status="ready",
+            owner_role="integrator",
+            patch_id=patch_id,
+            patch_path=str(patch.get("patch_path") or ""),
+            confidence=0.92,
+            metadata={
+                "source": "worker_patches",
+                "scheduler_action": "reconcile_worker_results",
+                "selected_by": selected_by,
+                "patch_id": patch_id,
+                "worker_id": str(patch.get("worker_id") or ""),
+                "execution_group_id": str(patch.get("execution_group_id") or ""),
+                "review_node_id": review_node_id,
+                "validation_node_id": validation_node_id,
+                "summary": f"Integrate worker patch {patch_id}",
+                "changed_files": [str(item) for item in patch.get("changed_files") or [] if str(item or "")],
+                "manifest_path": str(patch.get("manifest_path") or ""),
+            },
+        )
+        integration_nodes.append(integration_node)
+        edges.append(
+            upsert_execution_dag_edge(
+                conn,
+                source_node_id=validation_node_id,
+                target_node_id=str(integration_node["node_id"]),
+                dependency_kind="validates",
+                reason="serialized integration waits for completed validation",
+                confidence=0.96,
+            )
+        )
+        if source_node_id and _dag_node_exists_conn(conn, source_node_id):
+            edges.append(
+                upsert_execution_dag_edge(
+                    conn,
+                    source_node_id=source_node_id,
+                    target_node_id=str(integration_node["node_id"]),
+                    dependency_kind="integrates",
+                    reason="worker patch is the integration artifact for this builder node",
+                    confidence=0.9,
+                    dependency_mode="advisory",
+                )
+            )
+    return {"review_node": review_node, "validation_node": validation_node, "integration_nodes": integration_nodes, "edges": edges}
+
+
+def reconcile_worker_results_into_execution_dag_conn(
+    conn: sqlite3.Connection,
+    *,
+    target: Path | None = None,
+    selected_by: str = "dag_scheduler",
+    limit: int = 50,
+) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT patch.*, worker.payload_json AS worker_payload_json, worker.role AS worker_role
+        FROM worker_patches patch
+        LEFT JOIN worker_agents worker ON worker.worker_id = patch.worker_id
+        WHERE patch.status IN ('queued', 'conflict', 'failed')
+        ORDER BY patch.queued_at DESC, patch.created_at DESC, patch.patch_id
+        LIMIT ?
+        """,
+        (max(1, int(limit or 50)),),
+    ).fetchall()
+    queued_patch_records: list[dict[str, Any]] = []
+    integration_nodes: list[dict[str, Any]] = []
+    review_nodes: list[dict[str, Any]] = []
+    validation_nodes: list[dict[str, Any]] = []
+    repair_nodes: list[dict[str, Any]] = []
+    created_edges: list[dict[str, Any]] = []
+    with conn:
+        for row in rows:
+            patch = _worker_patch_row_to_dict(row)
+            worker_payload = _json_cell(row["worker_payload_json"], {})
+            worker_payload = worker_payload if isinstance(worker_payload, dict) else {}
+            patch_id = str(patch.get("patch_id") or "")
+            if not patch_id:
+                continue
+            task_id = str(worker_payload.get("task_id") or patch.get("execution_group_id") or patch_id)
+            source_dag_node_id = str(worker_payload.get("dag_node_id") or worker_payload.get("graph_task_node_id") or "")
+            status = str(patch.get("status") or "")
+            changed_files = [str(item) for item in patch.get("changed_files") or [] if str(item or "")]
+            if status == "queued":
+                upsert_worker_patch_lineage_conn(
+                    conn,
+                    patch_id=patch_id,
+                    worker_id=str(patch.get("worker_id") or ""),
+                    execution_group_id=str(patch.get("execution_group_id") or ""),
+                    task_id=task_id,
+                    source_dag_node_id=source_dag_node_id,
+                    status="queued",
+                    predicted_files=_lineage_unique_paths(worker_payload.get("predicted_files") or []) or None,
+                    predicted_symbols=_lineage_dedupe_symbols(
+                        [dict(item) for item in worker_payload.get("predicted_symbols") or [] if isinstance(item, Mapping)]
+                    )
+                    or None,
+                    actual_files=changed_files,
+                    actual_symbols=_lineage_actual_symbols_for_files_conn(conn, changed_files),
+                    integration_result="pending",
+                    started_at=str(patch.get("created_at") or ""),
+                    telemetry={"reconciled": True, "patch_status": status},
+                )
+                queued_patch_records.append(
+                    {
+                        **patch,
+                        "task_id": task_id,
+                        "source_dag_node_id": source_dag_node_id,
+                        "changed_files": changed_files,
+                    }
+                )
+            else:
+                node = upsert_execution_dag_node(
+                    conn,
+                    node_id=f"dag-node:worker-repair:{sha256_text(patch_id + ':' + status)[:24]}",
+                    task_id=task_id,
+                    action_type="repair",
+                    status="ready",
+                    owner_role="builder",
+                    patch_id=patch_id,
+                    patch_path=str(patch.get("patch_path") or ""),
+                    blocker_reason=str(patch.get("conflict_signature") or status),
+                    confidence=0.84,
+                    metadata={
+                        "source": "worker_patches",
+                        "scheduler_action": "reconcile_worker_results",
+                        "selected_by": selected_by,
+                        "patch_id": patch_id,
+                        "worker_id": str(patch.get("worker_id") or ""),
+                        "execution_group_id": str(patch.get("execution_group_id") or ""),
+                        "summary": f"Repair worker patch {patch_id}: {status}",
+                        "changed_files": changed_files,
+                    },
+                )
+                repair_nodes.append(node)
+                existing_lineage = worker_patch_lineage_conn(conn, patch_id=patch_id, limit=1)
+                existing_repairs = existing_lineage[0].get("repair_node_ids", []) if existing_lineage else []
+                upsert_worker_patch_lineage_conn(
+                    conn,
+                    patch_id=patch_id,
+                    worker_id=str(patch.get("worker_id") or ""),
+                    execution_group_id=str(patch.get("execution_group_id") or ""),
+                    task_id=task_id,
+                    source_dag_node_id=source_dag_node_id,
+                    status=status,
+                    predicted_files=_lineage_unique_paths(worker_payload.get("predicted_files") or []) or None,
+                    predicted_symbols=_lineage_dedupe_symbols(
+                        [dict(item) for item in worker_payload.get("predicted_symbols") or [] if isinstance(item, Mapping)]
+                    )
+                    or None,
+                    actual_files=changed_files,
+                    actual_symbols=_lineage_actual_symbols_for_files_conn(conn, changed_files),
+                    conflicts=[
+                        {
+                            "conflict_signature": str(patch.get("conflict_signature") or ""),
+                            "detail": _brief_text(str(patch.get("payload", {}).get("failure_reason") if isinstance(patch.get("payload"), Mapping) else status), limit=220),
+                            "detected_at": str(patch.get("created_at") or ""),
+                            "source": "worker_patch_status",
+                        }
+                    ]
+                    if status == "conflict"
+                    else None,
+                    repair_node_ids=[*existing_repairs, str(node.get("node_id") or "")],
+                    integration_result="repair_required",
+                    telemetry={"reconciled": True, "patch_status": status, "repair_created": True},
+                )
+                if source_dag_node_id:
+                    edge = upsert_execution_dag_edge(
+                        conn,
+                        source_node_id=source_dag_node_id,
+                        target_node_id=str(node["node_id"]),
+                        dependency_kind="blocks",
+                        reason=f"worker patch {status} requires targeted repair",
+                        confidence=0.9,
+                    )
+                    created_edges.append(edge)
+        for patch_group in _worker_patch_review_groups(queued_patch_records):
+            handoff = _upsert_worker_review_validation_handoff_conn(conn, patch_group, selected_by=selected_by, target=target)
+            if handoff.get("review_node"):
+                review_nodes.append(dict(handoff["review_node"]))
+            if handoff.get("validation_node"):
+                validation_nodes.append(dict(handoff["validation_node"]))
+            integration_nodes.extend([dict(item) for item in handoff.get("integration_nodes") or [] if isinstance(item, Mapping)])
+            created_edges.extend([dict(item) for item in handoff.get("edges") or [] if isinstance(item, Mapping)])
+        if integration_nodes or repair_nodes:
+            append_event(
+                conn,
+                StateEvent(
+                    stream_id="stream:execution-dag:worker-reconciliation",
+                    event_type="execution_dag.worker_results_reconciled",
+                    actor_role=selected_by,
+                    phase="scheduler",
+                    status="ACTIVE",
+                    payload={
+                        "review_node_count": len(review_nodes),
+                        "validation_node_count": len(validation_nodes),
+                        "integration_node_count": len(integration_nodes),
+                        "repair_node_count": len(repair_nodes),
+                        "edge_count": len(created_edges),
+                    },
+                ),
+            )
+    return {
+        "status": "reconciled" if integration_nodes or review_nodes or validation_nodes or repair_nodes else "skipped",
+        "review_nodes": review_nodes,
+        "validation_nodes": validation_nodes,
+        "integration_nodes": integration_nodes,
+        "repair_nodes": repair_nodes,
+        "edges": created_edges,
+        "review_node_count": len(review_nodes),
+        "validation_node_count": len(validation_nodes),
+        "integration_node_count": len(integration_nodes),
+        "repair_node_count": len(repair_nodes),
+    }
+
+
+def ready_integration_patch_ids_conn(conn: sqlite3.Connection) -> set[str]:
+    model = execution_dag_read_model(conn)
+    ready = model.get("ready_nodes") if isinstance(model.get("ready_nodes"), list) else []
+    patch_ids: set[str] = set()
+    for node in ready:
+        if not isinstance(node, Mapping) or not _execution_dag_action_matches(node.get("action_type"), "integrate"):
+            continue
+        row = conn.execute("SELECT metadata_json, patch_id FROM execution_dag_nodes WHERE node_id = ?", (str(node.get("node_id") or ""),)).fetchone()
+        if row is None:
+            continue
+        metadata = _json_cell(row["metadata_json"], {})
+        patch_id = str(row["patch_id"] or (metadata.get("patch_id") if isinstance(metadata, Mapping) else "") or "")
+        if patch_id:
+            patch_ids.add(patch_id)
+    return patch_ids
+
+
+def mark_worker_patches_integrated_conn(
+    conn: sqlite3.Connection,
+    *,
+    selected_by: str = "dag_scheduler",
+    limit: int = 50,
+    patch_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    requested_patch_ids = {str(patch_id) for patch_id in (patch_ids or []) if str(patch_id)}
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM worker_patches
+        WHERE status = 'queued'
+        ORDER BY queued_at DESC, created_at DESC, patch_id
+        LIMIT ?
+        """,
+        (max(1, int(limit or 50)),),
+    ).fetchall()
+    now = utc_now()
+    ready_patch_ids = ready_integration_patch_ids_conn(conn)
+    integrated_patch_ids = [
+        str(row["patch_id"])
+        for row in rows
+        if str(row["patch_id"] or "") and str(row["patch_id"] or "") in ready_patch_ids
+        and (not requested_patch_ids or str(row["patch_id"] or "") in requested_patch_ids)
+    ]
+    if integrated_patch_ids:
+        with conn:
+            for row in rows:
+                patch_id = str(row["patch_id"] or "")
+                if not patch_id or patch_id not in integrated_patch_ids:
+                    continue
+                payload = _json_cell(row["payload_json"], {})
+                payload = payload if isinstance(payload, dict) else {}
+                payload["integrated_by"] = selected_by
+                conn.execute(
+                    """
+                    UPDATE worker_patches
+                    SET status = 'integrated',
+                        integrated_at = ?,
+                        payload_json = ?
+                    WHERE patch_id = ?
+                    """,
+                    (now, stable_json(payload), patch_id),
+                )
+                changed_files = _json_cell(row["changed_files_json"], [])
+                changed_files = changed_files if isinstance(changed_files, list) else []
+                upsert_worker_patch_lineage_conn(
+                    conn,
+                    patch_id=patch_id,
+                    worker_id=str(row["worker_id"] or ""),
+                    execution_group_id=str(row["execution_group_id"] or ""),
+                    status="integrated",
+                    actual_files=changed_files,
+                    actual_symbols=_lineage_actual_symbols_for_files_conn(conn, changed_files),
+                    integration_result="integrated",
+                    finished_at=now,
+                    telemetry={"integrated_by": selected_by, "integration_success": True},
+                )
+            for patch_id in integrated_patch_ids:
+                node_id = f"dag-node:worker-integration:{sha256_text(patch_id)[:24]}"
+                existing = conn.execute("SELECT * FROM execution_dag_nodes WHERE node_id = ?", (node_id,)).fetchone()
+                if existing is not None:
+                    node = execution_dag_node_row_to_dict(existing)
+                    metadata = dict(node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {})
+                    metadata["integrated_by"] = selected_by
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id=node_id,
+                        task_id=str(node.get("task_id") or patch_id),
+                        action_type="integrate",
+                        status="done",
+                        owner_role="integrator",
+                        patch_id=patch_id,
+                        patch_path=str((node.get("patch") if isinstance(node.get("patch"), Mapping) else {}).get("path") or ""),
+                        confidence=float(node.get("confidence") or 0.92),
+                        attempt_count=int(node.get("attempt_count") or 0) + 1,
+                        finished_at=now,
+                        metadata=metadata,
+                    )
+            append_event(
+                conn,
+                StateEvent(
+                    stream_id="stream:execution-dag:worker-integration",
+                    event_type="execution_dag.worker_patches_integrated",
+                    actor_role=selected_by,
+                    phase="integration",
+                    status="ACTIVE",
+                    payload={"patch_ids": integrated_patch_ids},
+                ),
+            )
+    return {
+        "status": "integrated" if integrated_patch_ids else "skipped",
+        "patch_ids": integrated_patch_ids,
+        "integrated_count": len(integrated_patch_ids),
+    }
+
+
+def _execution_group_dag_nodes_conn(
+    conn: sqlite3.Connection,
+    execution_group_id: str,
+    *,
+    action_type: str = "",
+) -> list[dict[str, Any]]:
+    if not execution_group_id:
+        return []
+    rows = conn.execute(
+        """
+        SELECT payload_json
+        FROM execution_group_items
+        WHERE execution_group_id = ?
+        """,
+        (execution_group_id,),
+    ).fetchall()
+    nodes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        payload = _json_cell(row["payload_json"], {})
+        if not isinstance(payload, Mapping):
+            continue
+        dag_node_id = str(payload.get("dag_node_id") or "")
+        if not dag_node_id or dag_node_id in seen:
+            continue
+        node_row = conn.execute("SELECT * FROM execution_dag_nodes WHERE node_id = ?", (dag_node_id,)).fetchone()
+        if node_row is None:
+            continue
+        node = execution_dag_node_row_to_dict(node_row)
+        if action_type and not _execution_dag_action_matches(node.get("action_type"), action_type):
+            continue
+        seen.add(dag_node_id)
+        nodes.append(node)
+    return nodes
+
+
+def _validation_retry_limit(node: Mapping[str, Any]) -> int:
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+    configured = _nonnegative_int(metadata.get("retry_limit"), 0, maximum=20)
+    if configured > 0:
+        return configured
+    policy = default_stage_contracts().get("validation", {}).get("retry_policy", {})
+    return max(1, _nonnegative_int(policy.get("max_attempts"), 3, maximum=20))
+
+
+def _validation_dag_nodes_for_job_conn(conn: sqlite3.Connection, job: Mapping[str, Any]) -> list[dict[str, Any]]:
+    nodes = _execution_group_dag_nodes_conn(conn, str(job.get("plan_id") or ""), action_type="validate")
+    if nodes:
+        return nodes
+    gate_id = str(job.get("gate_id") or "")
+    if not gate_id:
+        return []
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM execution_dag_nodes
+        WHERE action_type IN ('validate', 'validation') AND task_id = ?
+        ORDER BY updated_at DESC, node_id
+        LIMIT 20
+        """,
+        (gate_id,),
+    ).fetchall()
+    return [execution_dag_node_row_to_dict(row) for row in rows]
+
+
+def _failed_validation_repair_node_id(job_id: str, attempt_count: int) -> str:
+    return f"dag-node:validation-repair:{sha256_text(f'{job_id}:{max(1, attempt_count)}')[:24]}"
+
+
+def _failed_validation_blocker_node_id(job_id: str) -> str:
+    return f"dag-node:validation-blocker:{sha256_text(job_id)[:24]}"
+
+
+def _validation_job_environment_signature(job: Mapping[str, Any]) -> str:
+    payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
+    if not bool(payload.get("environment_failure")):
+        return ""
+    signature = str(payload.get("validation_failure_signature") or "").strip()
+    if signature:
+        return signature
+    command = str(job.get("command") or "")
+    category = str(payload.get("failure_category") or "environment")
+    reason = str(payload.get("failure_reason") or "verification_environment_failure")
+    root_cause = str(payload.get("failure_root_cause") or command or "validation environment failure")
+    return _validation_failure_signature(command, reason, category, root_cause)
+
+
+def _failed_validation_environment_blocker_node_id(signature: str) -> str:
+    return f"dag-node:validation-env-blocker:{sha256_text(signature)[:24]}"
+
+
+def record_validation_group_result_on_execution_dag_conn(
+    conn: sqlite3.Connection,
+    execution_group_id: str,
+    validation_result: Mapping[str, Any],
+    *,
+    selected_by: str = "dag_scheduler",
+) -> dict[str, Any]:
+    nodes = _execution_group_dag_nodes_conn(conn, execution_group_id, action_type="validate")
+    if not nodes and execution_group_id:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM execution_dag_nodes
+            WHERE node_id = ? AND action_type IN ('validate', 'validation')
+            """,
+            (execution_group_id,),
+        ).fetchone()
+        if row is not None:
+            nodes = [execution_dag_node_row_to_dict(row)]
+    aggregate_status = str(validation_result.get("status") or "")
+    jobs = validation_result.get("jobs") if isinstance(validation_result.get("jobs"), list) else []
+    failed_jobs = [
+        job
+        for job in jobs
+        if isinstance(job, Mapping)
+        and str(job.get("status") or "") == "failed"
+        and bool((job.get("payload") if isinstance(job.get("payload"), Mapping) else {}).get("required", True))
+    ]
+    failed_receipts = [f"receipt:{job.get('job_id')}" for job in failed_jobs if str(job.get("job_id") or "")]
+    failed_commands = [str(job.get("command") or "") for job in failed_jobs if str(job.get("command") or "")]
+    updated: list[dict[str, Any]] = []
+    now = utc_now()
+    with conn:
+        for node in nodes:
+            metadata = dict(node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {})
+            metadata["last_scheduler_action_by"] = selected_by
+            metadata["validation_status"] = aggregate_status
+            metadata["validation_job_ids"] = [str(job.get("job_id") or "") for job in jobs if isinstance(job, Mapping)]
+            metadata["failed_validation_job_ids"] = [str(job.get("job_id") or "") for job in failed_jobs]
+            retry_limit = _validation_retry_limit({**node, "metadata": metadata})
+            metadata["retry_limit"] = retry_limit
+            next_attempt_count = int(node.get("attempt_count") or 0) + 1
+            status = "done"
+            blocker_reason = str(node.get("blocker_reason") or "")
+            refs = list(node.get("validation_receipt_refs") or [])
+            if failed_jobs:
+                status = "blocked"
+                blocker_reason = "failed validation: " + "; ".join(failed_commands[:3])
+                refs = sorted(set([*refs, *failed_receipts]))
+            updated.append(
+                upsert_execution_dag_node(
+                    conn,
+                    node_id=str(node.get("node_id") or ""),
+                    task_id=str(node.get("task_id") or ""),
+                    action_type=str(node.get("action_type") or "validate"),
+                    status=status,
+                    owner_role=str(node.get("owner_role") or "hardener"),
+                    confidence=float(node.get("confidence") or 0.88),
+                    attempt_count=next_attempt_count,
+                    started_at=str(node.get("started_at") or ""),
+                    finished_at=now if status == "done" else str(node.get("finished_at") or ""),
+                    blocker_reason=blocker_reason,
+                    validation_receipt_refs=refs,
+                    metadata=metadata,
+                )
+            )
+            patch_ids = [str(item) for item in metadata.get("patch_ids") or [] if str(item)]
+            for patch_id in patch_ids:
+                existing_lineage = worker_patch_lineage_conn(conn, patch_id=patch_id, limit=1)
+                existing_validations = existing_lineage[0].get("validations", []) if existing_lineage else []
+                upsert_worker_patch_lineage_conn(
+                    conn,
+                    patch_id=patch_id,
+                    status="validation_failed" if failed_jobs else "validated",
+                    validations=_lineage_merged_validations(existing_validations, jobs),
+                    integration_result="validation_failed" if failed_jobs else "validated",
+                    telemetry={
+                        "validation_status": aggregate_status,
+                        "validation_job_count": len(jobs),
+                        "validation_failed": bool(failed_jobs),
+                    },
+                )
+        if updated:
+            append_event(
+                conn,
+                StateEvent(
+                    stream_id=f"stream:execution-dag:validation:{execution_group_id}",
+                    event_type="execution_dag.validation_result_recorded",
+                    actor_role=selected_by,
+                    phase="validation",
+                    status="ACTIVE" if not failed_jobs else "ACTIVE_WITH_PENDING_USER_INPUT",
+                    payload={
+                        "execution_group_id": execution_group_id,
+                        "aggregate_status": aggregate_status,
+                        "updated_node_count": len(updated),
+                        "failed_job_count": len(failed_jobs),
+                    },
+                ),
+            )
+    return {"status": "recorded" if updated else "skipped", "nodes": updated, "failed_jobs": [dict(job) for job in failed_jobs]}
+
+
+def failed_validation_jobs_requiring_dag_action_conn(
+    conn: sqlite3.Connection,
+    jobs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    pending: list[dict[str, Any]] = []
+    for job in jobs:
+        job_id = str(job.get("job_id") or "")
+        if not job_id:
+            continue
+        validation_nodes = _validation_dag_nodes_for_job_conn(conn, job)
+        attempt_count = max([int(node.get("attempt_count") or 0) for node in validation_nodes] or [1])
+        retry_limit = max([_validation_retry_limit(node) for node in validation_nodes] or [int(default_stage_contracts()["validation"]["retry_policy"]["max_attempts"])])
+        environment_signature = _validation_job_environment_signature(job)
+        if environment_signature:
+            node_id = _failed_validation_environment_blocker_node_id(environment_signature)
+        else:
+            node_id = (
+                _failed_validation_blocker_node_id(job_id)
+                if attempt_count >= retry_limit
+                else _failed_validation_repair_node_id(job_id, attempt_count)
+            )
+        if conn.execute("SELECT 1 FROM execution_dag_nodes WHERE node_id = ?", (node_id,)).fetchone() is None:
+            pending.append(job)
+    return pending
+
+
+def create_repair_nodes_for_failed_validation_conn(
+    conn: sqlite3.Connection,
+    *,
+    selected_by: str = "dag_scheduler",
+    limit: int = 50,
+) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM validation_jobs
+        WHERE status = 'failed'
+        ORDER BY finished_at DESC, started_at DESC, job_id
+        LIMIT ?
+        """,
+        (max(1, int(limit or 50)),),
+    ).fetchall()
+    repair_nodes: list[dict[str, Any]] = []
+    blocker_nodes: list[dict[str, Any]] = []
+    created_edges: list[dict[str, Any]] = []
+    with conn:
+        for row in rows:
+            job = _validation_job_row_to_dict(row)
+            payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
+            if not bool(payload.get("required", True)):
+                continue
+            job_id = str(job.get("job_id") or "")
+            command = str(job.get("command") or "")
+            task_id = str(job.get("gate_id") or job.get("plan_id") or "validation-repair")
+            validation_nodes = _validation_dag_nodes_for_job_conn(conn, job)
+            validation_node_ids = [str(node.get("node_id") or "") for node in validation_nodes if str(node.get("node_id") or "")]
+            patch_ids = sorted(
+                {
+                    str(patch_id)
+                    for node in validation_nodes
+                    for patch_id in ((node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}).get("patch_ids") or [])
+                    if str(patch_id or "")
+                }
+            )
+            failed_work_node_ids = sorted(
+                {
+                    str(source_id)
+                    for node in validation_nodes
+                    for source_id in (
+                        (node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}).get("covered_builder_node_ids")
+                        or []
+                    )
+                    if str(source_id or "")
+                }
+            )
+            review_node_ids = sorted(
+                {
+                    str((node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}).get("review_node_id") or "")
+                    for node in validation_nodes
+                    if str((node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}).get("review_node_id") or "")
+                }
+            )
+            paths = sorted(
+                {
+                    normalize_path_for_brief(str(path))
+                    for node in validation_nodes
+                    for path in ((node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}).get("paths") or [])
+                    if str(path or "")
+                }
+            )
+            attempt_count = max([int(node.get("attempt_count") or 0) for node in validation_nodes] or [1])
+            retry_limit = max([_validation_retry_limit(node) for node in validation_nodes] or [int(default_stage_contracts()["validation"]["retry_policy"]["max_attempts"])])
+            receipt_ref = f"receipt:{job_id}"
+            environment_signature = _validation_job_environment_signature(job)
+            if environment_signature:
+                node_id = _failed_validation_environment_blocker_node_id(environment_signature)
+                if conn.execute("SELECT 1 FROM execution_dag_nodes WHERE node_id = ?", (node_id,)).fetchone() is not None:
+                    continue
+                failure_category = str(payload.get("failure_category") or "environment")
+                root_cause = str(payload.get("failure_root_cause") or "Validation environment failure.")
+                blocked_reason = f"validation environment failure ({failure_category}): {root_cause}"
+                blocker = upsert_execution_dag_node(
+                    conn,
+                    node_id=node_id,
+                    task_id=task_id,
+                    action_type="blocker",
+                    status="blocked_on_environment",
+                    owner_role="planner",
+                    confidence=0.96,
+                    blocker_reason=blocked_reason,
+                    validation_receipt_refs=[receipt_ref],
+                    metadata={
+                        "source": "validation_jobs",
+                        "scheduler_action": "create_repair_nodes",
+                        "selected_by": selected_by,
+                        "job_id": job_id,
+                        "execution_group_id": str(job.get("execution_group_id") or ""),
+                        "plan_id": str(job.get("plan_id") or ""),
+                        "gate_id": str(job.get("gate_id") or ""),
+                        "summary": f"Blocked on validation environment for `{command}`",
+                        "command": command,
+                        "log_artifact_id": str(job.get("log_artifact_id") or ""),
+                        "exit_code": int(job.get("exit_code") or 0),
+                        "failure_signature": environment_signature,
+                        "failure_reason": str(payload.get("failure_reason") or "verification_environment_failure"),
+                        "failure_category": failure_category,
+                        "failure_root_cause": root_cause,
+                        "environment_repair": payload.get("environment_repair") if isinstance(payload.get("environment_repair"), Mapping) else {},
+                        "attempt_count": attempt_count,
+                        "retry_limit": retry_limit,
+                        "patch_ids": patch_ids,
+                        "validation_node_ids": validation_node_ids,
+                        "failed_work_node_ids": failed_work_node_ids,
+                        "review_node_ids": review_node_ids,
+                        "paths": paths,
+                    },
+                )
+                blocker_nodes.append(blocker)
+                for patch_id in patch_ids:
+                    existing_lineage = worker_patch_lineage_conn(conn, patch_id=patch_id, limit=1)
+                    existing_repairs = existing_lineage[0].get("repair_node_ids", []) if existing_lineage else []
+                    upsert_worker_patch_lineage_conn(
+                        conn,
+                        patch_id=patch_id,
+                        status="blocked",
+                        repair_node_ids=[*existing_repairs, str(blocker.get("node_id") or "")],
+                        integration_result="blocked",
+                        telemetry={"validation_environment_blocker": True, "failure_signature": environment_signature},
+                    )
+                for validation_node_id in validation_node_ids:
+                    created_edges.append(
+                        upsert_execution_dag_edge(
+                            conn,
+                            source_node_id=node_id,
+                            target_node_id=validation_node_id,
+                            dependency_kind="blocks",
+                            reason="validation environment failure must be resolved before this validation can pass",
+                            confidence=0.96,
+                            metadata={"receipt_ref": receipt_ref, "job_id": job_id, "failure_signature": environment_signature},
+                        )
+                    )
+                continue
+            if attempt_count >= retry_limit:
+                node_id = _failed_validation_blocker_node_id(job_id)
+                if conn.execute("SELECT 1 FROM execution_dag_nodes WHERE node_id = ?", (node_id,)).fetchone() is not None:
+                    continue
+                blocker = upsert_execution_dag_node(
+                    conn,
+                    node_id=node_id,
+                    task_id=task_id,
+                    action_type="blocker",
+                    status="blocked",
+                    owner_role="planner",
+                    confidence=0.95,
+                    blocker_reason=f"validation retry limit exhausted after {attempt_count}/{retry_limit} attempts: {command}",
+                    validation_receipt_refs=[receipt_ref],
+                    metadata={
+                        "source": "validation_jobs",
+                        "scheduler_action": "create_repair_nodes",
+                        "selected_by": selected_by,
+                        "job_id": job_id,
+                        "execution_group_id": str(job.get("execution_group_id") or ""),
+                        "plan_id": str(job.get("plan_id") or ""),
+                        "gate_id": str(job.get("gate_id") or ""),
+                        "summary": f"Blocked after repeated validation failure `{command}`",
+                        "command": command,
+                        "log_artifact_id": str(job.get("log_artifact_id") or ""),
+                        "exit_code": int(job.get("exit_code") or 0),
+                        "attempt_count": attempt_count,
+                        "retry_limit": retry_limit,
+                        "patch_ids": patch_ids,
+                        "validation_node_ids": validation_node_ids,
+                        "failed_work_node_ids": failed_work_node_ids,
+                        "review_node_ids": review_node_ids,
+                        "paths": paths,
+                    },
+                )
+                blocker_nodes.append(blocker)
+                for patch_id in patch_ids:
+                    existing_lineage = worker_patch_lineage_conn(conn, patch_id=patch_id, limit=1)
+                    existing_repairs = existing_lineage[0].get("repair_node_ids", []) if existing_lineage else []
+                    upsert_worker_patch_lineage_conn(
+                        conn,
+                        patch_id=patch_id,
+                        status="blocked",
+                        repair_node_ids=[*existing_repairs, str(blocker.get("node_id") or "")],
+                        integration_result="blocked",
+                        telemetry={"retry_limit_exhausted": True, "repair_blocker_created": True},
+                    )
+                for validation_node_id in validation_node_ids:
+                    created_edges.append(
+                        upsert_execution_dag_edge(
+                            conn,
+                            source_node_id=node_id,
+                            target_node_id=validation_node_id,
+                            dependency_kind="blocks",
+                            reason="validation retry limit is exhausted",
+                            confidence=0.96,
+                        )
+                    )
+                continue
+            node_id = _failed_validation_repair_node_id(job_id, attempt_count)
+            existing = conn.execute("SELECT 1 FROM execution_dag_nodes WHERE node_id = ?", (node_id,)).fetchone()
+            if existing is not None:
+                continue
+            node = upsert_execution_dag_node(
+                conn,
+                node_id=node_id,
+                task_id=task_id,
+                action_type="repair",
+                status="ready",
+                owner_role="builder",
+                confidence=0.86,
+                blocker_reason=f"failed validation: {command}",
+                validation_receipt_refs=[f"receipt:{job_id}"],
+                metadata={
+                    "source": "validation_jobs",
+                    "scheduler_action": "create_repair_nodes",
+                    "selected_by": selected_by,
+                    "job_id": job_id,
+                    "execution_group_id": str(job.get("execution_group_id") or ""),
+                    "plan_id": str(job.get("plan_id") or ""),
+                    "gate_id": str(job.get("gate_id") or ""),
+                    "summary": f"Repair failed validation `{command}`",
+                    "command": command,
+                    "log_artifact_id": str(job.get("log_artifact_id") or ""),
+                    "exit_code": int(job.get("exit_code") or 0),
+                    "attempt_count": attempt_count,
+                    "retry_limit": retry_limit,
+                    "patch_ids": patch_ids,
+                    "validation_node_ids": validation_node_ids,
+                    "failed_work_node_ids": failed_work_node_ids,
+                    "review_node_ids": review_node_ids,
+                    "paths": paths,
+                },
+            )
+            repair_nodes.append(node)
+            for patch_id in patch_ids:
+                existing_lineage = worker_patch_lineage_conn(conn, patch_id=patch_id, limit=1)
+                existing_repairs = existing_lineage[0].get("repair_node_ids", []) if existing_lineage else []
+                upsert_worker_patch_lineage_conn(
+                    conn,
+                    patch_id=patch_id,
+                    status="repair_created",
+                    repair_node_ids=[*existing_repairs, node_id],
+                    integration_result="repair_required",
+                    telemetry={"repair_created": True, "validation_job_id": job_id},
+                )
+            for source_node_id in [*failed_work_node_ids, *review_node_ids, *validation_node_ids]:
+                if source_node_id and _dag_node_exists_conn(conn, source_node_id):
+                    created_edges.append(
+                        upsert_execution_dag_edge(
+                            conn,
+                            source_node_id=source_node_id,
+                            target_node_id=node_id,
+                            dependency_kind="repairs",
+                            reason="repair is targeted to failed validation evidence",
+                            confidence=0.9,
+                            dependency_mode="advisory",
+                            metadata={"receipt_ref": receipt_ref, "job_id": job_id},
+                        )
+                    )
+        if repair_nodes or blocker_nodes:
+            append_event(
+                conn,
+                StateEvent(
+                    stream_id="stream:execution-dag:validation-repair",
+                    event_type="execution_dag.validation_repair_nodes_created",
+                    actor_role=selected_by,
+                    phase="scheduler",
+                    status="ACTIVE_WITH_PENDING_USER_INPUT",
+                    payload={
+                        "repair_node_count": len(repair_nodes),
+                        "blocker_node_count": len(blocker_nodes),
+                        "edge_count": len(created_edges),
+                        "job_ids": [
+                            node.get("metadata", {}).get("job_id")
+                            for node in [*repair_nodes, *blocker_nodes]
+                            if isinstance(node.get("metadata"), Mapping)
+                        ],
+                    },
+                ),
+            )
+    return {
+        "status": "created" if repair_nodes or blocker_nodes else "skipped",
+        "repair_nodes": repair_nodes,
+        "blocker_nodes": blocker_nodes,
+        "edges": created_edges,
+        "repair_node_count": len(repair_nodes),
+        "blocker_node_count": len(blocker_nodes),
+    }
+
+
+def update_execution_group_dag_nodes_conn(
+    conn: sqlite3.Connection,
+    execution_group_id: str,
+    *,
+    status: str,
+    selected_by: str = "dag_scheduler",
+) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT payload_json
+        FROM execution_group_items
+        WHERE execution_group_id = ?
+        """,
+        (execution_group_id,),
+    ).fetchall()
+    updated: list[dict[str, Any]] = []
+    now = utc_now()
+    with conn:
+        for row in rows:
+            payload = _json_cell(row["payload_json"], {})
+            if not isinstance(payload, Mapping):
+                continue
+            dag_node_id = str(payload.get("dag_node_id") or "")
+            if not dag_node_id:
+                continue
+            existing = conn.execute("SELECT * FROM execution_dag_nodes WHERE node_id = ?", (dag_node_id,)).fetchone()
+            if existing is None:
+                continue
+            node = execution_dag_node_row_to_dict(existing)
+            metadata = dict(node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {})
+            metadata["last_scheduler_action_by"] = selected_by
+            updated.append(
+                upsert_execution_dag_node(
+                    conn,
+                    node_id=dag_node_id,
+                    task_id=str(node.get("task_id") or ""),
+                    action_type=str(node.get("action_type") or ""),
+                    status=status,
+                    owner_role=str(node.get("owner_role") or ""),
+                    confidence=float(node.get("confidence") or 0),
+                    attempt_count=int(node.get("attempt_count") or 0) + (1 if status in EXECUTION_DAG_TERMINAL_STATUSES else 0),
+                    started_at=str(node.get("started_at") or (now if status in EXECUTION_DAG_ACTIVE_STATUSES else "")),
+                    finished_at=now if status in EXECUTION_DAG_TERMINAL_STATUSES else str(node.get("finished_at") or ""),
+                    metadata=metadata,
+                )
+            )
+    return {"updated_count": len(updated), "nodes": updated}
+
+
+def update_execution_dag_node_status_conn(
+    conn: sqlite3.Connection,
+    node_id: str,
+    *,
+    status: str,
+    selected_by: str = "dag_scheduler",
+) -> dict[str, Any]:
+    node_id = str(node_id or "")
+    if not node_id:
+        return {}
+    existing = conn.execute("SELECT * FROM execution_dag_nodes WHERE node_id = ?", (node_id,)).fetchone()
+    if existing is None:
+        return {}
+    node = execution_dag_node_row_to_dict(existing)
+    metadata = dict(node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {})
+    metadata["last_scheduler_action_by"] = selected_by
+    now = utc_now()
+    normalized_status = _execution_dag_status(status)
+    worktree = node.get("worktree") if isinstance(node.get("worktree"), Mapping) else {}
+    patch = node.get("patch") if isinstance(node.get("patch"), Mapping) else {}
+    with conn:
+        return upsert_execution_dag_node(
+            conn,
+            node_id=node_id,
+            task_id=str(node.get("task_id") or ""),
+            action_type=str(node.get("action_type") or ""),
+            status=normalized_status,
+            owner_role=str(node.get("owner_role") or ""),
+            worktree_id=str(worktree.get("id") or ""),
+            worktree_path=str(worktree.get("path") or ""),
+            patch_id=str(patch.get("id") or ""),
+            patch_path=str(patch.get("path") or ""),
+            confidence=float(node.get("confidence") or 0),
+            attempt_count=int(node.get("attempt_count") or 0) + (1 if normalized_status in EXECUTION_DAG_TERMINAL_STATUSES else 0),
+            started_at=str(node.get("started_at") or (now if normalized_status in EXECUTION_DAG_ACTIVE_STATUSES else "")),
+            finished_at=now if normalized_status in EXECUTION_DAG_TERMINAL_STATUSES else str(node.get("finished_at") or ""),
+            blocker_reason=str(node.get("blocker_reason") or ""),
+            validation_receipt_refs=list(node.get("validation_receipt_refs") or []),
+            metadata=metadata,
+        )
 
 
 def record_worker_patch_conflict_conn(
@@ -8041,6 +17842,25 @@ def record_worker_patch_conflict_conn(
             WHERE patch_id = ?
             """,
             (signature, stable_json(payload), patch_id),
+        )
+        upsert_worker_patch_lineage_conn(
+            conn,
+            patch_id=patch_id,
+            worker_id=str(row["worker_id"] or ""),
+            execution_group_id=str(row["execution_group_id"] or ""),
+            status="conflict",
+            actual_files=_json_cell(row["changed_files_json"], []),
+            actual_symbols=_lineage_actual_symbols_for_files_conn(conn, _json_cell(row["changed_files_json"], [])),
+            conflicts=[
+                {
+                    "conflict_signature": signature,
+                    "detail": _brief_text(detail, limit=220),
+                    "detected_at": utc_now(),
+                    "source": "integration_conflict",
+                }
+            ],
+            integration_result="conflict",
+            telemetry={"conflict_recorded": True},
         )
     updated = conn.execute("SELECT * FROM worker_patches WHERE patch_id = ?", (patch_id,)).fetchone()
     return _worker_patch_row_to_dict(updated) if updated else {}
@@ -8543,38 +18363,60 @@ def launch_write_execution_group_conn(
     max_workers: int | None = None,
     command_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> dict[str, Any]:
+    phase_started_at = utc_now()
+    phase_started = time.perf_counter()
+
+    def finish_worker_launch_timing(status: str, payload: Mapping[str, Any] | None = None) -> None:
+        record_runtime_phase_timing_conn(
+            conn,
+            phase="worker_launch",
+            source="worker.write_launch",
+            run_id=run_id,
+            started_at=phase_started_at,
+            elapsed_ms=_elapsed_ms(phase_started),
+            status=status,
+            payload=payload,
+        )
+
     target = target.expanduser().resolve()
     control = ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
     worker = control.get("worker") if isinstance(control.get("worker"), Mapping) else {}
-    if not bool(worker.get("write_workers_allowed")):
-        return {"status": "blocked", "reason_kind": "write_workers_disabled", "reason": "Write workers are not enabled for this target."}
     selected_group = dict(group or {})
     if not selected_group:
         selected_group = _execution_group_by_id_conn(conn, execution_group_id) if execution_group_id else _latest_write_execution_group_conn(conn)
     if not selected_group:
+        finish_worker_launch_timing("skipped", {"reason_kind": "no_write_group"})
         return {"status": "skipped", "reason_kind": "no_write_group", "reason": "No proposed write-worker execution group is available."}
     group_id = str(selected_group.get("execution_group_id") or "")
     payload = selected_group.get("payload") if isinstance(selected_group.get("payload"), Mapping) else {}
     if str(payload.get("execution_mode") or "") != "write_workers":
+        finish_worker_launch_timing("skipped", {"execution_group_id": group_id, "reason_kind": "not_write_workers"})
         return {"status": "skipped", "execution_group_id": group_id, "reason_kind": "not_write_workers", "reason": "Only write-worker execution groups can be launched by this helper."}
     existing = worker_agents_conn(conn, mode="write", limit=50)
     existing_for_group = [worker_row for worker_row in existing if worker_row.get("execution_group_id") == group_id]
     if existing_for_group:
+        finish_worker_launch_timing("skipped", {"execution_group_id": group_id, "reason_kind": "already_launched", "worker_count": len(existing_for_group)})
         return {"status": "already_launched", "execution_group_id": group_id, "run_id": existing_for_group[0].get("run_id") or "", "workers": existing_for_group, "worker_count": len(existing_for_group)}
-    configured_max = _nonnegative_int(worker.get("max_write_worker_count"), 0, maximum=10)
+    configured_max = _nonnegative_int(worker.get("max_write_worker_count"), PARALLELISM_BUDGET_WRITE_CONCURRENT, maximum=10)
+    if configured_max <= 0:
+        configured_max = PARALLELISM_BUDGET_WRITE_CONCURRENT
     requested_max = configured_max if max_workers is None else min(configured_max, _nonnegative_int(max_workers, configured_max, maximum=10))
     items = [item for item in selected_group.get("items") or [] if isinstance(item, Mapping)]
     items = items[:requested_max]
     if not items:
+        finish_worker_launch_timing("blocked", {"execution_group_id": group_id, "reason_kind": "write_worker_count_zero"})
         return {"status": "blocked", "execution_group_id": group_id, "reason_kind": "write_worker_count_zero", "reason": "No write-worker slots are available."}
     budget_check = can_start_execution_group(conn, "write_workers", item_count=len(items), owner_role="")
     if not bool(budget_check.get("allowed")):
+        finish_worker_launch_timing("blocked", {"execution_group_id": group_id, "reason_kind": "budget_blocked"})
         return {"status": "blocked", "execution_group_id": group_id, "budget_check": budget_check, "reason": "; ".join(str(item) for item in budget_check.get("reasons", []))}
     for item in items:
         if not _write_worker_ownership_scope(item):
+            finish_worker_launch_timing("blocked", {"execution_group_id": group_id, "reason_kind": "ownership_scope_required"})
             return {"status": "blocked", "execution_group_id": group_id, "reason_kind": "ownership_scope_required", "reason": "Write workers require an ownership scope from leases or likely_touches."}
         required_leases = item.get("required_leases") if isinstance(item.get("required_leases"), list) else []
         if not required_leases:
+            finish_worker_launch_timing("blocked", {"execution_group_id": group_id, "reason_kind": "lease_required"})
             return {"status": "blocked", "execution_group_id": group_id, "reason_kind": "lease_required", "reason": "Write workers require at least one active resource lease."}
     run_id = _worker_slug(run_id or f"write-workers-{sha256_text(group_id)[:12]}", fallback="write-workers")
     helper_path = existing_or_target_path(target, "scripts/spawn_worker_agent.sh")
@@ -8582,6 +18424,7 @@ def launch_write_execution_group_conn(
     started_at = utc_now()
     launched_workers: list[dict[str, Any]] = []
     queued_patches: list[dict[str, Any]] = []
+    worker_specs: list[dict[str, Any]] = []
     with conn:
         conn.execute(
             """
@@ -8620,6 +18463,7 @@ def launch_write_execution_group_conn(
                         "UPDATE execution_groups SET status = 'failed', finished_at = ?, reason = ? WHERE execution_group_id = ?",
                         (utc_now(), "write-worker lease conflict", group_id),
                     )
+                finish_worker_launch_timing("blocked", {"execution_group_id": group_id, "reason_kind": "lease_conflict"})
                 return {
                     "status": "blocked",
                     "execution_group_id": group_id,
@@ -8632,8 +18476,10 @@ def launch_write_execution_group_conn(
             if lease_payload:
                 acquired_leases.append(dict(lease_payload))
         if not acquired_leases:
+            finish_worker_launch_timing("blocked", {"execution_group_id": group_id, "reason_kind": "lease_required"})
             return {"status": "blocked", "execution_group_id": group_id, "reason_kind": "lease_required", "reason": "Write workers require at least one acquired active lease."}
         contract = _write_worker_contract_payload(item, acquired_leases)
+        predicted_impact = _lineage_predicted_impact_from_worker_inputs(item, contract, acquired_leases)
         queue_dir = target_path(target, f"target/automation_queue/builder/{worker_run_id}")
         patch_path = queue_dir / "changes.patch"
         manifest_path = queue_dir / "manifest.json"
@@ -8642,10 +18488,12 @@ def launch_write_execution_group_conn(
         scratch_dir = target_path(target, "target/automation_worktrees") / "write-workers" / _worker_slug(worker_id, fallback=f"worker-{index}")
         _prepare_write_worker_scratch(target, scratch_dir, contract["allowed_paths"])
         assignment = _write_worker_assignment_prompt(selected_group, item, contract, queue_dir=queue_dir)
+        symbol_context = _worker_symbol_context(item)
         worker_payload = {
             "schema_version": 1,
             "item_id": str(item.get("item_id") or ""),
             "task_id": str(item.get("task_id") or ""),
+            "dag_node_id": str(item.get("dag_node_id") or (item.get("payload") if isinstance(item.get("payload"), Mapping) else {}).get("dag_node_id") or ""),
             "graph_task_node_id": str(item.get("graph_task_node_id") or ""),
             "ownership_scope": str(contract["ownership_scope"]),
             "scratch_path": str(scratch_dir),
@@ -8653,6 +18501,10 @@ def launch_write_execution_group_conn(
             "finding_disposition_required": False,
             "disposition_status": "not_applicable",
             "context_policy": "raw source contents are not embedded by default",
+            "symbol_context_available": bool(symbol_context),
+            "symbol_context": symbol_context,
+            "predicted_files": list(predicted_impact.get("files") or []),
+            "predicted_symbols": list(predicted_impact.get("symbols") or []),
         }
         with conn:
             conn.execute(
@@ -8730,6 +18582,29 @@ def launch_write_execution_group_conn(
             "--prompt",
             assignment,
         ]
+        worker_specs.append(
+            {
+                "item": item,
+                "worker_id": worker_id,
+                "contract": contract,
+                "worker_run_id": worker_run_id,
+                "role_slug": role_slug,
+                "queue_dir": queue_dir,
+                "patch_path": patch_path,
+                "manifest_path": manifest_path,
+                "summary_path": summary_path,
+                "changed_files_path": changed_files_path,
+                "scratch_dir": scratch_dir,
+                "acquired_leases": acquired_leases,
+                "predicted_impact": predicted_impact,
+                "worker_payload": worker_payload,
+                "command": command,
+            }
+        )
+
+    def execute_write_worker(spec: Mapping[str, Any]) -> dict[str, Any]:
+        scratch_dir = Path(str(spec.get("scratch_dir") or ""))
+        command = [str(part) for part in spec.get("command", [])] if isinstance(spec.get("command"), list) else []
         status = "completed"
         failure_reason = ""
         if not helper_path.exists() and command_runner is None:
@@ -8737,10 +18612,7 @@ def launch_write_execution_group_conn(
             failure_reason = f"worker helper not found at {helper_path}"
         else:
             try:
-                if command_runner is None:
-                    result = subprocess.run(command, cwd=scratch_dir, text=True, capture_output=True, timeout=7200, check=False)
-                else:
-                    result = command_runner(command, cwd=scratch_dir, timeout=7200)
+                result = _run_worker_command(command, cwd=scratch_dir, timeout=7200, command_runner=command_runner)
             except Exception as exc:  # pragma: no cover - defensive launcher behavior.
                 status = "failed"
                 failure_reason = f"{exc.__class__.__name__}: {exc}"
@@ -8752,6 +18624,48 @@ def launch_write_execution_group_conn(
                 elif return_code != 0:
                     status = "failed"
                     failure_reason = f"worker helper exited with code {return_code}"
+        return {
+            "worker_id": str(spec.get("worker_id") or ""),
+            "status": status,
+            "failure_reason": failure_reason,
+        }
+
+    results_by_worker: dict[str, dict[str, Any]] = {}
+    if worker_specs:
+        with ThreadPoolExecutor(max_workers=min(len(worker_specs), requested_max)) as executor:
+            future_by_worker = {
+                executor.submit(execute_write_worker, spec): str(spec.get("worker_id") or "")
+                for spec in worker_specs
+            }
+            for future in as_completed(future_by_worker):
+                worker_id = future_by_worker[future]
+                try:
+                    results_by_worker[worker_id] = future.result()
+                except Exception as exc:  # pragma: no cover - defensive launcher behavior.
+                    results_by_worker[worker_id] = {
+                        "worker_id": worker_id,
+                        "status": "failed",
+                        "failure_reason": f"{exc.__class__.__name__}: {exc}",
+                    }
+
+    for spec in worker_specs:
+        item = spec.get("item") if isinstance(spec.get("item"), Mapping) else {}
+        worker_id = str(spec.get("worker_id") or "")
+        worker_run_id = str(spec.get("worker_run_id") or "")
+        role_slug = str(spec.get("role_slug") or "")
+        contract = spec.get("contract") if isinstance(spec.get("contract"), Mapping) else {}
+        queue_dir = Path(str(spec.get("queue_dir") or ""))
+        patch_path = Path(str(spec.get("patch_path") or ""))
+        manifest_path = Path(str(spec.get("manifest_path") or ""))
+        summary_path = Path(str(spec.get("summary_path") or ""))
+        changed_files_path = Path(str(spec.get("changed_files_path") or ""))
+        scratch_dir = Path(str(spec.get("scratch_dir") or ""))
+        acquired_leases = [dict(lease) for lease in spec.get("acquired_leases", []) if isinstance(lease, Mapping)]
+        predicted_impact = spec.get("predicted_impact") if isinstance(spec.get("predicted_impact"), Mapping) else {}
+        worker_payload = dict(spec.get("worker_payload") if isinstance(spec.get("worker_payload"), Mapping) else {})
+        worker_result = results_by_worker.get(worker_id, {})
+        status = str(worker_result.get("status") or "failed")
+        failure_reason = str(worker_result.get("failure_reason") or "")
         queue_dir.mkdir(parents=True, exist_ok=True)
         changed_files = _scratch_patch_and_changed_files(scratch_dir, patch_path, changed_files_path)
         patch_check = subprocess.run(["git", "apply", "--check", str(patch_path)], cwd=target, text=True, capture_output=True, check=False)
@@ -8808,6 +18722,8 @@ def launch_write_execution_group_conn(
             "checks_run": [],
             "validation_evidence": [],
             "required_leases": acquired_leases,
+            "predicted_files": list(predicted_impact.get("files") or []),
+            "predicted_symbols": list(predicted_impact.get("symbols") or []),
             "ownership_scope": str(contract["ownership_scope"]),
             "created_at": utc_now(),
             "integrated_at": None,
@@ -8858,8 +18774,60 @@ def launch_write_execution_group_conn(
                     conflict_signature,
                     created_at,
                     created_at if patch_status == "queued" else "",
-                    stable_json({"schema_version": 1, "worker_run_id": worker_run_id, "scratch_path": str(scratch_dir), "failure_reason": failure_reason}),
+                    stable_json(
+                        {
+                            "schema_version": 1,
+                            "worker_run_id": worker_run_id,
+                            "scratch_path": str(scratch_dir),
+                            "failure_reason": failure_reason,
+                            "task_id": str(item.get("task_id") or ""),
+                            "dag_node_id": str(
+                                item.get("dag_node_id")
+                                or (item.get("payload") if isinstance(item.get("payload"), Mapping) else {}).get("dag_node_id")
+                                or ""
+                            ),
+                            "predicted_files": list(predicted_impact.get("files") or []),
+                            "predicted_symbols": list(predicted_impact.get("symbols") or []),
+                        }
+                    ),
                 ),
+            )
+            upsert_worker_patch_lineage_conn(
+                conn,
+                patch_id=patch_id,
+                worker_id=worker_id,
+                execution_group_id=group_id,
+                task_id=str(item.get("task_id") or ""),
+                source_dag_node_id=str(
+                    item.get("dag_node_id")
+                    or (item.get("payload") if isinstance(item.get("payload"), Mapping) else {}).get("dag_node_id")
+                    or ""
+                ),
+                status=patch_status,
+                predicted_files=list(predicted_impact.get("files") or []),
+                predicted_symbols=list(predicted_impact.get("symbols") or []),
+                actual_files=changed_files,
+                actual_symbols=_lineage_actual_symbols_for_files_conn(conn, changed_files),
+                conflicts=[
+                    {
+                        "conflict_signature": conflict_signature,
+                        "detail": _brief_text(failure_reason, limit=220),
+                        "detected_at": utc_now(),
+                        "source": "git_apply_check",
+                    }
+                ]
+                if conflict_signature
+                else [],
+                integration_result="pending" if patch_status == "queued" else patch_status,
+                started_at=started_at,
+                finished_at=created_at,
+                telemetry={
+                    "worker_status": status,
+                    "patch_status": patch_status,
+                    "changed_file_count": len(changed_files),
+                    "predicted_file_count": len(list(predicted_impact.get("files") or [])),
+                },
+                payload={"worker_run_id": worker_run_id, "selected_by": selected_by},
             )
             conn.execute(
                 """
@@ -8916,6 +18884,17 @@ def launch_write_execution_group_conn(
                 payload={"execution_group_id": group_id, "worker_count": len(launched_workers), "queued_patch_count": len([p for p in queued_patches if p.get("status") == "queued"]), "conflict_count": conflict_count},
             ),
         )
+    finish_worker_launch_timing(
+        group_status,
+        {
+            "execution_group_id": group_id,
+            "worker_count": len(launched_workers),
+            "failed_worker_count": failed_count,
+            "queued_patch_count": len([patch for patch in queued_patches if patch.get("status") == "queued"]),
+            "conflict_count": conflict_count,
+            "mode": "write_workers",
+        },
+    )
     return {
         "status": group_status,
         "execution_group_id": group_id,
@@ -8956,8 +18935,454 @@ def _latest_task_graph_nodes_conn(conn: sqlite3.Connection) -> dict[str, dict[st
     return nodes
 
 
+def _latest_task_graph_node_by_public_id_conn(conn: sqlite3.Connection, public_id: str) -> dict[str, Any]:
+    public_id = str(public_id or "").strip()
+    if not public_id:
+        return {}
+    for node in _latest_task_graph_nodes_conn(conn).values():
+        if _task_graph_node_public_id(node) == public_id:
+            return dict(node)
+    return {}
+
+
+def _parallel_dag_metadata(dag_node: Mapping[str, Any], task_node: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    task_metadata = task_node.get("metadata") if isinstance(task_node, Mapping) and isinstance(task_node.get("metadata"), Mapping) else {}
+    dag_metadata = dag_node.get("metadata") if isinstance(dag_node.get("metadata"), Mapping) else {}
+    merged = dict(task_metadata)
+    merged.update(dag_metadata)
+    ticket_payload = merged.get("ticket") if isinstance(merged.get("ticket"), Mapping) else {}
+    for key in (
+        "summary",
+        "owner_role",
+        "action_kind",
+        "execution_mode",
+        "read_only",
+        "paths",
+        "symbols",
+        "requires_approval",
+        "approval_status",
+    ):
+        if key not in merged and key in ticket_payload:
+            merged[key] = ticket_payload[key]
+    if "status" not in merged:
+        merged["status"] = str(dag_node.get("status") or "")
+    if "task_id" not in merged:
+        merged["task_id"] = str(dag_node.get("task_id") or "")
+    return merged
+
+
+def _parallel_task_text_from_dag_node(
+    dag_node: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    task_node: Mapping[str, Any] | None = None,
+) -> str:
+    task_metadata = task_node.get("metadata") if isinstance(task_node, Mapping) and isinstance(task_node.get("metadata"), Mapping) else {}
+    parts: list[str] = [
+        str(dag_node.get("task_id") or ""),
+        str(dag_node.get("action_type") or ""),
+        str(dag_node.get("owner_role") or ""),
+        str(task_node.get("name") or "") if isinstance(task_node, Mapping) else "",
+    ]
+    for source in (task_metadata, metadata):
+        for key in (
+            "summary",
+            "title",
+            "reason",
+            "description",
+            "action_kind",
+            "blocker",
+            "paths",
+            "symbols",
+            "target_paths",
+            "target_symbols",
+        ):
+            if key in source:
+                parts.extend(_task_text_values(source.get(key)))
+    ticket_payload = metadata.get("ticket") if isinstance(metadata.get("ticket"), Mapping) else {}
+    for key in ("summary", "title", "description", "paths", "symbols"):
+        if key in ticket_payload:
+            parts.extend(_task_text_values(ticket_payload.get(key)))
+    return " ".join(str(part or "") for part in parts if str(part or "").strip())
+
+
+def _parallel_dag_action(dag_node: Mapping[str, Any], metadata: Mapping[str, Any], *, kind: str = "ticket") -> tuple[str, str, str]:
+    action_type = str(dag_node.get("action_type") or "").strip().lower()
+    capability = _execution_dag_action_capability(action_type)
+    canonical_action = str(capability.get("canonical_action_type") or action_type)
+    owner_role = str(metadata.get("owner_role") or dag_node.get("owner_role") or "").strip()
+    if not owner_role:
+        owner_role = str(
+            (capability.get("role_family") or _execution_dag_owner(action_type))
+            if action_type
+            else ("builder" if kind == "ticket" else "planner")
+        )
+    action_kind = str(metadata.get("action_kind") or "").strip()
+    if not action_kind:
+        action_kind = f"{canonical_action}_execution" if canonical_action else ("implement_ready_ticket" if kind == "ticket" else "work_item_action")
+    execution_mode = str(metadata.get("execution_mode") or "").strip().lower()
+    if execution_mode in EXECUTION_GROUP_MODES:
+        return owner_role, action_kind, execution_mode
+    capability_mode = str(capability.get("execution_mode") or "").strip().lower()
+    if capability_mode in EXECUTION_GROUP_MODES:
+        return owner_role, action_kind, capability_mode
+    action_lowered = action_kind.lower()
+    if owner_role == "integrator" or canonical_action == "integrate" or "integrat" in action_lowered:
+        return owner_role, action_kind, "mixed"
+    if bool(metadata.get("read_only")) or canonical_action in {"orchestrate", "decompose", "scope", "review", "audit", "calibrate"} or any(
+        term in action_lowered for term in ("read_only", "read-only", "inspect", "research", "analysis", "context", "plan", "scope")
+    ):
+        return owner_role, action_kind, "read_only"
+    if canonical_action == "validate" or any(term in action_lowered for term in ("validate", "validation", "verify", "test")):
+        return owner_role, action_kind, "validation"
+    return owner_role, action_kind, "write_workers"
+
+
+def _parallel_dag_non_parallel_reason(dag_node: Mapping[str, Any]) -> tuple[str, str]:
+    task_id = str(dag_node.get("task_id") or "")
+    action_type = str(dag_node.get("action_type") or "").strip().lower()
+    canonical_action = _execution_dag_canonical_action(action_type)
+    status = _execution_dag_status(dag_node.get("status"), "")
+    blocker_reason = str(dag_node.get("blocker_reason") or "").lower()
+    if task_id == CONVEYOR_TASK_ID:
+        return "compatibility_conveyor_projection", "compatibility conveyor projection nodes are not parallelized"
+    if canonical_action == "ticket":
+        return "non_executable_dag_root", "ticket root nodes only gate executable DAG actions"
+    if canonical_action == "blocker":
+        return "blocked_or_human_environment_node", "blocker DAG nodes are not parallel execution work"
+    if canonical_action == "completion":
+        return "non_executable_completion", "completion DAG nodes are terminal reporting gates, not parallel worker launches"
+    if status in EXECUTION_DAG_BLOCKED_STATUSES or status in {"blocked_on_user", "blocked_on_environment", "critical_stop", "active_with_pending_user_input"}:
+        return "blocked_or_human_environment_node", "blocked, human, and environment-gated DAG nodes are not parallelized"
+    if any(token in f"{status} {blocker_reason} {action_type}" for token in ("human", "user", "environment")):
+        return "blocked_or_human_environment_node", "human or environment-gated DAG nodes are not parallelized"
+    return "", ""
+
+
+def _parallel_codebase_scope_index_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+) -> tuple[str, list[dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
+    row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        capability = refresh_capability_manifest_conn(conn, target)
+        ensure_codebase_graph_conn(conn, target, capability=capability)
+        row = _latest_codebase_graph_snapshot_row(conn)
+    if row is None:
+        return "", [], {}, {}, {}
+    snapshot_id = str(row["snapshot_id"])
+    code_rows = conn.execute(
+        """
+        SELECT node_id, kind, path, name, digest, is_stale, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ? AND graph_namespace = ?
+          AND kind IN ('file', 'test_file', 'config_file', 'doc_file', 'lockfile', 'command')
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    symbol_rows = conn.execute(
+        """
+        SELECT node_id, kind, path, name, digest, is_stale, metadata_json
+        FROM graph_nodes
+        WHERE snapshot_id = ? AND graph_namespace = ?
+          AND kind = 'symbol'
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall()
+    code_nodes = [
+        _impact_copy_graph_node(row, source_namespace=CODEBASE_GRAPH_NAMESPACE, source_snapshot_id=snapshot_id)
+        for row in code_rows
+        if _impact_context_path_allowed(row["path"])
+    ]
+    symbol_nodes = [
+        _impact_copy_graph_node(row, source_namespace=CODEBASE_GRAPH_NAMESPACE, source_snapshot_id=snapshot_id)
+        for row in symbol_rows
+        if _impact_context_path_allowed(row["path"])
+    ]
+    code_by_id = {str(node["node_id"]): node for node in code_nodes}
+    file_by_path = {
+        normalize_path_for_brief(str(node.get("path") or "")): node
+        for node in code_nodes
+        if str(node.get("kind") or "") in GRAPH_FILE_NODE_KINDS and str(node.get("path") or "")
+    }
+    code_intelligence_evidence = _code_intelligence_evidence_by_symbol_conn(conn, snapshot_id)
+    symbol_owner_matches = _symbol_owner_match_index(symbol_nodes, file_by_path, code_intelligence_evidence)
+    test_edges: dict[str, list[str]] = {}
+    for item in conn.execute(
+        """
+        SELECT from_node_id, to_node_id
+        FROM graph_edges
+        WHERE snapshot_id = ? AND graph_namespace = ? AND kind = 'likely_tests'
+        """,
+        (snapshot_id, CODEBASE_GRAPH_NAMESPACE),
+    ).fetchall():
+        test_id = str(item["from_node_id"])
+        source_id = str(item["to_node_id"])
+        if test_id in code_by_id and source_id in code_by_id:
+            test_edges.setdefault(source_id, []).append(test_id)
+    adjacency_neighbors = _codebase_adjacency_neighbors_conn(conn, snapshot_id, code_by_id)
+    return snapshot_id, code_nodes, symbol_owner_matches, adjacency_neighbors, test_edges
+
+
+def _parallel_context_pack_for_dag_node_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    dag_node: Mapping[str, Any],
+    *,
+    task_node: Mapping[str, Any] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    max_items: int = IMPACT_CONTEXT_PACK_LIMIT,
+) -> dict[str, Any]:
+    metadata = metadata if isinstance(metadata, Mapping) else _parallel_dag_metadata(dag_node, task_node)
+    task_id = str(dag_node.get("task_id") or "").strip()
+    task_text = _parallel_task_text_from_dag_node(dag_node, metadata, task_node)
+    task_terms = _impact_terms(task_text)
+    explicit_paths = _impact_explicit_task_paths(metadata)
+    symbol_mentions = _impact_explicit_task_symbols(metadata, task_text)
+    snapshot_id, code_nodes, symbol_owner_matches, adjacency_neighbors, test_edges = _parallel_codebase_scope_index_conn(conn, target)
+    code_by_id = {str(node["node_id"]): node for node in code_nodes}
+    item_by_node: dict[str, dict[str, Any]] = {}
+    primary_candidates: list[tuple[str, float]] = []
+
+    def add_item(
+        node: Mapping[str, Any],
+        *,
+        confidence: float,
+        reason: str,
+        source: str,
+        signal_kind: str,
+        write_candidate: bool,
+        extra_metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        node_id = str(node.get("node_id") or "")
+        if not node_id:
+            return
+        edge_metadata = {
+            "confidence": confidence,
+            "reason": reason,
+            "source": source,
+            "signal_kind": signal_kind,
+            "write_candidate": write_candidate,
+            "scoping_only": not write_candidate,
+        }
+        if isinstance(extra_metadata, Mapping):
+            edge_metadata.update({str(key): value for key, value in extra_metadata.items()})
+        item = _context_pack_item_from_node(
+            node,
+            edge_metadata,
+        )
+        current = item_by_node.get(node_id)
+        if current is None or float(item.get("confidence") or 0) > float(current.get("confidence") or 0):
+            item_by_node[node_id] = item
+
+    for code_node in code_nodes:
+        if str(code_node.get("kind") or "") == "command":
+            continue
+        explicit_path_confidence, explicit_path_reason = _impact_score_explicit_paths(explicit_paths, code_node)
+        path_confidence, path_reason = _impact_score_path_mentions(task_text, code_node)
+        keyword_confidence, keyword_reason = _impact_score_keywords(task_terms, code_node)
+        confidence = explicit_path_confidence
+        reason = explicit_path_reason
+        source = "authored_path_metadata" if explicit_path_confidence else ""
+        signal_kind = "direct_path" if explicit_path_confidence else ""
+        write_candidate = bool(explicit_path_confidence)
+        if path_confidence > confidence:
+            confidence = path_confidence
+            reason = path_reason
+            source = "path_mention"
+            signal_kind = "direct_path"
+            write_candidate = True
+        if keyword_confidence > confidence:
+            confidence = keyword_confidence
+            reason = keyword_reason
+            source = "keyword_advisory"
+            signal_kind = "keyword_only"
+            write_candidate = False
+        if confidence <= 0:
+            continue
+        add_item(
+            code_node,
+            confidence=confidence,
+            reason=reason,
+            source=source,
+            signal_kind=signal_kind,
+            write_candidate=write_candidate,
+        )
+        if write_candidate:
+            primary_candidates.append((str(code_node["node_id"]), confidence))
+
+    symbol_matches_by_owner = _symbol_match_resolution_items(symbol_mentions, symbol_owner_matches)
+    for owner_id, item in sorted(symbol_matches_by_owner.items()):
+        owner = item.get("owner") if isinstance(item.get("owner"), Mapping) else {}
+        confidence = float(item.get("confidence") or 0.0)
+        signal_kind = str(item.get("signal_kind") or "inferred_symbol")
+        write_candidate = bool(item.get("write_candidate"))
+        add_item(
+            owner,
+            confidence=confidence,
+            reason=str(item.get("reason") or "symbol owner match"),
+            source=str(item.get("source") or "symbol_owner_match"),
+            signal_kind=signal_kind,
+            write_candidate=write_candidate,
+            extra_metadata={
+                "symbol_name": str(item.get("symbol_name") or ""),
+                "qualified_name": str(item.get("qualified_name") or ""),
+                "symbol_node_id": str(item.get("symbol_node_id") or ""),
+                "symbol_resolution": str(item.get("symbol_resolution") or ""),
+                "symbol_match_kind": str(item.get("symbol_match_kind") or ""),
+                "symbol_is_stale": bool(item.get("symbol_is_stale")),
+                "lsp_status": str(item.get("lsp_status") or ""),
+                "lsp_source": str(item.get("lsp_source") or ""),
+                "lsp_language_server_id": str(item.get("lsp_language_server_id") or ""),
+                "lsp_language_server_version": str(item.get("lsp_language_server_version") or ""),
+                "lsp_collected_at": str(item.get("lsp_collected_at") or ""),
+                "lsp_candidate_count": int(item.get("lsp_candidate_count") or 0),
+            },
+        )
+        if write_candidate:
+            primary_candidates.append((owner_id, confidence))
+
+    code_by_path = {
+        normalize_path_for_brief(str(node.get("path") or "")): node
+        for node in code_nodes
+        if str(node.get("path") or "")
+    }
+    for evidence in _accepted_scope_evidence_for_task_conn(conn, task_id=task_id, limit=IMPACT_CONTEXT_PACK_LIMIT):
+        owner_id = str(evidence.get("owner_node_id") or "")
+        owner = code_by_id.get(owner_id) or code_by_path.get(normalize_path_for_brief(str(evidence.get("candidate_path") or "")))
+        if not owner and _scope_evidence_signal_kind(evidence) == "creation_path":
+            owner = _scope_evidence_creation_node(evidence)
+        if not owner:
+            continue
+        confidence = float(evidence.get("normalized_confidence") or 0.0)
+        add_item(
+            owner,
+            confidence=confidence,
+            reason=_scope_evidence_reason(evidence),
+            source="scope_evidence",
+            signal_kind=_scope_evidence_signal_kind(evidence),
+            write_candidate=True,
+            extra_metadata=_scope_evidence_context_metadata(evidence),
+        )
+        primary_candidates.append((str(owner.get("node_id") or owner_id), confidence))
+        for test_path in list(evidence.get("likely_tests") or [])[:SYMBOL_CONTEXT_TEST_LIMIT]:
+            test_node = code_by_path.get(normalize_path_for_brief(str(test_path or "")))
+            if not test_node:
+                continue
+            add_item(
+                test_node,
+                confidence=max(0.2, confidence - 0.18),
+                reason=f"scope evidence likely test for `{owner.get('path') or owner.get('name')}`",
+                source="scope_evidence_likely_test",
+                signal_kind="test_proximity",
+                write_candidate=False,
+                extra_metadata={"scope_evidence_id": str(evidence.get("evidence_id") or "")},
+            )
+
+    has_test_candidate = any(str(code_by_id.get(node_id, {}).get("kind") or "") == "test_file" for node_id, _confidence in primary_candidates)
+    for source_node_id, confidence in primary_candidates:
+        source_node = code_by_id.get(source_node_id)
+        source_path = str((source_node or {}).get("path") or (source_node or {}).get("name") or "")
+        for adjacency in adjacency_neighbors.get(source_node_id, []):
+            adjacent_node_id = str(adjacency.get("node_id") or "")
+            adjacent = code_by_id.get(adjacent_node_id)
+            if adjacent:
+                extra_metadata = adjacency.get("metadata") if isinstance(adjacency.get("metadata"), Mapping) else {}
+                add_item(
+                    adjacent,
+                    confidence=_adjacency_context_confidence(confidence, adjacency),
+                    reason=_adjacency_context_reason(source_node or {"path": source_path}, adjacency),
+                    source=str(adjacency.get("source") or "import_adjacency"),
+                    signal_kind=str(adjacency.get("signal_kind") or "import_adjacency"),
+                    write_candidate=False,
+                    extra_metadata={
+                        **dict(extra_metadata),
+                        "reference": str(adjacency.get("reference") or ""),
+                        "resolution_kind": str(adjacency.get("resolution_kind") or ""),
+                        "dependency_mode": str(adjacency.get("dependency_mode") or "advisory"),
+                        "edge_source_path": str(adjacency.get("edge_source_path") or ""),
+                        "edge_target_path": str(adjacency.get("edge_target_path") or ""),
+                    },
+                )
+        for test_node_id in test_edges.get(source_node_id, []):
+            test_node = code_by_id.get(test_node_id)
+            if test_node:
+                add_item(
+                    test_node,
+                    confidence=max(0.2, confidence - 0.18),
+                    reason=f"test proximity for `{source_path}`",
+                    source="test_proximity",
+                    signal_kind="test_proximity",
+                    write_candidate=False,
+                )
+                has_test_candidate = True
+
+    for code_node in code_nodes:
+        command_confidence, command_reason = _impact_score_command(task_text, task_terms, code_node, has_test_candidate=has_test_candidate)
+        if command_confidence > 0:
+            add_item(
+                code_node,
+                confidence=command_confidence,
+                reason=command_reason,
+                source="command_relevance",
+                signal_kind="command_relevance",
+                write_candidate=False,
+            )
+
+    pack_limit = max(1, int(max_items or IMPACT_CONTEXT_PACK_LIMIT))
+    ordered_items = sorted(
+        item_by_node.values(),
+        key=lambda item: (-float(item.get("confidence") or 0), str(item.get("category") or ""), str(item.get("path") or item.get("name") or "")),
+    )
+    items = ordered_items[:pack_limit]
+    excluded_items = ordered_items[pack_limit:]
+    pack = {
+        "schema_version": 1,
+        "graph_namespace": IMPACT_GRAPH_NAMESPACE,
+        "impact_snapshot_id": f"execution-dag-scope:{snapshot_id}" if snapshot_id else "",
+        "selected_task": {
+            "node_id": str(dag_node.get("node_id") or ""),
+            "task_id": str(dag_node.get("task_id") or ""),
+            "action_type": str(dag_node.get("action_type") or ""),
+            "task_graph_node_id": str(task_node.get("node_id") or "") if isinstance(task_node, Mapping) else "",
+        },
+        "items": items,
+        "files": [item for item in items if item.get("category") == "files"],
+        "tests": [item for item in items if item.get("category") == "tests"],
+        "configs": [item for item in items if item.get("category") == "configs"],
+        "docs": [item for item in items if item.get("category") == "docs"],
+        "commands": [item for item in items if item.get("category") == "commands"],
+        "artifacts": [item for item in items if item.get("category") == "artifacts"],
+        "item_count": len(items),
+        "max_items": pack_limit,
+        "symbol_context": _symbol_aware_context_pack_conn(conn, included_items=items, excluded_items=excluded_items, max_items=pack_limit),
+        "stale_context_warning": "one or more graph nodes are stale" if any(item.get("is_stale") for item in items) else "",
+        "policy_notes": _context_pack_policy_note(items, 0),
+    }
+    return pack
+
+
+def _symbol_context_preview(context: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(context, Mapping):
+        return {}
+    limits = context.get("limits") if isinstance(context.get("limits"), Mapping) else {}
+    return {
+        "schema_version": int(context.get("schema_version") or 1),
+        "codebase_snapshot_id": str(context.get("codebase_snapshot_id") or ""),
+        "bounded": bool(context.get("bounded", True)),
+        "limits": dict(limits),
+        "direct_symbols": list(context.get("direct_symbols") or [])[:SYMBOL_CONTEXT_DIRECT_SYMBOL_LIMIT],
+        "owning_files": list(context.get("owning_files") or [])[:SYMBOL_CONTEXT_OWNING_FILE_LIMIT],
+        "likely_tests": list(context.get("likely_tests") or [])[:SYMBOL_CONTEXT_TEST_LIMIT],
+        "dependency_neighbors": list(context.get("dependency_neighbors") or [])[:SYMBOL_CONTEXT_NEIGHBOR_LIMIT],
+        "interface_edges": list(context.get("interface_edges") or [])[:SYMBOL_CONTEXT_INTERFACE_LIMIT],
+        "excluded_low_confidence_candidates": list(context.get("excluded_low_confidence_candidates") or [])[:SYMBOL_CONTEXT_EXCLUDED_LIMIT],
+        "confidence_reasons": list(context.get("confidence_reasons") or [])[:IMPACT_CONTEXT_PACK_LIMIT],
+    }
+
+
 def _parallel_context_pack_preview(pack: Mapping[str, Any]) -> dict[str, Any]:
     items = pack.get("items") if isinstance(pack.get("items"), list) else []
+    symbol_context = pack.get("symbol_context") if isinstance(pack.get("symbol_context"), Mapping) else {}
     return {
         "impact_snapshot_id": str(pack.get("impact_snapshot_id") or ""),
         "item_count": int(pack.get("item_count") or len(items)),
@@ -8971,18 +19396,181 @@ def _parallel_context_pack_preview(pack: Mapping[str, Any]) -> dict[str, Any]:
                 "name": str(item.get("name") or ""),
                 "confidence": float(item.get("confidence") or 0),
                 "reason": _brief_text(item.get("reason"), limit=140),
+                "source": str(item.get("source") or ""),
+                "signal_kind": str(item.get("signal_kind") or ""),
+                "write_candidate": bool(item.get("write_candidate")),
+                "scoping_only": bool(item.get("scoping_only")),
                 "is_stale": bool(item.get("is_stale")),
+                "symbol_resolution": str(item.get("symbol_resolution") or ""),
+                "symbol_match_kind": str(item.get("symbol_match_kind") or ""),
                 "raw_contents_included": False,
             }
             for item in items[:6]
             if isinstance(item, dict)
         ],
+        "symbol_context": _symbol_context_preview(symbol_context),
+    }
+
+
+def _scope_evidence_payload(
+    pack: Mapping[str, Any],
+    *,
+    reason_kind: str,
+    reason: str,
+    missing_confidence_signal: str,
+) -> dict[str, Any]:
+    items = [item for item in (pack.get("items") if isinstance(pack.get("items"), list) else []) if isinstance(item, Mapping)]
+    symbol_context = pack.get("symbol_context") if isinstance(pack.get("symbol_context"), Mapping) else {}
+
+    def compact_item(item: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "node_id": str(item.get("node_id") or ""),
+            "path": str(item.get("path") or ""),
+            "name": str(item.get("name") or ""),
+            "category": str(item.get("category") or ""),
+            "signal_kind": str(item.get("signal_kind") or item.get("source") or ""),
+            "source": str(item.get("source") or ""),
+            "confidence": round(float(item.get("confidence") or 0), 4),
+            "reason": _brief_text(item.get("reason") or "", limit=180),
+            "write_candidate": bool(item.get("write_candidate")),
+            "scoping_only": bool(item.get("scoping_only")),
+            "is_stale": bool(item.get("is_stale")),
+        }
+
+    ownership_evidence = [
+        compact_item(item)
+        for item in sorted(items, key=lambda value: (-float(value.get("confidence") or 0), str(value.get("path") or value.get("name") or "")))
+        if str(item.get("category") or "") in {"files", "tests", "configs", "docs", "commands"}
+    ][:IMPACT_CONTEXT_PACK_LIMIT]
+    likely_paths = [
+        compact_item(item)
+        for item in sorted(items, key=lambda value: (-float(value.get("confidence") or 0), str(value.get("path") or "")))
+        if str(item.get("category") or "") in {"files", "tests", "configs", "docs"} and str(item.get("path") or "")
+    ][:IMPACT_CONTEXT_PACK_LIMIT]
+
+    likely_symbols: list[dict[str, Any]] = []
+    for key in ("direct_symbols", "owning_files", "excluded_low_confidence_candidates"):
+        values = symbol_context.get(key) if isinstance(symbol_context.get(key), list) else []
+        for value in values:
+            if not isinstance(value, Mapping):
+                continue
+            likely_symbols.append(
+                {
+                    "symbol": str(value.get("qualified_name") or value.get("symbol_name") or value.get("name") or ""),
+                    "path": str(value.get("path") or value.get("owner_file_path") or ""),
+                    "signal_kind": str(value.get("signal_kind") or value.get("source") or key),
+                    "confidence": round(float(value.get("confidence") or 0), 4),
+                    "reason": _brief_text(value.get("reason") or value.get("exclusion_reason") or "", limit=180),
+                    "source_bucket": key,
+                }
+            )
+    validation_hints = [
+        {
+            "node_id": str(item.get("node_id") or ""),
+            "command": str(item.get("name") or item.get("path") or ""),
+            "confidence": round(float(item.get("confidence") or 0), 4),
+            "reason": _brief_text(item.get("reason") or "", limit=180),
+            "source": str(item.get("source") or ""),
+        }
+        for item in items
+        if str(item.get("category") or "") == "commands"
+    ][:4]
+    risk_notes = [
+        {
+            "kind": reason_kind,
+            "missing_confidence_signal": missing_confidence_signal,
+            "reason": _brief_text(reason, limit=220),
+        }
+    ]
+    stale_warning = str(pack.get("stale_context_warning") or "")
+    if stale_warning:
+        risk_notes.append({"kind": "stale_context", "reason": _brief_text(stale_warning, limit=220)})
+    if not likely_paths:
+        risk_notes.append(
+            {
+                "kind": "no_likely_paths",
+                "reason": "No likely path cleared the current scope context threshold; use read-only inspection to identify a narrow ownership surface.",
+            }
+        )
+    if not likely_symbols:
+        risk_notes.append(
+            {
+                "kind": "no_likely_symbols",
+                "reason": "No exact symbol owner is available yet; report candidate symbols with confidence instead of assuming write ownership.",
+            }
+        )
+    return {
+        "schema_version": 1,
+        "authority": "sqlite",
+        "source": "parallel_scope_evidence_fanout",
+        "reason_kind": reason_kind,
+        "missing_confidence_signal": missing_confidence_signal,
+        "ownership_evidence": ownership_evidence,
+        "likely_paths": likely_paths,
+        "likely_symbols": likely_symbols[:IMPACT_CONTEXT_PACK_LIMIT],
+        "validation_hints": validation_hints,
+        "risk_notes": risk_notes[:IMPACT_CONTEXT_PACK_LIMIT],
+    }
+
+
+def _compact_symbol_context_preview(context: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(context, Mapping):
+        return {}
+    fields = {
+        "direct_symbols": list(context.get("direct_symbols") or []),
+        "owning_files": list(context.get("owning_files") or []),
+        "likely_tests": list(context.get("likely_tests") or []),
+        "dependency_neighbors": list(context.get("dependency_neighbors") or []),
+        "interface_edges": list(context.get("interface_edges") or []),
+        "excluded_low_confidence_candidates": list(context.get("excluded_low_confidence_candidates") or []),
+        "confidence_reasons": list(context.get("confidence_reasons") or []),
+    }
+    return {
+        "schema_version": int(context.get("schema_version") or 1),
+        "codebase_snapshot_id": str(context.get("codebase_snapshot_id") or ""),
+        "bounded": True,
+        "compact": True,
+        "limits": {
+            "inline_items": CONTEXT_PACK_INLINE_ITEM_LIMIT,
+            "inline_symbols": CONTEXT_PACK_INLINE_SYMBOL_LIMIT,
+        },
+        "counts": {key: len(value) for key, value in fields.items()},
+        "direct_symbols": fields["direct_symbols"][:CONTEXT_PACK_INLINE_SYMBOL_LIMIT],
+        "owning_files": fields["owning_files"][:CONTEXT_PACK_INLINE_SYMBOL_LIMIT],
+        "likely_tests": fields["likely_tests"][:CONTEXT_PACK_INLINE_SYMBOL_LIMIT],
+        "dependency_neighbors": fields["dependency_neighbors"][:CONTEXT_PACK_INLINE_SYMBOL_LIMIT],
+        "interface_edges": fields["interface_edges"][:CONTEXT_PACK_INLINE_SYMBOL_LIMIT],
+        "excluded_low_confidence_candidates": [],
+        "excluded_low_confidence_count": len(fields["excluded_low_confidence_candidates"]),
+        "confidence_reasons": fields["confidence_reasons"][:CONTEXT_PACK_INLINE_SYMBOL_LIMIT],
+    }
+
+
+def _compact_context_pack_preview(preview: Mapping[str, Any], *, context_pack_id: str = "") -> dict[str, Any]:
+    if not isinstance(preview, Mapping):
+        return {}
+    items = [dict(item) for item in (preview.get("items") if isinstance(preview.get("items"), list) else []) if isinstance(item, Mapping)]
+    symbol_context = preview.get("symbol_context") if isinstance(preview.get("symbol_context"), Mapping) else {}
+    digest = sha256_text(stable_json(preview))[:24]
+    return {
+        "schema_version": 1,
+        "storage": "compact_context_pack_reference",
+        "deduplicated": True,
+        "context_pack_id": str(context_pack_id or preview.get("context_pack_id") or ""),
+        "context_pack_digest": digest,
+        "impact_snapshot_id": str(preview.get("impact_snapshot_id") or ""),
+        "item_count": int(preview.get("item_count") or len(items)),
+        "max_items": int(preview.get("max_items") or IMPACT_CONTEXT_PACK_LIMIT),
+        "inline_item_count": min(len(items), CONTEXT_PACK_INLINE_ITEM_LIMIT),
+        "stale_context_warning": str(preview.get("stale_context_warning") or ""),
+        "items": items[:CONTEXT_PACK_INLINE_ITEM_LIMIT],
+        "symbol_context": _compact_symbol_context_preview(symbol_context),
     }
 
 
 def _parallel_lease_summary(lease: Mapping[str, Any]) -> dict[str, Any]:
     conflicts = lease.get("conflicts") if isinstance(lease.get("conflicts"), list) else []
-    return {
+    summary = {
         "scope_kind": str(lease.get("scope_kind") or ""),
         "scope_node_id": str(lease.get("scope_node_id") or ""),
         "path": str(lease.get("path") or ""),
@@ -8994,6 +19582,26 @@ def _parallel_lease_summary(lease: Mapping[str, Any]) -> dict[str, Any]:
         "conflict_count": len(conflicts),
         "conflicts": conflicts[:3],
     }
+    for key in (
+        "symbol_node_id",
+        "symbol_name",
+        "qualified_name",
+        "symbol_kind",
+        "language",
+        "owner_file_path",
+        "symbol_lease_eligible",
+        "symbol_lease_fallback_reason",
+        "extractor_confidence",
+        "parser_confidence",
+        "module_node_id",
+        "module_name",
+        "package_name",
+        "owned_paths",
+        "ownership_kind",
+    ):
+        if key in lease:
+            summary[key] = lease.get(key)
+    return summary
 
 
 def _parallel_lease_matches_touches(lease: Mapping[str, Any], touches: list[dict[str, Any]]) -> bool:
@@ -9001,11 +19609,35 @@ def _parallel_lease_matches_touches(lease: Mapping[str, Any], touches: list[dict
     scope_node_id = str(lease.get("scope_node_id") or "")
     path = normalize_path_for_brief(str(lease.get("path") or ""))
     touch_node_ids = {str(item.get("node_id") or "") for item in touches}
+    touch_symbol_ids = {str(item.get("symbol_node_id") or "") for item in touches if str(item.get("symbol_node_id") or "")}
     touch_paths = [str(item.get("path") or "") for item in touches]
+    if scope_kind == "symbol":
+        return bool(scope_node_id and scope_node_id in touch_symbol_ids)
     if scope_kind == "file":
         return bool(scope_node_id and scope_node_id in touch_node_ids) or bool(path and path in touch_paths)
     if scope_kind == "directory":
         return bool(path and any(_path_under(touch_path, path) for touch_path in touch_paths))
+    if scope_kind == "tests":
+        return bool(
+            path
+            and any(
+                _path_under(str(touch.get("path") or ""), path)
+                for touch in touches
+                if str(touch.get("category") or "") == "tests"
+            )
+        )
+    if scope_kind == "docs":
+        return bool(
+            path
+            and any(
+                _path_under(str(touch.get("path") or ""), path)
+                for touch in touches
+                if str(touch.get("category") or "") == "docs"
+            )
+        )
+    if scope_kind == "package":
+        package_name = str(lease.get("package_name") or lease.get("name") or "")
+        return bool(package_name and any(str(touch.get("package_name") or "") == package_name for touch in touches))
     if scope_kind in {"module", "command"}:
         return True
     return False
@@ -9061,6 +19693,8 @@ def _parallel_touch_items(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
         confidence = float(item.get("confidence") or 0)
         if category not in {"files", "tests", "configs", "docs"} or not node_id or not path:
             continue
+        if not bool(item.get("write_candidate")):
+            continue
         if confidence < PARALLEL_WRITE_TOUCH_CONFIDENCE_THRESHOLD:
             continue
         touches.append(
@@ -9070,6 +19704,17 @@ def _parallel_touch_items(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "category": category,
                 "confidence": confidence,
                 "reason": _brief_text(item.get("reason") or "", limit=140),
+                "signal_kind": str(item.get("signal_kind") or ""),
+                "source": str(item.get("source") or ""),
+                "write_candidate": True,
+                "symbol_node_id": str(item.get("symbol_node_id") or ""),
+                "symbol_name": str(item.get("symbol_name") or ""),
+                "qualified_name": str(item.get("qualified_name") or ""),
+                "symbol_resolution": str(item.get("symbol_resolution") or ""),
+                "symbol_match_kind": str(item.get("symbol_match_kind") or ""),
+                "symbol_is_stale": bool(item.get("symbol_is_stale")),
+                "creation_path": bool(item.get("creation_path")),
+                "path_kind": str(item.get("path_kind") or ""),
             }
         )
     unique: dict[str, dict[str, Any]] = {}
@@ -9081,11 +19726,276 @@ def _parallel_touch_items(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
     return sorted(unique.values(), key=lambda item: (-float(item.get("confidence") or 0), str(item.get("path") or "")))[:12]
 
 
+def _parallel_scoping_items(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
+    items = pack.get("items") if isinstance(pack.get("items"), list) else []
+    scoped: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        category = str(item.get("category") or "")
+        confidence = float(item.get("confidence") or 0)
+        if category not in {"files", "tests", "configs", "docs", "commands"}:
+            continue
+        if confidence < PARALLEL_SCOPING_READ_CONFIDENCE_THRESHOLD:
+            continue
+        scoped.append(dict(item))
+    return sorted(scoped, key=lambda item: (-float(item.get("confidence") or 0), str(item.get("path") or item.get("name") or "")))[:12]
+
+
+def _parallel_required_leases_from_touches_conn(
+    conn: sqlite3.Connection,
+    touches: list[dict[str, Any]],
+    *,
+    task_id: str,
+    owner_role: str,
+) -> list[dict[str, Any]]:
+    leases: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+    used_touch_keys: set[str] = set()
+
+    def touch_key(touch: Mapping[str, Any]) -> str:
+        return str(touch.get("node_id") or touch.get("path") or stable_json(touch))
+
+    def append_lease(raw: Mapping[str, Any]) -> None:
+        scope_kind = str(raw.get("scope_kind") or "")
+        scope_node_id = str(raw.get("scope_node_id") or "")
+        if not scope_kind or not scope_node_id:
+            return
+        conflicts = list_conflicting_leases_conn(
+            conn,
+            scope_kind=scope_kind,
+            scope_node_id=scope_node_id,
+            task_id=task_id,
+            owner_role=owner_role,
+        )
+        leases.append(_parallel_lease_summary({**dict(raw), "conflicts": conflicts}))
+
+    for touch in touches:
+        if not (bool(touch.get("creation_path")) and str(touch.get("path_kind") or "") == "directory"):
+            continue
+        path = normalize_path_for_brief(str(touch.get("path") or ""))
+        if not path:
+            continue
+        append_lease(
+            {
+                "scope_kind": "directory",
+                "scope_node_id": str(touch.get("node_id") or _scope_evidence_path_scope_node_id(path)),
+                "path": path,
+                "name": path,
+                "confidence": float(touch.get("confidence") or 0),
+                "reason": touch.get("reason") or f"creation-path directory ownership for `{path}`",
+                "recommended": True,
+                "caution": False,
+                "ownership_kind": "creation_directory",
+                "owned_paths": [path],
+            }
+        )
+        used_touch_keys.add(touch_key(touch))
+
+    category_by_scope = {"tests": "tests", "docs": "docs"}
+    for category, scope_kind in category_by_scope.items():
+        category_touches = [
+            touch
+            for touch in touches
+            if isinstance(touch, Mapping)
+            and str(touch.get("category") or "") == category
+            and str(touch.get("node_id") or "")
+            and str(touch.get("path") or "")
+        ]
+        by_parent: dict[str, list[dict[str, Any]]] = {}
+        for touch in category_touches:
+            path = normalize_path_for_brief(str(touch.get("path") or ""))
+            parent = Path(path).parent.as_posix()
+            by_parent.setdefault(parent if parent != "." else ".", []).append(touch)
+        for parent, group in sorted(by_parent.items(), key=lambda pair: (pair[0], -len(pair[1]))):
+            if not group:
+                continue
+            if len(group) > 1:
+                directory_node = _directory_node_for_path_conn(conn, parent)
+                scope_node_id = str(directory_node.get("node_id") or group[0].get("node_id") or "")
+                lease_path = str(directory_node.get("path") or parent)
+                lease_name = f"{scope_kind}:{lease_path}"
+            else:
+                scope_node_id = str(group[0].get("node_id") or "")
+                lease_path = normalize_path_for_brief(str(group[0].get("path") or ""))
+                lease_name = lease_path
+            append_lease(
+                {
+                    "scope_kind": scope_kind,
+                    "scope_node_id": scope_node_id,
+                    "path": lease_path,
+                    "name": lease_name,
+                    "confidence": max(float(item.get("confidence") or 0) for item in group),
+                    "reason": f"{scope_kind}-only write ownership for {len(group)} file(s) under `{lease_path}`",
+                    "recommended": True,
+                    "caution": False,
+                    "ownership_kind": f"{scope_kind}_only",
+                    "owned_paths": [normalize_path_for_brief(str(item.get("path") or "")) for item in group],
+                }
+            )
+            used_touch_keys.update(touch_key(touch) for touch in group)
+
+    source_touches = [
+        touch
+        for touch in touches
+        if touch_key(touch) not in used_touch_keys
+        and str(touch.get("category") or "") in {"files", "configs"}
+        and str(touch.get("node_id") or "")
+        and str(touch.get("path") or "")
+    ]
+    by_package: dict[str, list[dict[str, Any]]] = {}
+    for touch in source_touches:
+        package_name = _package_name_for_path_conn(conn, str(touch.get("path") or ""))
+        if package_name:
+            touch["package_name"] = package_name
+            by_package.setdefault(package_name, []).append(touch)
+    for package_name, group in sorted(by_package.items(), key=lambda pair: pair[0]):
+        unique_paths = sorted({normalize_path_for_brief(str(item.get("path") or "")) for item in group if str(item.get("path") or "")})
+        if len(unique_paths) < 2:
+            continue
+        confidence = min(float(item.get("confidence") or 0) for item in group)
+        if confidence < PACKAGE_RESOURCE_LEASE_MIN_CONFIDENCE:
+            continue
+        owned_paths = _package_owned_paths_conn(conn, package_name)
+        append_lease(
+            {
+                "scope_kind": "package",
+                "scope_node_id": package_name,
+                "path": "",
+                "name": package_name,
+                "confidence": confidence,
+                "reason": f"high-confidence package ownership `{package_name}` across {len(unique_paths)} touched file(s)",
+                "recommended": True,
+                "caution": False,
+                "ownership_kind": "package",
+                "package_name": package_name,
+                "owned_paths": owned_paths or unique_paths,
+            }
+        )
+        used_touch_keys.update(touch_key(touch) for touch in group)
+
+    by_directory: dict[str, list[dict[str, Any]]] = {}
+    for touch in source_touches:
+        if touch_key(touch) in used_touch_keys:
+            continue
+        path = normalize_path_for_brief(str(touch.get("path") or ""))
+        parent = Path(path).parent.as_posix()
+        by_directory.setdefault(parent if parent != "." else ".", []).append(touch)
+    for directory, group in sorted(by_directory.items(), key=lambda pair: (-len(pair[1]), pair[0])):
+        unique_paths = sorted({normalize_path_for_brief(str(item.get("path") or "")) for item in group if str(item.get("path") or "")})
+        if len(unique_paths) < 3:
+            continue
+        directory_node = _directory_node_for_path_conn(conn, directory)
+        if not directory_node:
+            continue
+        append_lease(
+            {
+                "scope_kind": "directory",
+                "scope_node_id": str(directory_node.get("node_id") or ""),
+                "path": str(directory_node.get("path") or directory),
+                "name": str(directory_node.get("name") or directory),
+                "confidence": max(float(item.get("confidence") or 0) for item in group),
+                "reason": f"directory ownership for {len(unique_paths)} direct write path(s) under `{directory}`",
+                "recommended": True,
+                "caution": False,
+                "ownership_kind": "directory",
+                "owned_paths": unique_paths,
+            }
+        )
+        used_touch_keys.update(touch_key(touch) for touch in group)
+
+    for touch in touches:
+        if touch_key(touch) in used_touch_keys:
+            continue
+        node_id = str(touch.get("node_id") or "")
+        path = normalize_path_for_brief(str(touch.get("path") or ""))
+        if not node_id or not path:
+            continue
+        symbol_info = _symbol_resource_lease_info_conn(conn, touch) if str(touch.get("symbol_node_id") or "") else {}
+        if bool(symbol_info.get("eligible")):
+            lease_path = str(symbol_info.get("path") or path)
+            lease_name = str(symbol_info.get("name") or touch.get("qualified_name") or touch.get("symbol_name") or lease_path)
+            append_lease(
+                {
+                    "scope_kind": "symbol",
+                    "scope_node_id": str(symbol_info.get("scope_node_id") or ""),
+                    "path": lease_path,
+                    "name": lease_name,
+                    "confidence": float(touch.get("confidence") or 0),
+                    "reason": f"exact fresh symbol ownership `{lease_name}` in `{lease_path}`",
+                    "recommended": True,
+                    "caution": False,
+                    "ownership_kind": "symbol",
+                    "package_name": str(symbol_info.get("package_name") or ""),
+                    "module_name": str(symbol_info.get("module_name") or ""),
+                    "symbol_node_id": str(symbol_info.get("symbol_node_id") or ""),
+                    "symbol_name": str(symbol_info.get("symbol_name") or ""),
+                    "qualified_name": str(symbol_info.get("qualified_name") or ""),
+                    "symbol_kind": str(symbol_info.get("symbol_kind") or ""),
+                    "language": str(symbol_info.get("language") or ""),
+                    "owner_file_path": lease_path,
+                    "symbol_lease_eligible": True,
+                    "extractor_confidence": float(symbol_info.get("extractor_confidence") or 0),
+                    "parser_confidence": float(symbol_info.get("parser_confidence") or 0),
+                }
+            )
+            continue
+        module_info = _module_resource_lease_info_conn(conn, touch)
+        if bool(module_info.get("eligible")):
+            append_lease(
+                {
+                    "scope_kind": "module",
+                    "scope_node_id": str(module_info.get("scope_node_id") or ""),
+                    "path": str(module_info.get("path") or path),
+                    "name": str(module_info.get("name") or path),
+                    "confidence": float(touch.get("confidence") or 0),
+                    "reason": f"high-confidence module ownership `{module_info.get('name')}` for `{path}`",
+                    "recommended": True,
+                    "caution": False,
+                    "ownership_kind": "module",
+                    "module_node_id": str(module_info.get("module_node_id") or ""),
+                    "module_name": str(module_info.get("module_name") or ""),
+                    "package_name": str(module_info.get("package_name") or ""),
+                    "language": str(module_info.get("language") or ""),
+                    "owned_paths": list(module_info.get("owned_paths") or [path]),
+                    "parser_confidence": float(module_info.get("parser_confidence") or 0),
+                }
+            )
+            continue
+        fallback_reason = str(symbol_info.get("reason") or module_info.get("reason") or "") if symbol_info or module_info else ""
+        lease_reason = (
+            f"file-level fallback for ownership: {fallback_reason}"
+            if fallback_reason
+            else touch.get("reason") or "direct write DAG ownership"
+        )
+        append_lease(
+            {
+                "scope_kind": "file",
+                "scope_node_id": node_id,
+                "path": path,
+                "name": path,
+                "confidence": float(touch.get("confidence") or 0),
+                "reason": lease_reason,
+                "recommended": True,
+                "caution": False,
+                "ownership_kind": "file",
+                "symbol_node_id": str(touch.get("symbol_node_id") or ""),
+                "symbol_name": str(touch.get("symbol_name") or ""),
+                "qualified_name": str(touch.get("qualified_name") or ""),
+                "symbol_lease_eligible": False if fallback_reason else bool(touch.get("symbol_node_id")),
+                "symbol_lease_fallback_reason": _brief_text(fallback_reason, limit=180),
+            }
+        )
+    return leases
+
+
 def _parallel_candidate_id(candidate: Mapping[str, Any]) -> str:
     digest = sha256_text(
         stable_json(
             {
                 "task_id": candidate.get("task_id"),
+                "dag_node_id": candidate.get("dag_node_id"),
+                "action_type": candidate.get("action_type"),
                 "graph_task_node_id": candidate.get("graph_task_node_id"),
                 "owner_role": candidate.get("owner_role"),
                 "action_kind": candidate.get("action_kind"),
@@ -9099,9 +20009,19 @@ def _parallel_candidate_id(candidate: Mapping[str, Any]) -> str:
 
 
 def _parallel_blocked_candidate(candidate: Mapping[str, Any], *, reason_kind: str, reason: str) -> dict[str, Any]:
+    required_leases = [item for item in (candidate.get("required_leases") if isinstance(candidate.get("required_leases"), list) else []) if isinstance(item, Mapping)]
+    lease_conflicts = [
+        conflict
+        for lease in required_leases
+        for conflict in (lease.get("conflicts") if isinstance(lease.get("conflicts"), list) else [])
+        if isinstance(conflict, Mapping)
+    ]
     return {
         "candidate_id": str(candidate.get("candidate_id") or _parallel_candidate_id(candidate)),
         "task_id": str(candidate.get("task_id") or ""),
+        "dag_node_id": str(candidate.get("dag_node_id") or ""),
+        "action_type": str(candidate.get("action_type") or ""),
+        "canonical_action_type": str(candidate.get("canonical_action_type") or _execution_dag_canonical_action(candidate.get("action_type"))),
         "graph_task_node_id": str(candidate.get("graph_task_node_id") or ""),
         "owner_role": str(candidate.get("owner_role") or ""),
         "action_kind": str(candidate.get("action_kind") or ""),
@@ -9109,6 +20029,364 @@ def _parallel_blocked_candidate(candidate: Mapping[str, Any], *, reason_kind: st
         "reason_kind": reason_kind,
         "reason": _brief_text(reason, limit=220),
         "likely_touches": list(candidate.get("likely_touches") or [])[:6],
+        "required_leases": [dict(item) for item in required_leases[:6]],
+        "lease_conflicts": [dict(item) for item in lease_conflicts[:6]],
+        "confidence_signals": list(candidate.get("confidence_signals") or [])[:8],
+        "missing_confidence_signal": str(candidate.get("missing_confidence_signal") or ""),
+        "scope_fanout_outcome": dict(candidate.get("scope_fanout_outcome")) if isinstance(candidate.get("scope_fanout_outcome"), Mapping) else {},
+    }
+
+
+def _why_not_parallel_reason_kind(raw_reason_kind: str, candidate: Mapping[str, Any]) -> str:
+    raw = re.sub(r"[^a-z0-9]+", "_", str(raw_reason_kind or "").strip().lower()).strip("_")
+    confidence_signals = {
+        str(item).strip().lower()
+        for item in (candidate.get("confidence_signals") if isinstance(candidate.get("confidence_signals"), list) else [])
+        if str(item).strip()
+    }
+    reason_text = str(candidate.get("reason") or candidate.get("skipped_reason") or "").lower()
+    if "stale_symbol" in confidence_signals or raw == "stale_symbol":
+        return "stale_symbol"
+    if raw in {"active_lease_conflict", "lease_conflict", "resource_lease_conflict"}:
+        return "lease_conflict"
+    if raw in {"budget_blocked", "budget_disabled", "budget_exhausted", "read_only_scope_budget_blocked", "write_worker_budget_blocked"}:
+        return "budget_blocked"
+    if raw.endswith("_budget_blocked"):
+        return "budget_blocked"
+    if raw or not reason_text:
+        return raw or "unknown"
+    if "budget" in reason_text or "slot" in reason_text:
+        return "budget_blocked"
+    if "lease" in reason_text and ("conflict" in reason_text or "active" in reason_text):
+        return "lease_conflict"
+    if "stale" in reason_text and "symbol" in reason_text:
+        return "stale_symbol"
+    return "unknown"
+
+
+def _why_not_parallel_guidance(reason_kind: str) -> dict[str, str]:
+    guidance = WHY_NOT_PARALLEL_REASON_GUIDANCE.get(reason_kind)
+    if isinstance(guidance, Mapping):
+        return {
+            "label": str(guidance.get("label") or reason_kind.replace("_", " ").title()),
+            "next_action": str(guidance.get("next_action") or "Inspect the blocked candidate and refine its ownership evidence."),
+            "improvement_kind": str(guidance.get("improvement_kind") or reason_kind),
+        }
+    return {
+        "label": reason_kind.replace("_", " ").title() if reason_kind else "Unknown",
+        "next_action": "Inspect the blocked candidate and refine its ownership evidence.",
+        "improvement_kind": reason_kind or "inspect_blocker",
+    }
+
+
+def _why_not_parallel_record(candidate: Mapping[str, Any], *, raw_reason_kind: str = "", reason: str = "") -> dict[str, Any]:
+    kind = _why_not_parallel_reason_kind(raw_reason_kind or str(candidate.get("reason_kind") or ""), candidate)
+    confidence_signals = [
+        str(item)
+        for item in (candidate.get("confidence_signals") if isinstance(candidate.get("confidence_signals"), list) else [])
+        if str(item)
+    ][:8]
+    likely_touches = [
+        dict(item)
+        for item in (candidate.get("likely_touches") if isinstance(candidate.get("likely_touches"), list) else [])
+        if isinstance(item, Mapping)
+    ][:6]
+    record_id = str(
+        candidate.get("candidate_id")
+        or candidate.get("execution_group_id")
+        or candidate.get("task_id")
+        or candidate.get("dag_node_id")
+        or candidate.get("graph_task_node_id")
+        or ""
+    )
+    if not record_id:
+        record_id = f"why-not-parallel:{sha256_text(stable_json(dict(candidate)))[:24]}"
+    return {
+        "candidate_id": record_id,
+        "task_id": str(candidate.get("task_id") or candidate.get("public_task_id") or ""),
+        "dag_node_id": str(candidate.get("dag_node_id") or candidate.get("graph_task_node_id") or ""),
+        "execution_group_id": str(candidate.get("execution_group_id") or ""),
+        "owner_role": str(candidate.get("owner_role") or candidate.get("role") or ""),
+        "action_kind": str(candidate.get("action_kind") or ""),
+        "execution_mode": str(candidate.get("execution_mode") or ""),
+        "reason_kind": kind,
+        "raw_reason_kind": str(raw_reason_kind or candidate.get("reason_kind") or ""),
+        "reason": _brief_text(reason or candidate.get("reason") or candidate.get("skipped_reason") or "", limit=220),
+        "likely_touches": likely_touches,
+        "confidence_signals": confidence_signals,
+        "missing_confidence_signal": str(candidate.get("missing_confidence_signal") or ""),
+        "required_lease_count": len(candidate.get("required_leases") if isinstance(candidate.get("required_leases"), list) else []),
+        "lease_conflict_count": len(candidate.get("lease_conflicts") if isinstance(candidate.get("lease_conflicts"), list) else []),
+    }
+
+
+def _why_not_parallel_add_record(records: list[dict[str, Any]], seen: set[tuple[str, str, str]], record: dict[str, Any]) -> None:
+    key = (
+        str(record.get("candidate_id") or ""),
+        str(record.get("reason_kind") or ""),
+        str(record.get("reason") or ""),
+    )
+    if key in seen:
+        return
+    seen.add(key)
+    records.append(record)
+
+
+def _budget_constraints_as_parallel_records(
+    budget_exhaustion_reasons: list[Mapping[str, Any]],
+    *,
+    include_constraints: bool,
+    relevant_scopes: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    if not include_constraints:
+        return []
+    records: list[dict[str, Any]] = []
+    for reason in budget_exhaustion_reasons:
+        if not isinstance(reason, Mapping):
+            continue
+        reason_kind = str(reason.get("reason_kind") or "")
+        if _why_not_parallel_reason_kind(reason_kind, reason) != "budget_blocked":
+            continue
+        scope = str(reason.get("scope") or "parallel")
+        if relevant_scopes is not None and scope not in relevant_scopes:
+            continue
+        records.append(
+            _why_not_parallel_record(
+                {
+                    "candidate_id": f"budget:{scope}:{reason_kind or 'blocked'}",
+                    "task_id": "",
+                    "action_kind": f"{scope}_budget",
+                    "reason_kind": reason_kind,
+                    "reason": reason.get("reason"),
+                },
+                raw_reason_kind=reason_kind,
+                reason=str(reason.get("reason") or f"{scope} budget blocks parallel work"),
+            )
+        )
+    return records
+
+
+def _why_not_parallel_budget_scopes_for_candidate(candidate: Mapping[str, Any]) -> set[str]:
+    action_kind = str(candidate.get("action_kind") or "").lower()
+    execution_mode = str(candidate.get("execution_mode") or "").lower()
+    scopes: set[str] = set()
+    if action_kind.startswith("launch_") or execution_mode:
+        scopes.add("global")
+    if execution_mode == "read_only" or action_kind in {"launch_scope_group", "launch_review_group"} or "scope" in action_kind or "review" in action_kind:
+        scopes.add("read_only_workers")
+    if execution_mode == "write_workers" or action_kind == "launch_write_group" or "build" in action_kind or "write" in action_kind:
+        scopes.add("write_workers")
+    if execution_mode == "validation" or action_kind == "launch_validation_group" or "validat" in action_kind or "test" in action_kind:
+        scopes.add("validation")
+    return scopes
+
+
+def _skipped_scheduler_candidate_as_parallel_records(candidate: Mapping[str, Any]) -> list[dict[str, Any]]:
+    action_kind = str(candidate.get("action_kind") or "")
+    if not action_kind.startswith("launch_"):
+        return []
+    records: list[dict[str, Any]] = []
+    blockers = candidate.get("blockers") if isinstance(candidate.get("blockers"), list) else []
+    for blocker in blockers:
+        if not isinstance(blocker, Mapping):
+            continue
+        reason_kind = str(blocker.get("reason_kind") or "")
+        normalized = _why_not_parallel_reason_kind(reason_kind, {**dict(candidate), **dict(blocker)})
+        if normalized not in {"budget_blocked", "lease_conflict"}:
+            continue
+        records.append(
+            _why_not_parallel_record(
+                {**dict(candidate), **dict(blocker), "reason": blocker.get("reason") or candidate.get("skipped_reason")},
+                raw_reason_kind=reason_kind,
+                reason=str(blocker.get("reason") or candidate.get("skipped_reason") or ""),
+            )
+        )
+    if records:
+        return records
+    skipped_reason = str(candidate.get("skipped_reason") or "")
+    if skipped_reason:
+        kind = _why_not_parallel_reason_kind("", {"reason": skipped_reason})
+        if kind in {"budget_blocked", "lease_conflict"}:
+            records.append(_why_not_parallel_record(candidate, raw_reason_kind=kind, reason=skipped_reason))
+    return records
+
+
+def why_not_parallel_read_model(
+    blocked_parallel_candidates: list[Mapping[str, Any]] | None = None,
+    *,
+    parallelization_summary: Mapping[str, Any] | None = None,
+    proposed_execution_groups: list[Mapping[str, Any]] | None = None,
+    skipped_scheduler_candidates: list[Mapping[str, Any]] | None = None,
+    budget_exhaustion_reasons: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Aggregate why ready work stayed out of a parallel execution wave."""
+    blocked_candidates = [item for item in (blocked_parallel_candidates or []) if isinstance(item, Mapping)]
+    proposed_groups = [item for item in (proposed_execution_groups or []) if isinstance(item, Mapping)]
+    skipped_candidates = [item for item in (skipped_scheduler_candidates or []) if isinstance(item, Mapping)]
+    budget_reasons = [item for item in (budget_exhaustion_reasons or []) if isinstance(item, Mapping)]
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for candidate in blocked_candidates:
+        _why_not_parallel_add_record(records, seen, _why_not_parallel_record(candidate))
+    for candidate in skipped_candidates:
+        for record in _skipped_scheduler_candidate_as_parallel_records(candidate):
+            _why_not_parallel_add_record(records, seen, record)
+    include_budget_constraints = bool(records or proposed_groups or skipped_candidates)
+    relevant_budget_scopes: set[str] = set()
+    for record in records:
+        relevant_budget_scopes.update(_why_not_parallel_budget_scopes_for_candidate(record))
+    for candidate in skipped_candidates:
+        relevant_budget_scopes.update(_why_not_parallel_budget_scopes_for_candidate(candidate))
+    for group in proposed_groups:
+        payload = group.get("payload") if isinstance(group.get("payload"), Mapping) else {}
+        relevant_budget_scopes.update(
+            _why_not_parallel_budget_scopes_for_candidate(
+                {
+                    "action_kind": str(group.get("action_kind") or payload.get("action_kind") or ""),
+                    "execution_mode": str(payload.get("execution_mode") or group.get("mode") or ""),
+                }
+            )
+        )
+    for record in _budget_constraints_as_parallel_records(
+        budget_reasons,
+        include_constraints=include_budget_constraints,
+        relevant_scopes=relevant_budget_scopes,
+    ):
+        _why_not_parallel_add_record(records, seen, record)
+
+    order_index = {kind: index for index, kind in enumerate(WHY_NOT_PARALLEL_REASON_ORDER)}
+    grouped: dict[str, dict[str, Any]] = {}
+    for record in records:
+        reason_kind = str(record.get("reason_kind") or "unknown")
+        guidance = _why_not_parallel_guidance(reason_kind)
+        group = grouped.setdefault(
+            reason_kind,
+            {
+                "reason_kind": reason_kind,
+                "label": guidance["label"],
+                "count": 0,
+                "candidate_count": 0,
+                "next_action": guidance["next_action"],
+                "improvement_kind": guidance["improvement_kind"],
+                "task_ids": [],
+                "dag_node_ids": [],
+                "execution_group_ids": [],
+                "action_kinds": [],
+                "owner_roles": [],
+                "raw_reason_kinds": [],
+                "confidence_signals": [],
+                "missing_confidence_signals": [],
+                "examples": [],
+            },
+        )
+        group["count"] = int(group["count"]) + 1
+        group["candidate_count"] = int(group["candidate_count"]) + 1
+        for key, value in (
+            ("task_ids", record.get("task_id")),
+            ("dag_node_ids", record.get("dag_node_id")),
+            ("execution_group_ids", record.get("execution_group_id")),
+            ("action_kinds", record.get("action_kind")),
+            ("owner_roles", record.get("owner_role")),
+            ("raw_reason_kinds", record.get("raw_reason_kind")),
+            ("missing_confidence_signals", record.get("missing_confidence_signal")),
+        ):
+            values = group[key]
+            if isinstance(values, list) and value and value not in values:
+                values.append(value)
+        signals = group["confidence_signals"]
+        if isinstance(signals, list):
+            for signal in record.get("confidence_signals") if isinstance(record.get("confidence_signals"), list) else []:
+                if signal and signal not in signals:
+                    signals.append(signal)
+        examples = group["examples"]
+        if isinstance(examples, list) and len(examples) < WHY_NOT_PARALLEL_EXAMPLE_LIMIT:
+            examples.append(
+                {
+                    "candidate_id": record.get("candidate_id"),
+                    "task_id": record.get("task_id"),
+                    "dag_node_id": record.get("dag_node_id"),
+                    "execution_group_id": record.get("execution_group_id"),
+                    "owner_role": record.get("owner_role"),
+                    "action_kind": record.get("action_kind"),
+                    "raw_reason_kind": record.get("raw_reason_kind"),
+                    "reason": record.get("reason"),
+                    "likely_touch_paths": [
+                        str(item.get("path") or "")
+                        for item in (record.get("likely_touches") if isinstance(record.get("likely_touches"), list) else [])
+                        if isinstance(item, Mapping) and str(item.get("path") or "")
+                    ][:4],
+                }
+            )
+    reason_groups = sorted(
+        grouped.values(),
+        key=lambda item: (
+            -int(item.get("count") or 0),
+            order_index.get(str(item.get("reason_kind") or ""), 999),
+            str(item.get("reason_kind") or ""),
+        ),
+    )
+    for group in reason_groups:
+        for key in (
+            "task_ids",
+            "dag_node_ids",
+            "execution_group_ids",
+            "action_kinds",
+            "owner_roles",
+            "raw_reason_kinds",
+            "confidence_signals",
+            "missing_confidence_signals",
+        ):
+            values = group.get(key) if isinstance(group.get(key), list) else []
+            group[key] = list(values)[:BRIEF_ITEM_LIMIT]
+    reason_counts = {str(group.get("reason_kind") or ""): int(group.get("count") or 0) for group in reason_groups}
+    next_improvements = [
+        {
+            "reason_kind": group.get("reason_kind"),
+            "label": group.get("label"),
+            "count": group.get("count"),
+            "next_action": group.get("next_action"),
+            "improvement_kind": group.get("improvement_kind"),
+        }
+        for group in reason_groups[:BRIEF_ITEM_LIMIT]
+    ]
+    top = reason_groups[0] if reason_groups else {}
+    raw_summary = dict(parallelization_summary or {})
+    if records:
+        summary = f"{len(records)} blocked parallel candidate(s); top reason: {top.get('label') or top.get('reason_kind')}."
+        status = "blocked"
+    elif proposed_groups:
+        summary = "Parallel dry run has proposed group(s) and no blocked candidate reason groups."
+        status = "clear"
+    else:
+        summary = "No blocked parallel candidates are visible in the current dry run."
+        status = "clear"
+    return {
+        "schema_version": 1,
+        "authority": "sqlite_runtime_read_model",
+        "title": "Why Not Parallel?",
+        "status": status,
+        "summary": summary,
+        "blocked_candidate_count": len(records),
+        "raw_blocked_candidate_count": len(blocked_candidates),
+        "proposed_group_count": len(proposed_groups),
+        "scheduler_skipped_candidate_count": len(skipped_candidates),
+        "reason_counts": reason_counts,
+        "top_reason_kind": str(top.get("reason_kind") or ""),
+        "top_next_action": str(top.get("next_action") or ""),
+        "reason_groups": reason_groups,
+        "next_improvements": next_improvements,
+        "parallelization": {
+            "mode": str(raw_summary.get("mode") or ""),
+            "planner_source": str(raw_summary.get("planner_source") or ""),
+            "scheduler_basis": str(raw_summary.get("scheduler_basis") or ""),
+            "group_count": int(raw_summary.get("group_count") or len(proposed_groups)),
+            "raw_blocked_candidate_count": int(raw_summary.get("blocked_candidate_count") or len(blocked_candidates)),
+        },
+        "policy": {
+            "worker_text_authorizes_writes": False,
+            "normalized_evidence_required": True,
+            "write_leases_remain_required": True,
+        },
     }
 
 
@@ -9156,6 +20434,14 @@ def _parallel_candidate_for_task_conn(
     )
     context_pack_id = f"context-pack:{pack.get('impact_snapshot_id') or 'none'}:{task_node_id or task_id}"
     touches = _parallel_touch_items(pack)
+    pack_items = pack.get("items") if isinstance(pack.get("items"), list) else []
+    confidence_signals = sorted(
+        {
+            str(item.get("signal_kind") or item.get("source") or "")
+            for item in pack_items
+            if isinstance(item, Mapping) and str(item.get("signal_kind") or item.get("source") or "")
+        }
+    )
     required_leases: list[dict[str, Any]] = []
     if execution_mode != "read_only":
         suggested_leases = [
@@ -9179,15 +20465,57 @@ def _parallel_candidate_for_task_conn(
         "context_pack_preview": _parallel_context_pack_preview(pack),
         "likely_touches": touches,
         "required_leases": required_leases,
+        "confidence_signals": confidence_signals,
+        "missing_confidence_signal": "",
         "validation_commands": [
             dict(item)
             for item in (_parallel_context_pack_preview(pack).get("items") or [])
             if isinstance(item, dict) and str(item.get("category") or "") == "commands"
         ][:4],
     }
+    scope_fanout_outcome = metadata.get("scope_fanout_outcome") if isinstance(metadata.get("scope_fanout_outcome"), Mapping) else {}
+    if scope_fanout_outcome:
+        candidate["scope_fanout_outcome"] = dict(scope_fanout_outcome)
     candidate["candidate_id"] = _parallel_candidate_id(candidate)
 
     if execution_mode == "write_workers" and not touches:
+        if str(scope_fanout_outcome.get("status") or "") == "exhausted":
+            candidate["missing_confidence_signal"] = "promotable_scope_evidence"
+            return None, _parallel_blocked_candidate(
+                candidate,
+                reason_kind="scope_fanout_exhausted",
+                reason="bounded read-only scope fanout completed without promotable ownership evidence; serialized builder fallback is safest",
+            )
+        advisory_signals = set(confidence_signals)
+        if advisory_signals.intersection({"keyword_only", "keyword_advisory"}):
+            candidate["missing_confidence_signal"] = "direct_path_or_exact_symbol"
+            return None, _parallel_blocked_candidate(
+                candidate,
+                reason_kind="missing_direct_write_signal",
+                reason="write task only has keyword-only advisory impact; add a direct file/path mention, authored path metadata, or an exact symbol owner match",
+            )
+        if advisory_signals.intersection({"import_adjacency", "test_proximity", "semantic_reference", "ambiguous_semantic_reference", "interface_bridge"}):
+            candidate["missing_confidence_signal"] = "direct_path_or_exact_symbol"
+            return None, _parallel_blocked_candidate(
+                candidate,
+                reason_kind="missing_direct_write_signal",
+                reason="write task only has reduced-confidence adjacency impact; direct path or exact symbol owner signal is required for write parallelization",
+            )
+        if advisory_signals.intersection({"inferred_symbol", "ambiguous_symbol", "stale_symbol", "unresolved_symbol"}):
+            candidate["missing_confidence_signal"] = "direct_path_or_exact_symbol"
+            return None, _parallel_blocked_candidate(
+                candidate,
+                reason_kind="missing_direct_write_signal",
+                reason="write task has only inferred, ambiguous, unresolved, or stale symbol impact; an exact non-stale symbol owner or direct path is required",
+            )
+        if pack_items:
+            candidate["missing_confidence_signal"] = "direct_write_confidence"
+            return None, _parallel_blocked_candidate(
+                candidate,
+                reason_kind="insufficient_write_confidence",
+                reason="write task has context, but no direct write candidate above the confidence threshold",
+            )
+        candidate["missing_confidence_signal"] = "impact_surface"
         return None, _parallel_blocked_candidate(
             candidate,
             reason_kind="unknown_impact_write",
@@ -9208,12 +20536,220 @@ def _parallel_candidate_for_task_conn(
     return candidate, None
 
 
+def _parallel_candidate_for_dag_node_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    dag_node: Mapping[str, Any],
+    *,
+    task_node: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    task_id = str(dag_node.get("task_id") or "").strip()
+    dag_node_id = str(dag_node.get("node_id") or "")
+    action_type = str(dag_node.get("action_type") or "").strip().lower()
+    action_capability = _execution_dag_action_capability(action_type)
+    canonical_action_type = str(action_capability.get("canonical_action_type") or action_type)
+    if task_node is None:
+        task_node = _latest_task_graph_node_by_public_id_conn(conn, task_id)
+    task_kind = str(task_node.get("kind") or "ticket") if isinstance(task_node, Mapping) else "ticket"
+    metadata = _parallel_dag_metadata(dag_node, task_node)
+    owner_role, action_kind, execution_mode = _parallel_dag_action(dag_node, metadata, kind=task_kind)
+    base_candidate = {
+        "task_id": task_id,
+        "dag_node_id": dag_node_id,
+        "action_type": action_type,
+        "canonical_action_type": canonical_action_type,
+        "action_capability": action_capability,
+        "graph_task_node_id": dag_node_id,
+        "task_graph_node_id": str(task_node.get("node_id") or "") if isinstance(task_node, Mapping) else "",
+        "kind": task_kind,
+        "summary": _brief_text(metadata.get("summary") or metadata.get("title") or metadata.get("reason") or "", limit=160),
+        "owner_role": owner_role,
+        "action_kind": action_kind,
+        "execution_mode": execution_mode,
+        "likely_touches": [],
+        "required_leases": [],
+        "context_pack_id": "",
+        "confidence_signals": [],
+        "missing_confidence_signal": "",
+    }
+    reason_kind, skip_reason = _parallel_dag_non_parallel_reason(dag_node)
+    if reason_kind in {"compatibility_conveyor_projection", "non_executable_dag_root"}:
+        return None, None
+    if reason_kind:
+        return None, _parallel_blocked_candidate(base_candidate, reason_kind=reason_kind, reason=skip_reason)
+    if execution_mode == "mixed" and (owner_role == "integrator" or canonical_action_type == "integrate" or "integrat" in action_kind.lower()):
+        return None, _parallel_blocked_candidate(
+            base_candidate,
+            reason_kind="integration_serialized",
+            reason="integration work stays serialized through the existing integrator path",
+        )
+    if _parallel_task_has_pending_approval({"metadata": metadata}):
+        return None, _parallel_blocked_candidate(
+            base_candidate,
+            reason_kind="pending_approval",
+            reason="task has a pending human approval requirement",
+        )
+
+    pack = _parallel_context_pack_for_dag_node_conn(
+        conn,
+        target,
+        dag_node,
+        task_node=task_node,
+        metadata=metadata,
+        max_items=IMPACT_CONTEXT_PACK_LIMIT,
+    )
+    context_pack_id = f"context-pack:execution-dag:{pack.get('impact_snapshot_id') or 'none'}:{dag_node_id or task_id}"
+    touches = _parallel_touch_items(pack)
+    pack_items = pack.get("items") if isinstance(pack.get("items"), list) else []
+    confidence_signals = sorted(
+        {
+            str(item.get("signal_kind") or item.get("source") or "")
+            for item in pack_items
+            if isinstance(item, Mapping) and str(item.get("signal_kind") or item.get("source") or "")
+        }
+    )
+    required_leases = []
+    if execution_mode == "write_workers":
+        required_leases = _parallel_required_leases_from_touches_conn(conn, touches, task_id=task_id, owner_role=owner_role)
+    preview = _parallel_context_pack_preview(pack)
+    candidate = {
+        **base_candidate,
+        "candidate_id": "",
+        "context_pack_id": context_pack_id,
+        "context_pack_preview": preview,
+        "likely_touches": touches,
+        "required_leases": required_leases,
+        "confidence_signals": confidence_signals,
+        "validation_commands": [
+            dict(item)
+            for item in (preview.get("items") or [])
+            if isinstance(item, dict) and str(item.get("category") or "") == "commands"
+        ][:4],
+    }
+    scope_fanout_outcome = metadata.get("scope_fanout_outcome") if isinstance(metadata.get("scope_fanout_outcome"), Mapping) else {}
+    if scope_fanout_outcome:
+        candidate["scope_fanout_outcome"] = dict(scope_fanout_outcome)
+    candidate["candidate_id"] = _parallel_candidate_id(candidate)
+
+    if execution_mode == "read_only" and not _parallel_scoping_items(pack):
+        if canonical_action_type == "scope":
+            reason_kind = "insufficient_scoping_confidence" if pack_items else "unknown_scoping_context"
+            reason = (
+                "scope DAG node has context below the read-only confidence threshold; launch bounded read-only scope evidence fanout before serial write fallback"
+                if pack_items
+                else "scope DAG node has no context above the read-only threshold; launch bounded read-only scope evidence fanout before serial write fallback"
+            )
+            candidate["missing_confidence_signal"] = "scoping_read_confidence" if pack_items else "scope_context"
+            candidate["scope_fanout_reason_kind"] = reason_kind
+            candidate["scope_evidence_required"] = True
+            candidate["scope_evidence"] = _scope_evidence_payload(
+                pack,
+                reason_kind=reason_kind,
+                reason=reason,
+                missing_confidence_signal=str(candidate.get("missing_confidence_signal") or ""),
+            )
+            candidate["required_leases"] = []
+            return candidate, None
+        candidate["missing_confidence_signal"] = "scoping_read_confidence"
+        if pack_items:
+            return None, _parallel_blocked_candidate(
+                candidate,
+                reason_kind="insufficient_scoping_confidence",
+                reason="read-only DAG node has context, but nothing above the scoping/read-only confidence threshold",
+            )
+        return None, _parallel_blocked_candidate(
+            candidate,
+            reason_kind="unknown_scoping_context",
+            reason="read-only DAG node has no context above the scoping/read-only confidence threshold",
+        )
+
+    if execution_mode == "write_workers" and not touches:
+        if str(scope_fanout_outcome.get("status") or "") == "exhausted":
+            candidate["missing_confidence_signal"] = "promotable_scope_evidence"
+            return None, _parallel_blocked_candidate(
+                candidate,
+                reason_kind="scope_fanout_exhausted",
+                reason="bounded read-only scope fanout completed without promotable ownership evidence; serialized builder fallback is safest",
+            )
+        advisory_signals = set(confidence_signals)
+        if advisory_signals.intersection({"keyword_only", "keyword_advisory"}):
+            candidate["missing_confidence_signal"] = "direct_path_or_exact_symbol"
+            return None, _parallel_blocked_candidate(
+                candidate,
+                reason_kind="missing_direct_write_signal",
+                reason="write DAG node only has keyword-only advisory impact; add a direct file/path mention, authored path metadata, or an exact symbol owner match",
+            )
+        if advisory_signals.intersection({"import_adjacency", "test_proximity", "semantic_reference", "ambiguous_semantic_reference", "interface_bridge"}):
+            candidate["missing_confidence_signal"] = "direct_path_or_exact_symbol"
+            return None, _parallel_blocked_candidate(
+                candidate,
+                reason_kind="missing_direct_write_signal",
+                reason="write DAG node only has reduced-confidence adjacency impact; direct path or exact symbol owner signal is required for write parallelization",
+            )
+        if advisory_signals.intersection({"inferred_symbol", "ambiguous_symbol", "stale_symbol", "unresolved_symbol"}):
+            candidate["missing_confidence_signal"] = "direct_path_or_exact_symbol"
+            return None, _parallel_blocked_candidate(
+                candidate,
+                reason_kind="missing_direct_write_signal",
+                reason="write DAG node has only inferred, ambiguous, unresolved, or stale symbol impact; an exact non-stale symbol owner or direct path is required",
+            )
+        if pack_items:
+            candidate["missing_confidence_signal"] = "direct_write_confidence"
+            return None, _parallel_blocked_candidate(
+                candidate,
+                reason_kind="insufficient_write_confidence",
+                reason="write DAG node has context, but no direct write candidate above the confidence threshold",
+            )
+        candidate["missing_confidence_signal"] = "impact_surface"
+        return None, _parallel_blocked_candidate(
+            candidate,
+            reason_kind="unknown_impact_write",
+            reason="write DAG node has no confident likely_touches surface",
+        )
+
+    lease_conflicts = [
+        conflict
+        for lease in required_leases
+        for conflict in (lease.get("conflicts") if isinstance(lease.get("conflicts"), list) else [])
+        if isinstance(conflict, Mapping)
+    ]
+    if lease_conflicts:
+        return None, _parallel_blocked_candidate(
+            candidate,
+            reason_kind="active_lease_conflict",
+            reason=f"required lease conflicts with {len(lease_conflicts)} active lease(s)",
+        )
+    return candidate, None
+
+
 def _parallel_write_like(candidate: Mapping[str, Any]) -> bool:
     return str(candidate.get("execution_mode") or "") == "write_workers"
 
 
+def _parallel_lease_conflict_reason(first: Mapping[str, Any], second: Mapping[str, Any], reason: str) -> str:
+    first_fallback = str(first.get("symbol_lease_fallback_reason") or "").strip()
+    second_fallback = str(second.get("symbol_lease_fallback_reason") or "").strip()
+    first_label = str(first.get("qualified_name") or first.get("name") or first.get("path") or first.get("scope_node_id") or "")
+    second_label = str(second.get("qualified_name") or second.get("name") or second.get("path") or second.get("scope_node_id") or "")
+    if first_fallback or second_fallback:
+        detail = first_fallback or second_fallback
+        return f"write lease overlap at `{first.get('path') or second.get('path') or first_label or second_label}`; symbol-level lease unavailable: {detail}"
+    if str(first.get("scope_kind") or "") == "symbol" or str(second.get("scope_kind") or "") == "symbol":
+        return f"symbol ownership overlaps: `{first_label}` conflicts with `{second_label}` ({reason})"
+    return f"write lease overlap: {reason}"
+
+
 def _parallel_candidates_conflict(first: Mapping[str, Any], second: Mapping[str, Any]) -> tuple[bool, str]:
     if not (_parallel_write_like(first) and _parallel_write_like(second)):
+        return False, ""
+    first_leases = [item for item in (first.get("required_leases") if isinstance(first.get("required_leases"), list) else []) if isinstance(item, Mapping)]
+    second_leases = [item for item in (second.get("required_leases") if isinstance(second.get("required_leases"), list) else []) if isinstance(item, Mapping)]
+    if first_leases and second_leases:
+        for first_lease in first_leases:
+            for second_lease in second_leases:
+                overlaps, reason = _lease_scopes_overlap(first_lease, second_lease)
+                if overlaps:
+                    return True, _parallel_lease_conflict_reason(first_lease, second_lease, reason)
         return False, ""
     first_touches = first.get("likely_touches") if isinstance(first.get("likely_touches"), list) else []
     second_touches = second.get("likely_touches") if isinstance(second.get("likely_touches"), list) else []
@@ -9277,8 +20813,17 @@ def _build_parallel_groups(
     impact_snapshot_id: str,
     generated_at: str,
     selected_by: str,
+    planner_source: str = "execution_dag",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    remaining = sorted(candidates, key=lambda item: (str(item.get("execution_mode") or ""), str(item.get("task_id") or "")))
+    mode_priority = {"write_workers": 0, "validation": 1, "read_only": 2, "mixed": 3}
+    remaining = sorted(
+        candidates,
+        key=lambda item: (
+            mode_priority.get(str(item.get("execution_mode") or ""), 9),
+            str(item.get("task_id") or ""),
+            str(item.get("dag_node_id") or item.get("graph_task_node_id") or ""),
+        ),
+    )
     groups: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
     while remaining and len(groups) < PARALLEL_DRY_RUN_GROUP_LIMIT:
@@ -9287,6 +20832,9 @@ def _build_parallel_groups(
         conflict_reasons: dict[str, str] = {}
         for candidate in remaining:
             if len(group_items) >= PARALLEL_DRY_RUN_GROUP_ITEM_LIMIT:
+                next_remaining.append(candidate)
+                continue
+            if group_items and str(candidate.get("execution_mode") or "") != str(group_items[0].get("execution_mode") or ""):
                 next_remaining.append(candidate)
                 continue
             conflict_reason = ""
@@ -9300,7 +20848,7 @@ def _build_parallel_groups(
                 next_remaining.append(candidate)
             else:
                 group_items.append(candidate)
-        if len(group_items) < 2:
+        if len(group_items) < 2 and next_remaining and conflict_reasons:
             for candidate in group_items:
                 blocked.append(
                     _parallel_blocked_candidate(
@@ -9320,6 +20868,7 @@ def _build_parallel_groups(
                 )
             break
         execution_mode = _parallel_group_mode(group_items)
+        wave_index = len(groups) + 1
         mode = "dry_run"
         group_id = _execution_group_id(mode, group_items, task_snapshot_id=task_snapshot_id, impact_snapshot_id=impact_snapshot_id)
         item_payloads: list[dict[str, Any]] = []
@@ -9337,18 +20886,33 @@ def _build_parallel_groups(
                 "execution_group_id": group_id,
                 "task_id": str(candidate.get("task_id") or ""),
                 "graph_task_node_id": str(candidate.get("graph_task_node_id") or ""),
+                "dag_node_id": str(candidate.get("dag_node_id") or ""),
+                "action_type": str(candidate.get("action_type") or ""),
+                "canonical_action_type": str(candidate.get("canonical_action_type") or _execution_dag_canonical_action(candidate.get("action_type"))),
                 "owner_role": str(candidate.get("owner_role") or ""),
                 "action_kind": str(candidate.get("action_kind") or ""),
                 "required_leases": list(candidate.get("required_leases") or []),
                 "context_pack_id": str(candidate.get("context_pack_id") or ""),
                 "status": "proposed",
-                "reason": "compatible dry-run parallel candidate",
+                "reason": "compatible dry-run execution candidate" if len(group_items) == 1 else "compatible dry-run parallel candidate",
                 "payload": {
                     "candidate_id": str(candidate.get("candidate_id") or ""),
+                    "dag_node_id": str(candidate.get("dag_node_id") or ""),
+                    "action_type": str(candidate.get("action_type") or ""),
+                    "canonical_action_type": str(candidate.get("canonical_action_type") or _execution_dag_canonical_action(candidate.get("action_type"))),
+                    "action_capability": candidate.get("action_capability") if isinstance(candidate.get("action_capability"), Mapping) else {},
+                    "task_graph_node_id": str(candidate.get("task_graph_node_id") or ""),
                     "execution_mode": str(candidate.get("execution_mode") or ""),
                     "summary": str(candidate.get("summary") or ""),
                     "likely_touches": list(candidate.get("likely_touches") or [])[:8],
-                    "context_pack_preview": candidate.get("context_pack_preview") if isinstance(candidate.get("context_pack_preview"), Mapping) else {},
+                    "scope_evidence_required": bool(candidate.get("scope_evidence_required")),
+                    "scope_fanout_reason_kind": str(candidate.get("scope_fanout_reason_kind") or ""),
+                    "missing_confidence_signal": str(candidate.get("missing_confidence_signal") or ""),
+                    "scope_evidence": candidate.get("scope_evidence") if isinstance(candidate.get("scope_evidence"), Mapping) else {},
+                    "context_pack_preview": _compact_context_pack_preview(
+                        candidate.get("context_pack_preview") if isinstance(candidate.get("context_pack_preview"), Mapping) else {},
+                        context_pack_id=str(candidate.get("context_pack_id") or ""),
+                    ),
                     "validation_commands": list(candidate.get("validation_commands") or [])[:4],
                 },
             }
@@ -9361,17 +20925,33 @@ def _build_parallel_groups(
             "started_at": "",
             "finished_at": "",
             "selected_by": selected_by,
-            "reason": "ready tasks have no overlapping write impact surfaces",
+            "reason": (
+                "single ready execution DAG node has a confident ownership surface"
+                if len(group_items) == 1
+                else "ready execution DAG nodes have no overlapping write impact surfaces"
+            ),
             "items": item_payloads,
             "payload": {
                 "schema_version": 1,
                 "planner_mode": "dry_run",
+                "planner_source": planner_source,
+                "scheduler_basis": "dag_action_capabilities" if planner_source == "execution_dag" else "task_graph_compatibility",
+                "wave_kind": "ready_execution_wave",
+                "wave_index": wave_index,
                 "execution_mode": execution_mode,
+                "scheduler_snapshot_id": task_snapshot_id,
                 "task_snapshot_id": task_snapshot_id,
                 "impact_snapshot_id": impact_snapshot_id,
                 "candidate_count": len(group_items),
-                "why_together": "write candidates have disjoint likely_touches; read-only candidates do not acquire write leases",
+                "why_together": (
+                    "single ready DAG node is safe to launch without a parallel peer"
+                    if len(group_items) == 1
+                    else "read-only scope evidence workers can overlap and do not acquire write leases"
+                    if execution_mode == "read_only" and any(bool(item.get("scope_evidence_required")) for item in group_items)
+                    else "write candidates have disjoint likely_touches; read-only candidates do not acquire write leases"
+                ),
                 "likely_touch_paths": touch_paths[:20],
+                "scope_evidence_required": any(bool(item.get("scope_evidence_required")) for item in group_items),
             },
         }
         groups.append(group)
@@ -9518,6 +21098,80 @@ def _persist_parallel_execution_plan_conn(conn: sqlite3.Connection, groups: list
                 )
 
 
+def _execution_dag_action_counts(nodes: list[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for node in nodes:
+        action = _execution_dag_canonical_action(node.get("action_type"))
+        if not action:
+            continue
+        counts[action] = counts.get(action, 0) + 1
+    return counts
+
+
+def _role_specialization_telemetry(
+    dag_model: Mapping[str, Any],
+    ready_dag_nodes: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    nodes = dag_model.get("nodes") if isinstance(dag_model.get("nodes"), list) else []
+    edges = dag_model.get("edges") if isinstance(dag_model.get("edges"), list) else []
+    nodes_by_id = {str(node.get("node_id") or ""): node for node in nodes if isinstance(node, Mapping)}
+    scope_gated_targets: set[str] = set()
+    for edge in edges:
+        if not isinstance(edge, Mapping) or str(edge.get("dependency_mode") or "hard") != "hard":
+            continue
+        source = nodes_by_id.get(str(edge.get("source") or ""))
+        target_id = str(edge.get("target") or "")
+        if source and _execution_dag_action_matches(source.get("action_type"), "scope"):
+            scope_gated_targets.add(target_id)
+    fast_path_build_count = sum(
+        1
+        for node in ready_dag_nodes
+        if _execution_dag_action_matches(node.get("action_type"), "build")
+        and float(node.get("confidence") or 0) >= PARALLEL_WRITE_TOUCH_CONFIDENCE_THRESHOLD
+        and str(node.get("node_id") or "") not in scope_gated_targets
+    )
+    specialization_actions = {"scope", "review", "audit", "calibrate", "repair"}
+    specialization_nodes = [
+        node
+        for node in nodes
+        if isinstance(node, Mapping)
+        and _execution_dag_canonical_action(node.get("action_type")) in specialization_actions
+        and str(node.get("task_id") or "") != CONVEYOR_TASK_ID
+    ]
+    validation_candidates = [item for item in candidates if str(item.get("execution_mode") or "") == "validation"]
+    low_confidence_specialization_count = sum(
+        1
+        for node in specialization_nodes
+        if float(node.get("confidence") or 0) < PARALLEL_WRITE_TOUCH_CONFIDENCE_THRESHOLD
+        or bool((node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}).get("requires_scope"))
+        or bool((node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}).get("requires_review"))
+    )
+    specialization_added_count = len(specialization_nodes)
+    wall_clock_effect = "preserved_or_improved" if fast_path_build_count else "increased" if specialization_added_count else "neutral"
+    failure_effect = "expected_reduced_failures" if low_confidence_specialization_count or any(
+        _execution_dag_action_matches(node.get("action_type"), "repair") for node in specialization_nodes
+    ) else "not_measured"
+    return {
+        "schema_version": 1,
+        "measurement_source": "planner_static_dag_signals",
+        "scheduler_basis": "dag_action_capabilities",
+        "action_capability_counts": _execution_dag_action_counts([node for node in nodes if isinstance(node, Mapping)]),
+        "ready_action_capability_counts": _execution_dag_action_counts(ready_dag_nodes),
+        "specialization_added_count": specialization_added_count,
+        "low_confidence_specialization_count": low_confidence_specialization_count,
+        "fast_path_build_count": fast_path_build_count,
+        "scope_gated_build_count": len(scope_gated_targets),
+        "parallel_validation_candidate_count": len(validation_candidates),
+        "wall_clock_effect": wall_clock_effect,
+        "failure_effect": failure_effect,
+        "specialization_increased_wall_clock": wall_clock_effect == "increased",
+        "specialization_reduced_failures": failure_effect == "expected_reduced_failures",
+        "specialization_increased_wall_clock_and_reduced_failures": wall_clock_effect == "increased"
+        and failure_effect == "expected_reduced_failures",
+    }
+
+
 def plan_parallel_execution_groups_conn(
     conn: sqlite3.Connection,
     target: Path,
@@ -9525,77 +21179,163 @@ def plan_parallel_execution_groups_conn(
     selected_by: str = "state.snapshot",
     persist: bool = True,
 ) -> dict[str, Any]:
+    phase_started_at = utc_now()
+    phase_started = time.perf_counter()
     generated_at = utc_now()
     target = target.expanduser().resolve()
-    ready_model = task_graph_read_model(conn)
     task_row = _latest_task_graph_snapshot_row(conn)
     impact_row = _latest_impact_graph_snapshot_row(conn)
     task_snapshot_id = str(task_row["snapshot_id"]) if task_row else ""
     impact_snapshot_id = str(impact_row["snapshot_id"]) if impact_row else ""
-    nodes = _latest_task_graph_nodes_conn(conn)
-    ready_nodes: list[dict[str, Any]] = []
-    for brief in ready_model.get("ready_task_nodes", []) if isinstance(ready_model.get("ready_task_nodes"), list) else []:
-        if not isinstance(brief, Mapping):
-            continue
-        node_id = str(brief.get("node_id") or "")
-        node = nodes.get(node_id)
-        if node is None:
-            continue
-        kind = str(node.get("kind") or "")
-        metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
-        if kind == "work_item" and str(metadata.get("work_item_id") or "") == CONVEYOR_WORK_ITEM_ID:
-            continue
-        if kind not in {"ticket", "work_item"}:
-            continue
-        ready_nodes.append(node)
-
     candidates: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
-    for node in ready_nodes:
-        candidate, blocked_candidate = _parallel_candidate_for_task_conn(conn, target, node)
-        if candidate is not None:
-            candidates.append(candidate)
-        if blocked_candidate is not None:
-            blocked.append(blocked_candidate)
+    dag_model = execution_dag_read_model(conn)
+    dag_nodes = dag_model.get("nodes") if isinstance(dag_model.get("nodes"), list) else []
+    dag_snapshot_id = f"execution-dag:{str(dag_model.get('digest') or '')[:24]}" if dag_nodes else ""
+    planner_source = "execution_dag" if dag_nodes else "task_graph_compatibility"
+    ready_dag_nodes: list[dict[str, Any]] = []
+    ready_nodes: list[dict[str, Any]] = []
+    if dag_nodes:
+        dag_nodes_by_id = {str(node.get("node_id") or ""): node for node in dag_nodes if isinstance(node, Mapping)}
+        task_nodes_by_public_id = {
+            _task_graph_node_public_id(node): node
+            for node in _latest_task_graph_nodes_conn(conn).values()
+            if str(node.get("kind") or "") in {"ticket", "work_item"}
+        }
+        for brief in dag_model.get("ready_nodes", []) if isinstance(dag_model.get("ready_nodes"), list) else []:
+            if not isinstance(brief, Mapping):
+                continue
+            node_id = str(brief.get("node_id") or "")
+            node = dag_nodes_by_id.get(node_id)
+            if node is None:
+                continue
+            ready_dag_nodes.append(node)
+        for node in ready_dag_nodes:
+            task_node = task_nodes_by_public_id.get(str(node.get("task_id") or ""), {})
+            candidate, blocked_candidate = _parallel_candidate_for_dag_node_conn(conn, target, node, task_node=task_node)
+            if candidate is not None:
+                candidates.append(candidate)
+            if blocked_candidate is not None:
+                blocked.append(blocked_candidate)
+    else:
+        ready_model = task_graph_read_model(conn)
+        nodes = _latest_task_graph_nodes_conn(conn)
+        for brief in ready_model.get("ready_task_nodes", []) if isinstance(ready_model.get("ready_task_nodes"), list) else []:
+            if not isinstance(brief, Mapping):
+                continue
+            node_id = str(brief.get("node_id") or "")
+            node = nodes.get(node_id)
+            if node is None:
+                continue
+            kind = str(node.get("kind") or "")
+            metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+            if kind == "work_item" and str(metadata.get("work_item_id") or "") == CONVEYOR_WORK_ITEM_ID:
+                continue
+            if kind not in {"ticket", "work_item"}:
+                continue
+            ready_nodes.append(node)
+        for node in ready_nodes:
+            candidate, blocked_candidate = _parallel_candidate_for_task_conn(conn, target, node)
+            if candidate is not None:
+                candidates.append(candidate)
+            if blocked_candidate is not None:
+                blocked.append(blocked_candidate)
+    scheduler_snapshot_id = dag_snapshot_id or task_snapshot_id
     groups, group_blocked = _build_parallel_groups(
         candidates,
-        task_snapshot_id=task_snapshot_id,
+        task_snapshot_id=scheduler_snapshot_id,
         impact_snapshot_id=impact_snapshot_id,
         generated_at=generated_at,
         selected_by=selected_by,
+        planner_source=planner_source,
     )
     blocked.extend(group_blocked)
     if persist:
         _persist_parallel_execution_plan_conn(conn, groups, generated_at=generated_at)
+    role_specialization_telemetry = _role_specialization_telemetry(dag_model, ready_dag_nodes, candidates) if dag_nodes else {
+        "schema_version": 1,
+        "measurement_source": "task_graph_compatibility",
+        "scheduler_basis": "task_graph_compatibility",
+        "specialization_added_count": 0,
+        "fast_path_build_count": 0,
+        "wall_clock_effect": "not_applicable",
+        "failure_effect": "not_measured",
+        "specialization_increased_wall_clock": False,
+        "specialization_reduced_failures": False,
+        "specialization_increased_wall_clock_and_reduced_failures": False,
+    }
     summary = {
         "schema_version": 1,
         "mode": "dry_run",
         "generated_at": generated_at,
         "selected_by": selected_by,
+        "planner_source": planner_source,
+        "scheduler_basis": "dag_action_capabilities" if dag_nodes else "task_graph_compatibility",
+        "scheduler_snapshot_id": scheduler_snapshot_id,
+        "execution_dag_snapshot_id": dag_snapshot_id,
         "task_snapshot_id": task_snapshot_id,
         "impact_snapshot_id": impact_snapshot_id,
-        "ready_task_count": len(ready_nodes),
+        "action_capability_counts": role_specialization_telemetry.get("action_capability_counts", {}),
+        "ready_action_capability_counts": role_specialization_telemetry.get("ready_action_capability_counts", {}),
+        "role_specialization_telemetry": role_specialization_telemetry,
+        "fast_path_build_count": int(role_specialization_telemetry.get("fast_path_build_count") or 0),
+        "specialization_added_count": int(role_specialization_telemetry.get("specialization_added_count") or 0),
+        "ready_dag_node_count": len(ready_dag_nodes),
+        "ready_task_count": len(ready_nodes) if not ready_dag_nodes else len(ready_dag_nodes),
         "candidate_count": len(candidates),
         "group_count": len(groups),
+        "wave_count": len(groups),
         "grouped_task_count": sum(len(group.get("items") if isinstance(group.get("items"), list) else []) for group in groups),
         "blocked_candidate_count": len(blocked),
         "policy": {
             "max_groups": PARALLEL_DRY_RUN_GROUP_LIMIT,
             "max_items_per_group": PARALLEL_DRY_RUN_GROUP_ITEM_LIMIT,
+            "direct_write_confidence_threshold": PARALLEL_WRITE_TOUCH_CONFIDENCE_THRESHOLD,
+            "scoping_read_only_confidence_threshold": PARALLEL_SCOPING_READ_CONFIDENCE_THRESHOLD,
             "integration_serialized": True,
             "write_tasks_require_known_impact": True,
             "read_only_overlap_allowed": True,
             "active_lease_conflicts_block": True,
+            "blocked_human_environment_nodes_parallelized": False,
+            "overlapping_write_ownership_blocks_same_wave": True,
+            "high_confidence_write_nodes_may_skip_scope": True,
+            "review_audit_optional_unless_risk": True,
+            "extra_role_specialization_blocks_only_with_typed_dependency": True,
         },
     }
-    return {
+    blocked_limited = blocked[:PARALLEL_DRY_RUN_BLOCKED_LIMIT]
+    why_not_parallel = why_not_parallel_read_model(
+        blocked_limited,
+        parallelization_summary=summary,
+        proposed_execution_groups=groups,
+    )
+    summary["blocked_reason_counts"] = why_not_parallel.get("reason_counts", {})
+    summary["top_blocked_reason_kind"] = why_not_parallel.get("top_reason_kind", "")
+    summary["next_parallel_improvement"] = why_not_parallel.get("top_next_action", "")
+    result = {
         "schema_version": 1,
         "mode": "dry_run",
         "generated_at": generated_at,
         "proposed_execution_groups": groups,
         "parallelization_summary": summary,
-        "blocked_parallel_candidates": blocked[:PARALLEL_DRY_RUN_BLOCKED_LIMIT],
+        "blocked_parallel_candidates": blocked_limited,
+        "why_not_parallel": why_not_parallel,
     }
+    record_runtime_phase_timing_conn(
+        conn,
+        phase="scheduling",
+        source="parallel_execution.plan",
+        started_at=phase_started_at,
+        elapsed_ms=_elapsed_ms(phase_started),
+        status="ok",
+        payload={
+            "candidate_count": len(candidates),
+            "group_count": len(groups),
+            "blocked_candidate_count": len(blocked),
+            "persisted": bool(persist),
+        },
+    )
+    return result
 
 
 def infer_conveyor_stage(state: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -10317,10 +22057,18 @@ def write_conveyor_state(
             event_id=event_id,
             event_type=event_type,
         )
+        execution_dag = materialize_execution_dag_conn(
+            conn,
+            target,
+            base_state,
+            event_id=event_id,
+            event_type=event_type,
+        )
         annotated = annotate_projection_state(base_state, db_path, event_id, machine=machine)
         replace_projection(conn, name=CONVEYOR_PROJECTION_NAME, payload=annotated, event_id=event_id)
         apply_conveyor_read_models(conn, annotated, event_id=event_id)
         replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=event_id)
+        replace_projection(conn, name=EXECUTION_DAG_PROJECTION_NAME, payload=execution_dag, event_id=event_id)
         checkpoint_stream(
             conn,
             stream_id=CONVEYOR_STREAM_ID,
@@ -10366,10 +22114,18 @@ def import_legacy_conveyor_json(projection_path: Path, db_path: Path) -> dict[st
             event_id=event_id,
             event_type="compatibility.legacy_conveyor_json_imported",
         )
+        execution_dag = materialize_execution_dag_conn(
+            conn,
+            target,
+            legacy,
+            event_id=event_id,
+            event_type="compatibility.legacy_conveyor_json_imported",
+        )
         annotated = annotate_projection_state(legacy, db_path, event_id, machine=machine)
         replace_projection(conn, name=CONVEYOR_PROJECTION_NAME, payload=annotated, event_id=event_id)
         apply_conveyor_read_models(conn, annotated, event_id=event_id)
         replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=event_id)
+        replace_projection(conn, name=EXECUTION_DAG_PROJECTION_NAME, payload=execution_dag, event_id=event_id)
         checkpoint_stream(
             conn,
             stream_id=CONVEYOR_STREAM_ID,
@@ -10419,9 +22175,17 @@ def load_conveyor_state(projection_path: Path) -> dict[str, Any]:
                     event_id=None,
                     event_type="conveyor.state_machine_backfilled",
                 )
+                execution_dag = materialize_execution_dag_conn(
+                    conn,
+                    target,
+                    normalized,
+                    event_id=None,
+                    event_type="execution_dag.backfilled_from_conveyor_projection",
+                )
                 annotated = annotate_projection_state(normalized, db_path, None, machine=machine)
                 replace_projection(conn, name=CONVEYOR_PROJECTION_NAME, payload=annotated, event_id=None)
                 replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=None)
+                replace_projection(conn, name=EXECUTION_DAG_PROJECTION_NAME, payload=execution_dag, event_id=None)
                 write_json_projection(projection_path, annotated)
                 return normalize_conveyor_state(annotated)
     if projection_path.exists():
@@ -10663,11 +22427,11 @@ def _default_automation_control_from_setup(target: Path) -> dict[str, Any]:
     setup = {**intake, **dashboard}
     project_name = str(setup.get("project_name") or target.name or "target")
     workers_allowed = bool(setup.get("worker_agents_allowed", True))
-    write_workers = bool(setup.get("write_worker_agents_allowed", False)) and workers_allowed
     try:
-        max_write_workers = int(setup.get("max_write_worker_count") or (1 if write_workers else 0))
+        max_write_workers = int(setup.get("max_write_worker_count") or PARALLELISM_BUDGET_WRITE_CONCURRENT)
     except (TypeError, ValueError):
-        max_write_workers = 1 if write_workers else 0
+        max_write_workers = PARALLELISM_BUDGET_WRITE_CONCURRENT
+    max_write_workers = max(1, min(10, max_write_workers))
     campaign = _normalize_campaign_mode(setup.get("campaign_mode"), setup.get("automation_run_mode"))
     if campaign == "bounded":
         horizon = "T1 Ticket-run readiness"
@@ -10690,8 +22454,8 @@ def _default_automation_control_from_setup(target: Path) -> dict[str, Any]:
         "bootstrap_status": "pending",
         "worker": {
             "agents_allowed": workers_allowed,
-            "write_workers_allowed": write_workers,
-            "max_write_worker_count": max(0, max_write_workers if write_workers else 0),
+            "write_workers_allowed": True,
+            "max_write_worker_count": max_write_workers,
         },
         "source": "setup_json",
         "payload": {
@@ -10735,8 +22499,8 @@ def _unknown_automation_control(target: Path) -> dict[str, Any]:
         "bootstrap_pending": False,
         "worker": {
             "agents_allowed": False,
-            "write_workers_allowed": False,
-            "max_write_worker_count": 0,
+            "write_workers_allowed": True,
+            "max_write_worker_count": PARALLELISM_BUDGET_WRITE_CONCURRENT,
         },
         "updated_at": "",
         "payload": {},
@@ -10763,13 +22527,13 @@ def _parse_legacy_task_markdown(text: str, *, source_path: Path) -> dict[str, An
         for item in _section_bullets(text, "Known Issues", limit=25)
         if item.lower() not in {"none", "none.", "no known issues", "no known issues."}
     ]
-    write_workers_allowed = _task_bool_value(text, "Write-capable worker agents allowed", default=False)
     worker_agents_allowed = _task_bool_value(text, "Worker agents allowed", default=True)
     max_write_worker_count = _task_int_value(
         text,
         "Max write worker count",
-        default=0 if not write_workers_allowed else 1,
+        default=PARALLELISM_BUDGET_WRITE_CONCURRENT,
     )
+    max_write_worker_count = max(1, min(10, max_write_worker_count))
     checks = _section_bullets(text, "Checks From Last Run", limit=25)
     validation_items = []
     for index, check in enumerate(checks):
@@ -10801,8 +22565,8 @@ def _parse_legacy_task_markdown(text: str, *, source_path: Path) -> dict[str, An
         "bootstrap_status": bootstrap_status,
         "worker": {
             "agents_allowed": worker_agents_allowed,
-            "write_workers_allowed": write_workers_allowed and worker_agents_allowed,
-            "max_write_worker_count": max_write_worker_count if write_workers_allowed and worker_agents_allowed else 0,
+            "write_workers_allowed": True,
+            "max_write_worker_count": max_write_worker_count,
         },
         "source": "legacy_task_markdown",
         "source_path": str(source_path),
@@ -10834,10 +22598,8 @@ def _automation_control_payload_from_row(row: sqlite3.Row | None) -> dict[str, A
         "bootstrap_pending": str(row["bootstrap_status"] or "").lower() in {"pending", "not_bootstrapped", "not bootstrapped"},
         "worker": {
             "agents_allowed": bool(row["worker_agents_allowed"]),
-            "write_workers_allowed": bool(row["write_workers_allowed"]) and bool(row["worker_agents_allowed"]),
-            "max_write_worker_count": int(row["max_write_worker_count"] or 0)
-            if bool(row["write_workers_allowed"]) and bool(row["worker_agents_allowed"])
-            else 0,
+            "write_workers_allowed": True,
+            "max_write_worker_count": max(1, min(10, int(row["max_write_worker_count"] or PARALLELISM_BUDGET_WRITE_CONCURRENT))),
         },
         "updated_at": str(row["updated_at"] or ""),
         "payload": payload,
@@ -10852,6 +22614,13 @@ def _upsert_automation_control_conn(
 ) -> dict[str, Any]:
     now = utc_now()
     worker = data.get("worker") if isinstance(data.get("worker"), Mapping) else {}
+    max_write_worker_count = _nonnegative_int(
+        worker.get("max_write_worker_count"),
+        PARALLELISM_BUDGET_WRITE_CONCURRENT,
+        maximum=10,
+    )
+    if max_write_worker_count <= 0:
+        max_write_worker_count = PARALLELISM_BUDGET_WRITE_CONCURRENT
     payload = {
         "known_issue": data.get("known_issue") or "No active issue summary.",
         "known_issues": data.get("known_issues") if isinstance(data.get("known_issues"), list) else [],
@@ -10894,8 +22663,8 @@ def _upsert_automation_control_conn(
             str(data.get("suggested_next_task") or ""),
             str(data.get("bootstrap_status") or "unknown"),
             1 if bool(worker.get("agents_allowed", True)) else 0,
-            1 if bool(worker.get("write_workers_allowed", False)) else 0,
-            int(worker.get("max_write_worker_count") or 0),
+            1,
+            max_write_worker_count,
             now,
             stable_json(payload),
         ),
@@ -11118,19 +22887,19 @@ def _derive_ticket_campaign_control_updates(
     if campaign == "ongoing" and total == 0:
         horizon = "O1 Ongoing campaign discovery"
         bootstrap_status = "pending"
-        assessment = "Ongoing campaign has no active tickets yet; the conveyor can draft a safe next ticket from typed runtime context."
+        assessment = "Ongoing campaign has no active tickets yet; the DAG scheduler can draft a safe next ticket from typed runtime context."
         milestone = f"Draft and enqueue the next safe project-agnostic ticket for `{project_name}`."
-        suggested = "Use intake, repo context, blockers, validation receipts, and completed work to draft the next dependency-ready ticket, then continue through the conveyor."
+        suggested = "Use intake, repo context, blockers, validation receipts, and completed work to draft the next dependency-ready ticket, then continue through the DAG scheduler."
     elif campaign == "ongoing" and all_done:
         horizon = "O2 Ongoing campaign continuation"
         bootstrap_status = "bootstrapped"
-        assessment = f"Ongoing campaign has completed the current {total} ticket(s); the conveyor can draft the next useful ticket."
+        assessment = f"Ongoing campaign has completed the current {total} ticket(s); the DAG scheduler can draft the next useful ticket."
         milestone = f"Draft the next safe follow-up ticket for `{project_name}` from current runtime context."
-        suggested = "Draft/enqueue the next dependency-ready ticket without requiring human approval, then continue through the conveyor."
+        suggested = "Draft/enqueue the next dependency-ready ticket without requiring human approval, then continue through the DAG scheduler."
     elif campaign == "ongoing" and all_remaining_blocked:
         horizon = "O2 Ongoing campaign continuation"
         bootstrap_status = "bootstrapped"
-        assessment = f"Ongoing campaign has {done}/{total} ticket(s) done and {blocked} blocked; the conveyor can draft unblocked follow-up or blocker-resolution work."
+        assessment = f"Ongoing campaign has {done}/{total} ticket(s) done and {blocked} blocked; the DAG scheduler can draft unblocked follow-up or blocker-resolution work."
         milestone = "Draft the next safe unblocked ticket or blocker-resolution ticket from available context."
         suggested = "Use blocker details and runtime state to draft/enqueue a safe next ticket without waiting for approval unless no useful work can continue."
     elif total == 0:
@@ -11801,6 +23570,14 @@ def write_ticket_run_state(
                 actor_role=actor_role,
                 causation_id=event_id,
             )
+            conveyor_state = load_projection(conn, CONVEYOR_PROJECTION_NAME)
+            materialize_execution_dag_conn(
+                conn,
+                target,
+                conveyor_state if isinstance(conveyor_state, Mapping) else default_conveyor_state(),
+                event_id=event_id,
+                event_type=event_type,
+            )
             refresh_task_graph_conn(conn, target)
             if _latest_codebase_graph_snapshot_row(conn) is not None:
                 refresh_impact_graph_conn(conn, target)
@@ -12226,11 +24003,76 @@ def _validate_terminal_validation_receipts(conn: sqlite3.Connection) -> dict[str
     )
 
 
+def _validate_execution_dag_contract(conn: sqlite3.Connection) -> dict[str, Any]:
+    failures: list[dict[str, Any]] = []
+    node_count = int(conn.execute("SELECT COUNT(*) AS count FROM execution_dag_nodes").fetchone()["count"] or 0)
+    if node_count == 0:
+        failures.append({"table": "execution_dag_nodes", "reason": "no_nodes"})
+    node_rows = conn.execute(
+        """
+        SELECT node_id, task_id, action_type, status, owner_role, confidence,
+               attempt_count, created_at, updated_at, validation_receipt_refs_json
+        FROM execution_dag_nodes
+        ORDER BY node_id
+        """
+    ).fetchall()
+    for row in node_rows:
+        missing = [
+            column
+            for column in ("node_id", "task_id", "action_type", "status", "owner_role", "created_at", "updated_at")
+            if not str(row[column] or "").strip()
+        ]
+        if str(row["action_type"] or "") not in EXECUTION_DAG_NODE_ACTION_TYPES:
+            missing.append("valid_action_type")
+        try:
+            refs = json.loads(str(row["validation_receipt_refs_json"] or "[]"))
+        except json.JSONDecodeError:
+            refs = None
+        if not isinstance(refs, list):
+            missing.append("validation_receipt_refs_json")
+        if missing:
+            failures.append({"table": "execution_dag_nodes", "node_id": str(row["node_id"]), "missing": missing})
+    edge_rows = conn.execute(
+        """
+        SELECT edge_id, source_node_id, target_node_id, dependency_kind,
+               dependency_mode, reason, confidence
+        FROM execution_dag_edges
+        ORDER BY edge_id
+        """
+    ).fetchall()
+    node_ids = {str(row["node_id"]) for row in node_rows}
+    for row in edge_rows:
+        missing = [
+            column
+            for column in ("edge_id", "source_node_id", "target_node_id", "dependency_kind", "dependency_mode", "reason")
+            if not str(row[column] or "").strip()
+        ]
+        if str(row["dependency_kind"] or "") not in EXECUTION_DAG_DEPENDENCY_KINDS:
+            missing.append("valid_dependency_kind")
+        if str(row["dependency_mode"] or "") not in EXECUTION_DAG_DEPENDENCY_MODES:
+            missing.append("valid_dependency_mode")
+        if str(row["source_node_id"]) not in node_ids:
+            missing.append("source_node_exists")
+        if str(row["target_node_id"]) not in node_ids:
+            missing.append("target_node_exists")
+        if missing:
+            failures.append({"table": "execution_dag_edges", "edge_id": str(row["edge_id"]), "missing": missing})
+    return _invariant_result(
+        "execution_dag.contract",
+        not failures,
+        "Execution DAG nodes and edges satisfy the typed scheduler contract."
+        if not failures
+        else f"Execution DAG contract violations found: {len(failures)}.",
+        failures=failures,
+    )
+
+
 def state_invariant_results(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [
         _validate_event_sequences(conn),
         _validate_event_hash_chain(conn),
         _validate_projection_event_refs(conn),
+        _validate_execution_dag_contract(conn),
         _validate_current_work_item_owner(conn),
         _validate_open_blockers_and_escalations(conn),
         _validate_terminal_validation_receipts(conn),
@@ -12295,6 +24137,8 @@ def journal_mode(conn: sqlite3.Connection) -> str:
 
 def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> dict[str, Any]:
     target = target.expanduser().resolve()
+    snapshot_started_at = utc_now()
+    snapshot_started = time.perf_counter()
     projection_path = conveyor_projection_path_for_target(target)
     state = load_conveyor_state(projection_path)
     runner_projection_path = runner_projection_path_for_target(target)
@@ -12307,6 +24151,7 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         state = normalize_conveyor_state({**state, "status": automation_control.get("status") or state.get("status") or "ACTIVE"})
         capability = refresh_capability_manifest_conn(conn, target, actor_role="dashboard", append_event_first=True)
         codebase_graph = ensure_codebase_graph_conn(conn, target, capability=capability)
+        code_intel = code_intelligence_summary(conn, target, manifest=capability)
         machine = apply_conveyor_machine_read_models(
             conn,
             target,
@@ -12316,6 +24161,13 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         )
         state = normalize_conveyor_state({**state, "state_machine": machine})
         replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=None)
+        execution_dag = materialize_execution_dag_conn(
+            conn,
+            target,
+            state,
+            event_id=None,
+            event_type="state.snapshot",
+        )
         task_graph = refresh_task_graph_conn(conn, target)
         task_graph_readiness = task_graph_read_model(conn)
         impact_graph = refresh_impact_graph_conn(conn, target)
@@ -12329,8 +24181,38 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         parallelism_budgets = parallelism_budgets_conn(conn)
         active_parallel_counts = active_parallel_counts_conn(conn)
         budget_exhaustion_reasons = budget_exhaustion_reasons_conn(conn)
+        skipped_scheduler_candidates = scheduler_decision.get("skipped_scheduler_candidates") or scheduler_decision.get("skipped_candidates", [])
+        if not isinstance(skipped_scheduler_candidates, list):
+            skipped_scheduler_candidates = []
+        parallelization_summary = (
+            dict(parallel_dry_run.get("parallelization_summary"))
+            if isinstance(parallel_dry_run.get("parallelization_summary"), Mapping)
+            else {}
+        )
+        why_not_parallel = why_not_parallel_read_model(
+            parallel_dry_run.get("blocked_parallel_candidates")
+            if isinstance(parallel_dry_run.get("blocked_parallel_candidates"), list)
+            else [],
+            parallelization_summary=parallelization_summary,
+            proposed_execution_groups=parallel_dry_run.get("proposed_execution_groups")
+            if isinstance(parallel_dry_run.get("proposed_execution_groups"), list)
+            else [],
+            skipped_scheduler_candidates=skipped_scheduler_candidates,
+            budget_exhaustion_reasons=budget_exhaustion_reasons,
+        )
+        parallelization_summary["blocked_reason_counts"] = why_not_parallel.get("reason_counts", {})
+        parallelization_summary["top_blocked_reason_kind"] = why_not_parallel.get("top_reason_kind", "")
+        parallelization_summary["next_parallel_improvement"] = why_not_parallel.get("top_next_action", "")
+        parallel_dry_run = {
+            **parallel_dry_run,
+            "parallelization_summary": parallelization_summary,
+            "why_not_parallel": why_not_parallel,
+        }
         worker_reports = worker_reports_read_model_conn(conn)
-        worker_patches = worker_patch_read_model_conn(conn)
+        scope_evidence_records = scope_evidence_records_conn(conn, limit=30)
+        scope_fanout_outcomes = scope_fanout_outcomes_conn(conn, limit=30)
+        worker_patches = worker_patch_read_model_conn(conn, target=target)
+        patch_lineage = patch_lineage_summary_conn(conn)
         candidate_lanes = candidate_lane_read_model_conn(conn)
         validation_jobs = validation_job_read_model_conn(conn)
         last_event = conn.execute(
@@ -12365,6 +24247,10 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         automation_projection_row = conn.execute(
             "SELECT name, updated_at, payload_sha256, event_id FROM projections WHERE name = ?",
             (AUTOMATION_CONTROL_PROJECTION_NAME,),
+        ).fetchone()
+        execution_dag_projection_row = conn.execute(
+            "SELECT name, updated_at, payload_sha256, event_id FROM projections WHERE name = ?",
+            (EXECUTION_DAG_PROJECTION_NAME,),
         ).fetchone()
         counts = table_counts(conn)
         projection_payload = {
@@ -12407,6 +24293,14 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "payload_sha256": automation_projection_row["payload_sha256"] if automation_projection_row else "",
             "event_id": automation_projection_row["event_id"] if automation_projection_row else None,
         }
+        execution_dag_projection_payload = {
+            "name": EXECUTION_DAG_PROJECTION_NAME,
+            "path": str(db_path),
+            "exists": bool(execution_dag_projection_row),
+            "updated_at": execution_dag_projection_row["updated_at"] if execution_dag_projection_row else "",
+            "payload_sha256": execution_dag_projection_row["payload_sha256"] if execution_dag_projection_row else "",
+            "event_id": execution_dag_projection_row["event_id"] if execution_dag_projection_row else None,
+        }
         schema_migrations = schema_migration_rows(conn)
         invariant_results = state_invariant_results(conn)
         health_summary = state_health_summary(invariant_results)
@@ -12414,6 +24308,8 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         stale_context_warning = str(impact_read_model.get("stale_context_warning") or "")
         stale_graph_warnings: list[dict[str, Any]] = []
         stale_node_count = int(codebase_graph.get("stale_node_count") or 0) if isinstance(codebase_graph, dict) else 0
+        stale_file_count = int(codebase_graph.get("stale_file_count") or 0) if isinstance(codebase_graph, dict) else 0
+        failed_file_count = int(codebase_graph.get("failed_file_count") or 0) if isinstance(codebase_graph, dict) else 0
         if stale_node_count:
             stale_graph_warnings.append(
                 {
@@ -12422,6 +24318,16 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
                     "count": stale_node_count,
                     "source": "codebase_graph",
                     "message": f"{stale_node_count} indexed codebase node{' is' if stale_node_count == 1 else 's are'} stale.",
+                }
+            )
+        if failed_file_count:
+            stale_graph_warnings.append(
+                {
+                    "kind": "codebase_index_failures",
+                    "severity": "warn",
+                    "count": failed_file_count,
+                    "source": "codebase_file_index",
+                    "message": f"{failed_file_count} indexed file{' has' if failed_file_count == 1 else 's have'} parser failures.",
                 }
             )
         if stale_context_warning:
@@ -12434,6 +24340,21 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
                     "message": stale_context_warning,
                 }
             )
+        record_runtime_phase_timing_conn(
+            conn,
+            phase="dashboard_rendering",
+            source="state.snapshot",
+            started_at=snapshot_started_at,
+            elapsed_ms=_elapsed_ms(snapshot_started),
+            status="ok",
+            payload={
+                "event_limit": int(event_limit),
+                "execution_dag_nodes": int((execution_dag or {}).get("node_count") or 0) if isinstance(execution_dag, Mapping) else 0,
+                "proposed_execution_groups": len(parallel_dry_run.get("proposed_execution_groups", []) if isinstance(parallel_dry_run.get("proposed_execution_groups"), list) else []),
+            },
+        )
+        telemetry_compaction = compact_runtime_telemetry_conn(conn)
+        runtime_performance = runtime_performance_summary_conn(conn)
         return {
             "schema_version": STATE_SCHEMA_VERSION,
             "authority": "sqlite",
@@ -12452,6 +24373,7 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
                 "conveyor": projection_payload,
                 "runner": runner_projection_payload,
                 "machine": machine_projection_payload,
+                "execution_dag": execution_dag_projection_payload,
                 "capabilities": capability_projection_payload,
                 "automation_control": automation_projection_payload,
             },
@@ -12459,7 +24381,12 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
                 "tables": list(ORCHESTRATION_TABLES),
                 "status_model": list(STATUS_MODEL),
                 "conveyor_stages": list(CONVEYOR_STAGES),
-                "canonical_runtime_state": "SQLite append-only events + typed conveyor state machine projections",
+                "execution_dag_action_types": list(EXECUTION_DAG_NODE_ACTION_TYPES),
+                "execution_dag_canonical_action_types": list(EXECUTION_DAG_CANONICAL_ACTION_TYPES),
+                "execution_dag_action_capabilities": execution_dag_action_capabilities(),
+                "execution_dag_legacy_action_aliases": dict(EXECUTION_DAG_LEGACY_ACTION_ALIASES),
+                "execution_dag_dependency_kinds": list(EXECUTION_DAG_DEPENDENCY_KINDS),
+                "canonical_runtime_state": "SQLite append-only events + typed execution_dag nodes/edges; conveyor state is a compatibility projection",
                 "compatibility_surfaces": [
                     "canonical Markdown state brief",
                     "conveyor/runner JSON projections",
@@ -12477,10 +24404,17 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "open_blockers": open_blockers(conn),
             "next_actions": pending_next_actions(conn),
             "validations": validation_summary(conn),
+            "execution_dag": execution_dag,
+            "progress_model": execution_dag,
+            "ready_dag_nodes": execution_dag.get("ready_nodes", []),
+            "blocked_dag_nodes": execution_dag.get("blocked_nodes", []),
+            "active_dag_nodes": execution_dag.get("active_nodes", []),
+            "terminal_dag_nodes": execution_dag.get("terminal_nodes", []),
             "conveyor_state": state,
             "conveyor_machine": machine,
             "automation_control": automation_control,
             "capability_manifest": capability,
+            "code_intelligence": code_intel,
             "codebase_graph_summary": codebase_graph,
             "latest_graph_snapshot": codebase_graph.get("latest_graph_snapshot") if isinstance(codebase_graph, dict) else {},
             "graph_refresh_mode": str(codebase_graph.get("graph_refresh_mode") or "") if isinstance(codebase_graph, dict) else "",
@@ -12491,6 +24425,9 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "graph_inventory_deleted_count": int(codebase_graph.get("graph_inventory_deleted_count") or 0) if isinstance(codebase_graph, dict) else 0,
             "graph_inventory_structural_count": int(codebase_graph.get("graph_inventory_structural_count") or 0) if isinstance(codebase_graph, dict) else 0,
             "stale_node_count": stale_node_count,
+            "stale_file_count": stale_file_count,
+            "failed_file_count": failed_file_count,
+            "file_index": codebase_graph.get("file_index", []) if isinstance(codebase_graph, dict) else [],
             "indexed_file_count": int(codebase_graph.get("indexed_file_count") or 0) if isinstance(codebase_graph, dict) else 0,
             "command_node_count": int(codebase_graph.get("command_node_count") or 0) if isinstance(codebase_graph, dict) else 0,
             "test_node_count": int(codebase_graph.get("test_node_count") or 0) if isinstance(codebase_graph, dict) else 0,
@@ -12504,6 +24441,10 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "top_impacted_nodes": impact_read_model.get("top_impacted_nodes", []),
             "stale_context_warning": stale_context_warning,
             "stale_graph_warnings": stale_graph_warnings,
+            "runtime_performance": runtime_performance,
+            "performance": runtime_performance,
+            "slow_phase_warnings": runtime_performance.get("slow_phases", []),
+            "runtime_telemetry_compaction": telemetry_compaction,
             "active_leases": active_leases,
             "conflicting_leases": conflicting_leases,
             "lease_suggestions_for_next_action": lease_suggestions,
@@ -12512,15 +24453,15 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "skipped_candidates": scheduler_decision.get("skipped_candidates", []),
             "selected_scheduler_candidate": scheduler_decision.get("selected_scheduler_candidate")
             or scheduler_decision.get("selected_candidate", {}),
-            "skipped_scheduler_candidates": scheduler_decision.get("skipped_scheduler_candidates")
-            or scheduler_decision.get("skipped_candidates", []),
+            "skipped_scheduler_candidates": skipped_scheduler_candidates,
             "scheduler_fallback_used": bool(scheduler_decision.get("scheduler_fallback_used")),
             "graph_signals_used": scheduler_decision.get("graph_signals_used", {}),
             "lease_conflicts_considered": scheduler_decision.get("lease_conflicts_considered", []),
             "legacy_result": scheduler_decision.get("legacy_result", {}),
             "proposed_execution_groups": parallel_dry_run.get("proposed_execution_groups", []),
-            "parallelization_summary": parallel_dry_run.get("parallelization_summary", {}),
+            "parallelization_summary": parallelization_summary,
             "blocked_parallel_candidates": parallel_dry_run.get("blocked_parallel_candidates", []),
+            "why_not_parallel": why_not_parallel,
             "scheduler_parallel_dry_run": parallel_dry_run,
             "parallelism_budgets": parallelism_budgets,
             "active_parallel_counts": active_parallel_counts,
@@ -12529,11 +24470,20 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "pending_worker_reports": worker_reports.get("pending_worker_reports", []),
             "completed_worker_reports": worker_reports.get("completed_worker_reports", []),
             "worker_finding_disposition_required": bool(worker_reports.get("worker_finding_disposition_required")),
+            "scope_evidence_records": scope_evidence_records,
+            "accepted_scope_evidence_records": [record for record in scope_evidence_records if record.get("status") == "accepted"],
+            "scope_fanout_outcomes": scope_fanout_outcomes,
+            "exhausted_scope_fanout_outcomes": [outcome for outcome in scope_fanout_outcomes if outcome.get("status") == "exhausted"],
             "active_write_workers": worker_patches.get("active_write_workers", []),
             "queued_worker_patches": worker_patches.get("queued_worker_patches", []),
             "write_worker_conflicts": worker_patches.get("write_worker_conflicts", []),
             "lease_conflict_summary": worker_patches.get("lease_conflict_summary", {}),
             "integration_backlog_from_parallel_workers": worker_patches.get("integration_backlog_from_parallel_workers", []),
+            "worker_patch_integration_preflight": worker_patches.get("worker_patch_integration_preflight", {}),
+            "worker_patch_lineage": patch_lineage.get("latest", []),
+            "patch_lineage_summary": patch_lineage,
+            "patch_prediction_accuracy": patch_lineage.get("prediction_accuracy", {}),
+            "patch_telemetry": patch_lineage.get("telemetry", {}),
             "candidate_lanes": candidate_lanes.get("candidate_lanes", []),
             "candidate_lane_summary": candidate_lanes.get("candidate_lane_summary", {}),
             "candidate_lane_comparisons": candidate_lanes.get("candidate_lane_comparisons", []),
@@ -12598,6 +24548,11 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
     target = target.expanduser().resolve()
     generated_at = utc_now()
     database = snapshot.get("database") if isinstance(snapshot.get("database"), dict) else {}
+    execution_dag = snapshot.get("execution_dag") if isinstance(snapshot.get("execution_dag"), dict) else {}
+    dag_primary = execution_dag.get("primary_progress_node") if isinstance(execution_dag.get("primary_progress_node"), dict) else {}
+    dag_ready = execution_dag.get("ready_nodes") if isinstance(execution_dag.get("ready_nodes"), list) else []
+    dag_blocked = execution_dag.get("blocked_nodes") if isinstance(execution_dag.get("blocked_nodes"), list) else []
+    dag_active = execution_dag.get("active_nodes") if isinstance(execution_dag.get("active_nodes"), list) else []
     conveyor_state = snapshot.get("conveyor_state") if isinstance(snapshot.get("conveyor_state"), dict) else {}
     conveyor_machine = snapshot.get("conveyor_machine") if isinstance(snapshot.get("conveyor_machine"), dict) else {}
     machine_work_item = conveyor_machine.get("work_item") if isinstance(conveyor_machine.get("work_item"), dict) else {}
@@ -12605,6 +24560,25 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
     capability_languages = capability_manifest.get("languages") if isinstance(capability_manifest.get("languages"), dict) else {}
     graph_summary = snapshot.get("codebase_graph_summary") if isinstance(snapshot.get("codebase_graph_summary"), dict) else {}
     latest_graph = snapshot.get("latest_graph_snapshot") if isinstance(snapshot.get("latest_graph_snapshot"), dict) else {}
+    runtime_performance = (
+        snapshot.get("runtime_performance")
+        if isinstance(snapshot.get("runtime_performance"), dict)
+        else snapshot.get("performance")
+        if isinstance(snapshot.get("performance"), dict)
+        else {}
+    )
+    latest_phase_timings = (
+        runtime_performance.get("latest_phase_timings")
+        if isinstance(runtime_performance.get("latest_phase_timings"), list)
+        else []
+    )
+    slow_phase_warnings = (
+        snapshot.get("slow_phase_warnings")
+        if isinstance(snapshot.get("slow_phase_warnings"), list)
+        else runtime_performance.get("slow_phases")
+        if isinstance(runtime_performance.get("slow_phases"), list)
+        else []
+    )
     impact_summary = snapshot.get("impact_graph_summary") if isinstance(snapshot.get("impact_graph_summary"), dict) else {}
     impact_latest = impact_summary.get("latest_graph_snapshot") if isinstance(impact_summary.get("latest_graph_snapshot"), dict) else {}
     context_pack = snapshot.get("context_pack_preview") if isinstance(snapshot.get("context_pack_preview"), dict) else {}
@@ -12638,6 +24612,21 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         if isinstance(snapshot.get("parallelization_summary"), dict)
         else {}
     )
+    why_not_parallel = (
+        snapshot.get("why_not_parallel")
+        if isinstance(snapshot.get("why_not_parallel"), dict)
+        else {}
+    )
+    why_not_parallel_groups = (
+        why_not_parallel.get("reason_groups")
+        if isinstance(why_not_parallel.get("reason_groups"), list)
+        else []
+    )
+    why_not_parallel_next = (
+        why_not_parallel.get("next_improvements")
+        if isinstance(why_not_parallel.get("next_improvements"), list)
+        else []
+    )
     parallelism_budgets = snapshot.get("parallelism_budgets") if isinstance(snapshot.get("parallelism_budgets"), list) else []
     active_parallel_counts = (
         snapshot.get("active_parallel_counts")
@@ -12659,6 +24648,16 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         if isinstance(snapshot.get("completed_worker_reports"), list)
         else []
     )
+    scope_fanout_outcomes = (
+        snapshot.get("scope_fanout_outcomes")
+        if isinstance(snapshot.get("scope_fanout_outcomes"), list)
+        else []
+    )
+    exhausted_scope_fanout_outcomes = (
+        snapshot.get("exhausted_scope_fanout_outcomes")
+        if isinstance(snapshot.get("exhausted_scope_fanout_outcomes"), list)
+        else [outcome for outcome in scope_fanout_outcomes if isinstance(outcome, dict) and outcome.get("status") == "exhausted"]
+    )
     active_write_workers = (
         snapshot.get("active_write_workers")
         if isinstance(snapshot.get("active_write_workers"), list)
@@ -12674,6 +24673,21 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         if isinstance(snapshot.get("write_worker_conflicts"), list)
         else []
     )
+    worker_patch_preflight = (
+        snapshot.get("worker_patch_integration_preflight")
+        if isinstance(snapshot.get("worker_patch_integration_preflight"), dict)
+        else {}
+    )
+    worker_patch_preflight_order = (
+        worker_patch_preflight.get("safe_order")
+        if isinstance(worker_patch_preflight.get("safe_order"), list)
+        else []
+    )
+    worker_patch_preflight_conflicts = (
+        worker_patch_preflight.get("likely_conflicts")
+        if isinstance(worker_patch_preflight.get("likely_conflicts"), list)
+        else []
+    )
     active_validation_jobs = (
         snapshot.get("active_validation_jobs")
         if isinstance(snapshot.get("active_validation_jobs"), list)
@@ -12687,6 +24701,16 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
     validation_budget_status = (
         snapshot.get("validation_budget_status")
         if isinstance(snapshot.get("validation_budget_status"), dict)
+        else {}
+    )
+    patch_prediction_accuracy = (
+        snapshot.get("patch_prediction_accuracy")
+        if isinstance(snapshot.get("patch_prediction_accuracy"), dict)
+        else {}
+    )
+    patch_telemetry = (
+        snapshot.get("patch_telemetry")
+        if isinstance(snapshot.get("patch_telemetry"), dict)
         else {}
     )
     worker_finding_disposition_required = bool(snapshot.get("worker_finding_disposition_required"))
@@ -12706,6 +24730,7 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
     decision_queue = conveyor_state.get("decision_queue") if isinstance(conveyor_state.get("decision_queue"), list) else []
     projections = snapshot.get("projections") if isinstance(snapshot.get("projections"), dict) else {}
     projection_items = [
+        ("execution_dag", projections.get("execution_dag") if isinstance(projections.get("execution_dag"), dict) else {}),
         ("conveyor", projections.get("conveyor") if isinstance(projections.get("conveyor"), dict) else snapshot.get("projection")),
         ("runner", projections.get("runner") if isinstance(projections.get("runner"), dict) else {}),
     ]
@@ -12735,11 +24760,64 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         f"- event: {_format_key_values({'id': last_event.get('event_id'), 'type': last_event.get('event_type'), 'role': last_event.get('actor_role'), 'phase': last_event.get('phase'), 'status': last_event.get('status'), 'at': last_event.get('occurred_at'), 'hash': _brief_sha(last_event.get('event_hash'))})}",
         f"- checkpoint: {_format_key_values({'id': last_checkpoint.get('checkpoint_id'), 'kind': last_checkpoint.get('kind'), 'sequence': last_checkpoint.get('sequence'), 'at': last_checkpoint.get('created_at'), 'sha': _brief_sha(last_checkpoint.get('state_sha256'))})}",
         "",
-        "## Runner And Conveyor",
+        "## Performance Guardrails",
+        "",
+        f"- timing_summary: {_format_key_values({'slow_threshold_ms': runtime_performance.get('slow_phase_threshold_ms'), 'latest_samples': len(latest_phase_timings), 'slow_warnings': len(slow_phase_warnings)})}",
+        f"- graph_storage: {_format_key_values({'truncated': _brief_bool(graph_summary.get('storage_truncated')), 'file_limit': (graph_summary.get('snapshot_storage') or {}).get('limits', {}).get('file') if isinstance(graph_summary.get('snapshot_storage'), dict) and isinstance((graph_summary.get('snapshot_storage') or {}).get('limits'), dict) else '', 'symbol_limit': (graph_summary.get('snapshot_storage') or {}).get('limits', {}).get('symbol') if isinstance(graph_summary.get('snapshot_storage'), dict) and isinstance((graph_summary.get('snapshot_storage') or {}).get('limits'), dict) else '', 'edge_limit': (graph_summary.get('snapshot_storage') or {}).get('limits', {}).get('edge') if isinstance(graph_summary.get('snapshot_storage'), dict) and isinstance((graph_summary.get('snapshot_storage') or {}).get('limits'), dict) else ''})}",
+    ]
+    for item in latest_phase_timings[:4]:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"- phase_timing: {_format_key_values({'phase': item.get('phase'), 'ms': item.get('elapsed_ms'), 'status': item.get('status'), 'source': item.get('source')})}"
+        )
+    for item in slow_phase_warnings[:4]:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"- slow_phase: {_format_key_values({'phase': item.get('phase'), 'ms': item.get('elapsed_ms'), 'source': item.get('source'), 'status': item.get('status')})}"
+        )
+    lines.extend([
+        "",
+        "## Execution DAG",
+        "",
+        f"- summary: {_format_key_values({'digest': _brief_sha(execution_dag.get('digest')), 'nodes': execution_dag.get('node_count'), 'edges': execution_dag.get('edge_count'), 'ready': len(dag_ready), 'active': len(dag_active), 'blocked': len(dag_blocked)})}",
+        f"- primary_node: {_format_key_values({'task': dag_primary.get('task_id') or dag_primary.get('id'), 'action': dag_primary.get('action_type'), 'status': dag_primary.get('status'), 'owner': dag_primary.get('owner_role'), 'confidence': dag_primary.get('confidence')})}",
+    ])
+    if dag_active:
+        for item in dag_active[:BRIEF_ITEM_LIMIT]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- active_node: {_format_key_values({'task': item.get('task_id') or item.get('id'), 'action': item.get('action_type'), 'owner': item.get('owner_role'), 'attempts': item.get('attempt_count'), 'summary': item.get('summary')})}"
+            )
+    if dag_ready:
+        for item in dag_ready[:BRIEF_ITEM_LIMIT]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- ready_node: {_format_key_values({'task': item.get('task_id') or item.get('id'), 'action': item.get('action_type'), 'owner': item.get('owner_role'), 'receipts': len(item.get('validation_receipt_refs') if isinstance(item.get('validation_receipt_refs'), list) else []), 'summary': item.get('summary')})}"
+            )
+    else:
+        lines.append("- ready_node: none")
+    if dag_blocked:
+        for item in dag_blocked[:BRIEF_ITEM_LIMIT]:
+            if not isinstance(item, dict):
+                continue
+            reasons = item.get("blocked_reasons") if isinstance(item.get("blocked_reasons"), list) else []
+            first_reason = reasons[0] if reasons and isinstance(reasons[0], dict) else {}
+            lines.append(
+                f"- blocked_node: {_format_key_values({'task': item.get('task_id') or item.get('id'), 'action': item.get('action_type'), 'status': item.get('status'), 'reason': first_reason.get('reason') or item.get('blocker_reason')})}"
+            )
+    else:
+        lines.append("- blocked_node: none")
+    lines.extend([
+        "",
+        "## Runner And Compatibility Conveyor",
         "",
         f"- conveyor_stage: {_format_key_values({'stage': machine_work_item.get('current_stage') or conveyor_machine.get('current_stage'), 'stage_status': machine_work_item.get('stage_status') or conveyor_machine.get('stage_status'), 'owner': machine_work_item.get('owner_role') or conveyor_machine.get('owner_role'), 'validation': machine_work_item.get('validation_status'), 'continuation': machine_work_item.get('continuation_token')})}",
         f"- repo_capabilities: {_format_key_values({'primary_language': capability_languages.get('primary'), 'manifest_version': capability_manifest.get('version'), 'digest': _brief_sha(capability_manifest.get('digest')), 'commands': len(capability_manifest.get('commands') if isinstance(capability_manifest.get('commands'), list) else [])})}",
-        f"- codebase_graph: {_format_key_values({'namespace': graph_summary.get('graph_namespace'), 'digest': _brief_sha(latest_graph.get('digest')), 'files': graph_summary.get('indexed_file_count'), 'commands': graph_summary.get('command_node_count'), 'tests': graph_summary.get('test_node_count'), 'stale': graph_summary.get('stale_node_count')})}",
+        f"- codebase_graph: {_format_key_values({'namespace': graph_summary.get('graph_namespace'), 'digest': _brief_sha(latest_graph.get('digest')), 'files': graph_summary.get('indexed_file_count'), 'symbols': (graph_summary.get('node_counts') or {}).get('symbol') if isinstance(graph_summary.get('node_counts'), dict) else 0, 'imports': (graph_summary.get('edge_counts') or {}).get('imports') if isinstance(graph_summary.get('edge_counts'), dict) else 0, 'ownership': (graph_summary.get('edge_counts') or {}).get('owns_symbol') if isinstance(graph_summary.get('edge_counts'), dict) else 0, 'commands': graph_summary.get('command_node_count'), 'tests': graph_summary.get('test_node_count'), 'stale': graph_summary.get('stale_node_count'), 'truncated': _brief_bool(graph_summary.get('storage_truncated'))})}",
         f"- impact_graph: {_format_key_values({'namespace': impact_summary.get('graph_namespace'), 'digest': _brief_sha(impact_latest.get('digest')), 'edges': impact_latest.get('edge_count'), 'stale': impact_summary.get('stale_node_count')})}",
         f"- conveyor_cycles: {int(conveyor_state.get('cycles') or 0)}",
         f"- last_decision: {_format_key_values({'role': last_decision.get('role') or 'idle', 'reason': last_decision.get('reason'), 'decided_at': last_decision.get('decided_at')})}",
@@ -12751,7 +24829,7 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         "",
         "## Graph Context For Next Action",
         "",
-    ]
+    ])
     selected_task = context_pack.get("selected_task") if isinstance(context_pack.get("selected_task"), dict) else {}
     lines.append(
         f"- selected_task: {_format_key_values({'kind': selected_task.get('kind'), 'id': selected_task.get('id'), 'status': selected_task.get('status'), 'summary': selected_task.get('summary')})}"
@@ -12832,12 +24910,27 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         "",
         "## Parallel Execution Dry Run",
         "",
-        f"- summary: {_format_key_values({'mode': parallelization_summary.get('mode'), 'groups': parallelization_summary.get('group_count'), 'grouped_tasks': parallelization_summary.get('grouped_task_count'), 'blocked': parallelization_summary.get('blocked_candidate_count')})}",
+        f"- summary: {_format_key_values({'mode': parallelization_summary.get('mode'), 'groups': parallelization_summary.get('group_count'), 'grouped_tasks': parallelization_summary.get('grouped_task_count'), 'blocked': parallelization_summary.get('blocked_candidate_count'), 'top_blocked': parallelization_summary.get('top_blocked_reason_kind')})}",
         f"- active_counts: {_format_key_values(active_parallel_counts)}",
         f"- worker_reports: {_format_key_values({'active_read_only': len(active_read_only_workers), 'active_write': len(active_write_workers), 'completed': len(completed_worker_reports), 'disposition_required': _brief_bool(worker_finding_disposition_required)})}",
+        f"- scope_fanout: {_format_key_values({'outcomes': len(scope_fanout_outcomes), 'exhausted': len(exhausted_scope_fanout_outcomes), 'max_completed_attempts': SCOPE_FANOUT_MAX_COMPLETED_ATTEMPTS})}",
         f"- worker_patches: {_format_key_values({'queued': len(queued_worker_patches), 'conflicts': len(write_worker_conflicts)})}",
+        f"- worker_patch_preflight: {_format_key_values({'safe': worker_patch_preflight.get('safe_count'), 'ready': worker_patch_preflight.get('ready_patch_count'), 'likely_conflicts': worker_patch_preflight.get('likely_conflict_count'), 'stale_base': worker_patch_preflight.get('stale_base_count'), 'missing_metadata': worker_patch_preflight.get('missing_metadata_count')})}",
+        f"- patch_lineage: {_format_key_values({'count': (snapshot.get('patch_lineage_summary') or {}).get('lineage_count') if isinstance(snapshot.get('patch_lineage_summary'), dict) else 0, 'file_f1': patch_prediction_accuracy.get('average_file_f1'), 'symbol_f1': patch_prediction_accuracy.get('average_symbol_f1'), 'conflict_rate': patch_telemetry.get('conflict_rate'), 'validation_failure_rate': patch_telemetry.get('validation_failure_rate'), 'retry_rate': patch_telemetry.get('retry_rate'), 'integration_success_rate': patch_telemetry.get('integration_success_rate'), 'wall_clock_saved_s': patch_telemetry.get('wall_clock_savings_seconds')})}",
         f"- validation_jobs: {_format_key_values({'aggregate': validation_job_summary.get('aggregate_status'), 'active': len(active_validation_jobs), 'total': validation_job_summary.get('job_count'), 'available': _brief_bool(snapshot.get('parallel_validation_available')), 'budget_allowed': _brief_bool(validation_budget_status.get('allowed'))})}",
     ])
+    for item in worker_patch_preflight_order[:BRIEF_ITEM_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"- integration_preflight_order: {_format_key_values({'order': item.get('safe_order'), 'patch': item.get('patch_id'), 'status': item.get('status'), 'ready': _brief_bool(item.get('ready_to_integrate')), 'reason': item.get('reason_kind')})}"
+        )
+    for item in worker_patch_preflight_conflicts[:BRIEF_ITEM_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"- integration_preflight_conflict: {_format_key_values({'patch': item.get('patch_id'), 'conflicts': ','.join(str(value) for value in item.get('conflict_patch_ids') or []), 'kind': item.get('reason_kind')})}"
+        )
     if parallelism_budgets:
         for budget in parallelism_budgets[:BRIEF_ITEM_LIMIT]:
             if not isinstance(budget, dict):
@@ -12854,6 +24947,14 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
             lines.append(
                 f"- budget_limit: {_format_key_values({'scope': reason.get('scope'), 'kind': reason.get('reason_kind'), 'active': reason.get('active'), 'max': reason.get('max_concurrent'), 'reason': reason.get('reason')})}"
             )
+    for outcome in exhausted_scope_fanout_outcomes[:BRIEF_ITEM_LIMIT]:
+        if not isinstance(outcome, dict):
+            continue
+        top_reasons = outcome.get("top_rejection_reasons") if isinstance(outcome.get("top_rejection_reasons"), list) else []
+        top_reason = top_reasons[0].get("reason_kind") if top_reasons and isinstance(top_reasons[0], dict) else ""
+        lines.append(
+            f"- scope_fanout_exhausted: {_format_key_values({'task': outcome.get('task_id'), 'attempts': outcome.get('attempt_count'), 'records': outcome.get('evidence_record_count'), 'accepted': outcome.get('accepted_count'), 'top_rejection': top_reason, 'next': 'serialized fallback allowed'})}"
+        )
     if proposed_execution_groups:
         for group in proposed_execution_groups[:BRIEF_ITEM_LIMIT]:
             if not isinstance(group, dict):
@@ -12888,10 +24989,39 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
             if not isinstance(candidate, dict):
                 continue
             lines.append(
-                f"- skipped_parallel_candidate: {_format_key_values({'task': candidate.get('task_id') or candidate.get('graph_task_node_id'), 'role': candidate.get('owner_role'), 'action': candidate.get('action_kind'), 'reason': candidate.get('reason')})}"
+                f"- skipped_parallel_candidate: {_format_key_values({'task': candidate.get('task_id') or candidate.get('graph_task_node_id'), 'role': candidate.get('owner_role'), 'action': candidate.get('action_kind'), 'kind': candidate.get('reason_kind'), 'reason': candidate.get('reason')})}"
             )
     else:
         lines.append("- skipped_parallel_candidate: none")
+    lines.extend([
+        "",
+        "## Why Not Parallel?",
+        "",
+        f"- summary: {_format_key_values({'status': why_not_parallel.get('status'), 'blocked': why_not_parallel.get('blocked_candidate_count'), 'top_reason': why_not_parallel.get('top_reason_kind'), 'next': why_not_parallel.get('top_next_action')})}",
+    ])
+    if why_not_parallel_groups:
+        for group in why_not_parallel_groups[:BRIEF_ITEM_LIMIT]:
+            if not isinstance(group, dict):
+                continue
+            lines.append(
+                f"- reason_group: {_format_key_values({'kind': group.get('reason_kind'), 'count': group.get('count'), 'next': group.get('next_action')})}"
+            )
+            examples = group.get("examples") if isinstance(group.get("examples"), list) else []
+            for example in examples[:2]:
+                if not isinstance(example, dict):
+                    continue
+                lines.append(
+                    f"- reason_example: {_format_key_values({'task': example.get('task_id') or example.get('dag_node_id'), 'action': example.get('action_kind'), 'raw_kind': example.get('raw_reason_kind'), 'reason': example.get('reason')})}"
+                )
+    else:
+        lines.append("- reason_group: none")
+    if why_not_parallel_next:
+        for item in why_not_parallel_next[:BRIEF_ITEM_LIMIT]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- next_improvement: {_format_key_values({'kind': item.get('reason_kind'), 'action': item.get('next_action')})}"
+            )
     lines.extend([
         "",
         "## Queued Decisions",
@@ -13020,6 +25150,12 @@ def validate_state_database(target: Path) -> dict[str, Any]:
             "detail": "Required typed state tables present."
             if not missing_tables
             else "Missing typed state tables: " + ", ".join(missing_tables),
+        },
+        {
+            "ok": bool((snapshot.get("execution_dag") or {}).get("node_count")),
+            "detail": "Execution DAG nodes/edges are the primary scheduler state."
+            if bool((snapshot.get("execution_dag") or {}).get("node_count"))
+            else "Execution DAG state is missing.",
         },
         {
             "ok": bool(snapshot["projection"]["exists"]),

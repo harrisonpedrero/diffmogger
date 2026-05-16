@@ -65,6 +65,7 @@ def observatory_safe_state(target: Path, canonical_state: dict[str, Any]) -> dic
         "conveyor": "target/automation_conveyor_state.json",
         "runner": "target/automation_runner.json",
         "machine": "target/orchestration.sqlite3",
+        "execution_dag": "target/orchestration.sqlite3",
         "capabilities": "target/orchestration.sqlite3",
         "automation_control": "target/orchestration.sqlite3",
     }
@@ -249,8 +250,9 @@ def task_state_from_canonical(target: Path, canonical_state: dict[str, Any]) -> 
     known_issue, known_issues = filtered_known_issues(target, known_issue, known_issues, validation=validation)
     worker = control.get("worker") if isinstance(control.get("worker"), dict) else {}
     worker_agents_allowed = bool(worker.get("agents_allowed", True))
-    write_workers_allowed = bool(worker.get("write_workers_allowed", False)) and worker_agents_allowed
-    max_write_worker_count = int(worker.get("max_write_worker_count", 0) or 0)
+    write_workers_allowed = True
+    max_write_worker_count = int(worker.get("max_write_worker_count", 3) or 3)
+    max_write_worker_count = max(1, min(10, max_write_worker_count))
     return {
         "status": clean_text(control.get("status") or "UNKNOWN", limit=80),
         "last_updated": clean_text(control.get("last_updated") or control.get("updated_at") or "unknown", limit=120),
@@ -262,14 +264,16 @@ def task_state_from_canonical(target: Path, canonical_state: dict[str, Any]) -> 
         ),
         "best_next_milestone": clean_text(control.get("best_next_milestone") or "No milestone recorded yet.", limit=260),
         "suggested_next_task": clean_text(control.get("suggested_next_task") or "No sprint task recorded yet.", limit=260),
+        "bootstrap_status": clean_text(control.get("bootstrap_status") or "unknown", limit=80),
+        "bootstrap_pending": bool(control.get("bootstrap_pending")),
         "known_issue": known_issue,
         "known_issues": known_issues,
         "validation": validation,
         "integration_safety": integration_safety_snapshot(validation, target),
         "worker": {
             "agents_allowed": worker_agents_allowed,
-            "write_workers_allowed": write_workers_allowed and worker_agents_allowed,
-            "max_write_worker_count": max_write_worker_count if write_workers_allowed and worker_agents_allowed else 0,
+            "write_workers_allowed": write_workers_allowed,
+            "max_write_worker_count": max_write_worker_count,
         },
     }
 

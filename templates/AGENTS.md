@@ -36,7 +36,7 @@ docs/CODEX_AUTOMATION_GUARDRAILS.md
 - Automation role profile: {{AUTOMATION_ROLE_PROFILE}}.
 {{HUMAN_AGENTS_RULES}}
 - Treat `.diffmogger/runtime/orchestration.sqlite3` as canonical automation state. Read `.diffmogger/runtime/canonical_state_brief.md` for current state instead of inspecting SQLite manually. Markdown and JSON files under `.diffmogger/state/` and `.diffmogger/runtime/` are prompt inputs, handoffs, authored surfaces, compatibility shims, or generated projections.
-- Automation status, product horizon, validation receipts, blockers, next actions, conveyor stage contracts, the current work item, and repo capability manifest are typed SQLite records. Use `.diffmogger/scripts/state_brief.py` and other generated helpers/dashboards to record state changes; do not hand-edit runtime projections as authority.
+- Automation status, product horizon, execution DAG nodes/edges, validation receipts, blockers, next actions, and repo capability manifest are typed SQLite records. Conveyor stage fields are compatibility projections only. Use `.diffmogger/scripts/state_brief.py` and other generated helpers/dashboards to record state changes; do not hand-edit runtime projections as authority.
 - In ticket-campaign mode, use `.diffmogger/scripts/ticket_run.py` to update ticket status. In planner/builder/hardener worktrees this stages a typed ticket-state action for integrator reconciliation after patch acceptance; do not mark completion only by editing Markdown or generated JSON.
 - Record `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` every automation run.
 - Refresh `docs/CODEX_AUTOMATION_TASKS.md` only as a generated prompt/handoff projection after typed state is updated.

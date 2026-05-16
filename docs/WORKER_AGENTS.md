@@ -14,8 +14,8 @@ Reason: <one sentence>
 ```
 
 - Use one generation of workers by default.
-- Prefer read-only worker reports.
-- Use write-capable workers only when the generated project intake explicitly enables them.
+- Prefer read-only worker reports for exploration and review.
+- Treat write-capable workers as always available but optional per run.
 - Use write-capable workers as bounded acceleration when work can split into reviewable write scopes or isolated work areas.
 - The main agent owns integration and verification.
 - Record worker activity in typed runtime state and refresh `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` only as the generated handoff projection.
@@ -60,7 +60,7 @@ python3 .diffmogger/scripts/summarize_worker_outputs.py /absolute/path/to/target
 
 `spawn_worker_agent.sh` creates `.diffmogger/runtime/agent_runs/<run_id>/`, defaults to read-only report mode, tells the worker not to spawn more workers, and writes an unavailable/failure report if the CLI cannot run.
 
-When a generated target project explicitly enables write-capable workers, the same helper supports an explicit write mode:
+The same helper supports an explicit write mode:
 
 ```bash
 bash .diffmogger/scripts/spawn_worker_agent.sh \
@@ -109,32 +109,37 @@ If workers are skipped on a broad task, record the reason in typed automation co
 
 ## Optional Write Workers
 
-Generated target projects are conservative by default only in the sense that write-capable workers require explicit opt-in. Once enabled, they are meant to accelerate progress when work can split into reviewable lanes.
+Generated target projects allow write-capable workers by default. They are meant to accelerate progress when work can split into reviewable lanes, but using zero write workers is still valid for tiny or tightly coupled changes.
 
 ```json
 {
-  "write_worker_agents_allowed": true,
   "max_write_worker_count": 10,
   "write_worker_guidance": "Use the most parallelism the task can safely absorb while keeping ownership reviewable."
 }
 ```
 
-`max_write_worker_count` is capped at 10. The main agent should use the most parallelism the task can safely absorb: no workers for tiny or tightly coupled changes, a few workers for normal multi-surface work, and up to the cap for broad implementation, hardening, observability, docs, examples, validation, or competing prototype lanes.
+`max_write_worker_count` defaults to 3 and is capped at 10. `write_worker_agents_allowed` is a deprecated compatibility field and no longer disables write workers when false. The main agent should use the most parallelism the task can safely absorb: no workers for tiny or tightly coupled changes, a few workers for normal multi-surface work, and up to the cap for broad implementation, hardening, observability, docs, examples, validation, or competing prototype lanes.
 
 ## Runtime Budgets
 
-Diffmogger stores local concurrency limits in SQLite as `parallelism_budgets`. Budgets are derived from intake worker settings and surfaced in `state.snapshot`, so the dashboard and conveyor can show why work can or cannot start without launching anything.
+Diffmogger stores local concurrency limits in SQLite as `parallelism_budgets`. Budgets are derived from intake worker and DAG scheduler settings, then surfaced in `state.snapshot` so the dashboard can show why work can or cannot start without launching anything.
 
 - read-only worker budget is enabled when `worker_agents_allowed` is true
-- write worker budget is enabled only when `write_worker_agents_allowed` is true
+- write worker budget is enabled by default
 - write worker capacity comes from `max_write_worker_count`
 - validation and integration have conservative local caps
 
 Runtime helpers check these budgets before manual workers, execution groups, or validation jobs start. A read-only budget never authorizes write-capable workers.
 
+Validation fanout classifies commands before launch. Unit tests, lint, typecheck, smoke checks, docs checks, and generated helper checks may run concurrently when they are local and read-only. Setup/repair, browser, build, unknown, and explicitly exclusive commands stay in a serial validation lane. Each `validation_jobs` row and matching receipt records the classification, lane, resource profile, and any reusable target-local setup cache that was detected.
+
 ## Read-Only Fanout
 
 Diffmogger can launch read-only workers from proposed execution groups. The launcher consumes a read-only dry-run group, checks the typed budget, creates `worker_agents` and `worker_contracts` rows, and writes each worker report under the sidecar-aware `target/agent_runs/<run_id>/` runtime path.
+
+When a ready ticket is too weakly scoped for parallel write work, the scheduler prefers a bounded read-only scope evidence group before serial builder fallback. These workers collect ownership evidence, likely paths, likely symbols, validation hints, and risk notes. The evidence contract lives in typed SQLite execution-group and worker-contract payloads; worker Markdown reports are review artifacts, not canonical state.
+
+Scope/review workers may include a fenced JSON `scope_evidence_records` block in their report. Diffmogger normalizes those records into `scope_evidence_records` rows with candidate paths, symbols, confidence, stale-context warnings, likely tests, and reasons. Only accepted rows that resolve against the current codebase graph and meet the promotion threshold can raise future DAG ownership confidence. Ambiguous, stale, unresolved, unsafe, or low-confidence records remain auditable but do not authorize write leases.
 
 Each worker receives a bounded context-pack preview: paths, reasons, confidence, and stale-context warnings only. Raw source contents are not embedded by default. Contracts forbid source writes, network access, credential access, external messages, and spawning more workers. The main agent remains responsible for consolidating reports and marking findings accepted, rejected, or deferred.
 
@@ -142,9 +147,11 @@ Worker report state is visible in `state.snapshot` as active read-only workers, 
 
 ## Write-Worker Fanout
 
-Write-worker fanout is opt-in only. It requires `write_worker_agents_allowed: true`, respects `max_write_worker_count`, and launches from a proposed write-worker execution group whose likely write surfaces are disjoint.
+Write-worker fanout is always available, respects `max_write_worker_count`, and launches from a proposed write-worker execution group whose likely write surfaces are disjoint.
 
-Before any write worker starts, Diffmogger acquires active resource leases for the worker's ownership scope. A worker without leases, without an ownership scope, or with an overlapping active lease is blocked. Workers run in isolated scratch/worktree space and produce queue artifacts rather than changing the main checkout.
+Before any write worker starts, Diffmogger acquires active resource leases for the worker's ownership scope. A worker without leases, without an ownership scope, or with an overlapping active lease is blocked. Lease scopes may be file, directory, tests-only, docs-only, symbol, module, or package shaped when the codebase graph can verify that ownership safely; otherwise Diffmogger falls back to narrower file leases or blocks the wave. Workers run in isolated scratch/worktree space and produce queue artifacts rather than changing the main checkout.
+
+Same-wave write workers must have non-overlapping ownership. Overlapping source, module, package, directory, symbol, docs, or test scopes are serialized unless the parent run records an explicit coordination protocol and integration still remains serialized through the integrator.
 
 Each write worker produces:
 
@@ -154,6 +161,8 @@ Each write worker produces:
 - a normal integrator queue manifest under `target/automation_queue/builder/<run_id>/`
 
 The serialized integrator remains the only path that applies patches to the main checkout. Parallel worker patches are visible in `state.snapshot` as queued worker patches, write-worker conflicts, lease conflict summary, and the integration backlog from parallel workers.
+
+Before launching serialized integration, Diffmogger records `worker_patch_integration_preflight` in SQLite and snapshots. That preflight predicts safe order, likely overlap conflicts, stale-base risk, missing metadata, and DAG dependency readiness from normalized patch metadata; Markdown worker text never authorizes writes by itself.
 
 Every run should choose a strategy:
 
@@ -168,7 +177,7 @@ Use write workers after the main agent has enough plan to split the work without
 
 - the milestone and implementation plan
 - shared contracts, interfaces, data shapes, or command boundaries
-- rough file/module ownership for each worker
+- rough file/module/package/docs/tests ownership for each worker
 - an explicit coordination protocol if any ownership overlaps
 - verification expected from each worker
 
@@ -222,6 +231,7 @@ Worker rules:
 - Workers must not spawn additional workers.
 - Workers must not send Discord, local notifier, email, or other external messages.
 - Workers must not touch `.env` or credentials.
+- Read-only scope workers must not acquire write leases or mutate source, generated projections, or runtime state.
 - Workers must not use network unless explicitly approved for that run.
 - The main automation agent must read and consolidate worker findings before implementation is considered complete.
 - Write workers must not overlap write ownership without a documented coordination protocol.

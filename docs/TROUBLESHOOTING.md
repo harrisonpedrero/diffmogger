@@ -148,4 +148,4 @@ Then run without `--dry-run` only after confirming unresolved human requests rem
 
 `.diffmogger/scripts/release_codex_lock.sh` prefers a matching `CODEX_RUN_ID`. If release fails, inspect `.diffmogger/runtime/codex_automation.lock` and confirm you are not removing another active run. Use `CODEX_LOCK_FORCE_RELEASE=true` only after review.
 
-If an automation run already exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, the Codex prompt should not acquire or release another lock. The target repo's conveyor role wrapper owns lock release for wrapped runs.
+If an automation run already exports `CODEX_LOCK_ALREADY_ACQUIRED=true`, the Codex prompt should not acquire or release another lock. The target repo's DAG scheduler role wrapper owns lock release for wrapped runs.

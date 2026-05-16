@@ -208,6 +208,33 @@ def normalize_campaign_mode(data: dict[str, Any]) -> str:
         return "ongoing"
     return "ongoing"
 
+
+def normalize_float(value: Any, default: float, *, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def normalize_positive_int(value: Any, default: int, *, maximum: int = 10) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(maximum, parsed))
+
+
+def normalize_symbol_graph_languages(value: Any) -> list[str]:
+    raw = value if isinstance(value, list) else str(value or "").split(",")
+    languages = [
+        str(language).strip().lower()
+        for language in raw
+        if str(language).strip().lower() in {"python", "typescript", "javascript"}
+    ]
+    return languages or ["python", "typescript", "javascript"]
+
+
 def dashboard_state_from_intake(
     target: Path,
     intake: dict[str, Any],
@@ -217,7 +244,7 @@ def dashboard_state_from_intake(
     dashboard_app = load_dashboard_module()
     existing = load_dashboard_state(target)
     optional_mcp = dashboard_app.optional_mcp_servers_from_value(intake.get("optional_mcp_servers"))
-    write_workers_enabled = bool(intake.get("write_worker_agents_allowed")) and bool(intake.get("worker_agents_allowed", True))
+    write_workers_enabled = True
     automation_role_profile = normalize_automation_role_profile(intake)
     multi_role_enabled = True
     campaign_mode = normalize_campaign_mode(intake)
@@ -225,7 +252,20 @@ def dashboard_state_from_intake(
         **intake,
         "automation_role_profile": automation_role_profile,
         "multi_role_automations_allowed": multi_role_enabled,
+        "write_worker_agents_allowed": True,
+        "max_write_worker_count": dashboard_app.write_worker_count_from_text(
+            intake.get("max_write_worker_count"),
+            enabled=True,
+        ),
         "campaign_mode": campaign_mode,
+        "parallel_execution_mode": (
+            "conservative" if str(intake.get("parallel_execution_mode") or "").strip().lower() == "conservative" else "aggressive"
+        ),
+        "symbol_graph_languages": normalize_symbol_graph_languages(intake.get("symbol_graph_languages")),
+        "parallel_write_min_confidence": normalize_float(intake.get("parallel_write_min_confidence"), 0.75),
+        "parallel_write_direct_confidence": normalize_float(intake.get("parallel_write_direct_confidence"), 0.75),
+        "max_parallel_write_workers": normalize_positive_int(intake.get("max_parallel_write_workers"), 3),
+        "max_parallel_scope_workers": normalize_positive_int(intake.get("max_parallel_scope_workers"), 2),
     }
     state = {
         **existing,
@@ -241,11 +281,19 @@ def dashboard_state_from_intake(
         "worker_agents_allowed": bool(intake.get("worker_agents_allowed", True)),
         "codex_cli_workers_expected_on_broad_runs": bool(intake.get("codex_cli_workers_expected_on_broad_runs", True)),
         "optional_mcp_servers": optional_mcp,
-        "write_worker_agents_allowed": write_workers_enabled,
+        "write_worker_agents_allowed": True,
         "max_write_worker_count": dashboard_app.write_worker_count_from_text(
             intake.get("max_write_worker_count"),
-            enabled=write_workers_enabled,
+            enabled=True,
         ),
+        "parallel_execution_mode": (
+            "conservative" if str(intake.get("parallel_execution_mode") or "").strip().lower() == "conservative" else "aggressive"
+        ),
+        "symbol_graph_languages": normalize_symbol_graph_languages(intake.get("symbol_graph_languages")),
+        "parallel_write_min_confidence": normalize_float(intake.get("parallel_write_min_confidence"), 0.75),
+        "parallel_write_direct_confidence": normalize_float(intake.get("parallel_write_direct_confidence"), 0.75),
+        "max_parallel_write_workers": normalize_positive_int(intake.get("max_parallel_write_workers"), 3),
+        "max_parallel_scope_workers": normalize_positive_int(intake.get("max_parallel_scope_workers"), 2),
         "multi_role_automations_allowed": multi_role_enabled,
         "automation_role_profile": automation_role_profile,
         "automation_checkpoint_commits": bool(intake.get("automation_checkpoint_commits", True)),
@@ -264,6 +312,12 @@ def project_intake_payload(intake: dict[str, Any]) -> dict[str, Any]:
     automation_role_profile = normalize_automation_role_profile(payload)
     payload["automation_role_profile"] = automation_role_profile
     payload["multi_role_automations_allowed"] = automation_role_profile == "planner_builder_hardener_integrator"
+    dashboard_app = load_dashboard_module()
+    payload["write_worker_agents_allowed"] = True
+    payload["max_write_worker_count"] = dashboard_app.write_worker_count_from_text(
+        payload.get("max_write_worker_count"),
+        enabled=True,
+    )
     payload.pop("overwrite_existing_scaffold_files", None)
     return payload
 

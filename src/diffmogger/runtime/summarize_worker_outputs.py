@@ -54,11 +54,33 @@ class WorkerReport:
 
 
 def latest_run_id(target: Path) -> str:
-    runs_dir = target_path(target, "target/agent_runs")
-    candidates = [path for path in runs_dir.iterdir() if path.is_dir()] if runs_dir.exists() else []
+    candidates: list[Path] = []
+    for runs_dir in agent_runs_dirs(target):
+        if runs_dir.exists():
+            candidates.extend(path for path in runs_dir.iterdir() if path.is_dir())
     if not candidates:
-        raise SystemExit(f"No worker run directories found under {runs_dir}")
+        searched = ", ".join(str(path) for path in agent_runs_dirs(target))
+        raise SystemExit(f"No worker run directories found under {searched}")
     return max(candidates, key=lambda path: path.stat().st_mtime).name
+
+
+def agent_runs_dirs(target: Path) -> list[Path]:
+    canonical = target_path(target, "target/agent_runs")
+    legacy = target / "target" / "agent_runs"
+    if canonical == legacy:
+        return [canonical]
+    return [canonical, legacy]
+
+
+def run_dir_for_summary(target: Path, run_id: str) -> Path:
+    candidates = [base / run_id for base in agent_runs_dirs(target)]
+    for candidate in candidates:
+        if candidate.exists() and any(path.name != "worker_summary.md" for path in candidate.glob(WORKER_GLOB)):
+            return candidate
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def section_lines(text: str, heading: str) -> list[str]:
@@ -122,7 +144,7 @@ def summarize_report(path: Path) -> WorkerReport:
 
 
 def build_summary(target: Path, run_id: str) -> tuple[Path, str]:
-    run_dir = target_path(target, "target/agent_runs") / run_id
+    run_dir = run_dir_for_summary(target, run_id)
     reports = sorted(
         path for path in run_dir.glob(WORKER_GLOB) if path.name != "worker_summary.md"
     )

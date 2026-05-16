@@ -358,7 +358,7 @@ DISCORD_NOTIFIER_AUTOMATION_REQUIRED_STRINGS = [
 
 MULTI_ROLE_AUTOMATION_REQUIRED_STRINGS = [
     "Role profile: `planner_builder_hardener_integrator`",
-    "Continuous conveyor",
+    "Continuous DAG scheduler",
     "target/automation_worktrees",
     "target/automation_queue",
     "docs/MULTI_ROLE_PROGRESS.md",
@@ -426,13 +426,16 @@ RUN_ROLE_REQUIRED_STRINGS = [
 
 WATCHDOG_REQUIRED_STRINGS = [
     "CODEX_ROLE_TIMEOUT_SECONDS",
+    "CODEX_ROLE_IDLE_TIMEOUT_SECONDS",
     "CODEX_ROLE_TERMINATION_GRACE_SECONDS",
     "DEFAULT_TIMEOUT_SECONDS = 5400",
+    "DEFAULT_IDLE_TIMEOUT_SECONDS = 600",
     "TIMEOUT_EXIT_CODE = 124",
     "start_new_session=True",
     "os.killpg",
     "timed_out",
     "idle_timed_out",
+    "progress_path_changed",
 ]
 
 INTEGRATOR_REQUIRED_STRINGS = [
@@ -594,7 +597,7 @@ def main() -> int:
     parser.add_argument(
         "--write-workers-enabled",
         action="store_true",
-        help="Validate write-worker markers for targets whose intake explicitly enabled bounded write workers.",
+        help="Deprecated compatibility flag; write-worker markers are validated for all targets.",
     )
     parser.add_argument(
         "--multi-role-enabled",
@@ -739,7 +742,7 @@ def main() -> int:
             mode_markers = LOCAL_NOTIFIER_AUTOMATION_REQUIRED_STRINGS
         elif mode == "discord_notifier":
             mode_markers = DISCORD_NOTIFIER_AUTOMATION_REQUIRED_STRINGS
-        write_worker_markers = WRITE_WORKER_AUTOMATION_REQUIRED_STRINGS if args.write_workers_enabled else []
+        write_worker_markers = WRITE_WORKER_AUTOMATION_REQUIRED_STRINGS
         multi_role_markers = MULTI_ROLE_AUTOMATION_REQUIRED_STRINGS if multi_role_enabled else []
         ticket_markers = ["Campaign mode: `bounded`", "SQLite ticket queue"] if args.ticket_campaign_enabled else []
         for marker in AUTOMATION_REQUIRED_STRINGS + mode_markers + write_worker_markers + multi_role_markers + ticket_markers:
@@ -881,7 +884,7 @@ def main() -> int:
     worker_helper_path = rel_path(root, worker_helper_rel)
     if worker_helper_path.exists() and worker_helper_path.is_file():
         worker_helper_text = worker_helper_path.read_text(encoding="utf-8")
-        write_worker_helper_markers = WRITE_WORKER_HELPER_REQUIRED_STRINGS if args.write_workers_enabled else []
+        write_worker_helper_markers = WRITE_WORKER_HELPER_REQUIRED_STRINGS
         for marker in WORKER_HELPER_REQUIRED_STRINGS + write_worker_helper_markers:
             if not has_marker(worker_helper_text, marker):
                 problems.append(f"{worker_helper_label}: missing marker {marker!r}")

@@ -18,7 +18,7 @@ docs/PROJECT_CONTEXT.md
 {{HUMAN_FILE_READS}}
 ```
 
-Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/conveyor authority.
+Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/DAG authority.
 
 ## Mission
 

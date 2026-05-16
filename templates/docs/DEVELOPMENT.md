@@ -78,17 +78,17 @@ Scheduled runs should use the local wrapper:
 bash .diffmogger/scripts/run_conveyor_automation.sh --once
 ```
 
-The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto --skip-git-repo-check` through `.diffmogger/scripts/run_process_watchdog.py`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock when the run exits. Set `CODEX_ROLE_TIMEOUT_SECONDS` to override the 90-minute hard timeout and `CODEX_ROLE_TERMINATION_GRACE_SECONDS` to tune graceful shutdown.
+The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto --skip-git-repo-check` through `.diffmogger/scripts/run_process_watchdog.py`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock when the run exits. Set `CODEX_ROLE_TIMEOUT_SECONDS` to override the 90-minute hard timeout, `CODEX_ROLE_IDLE_TIMEOUT_SECONDS` to override the 10-minute no-progress timeout, and `CODEX_ROLE_TERMINATION_GRACE_SECONDS` to tune graceful shutdown. Idle progress is detected from stdout/stderr plus role worktree and queue file changes; set the idle timeout to `0` to disable it for a run.
 
 ## Automation Environment Loading
 
-The local wrappers load target env files into the automation process before launching Codex, conveyor, role worktrees, or child workers. Values are inherited through the process environment; `.env*` files are not copied into isolated worktrees or queued patches.
+The local wrappers load target env files into the automation process before launching Codex, the DAG scheduler, role worktrees, or child workers. Values are inherited through the process environment; `.env*` files are not copied into isolated worktrees or queued patches.
 
 Default env files include root `.env`, `.env.local`, `.env.development`, `.env.development.local`, and matching `apps/*/.env*` development files. Already-exported shell variables win over file values.
 
 Use `CODEX_AUTOMATION_ENV_FILES` for an explicit comma- or colon-separated file list. Use `CODEX_AUTOMATION_ENV_DENYLIST` for comma- or colon-separated variable names that should not be inherited. Never print, summarize, commit, or copy secret values.
 
-Continuous conveyor automation uses:
+Continuous DAG scheduler automation uses:
 
 ```bash
 bash .diffmogger/scripts/run_conveyor_automation.sh --dry-run
@@ -96,9 +96,28 @@ bash .diffmogger/scripts/run_conveyor_automation.sh --once
 python3 .diffmogger/scripts/run_observatory.py --open
 ```
 
-Continuous conveyor automation requires this target to be an initialized git repo with an initial commit. Diffmogger scaffold creates the local repo and first `chore: initial commit` automatically when `HEAD` is missing.
+Continuous DAG scheduler automation requires this target to be an initialized git repo with an initial commit. Diffmogger scaffold creates the local repo and first `chore: initial commit` automatically when `HEAD` is missing.
 
-The conveyor records canonical local state in `target/orchestration.sqlite3`, including typed automation control, stage contracts, the current work item, repository capability manifest, validation receipts, blockers, human messages, and next actions. It regenerates `target/canonical_state_brief.md` before Codex runs, keeps `target/automation_conveyor_state.json` and `target/automation_runner.json` as generated compatibility projections, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to target-local planner, builder, hardener, and integrator role wrappers. The observatory reads canonical state plus `target/baseline_verification.json` to show runner state, automation control, typed conveyor stage, baseline verification state, conveyor health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent conveyor or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming lanes, queued/deferred patches, recent outcomes, and timeline events.
+The runner records canonical execution DAG state in `target/orchestration.sqlite3`, including typed automation control, execution DAG nodes/edges, repository capability manifest, validation receipts, blockers, human messages, and next actions. It regenerates `target/canonical_state_brief.md` before Codex runs, keeps `target/automation_conveyor_state.json` and `target/automation_runner.json` as generated compatibility projections, uses `target/automation_conveyor.lock` to avoid duplicate dispatchers, and delegates actual work to target-local planner, builder, hardener, and integrator role wrappers. The observatory reads canonical state plus `target/baseline_verification.json` to show runner state, automation control, execution DAG progress, baseline verification state, scheduler health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent DAG scheduler or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming DAG lanes, queued/deferred patches, recent outcomes, and timeline events.
+
+DAG scheduler config:
+
+```text
+parallel_execution_mode={{PARALLEL_EXECUTION_MODE}}
+symbol_graph_languages={{SYMBOL_GRAPH_LANGUAGES_INLINE}}
+parallel_write_min_confidence={{PARALLEL_WRITE_MIN_CONFIDENCE}}
+parallel_write_direct_confidence={{PARALLEL_WRITE_DIRECT_CONFIDENCE}}
+max_parallel_write_workers={{MAX_PARALLEL_WRITE_WORKERS}}
+max_parallel_scope_workers={{MAX_PARALLEL_SCOPE_WORKERS}}
+```
+
+Before the first long DAG run, generate a preflight report:
+
+```bash
+python3 .diffmogger/scripts/preflight_parallelization_readiness.py --target . --json
+```
+
+The report returns `ready`, `warn`, or `block`, lists expected parallel and serialized tasks with reasons, and calls out symbol, scheduler, lease, validation, dashboard, and telemetry risks.
 
 ## Managed Browser Runtime
 
@@ -146,7 +165,7 @@ python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diff
 This writes `/tmp/Diffmogger-review/Diffmogger-observatory.html` and
 `/tmp/Diffmogger-review/Diffmogger-self-review.md`. Markdown review exports update
 `target/action_plan_history.json` so repeated recommendations and follow-through outcomes
-remain visible across local conveyor cycles.
+remain visible across local DAG scheduler cycles.
 
 ### First Review Checklist
 

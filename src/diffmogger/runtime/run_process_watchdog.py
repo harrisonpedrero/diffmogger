@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run a subprocess with a hard timeout and structured status output."""
+"""Run a subprocess with hard and idle timeouts plus structured status output."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -18,9 +19,22 @@ from typing import BinaryIO, Any
 
 
 DEFAULT_TIMEOUT_SECONDS = 5400
+DEFAULT_IDLE_TIMEOUT_SECONDS = 600
 DEFAULT_TERMINATION_GRACE_SECONDS = 20
 TIMEOUT_EXIT_CODE = 124
 PROCESS_SCAN_INTERVAL_SECONDS = 1.0
+PROGRESS_SCAN_INTERVAL_SECONDS = 1.0
+DEFAULT_PROGRESS_FILE_LIMIT = 4000
+PROGRESS_SKIP_DIR_NAMES = {
+    ".git",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "node_modules",
+}
 
 CHILD: subprocess.Popen[bytes] | None = None
 TERMINATE_SIGNAL: int | None = None
@@ -42,6 +56,14 @@ def parse_non_negative_int(value: str | None, default: int, *, name: str) -> int
         print(f"{name} must be zero or greater, got {value!r}", file=sys.stderr)
         raise SystemExit(2)
     return parsed
+
+
+def progress_file_limit() -> int:
+    return parse_non_negative_int(
+        os.environ.get("CODEX_ROLE_IDLE_PROGRESS_FILE_LIMIT"),
+        DEFAULT_PROGRESS_FILE_LIMIT,
+        name="CODEX_ROLE_IDLE_PROGRESS_FILE_LIMIT",
+    )
 
 
 def command_for_status(command: list[str]) -> list[str]:
@@ -68,6 +90,59 @@ def write_status(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def progress_path_label(path: Path) -> str:
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
+def progress_entries_for_path(path: Path, *, file_limit: int) -> list[str]:
+    """Return file metadata entries that represent observable subprocess progress."""
+    label = progress_path_label(path)
+    try:
+        stat_result = path.stat()
+    except OSError as exc:
+        return [f"{label}\0missing\0{exc.__class__.__name__}"]
+
+    if path.is_file():
+        return [f"{label}\0file\0{stat_result.st_size}\0{stat_result.st_mtime_ns}"]
+    if not path.is_dir():
+        return [f"{label}\0other\0{stat_result.st_size}\0{stat_result.st_mtime_ns}"]
+
+    entries = [f"{label}\0dir\0{stat_result.st_mtime_ns}"]
+    seen = 0
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [name for name in sorted(dirs) if name not in PROGRESS_SKIP_DIR_NAMES]
+        root_path = Path(root)
+        for name in sorted(files):
+            if file_limit and seen >= file_limit:
+                entries.append(f"{label}\0truncated\0{file_limit}")
+                return entries
+            file_path = root_path / name
+            try:
+                file_stat = file_path.stat()
+            except OSError as exc:
+                entries.append(f"{progress_path_label(file_path)}\0missing\0{exc.__class__.__name__}")
+                seen += 1
+                continue
+            try:
+                rel = file_path.relative_to(path)
+            except ValueError:
+                rel = file_path
+            entries.append(f"{label}\0{rel}\0{file_stat.st_size}\0{file_stat.st_mtime_ns}")
+            seen += 1
+    return entries
+
+
+def progress_signature(paths: list[Path], *, file_limit: int) -> tuple[str, dict[str, Any]]:
+    entries: list[str] = []
+    for path in paths:
+        entries.extend(progress_entries_for_path(path, file_limit=file_limit))
+    digest = hashlib.sha256("\n".join(entries).encode("utf-8", errors="surrogateescape")).hexdigest()
+    return digest, {"path_count": len(paths), "entry_count": len(entries), "digest": digest}
 
 
 def stream_to_file(stream: BinaryIO, output: BinaryIO) -> None:
@@ -285,6 +360,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stderr-file", required=True, type=Path)
     parser.add_argument("--status-file", required=True, type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=None)
+    parser.add_argument("--idle-timeout-seconds", type=int, default=None)
+    parser.add_argument(
+        "--progress-path",
+        action="append",
+        default=[],
+        type=Path,
+        help="File or directory whose size/mtime changes reset the idle timeout.",
+    )
     parser.add_argument("--termination-grace-seconds", type=int, default=None)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
@@ -311,6 +394,17 @@ def main() -> int:
         print("--timeout-seconds must be zero or greater", file=sys.stderr)
         return 2
 
+    idle_timeout_seconds = args.idle_timeout_seconds
+    if idle_timeout_seconds is None:
+        idle_timeout_seconds = parse_non_negative_int(
+            os.environ.get("CODEX_ROLE_IDLE_TIMEOUT_SECONDS"),
+            DEFAULT_IDLE_TIMEOUT_SECONDS,
+            name="CODEX_ROLE_IDLE_TIMEOUT_SECONDS",
+        )
+    if idle_timeout_seconds < 0:
+        print("--idle-timeout-seconds must be zero or greater", file=sys.stderr)
+        return 2
+
     grace_seconds = args.termination_grace_seconds
     if grace_seconds is None:
         grace_seconds = parse_non_negative_int(
@@ -323,6 +417,15 @@ def main() -> int:
         return 2
 
     started = time.monotonic()
+    args.stdout_file.parent.mkdir(parents=True, exist_ok=True)
+    args.stderr_file.parent.mkdir(parents=True, exist_ok=True)
+    args.stdout_file.touch(exist_ok=True)
+    args.stderr_file.touch(exist_ok=True)
+    progress_paths = [args.stdout_file, args.stderr_file, *args.progress_path]
+    progress_limit = progress_file_limit()
+    last_progress = started
+    last_progress_at = utc_now()
+    current_progress_signature, progress_detail = progress_signature(progress_paths, file_limit=progress_limit)
     status: dict[str, Any] = {
         "schema_version": 1,
         "started_at": utc_now(),
@@ -337,6 +440,11 @@ def main() -> int:
         "signal": None,
         "termination_reason": None,
         "timeout_seconds": timeout_seconds,
+        "idle_timeout_seconds": idle_timeout_seconds,
+        "last_progress_at": last_progress_at,
+        "last_progress_reason": "initial_observation",
+        "progress_paths": [progress_path_label(path) for path in progress_paths],
+        "progress_observation": progress_detail,
         "termination_grace_seconds": grace_seconds,
         "command": command_for_status(command),
         "command_display": shlex.join(command_for_status(command)),
@@ -353,8 +461,6 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_termination)
     signal.signal(signal.SIGINT, request_termination)
 
-    args.stdout_file.parent.mkdir(parents=True, exist_ok=True)
-    args.stderr_file.parent.mkdir(parents=True, exist_ok=True)
     stdout_handle = args.stdout_file.open("wb")
     stderr_handle = args.stderr_file.open("wb")
     threads: list[threading.Thread] = []
@@ -400,7 +506,9 @@ def main() -> int:
             thread.start()
 
         deadline = time.monotonic() + timeout_seconds if timeout_seconds else None
+        idle_deadline = time.monotonic() + idle_timeout_seconds if idle_timeout_seconds else None
         next_process_scan = 0.0
+        next_progress_scan = 0.0
         while True:
             now = time.monotonic()
             if now >= next_process_scan:
@@ -412,6 +520,18 @@ def main() -> int:
                 )
                 scan_interval = 0.1 if now - started < 5 else PROCESS_SCAN_INTERVAL_SECONDS
                 next_process_scan = now + scan_interval
+            if idle_timeout_seconds and now >= next_progress_scan:
+                observed_signature, observed_detail = progress_signature(progress_paths, file_limit=progress_limit)
+                if observed_signature != current_progress_signature:
+                    current_progress_signature = observed_signature
+                    progress_detail = observed_detail
+                    last_progress = now
+                    last_progress_at = utc_now()
+                    idle_deadline = now + idle_timeout_seconds
+                    status["last_progress_at"] = last_progress_at
+                    status["last_progress_reason"] = "progress_path_changed"
+                    status["progress_observation"] = progress_detail
+                next_progress_scan = now + PROGRESS_SCAN_INTERVAL_SECONDS
             child_return_code = CHILD.poll()
             if child_return_code is not None:
                 exit_code = child_return_code if child_return_code >= 0 else 128 + abs(child_return_code)
@@ -423,6 +543,19 @@ def main() -> int:
                 child_return_code, killed = wait_after_termination(CHILD, grace_seconds)
                 status["killed"] = killed
                 exit_code = 128 + int(TERMINATE_SIGNAL)
+                break
+            if idle_deadline is not None and time.monotonic() >= idle_deadline:
+                status["idle_timed_out"] = True
+                status["terminated"] = True
+                status["signal"] = signal_name(signal.SIGTERM)
+                status["termination_reason"] = "idle_timeout"
+                status["idle_seconds"] = round(time.monotonic() - last_progress, 3)
+                signal_child_group(CHILD, signal.SIGTERM)
+                child_return_code, killed = wait_after_termination(CHILD, grace_seconds)
+                status["killed"] = killed
+                if killed:
+                    status["signal"] = signal_name(signal.SIGKILL)
+                exit_code = TIMEOUT_EXIT_CODE
                 break
             if deadline is not None and time.monotonic() >= deadline:
                 status["timed_out"] = True

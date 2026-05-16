@@ -12,6 +12,8 @@ The helper is intentionally local-first:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -22,6 +24,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
+    tomllib = None
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -356,6 +363,71 @@ def python_requirement_candidates(target: Path, command: str, output: str) -> li
     return unique
 
 
+def pyproject_test_extra(target: Path) -> str:
+    pyproject = target / "pyproject.toml"
+    if tomllib is None or not pyproject.exists():
+        return ""
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    project = data.get("project") if isinstance(data, dict) else {}
+    optional = project.get("optional-dependencies") if isinstance(project, dict) else {}
+    if not isinstance(optional, dict):
+        return ""
+    for name in ("test", "tests", "dev"):
+        values = optional.get(name)
+        if isinstance(values, list) and any("pytest" in str(item).lower() for item in values):
+            return name
+    return ""
+
+
+@contextlib.contextmanager
+def advisory_lock(lock_path: Path):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def repair_pyproject_environment(
+    target: Path,
+    command: str,
+    primary_module: str,
+) -> tuple[str | None, list[str], str]:
+    extra = pyproject_test_extra(target)
+    if not extra:
+        return None, [], ""
+    notes: list[str] = []
+    venv_dir = target_path(target, "target/automation_venvs") / "root"
+    ensure_info_exclude(target, ["/target/automation_venvs/", "/.venv/", "/services/*/.venv/"])
+    if not git_ignores_path(target, venv_dir):
+        return None, [f"skipped {venv_dir.relative_to(target)} because it is not ignored by repo policy"], ""
+    python_path = venv_dir / "bin" / "python"
+    lock_path = venv_dir.parent / f"{venv_dir.name}.lock"
+    with advisory_lock(lock_path):
+        if python_path.exists() and python_can_import(python_path, primary_module):
+            notes.append(f"using existing local ignored venv {venv_dir.relative_to(target)} from pyproject extra `{extra}`")
+            return python_command_for_venv(target, python_path, command), notes, ""
+        if not python_path.exists():
+            created = run([sys.executable, "-m", "venv", str(venv_dir)], cwd=target)
+            if created.returncode != 0:
+                notes.append(f"venv creation failed for {venv_dir.relative_to(target)}: {created.stderr.strip()}")
+                return None, notes, ""
+        installed = run([str(python_path), "-m", "pip", "install", "-e", f".[{extra}]"], cwd=target)
+        if installed.returncode != 0:
+            notes.append(f"dependency install failed for pyproject extra `{extra}`: {installed.stderr.strip()}")
+            return None, notes, ""
+        if python_can_import(python_path, primary_module):
+            notes.append(f"installed Python dependencies from pyproject extra `{extra}` into {venv_dir.relative_to(target)}")
+            return python_command_for_venv(target, python_path, command), notes, ""
+        notes.append(f"installed pyproject extra `{extra}` but {primary_module} is still unavailable")
+    return None, notes, ""
+
+
 def python_command_for_venv(target: Path, python_path: Path, original_command: str) -> str:
     tokens = split_command(original_command)
     if tokens:
@@ -402,27 +474,36 @@ def repair_python_environment(
         notes.append(f"{python_path.relative_to(target)} exists but cannot import {primary_module}")
 
     ensure_info_exclude(target, ["/target/automation_venvs/", "/.venv/", "/services/*/.venv/"])
+    repaired_command, pyproject_notes, pyproject_blocked = repair_pyproject_environment(target, command, primary_module)
+    notes.extend(pyproject_notes)
+    if repaired_command:
+        return repaired_command, notes, ""
+    if pyproject_blocked:
+        return None, notes, pyproject_blocked
+
     for requirements, venv_dir in python_requirement_candidates(target, command, output):
         if not git_ignores_path(target, venv_dir):
             notes.append(f"skipped {venv_dir.relative_to(target)} because it is not ignored by repo policy")
             continue
         python_path = venv_dir / "bin" / "python"
-        if python_path.exists() and python_can_import(python_path, primary_module):
-            notes.append(f"using existing local ignored venv {venv_dir.relative_to(target)}")
-            return python_command_for_venv(target, python_path, command), notes, ""
-        if not python_path.exists():
-            created = run([sys.executable, "-m", "venv", str(venv_dir)], cwd=target)
-            if created.returncode != 0:
-                notes.append(f"venv creation failed for {venv_dir.relative_to(target)}: {created.stderr.strip()}")
+        lock_path = venv_dir.parent / f"{venv_dir.name}.lock"
+        with advisory_lock(lock_path):
+            if python_path.exists() and python_can_import(python_path, primary_module):
+                notes.append(f"using existing local ignored venv {venv_dir.relative_to(target)}")
+                return python_command_for_venv(target, python_path, command), notes, ""
+            if not python_path.exists():
+                created = run([sys.executable, "-m", "venv", str(venv_dir)], cwd=target)
+                if created.returncode != 0:
+                    notes.append(f"venv creation failed for {venv_dir.relative_to(target)}: {created.stderr.strip()}")
+                    continue
+            installed = run([str(python_path), "-m", "pip", "install", "-r", str(requirements)], cwd=target)
+            if installed.returncode != 0:
+                notes.append(f"dependency install failed for {requirements.relative_to(target)}: {installed.stderr.strip()}")
                 continue
-        installed = run([str(python_path), "-m", "pip", "install", "-r", str(requirements)], cwd=target)
-        if installed.returncode != 0:
-            notes.append(f"dependency install failed for {requirements.relative_to(target)}: {installed.stderr.strip()}")
-            continue
-        if python_can_import(python_path, primary_module):
-            notes.append(f"installed Python dependencies from {requirements.relative_to(target)} into {venv_dir.relative_to(target)}")
-            return python_command_for_venv(target, python_path, command), notes, ""
-        notes.append(f"installed {requirements.relative_to(target)} but {primary_module} is still unavailable")
+            if python_can_import(python_path, primary_module):
+                notes.append(f"installed Python dependencies from {requirements.relative_to(target)} into {venv_dir.relative_to(target)}")
+                return python_command_for_venv(target, python_path, command), notes, ""
+            notes.append(f"installed {requirements.relative_to(target)} but {primary_module} is still unavailable")
     return None, notes, "No ignored local Python venv with declared requirements could satisfy the missing module."
 
 
@@ -499,6 +580,20 @@ def repair_node_environment(
         if not git_ignores_path(target, node_modules):
             notes.append(f"skipped {rel}/node_modules because it is not ignored by repo policy")
             continue
+        missing_names = {
+            str(item.get("name") or "")
+            for item in diagnostics
+            if item.get("kind") in {"missing_node_module", "missing_node_dependencies"}
+            and str(item.get("name") or "")
+        }
+        node_bin = node_modules / ".bin"
+        reusable_cache = node_modules.exists() and (
+            not missing_names
+            or any((node_modules / name).exists() or (node_bin / name).exists() for name in missing_names)
+        )
+        if reusable_cache:
+            notes.append(f"using existing ignored Node dependency cache in {rel}/node_modules")
+            return command_with_node_bin(package_dir, command), notes, ""
         install_command = package_manager_install_command(package_dir)
         if install_command is None:
             notes.append(f"skipped {rel}: no supported lockfile/package manager pair found")

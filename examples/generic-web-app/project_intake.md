@@ -62,7 +62,16 @@ project_commands_only
 
 ## Automation Mode
 
-Continuous planner/builder/hardener/integrator conveyor.
+Continuous execution DAG scheduler with planner/builder/hardener/integrator roles.
+
+## DAG Scheduler Config
+
+parallel_execution_mode: aggressive
+symbol_graph_languages: python, typescript, javascript
+parallel_write_min_confidence: 0.75
+parallel_write_direct_confidence: 0.75
+max_parallel_write_workers: 3
+max_parallel_scope_workers: 2
 
 ## Human Bridge
 

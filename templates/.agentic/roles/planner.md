@@ -18,11 +18,11 @@ docs/PROJECT_CONTEXT.md
 {{HUMAN_FILE_READS}}
 ```
 
-Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/conveyor authority.
+Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/DAG authority.
 
 ## Mission
 
-Maintain stable planning continuity for the next builder and hardener cycles. Planner should run when the continuous conveyor reaches a planning transition, so implementation roles execute against a stable plan.
+Maintain stable planning continuity for upcoming build, review, validation, and repair DAG nodes. Planner should run when the continuous DAG scheduler reaches a planning transition, so implementation roles execute against a stable plan.
 
 ## Responsibilities
 

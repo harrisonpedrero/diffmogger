@@ -143,7 +143,7 @@ describe("ObservatoryPage", () => {
     expect(html).toContain("Patch is queued.");
   });
 
-  it("renders the full typed conveyor state machine before role lanes", () => {
+  it("renders the DAG compatibility state projection before role lanes", () => {
     const html = render(
       observatorySnapshot({
         conveyor: {
@@ -175,7 +175,7 @@ describe("ObservatoryPage", () => {
       }),
     );
 
-    expect(html).toContain("State Machine");
+    expect(html).toContain("DAG Compatibility State");
     expect(html).toContain("Intake");
     expect(html).toContain("Discovery");
     expect(html).toContain("Decomposition");
@@ -188,7 +188,7 @@ describe("ObservatoryPage", () => {
     expect(html).toContain("Continuation");
     expect(html).toContain("workitem:default:validation:77");
     expect(html).toContain("TypeScript / 2 commands");
-    expect(html.indexOf("Execution Lanes")).toBeLessThan(html.indexOf("State Machine"));
+    expect(html.indexOf("Execution Lanes")).toBeLessThan(html.indexOf("DAG Compatibility State"));
   });
 
   it("renders blocked user input", () => {

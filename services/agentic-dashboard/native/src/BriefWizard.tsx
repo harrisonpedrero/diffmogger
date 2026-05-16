@@ -82,6 +82,12 @@ export type IntakeDraft = {
   write_worker_agents_allowed: boolean;
   max_write_worker_count: number;
   write_worker_guidance: string;
+  parallel_execution_mode: "conservative" | "aggressive";
+  symbol_graph_languages: string[];
+  parallel_write_min_confidence: number;
+  parallel_write_direct_confidence: number;
+  max_parallel_write_workers: number;
+  max_parallel_scope_workers: number;
   multi_role_automations_allowed: boolean;
   automation_role_profile: "planner_builder_hardener_integrator";
   automation_checkpoint_commits: boolean;
@@ -132,6 +138,13 @@ type ScaffoldResponse = {
   preflight?: ScaffoldPreviewResponse;
   log?: BackendLogEvent[];
   log_excerpt?: BackendLogEvent[];
+};
+
+export type SetupRunState = {
+  enabled: boolean;
+  bootstrapCompleted: boolean;
+  reason: string;
+  status: string;
 };
 
 export type ScaffoldPreviewFile = {
@@ -210,10 +223,16 @@ const defaultDraft: IntakeDraft = {
   local_notifications_enabled: true,
   worker_agents_allowed: true,
   codex_cli_workers_expected_on_broad_runs: true,
-  write_worker_agents_allowed: false,
-  max_write_worker_count: 0,
+  write_worker_agents_allowed: true,
+  max_write_worker_count: 3,
   write_worker_guidance:
-    "Write workers are optional and should be used only for large, well-planned changes with disjoint file or module ownership. Prefer fewer workers when the change can be done clearly by the main agent.",
+    "Use write workers as optional bounded acceleration when work splits into reviewable ownership scopes.",
+  parallel_execution_mode: "aggressive",
+  symbol_graph_languages: ["python", "typescript", "javascript"],
+  parallel_write_min_confidence: 0.75,
+  parallel_write_direct_confidence: 0.75,
+  max_parallel_write_workers: 3,
+  max_parallel_scope_workers: 2,
   multi_role_automations_allowed: true,
   automation_role_profile: "planner_builder_hardener_integrator",
   automation_checkpoint_commits: true,
@@ -247,7 +266,7 @@ function boolValue(value: unknown, fallback: boolean): boolean {
 function numberValue(value: unknown, fallback: number): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
-    const parsed = Number.parseInt(value, 10);
+    const parsed = Number.parseFloat(value);
     if (Number.isFinite(parsed)) return parsed;
   }
   return fallback;
@@ -335,9 +354,27 @@ function draftFromSource(source: Record<string, unknown>, targetName: string): I
       source.codex_cli_workers_expected_on_broad_runs,
       defaultDraft.codex_cli_workers_expected_on_broad_runs,
     ),
-    write_worker_agents_allowed: boolValue(source.write_worker_agents_allowed, defaultDraft.write_worker_agents_allowed),
-    max_write_worker_count: numberValue(source.max_write_worker_count, defaultDraft.max_write_worker_count),
+    write_worker_agents_allowed: true,
+    max_write_worker_count: Math.max(1, Math.min(10, numberValue(source.max_write_worker_count, defaultDraft.max_write_worker_count))),
     write_worker_guidance: stringValue(source.write_worker_guidance, defaultDraft.write_worker_guidance),
+    parallel_execution_mode: enumValue(
+      source.parallel_execution_mode,
+      ["conservative", "aggressive"],
+      defaultDraft.parallel_execution_mode,
+    ),
+    symbol_graph_languages: listValue(source.symbol_graph_languages).length
+      ? listValue(source.symbol_graph_languages)
+      : defaultDraft.symbol_graph_languages,
+    parallel_write_min_confidence: numberValue(
+      source.parallel_write_min_confidence,
+      defaultDraft.parallel_write_min_confidence,
+    ),
+    parallel_write_direct_confidence: numberValue(
+      source.parallel_write_direct_confidence,
+      defaultDraft.parallel_write_direct_confidence,
+    ),
+    max_parallel_write_workers: numberValue(source.max_parallel_write_workers, defaultDraft.max_parallel_write_workers),
+    max_parallel_scope_workers: numberValue(source.max_parallel_scope_workers, defaultDraft.max_parallel_scope_workers),
     multi_role_automations_allowed: roleProfile.multi_role_automations_allowed,
     automation_role_profile: roleProfile.automation_role_profile,
     automation_checkpoint_commits: boolValue(source.automation_checkpoint_commits, defaultDraft.automation_checkpoint_commits),
@@ -401,7 +438,12 @@ function serializeDraft(draft: IntakeDraft): Record<string, unknown> {
     campaign_mode: scope,
     ticket_run_seed_tickets: draft.ticket_run_seed_tickets.map((ticket) => normalizeTicket(ticket)),
     human_bridge_mode: draft.human_bridge_enabled ? draft.human_bridge_mode : "disabled",
-    max_write_worker_count: draft.write_worker_agents_allowed ? Math.max(1, Math.min(10, draft.max_write_worker_count)) : 0,
+    write_worker_agents_allowed: true,
+    max_write_worker_count: Math.max(1, Math.min(10, draft.max_write_worker_count || 3)),
+    parallel_write_min_confidence: Math.max(0, Math.min(1, draft.parallel_write_min_confidence)),
+    parallel_write_direct_confidence: Math.max(0, Math.min(1, draft.parallel_write_direct_confidence)),
+    max_parallel_write_workers: Math.max(1, Math.min(10, Math.round(draft.max_parallel_write_workers))),
+    max_parallel_scope_workers: Math.max(1, Math.min(10, Math.round(draft.max_parallel_scope_workers))),
   };
   return payload;
 }
@@ -439,6 +481,94 @@ function actionLabel(action: string): string {
 
 export function visibleScaffoldPreviewFiles(files: ScaffoldPreviewFile[]): ScaffoldPreviewFile[] {
   return files.filter((file) => file.action !== "skip_existing");
+}
+
+const pendingBootstrapStatuses = new Set(["", "unknown", "pending", "not_bootstrapped", "not bootstrapped"]);
+
+function normalizedStatus(value: string): string {
+  return value.trim().toLowerCase().replace(/-/g, "_");
+}
+
+export function setupRunState(
+  snapshot: ProjectSnapshot | null,
+  options: {
+    scaffoldResultPresent?: boolean;
+    draftDirty?: boolean;
+    saveState?: "idle" | "saving" | "saved" | "error";
+    busy?: boolean;
+    ticketIssueCount?: number;
+  } = {},
+): SetupRunState {
+  if (!snapshot) {
+    return {
+      enabled: false,
+      bootstrapCompleted: false,
+      reason: "Choose a target folder before running.",
+      status: "Choose a target",
+    };
+  }
+  const task = asRecord(snapshot.run.task);
+  const dashboard = asRecord(snapshot.brief.dashboard_state);
+  const dashboardPassed =
+    normalizedStatus(stringValue(dashboard.initial_bootstrap_status, "")) === "pass" ||
+    Boolean(String(dashboard.initial_bootstrap_completed_at ?? "").trim());
+  const scaffolded = snapshot.target.automation_task_exists || Boolean(options.scaffoldResultPresent);
+  const bootstrapStatus = normalizedStatus(stringValue(task.bootstrap_status, scaffolded ? "pending" : "unknown"));
+  const completed = dashboardPassed || (scaffolded && !pendingBootstrapStatuses.has(bootstrapStatus));
+  if (!scaffolded) {
+    return {
+      enabled: false,
+      bootstrapCompleted: false,
+      reason: "Run Scaffold before opening Run.",
+      status: "Scaffold first",
+    };
+  }
+  if (options.busy) {
+    return {
+      enabled: false,
+      bootstrapCompleted: completed,
+      reason: "Setup is already running.",
+      status: "Setup running",
+    };
+  }
+  if (options.saveState === "saving") {
+    return {
+      enabled: false,
+      bootstrapCompleted: completed,
+      reason: "Wait for the setup draft to finish saving.",
+      status: "Saving",
+    };
+  }
+  if (options.saveState === "error") {
+    return {
+      enabled: false,
+      bootstrapCompleted: completed,
+      reason: "Resolve the setup draft save error before running.",
+      status: "Save error",
+    };
+  }
+  if (options.draftDirty) {
+    return {
+      enabled: false,
+      bootstrapCompleted: completed,
+      reason: "Scaffold the latest setup changes before running.",
+      status: "Scaffold latest changes",
+    };
+  }
+  if ((options.ticketIssueCount ?? 0) > 0) {
+    return {
+      enabled: false,
+      bootstrapCompleted: completed,
+      reason: "Resolve ticket issues before running.",
+      status: "Resolve ticket issues",
+    };
+  }
+  return {
+    enabled: true,
+    bootstrapCompleted: completed,
+    reason: completed ? "Open Run." : "Open Run; the first Start will prepare the target automatically.",
+    status: completed ? "Ready" : "First run will prepare target",
+  };
 }
 
 function logEventKey(event: BackendLogEvent, index: number): string {
@@ -627,6 +757,13 @@ export function BriefWizard(props: {
   const draftDirty = draftPayload !== lastSavedRef.current;
   const ticketEditorDirty = Boolean(ticketEditorJson.trim() && ticketEditorJson !== selectedTicketJson);
   const lowCortisolDirty = lowCortisolMode && Boolean(lowCortisolText.trim());
+  const runState = setupRunState(props.snapshot, {
+    scaffoldResultPresent: Boolean(scaffoldResult),
+    draftDirty,
+    saveState,
+    busy: scaffoldBusy,
+    ticketIssueCount: ticketIssues.length,
+  });
   const routeDirtyMessage = ticketEditorDirty
     ? "A setup ticket editor has unsaved changes."
     : lowCortisolDirty
@@ -1271,15 +1408,6 @@ export function BriefWizard(props: {
     return (
       <div className="brief-step-grid">
         <section className="brief-section span-3">
-          <h2>Automation architecture</h2>
-          <div className="brief-choice-grid compact">
-            <button className="selected">
-              <strong>Multi-role conveyor</strong>
-              <span>Planner, builder, hardener, and integrator lanes backed by typed SQLite runtime state.</span>
-            </button>
-          </div>
-        </section>
-        <section className="brief-section span-3">
           <h2>Scope</h2>
           <div className="brief-choice-grid two-up compact">
             <button
@@ -1421,18 +1549,6 @@ export function BriefWizard(props: {
               onChange={(checked) => updateDraft("codex_cli_workers_expected_on_broad_runs", checked)}
             />
             <ToggleRow
-              checked={draft.write_worker_agents_allowed}
-              label="Write workers"
-              detail="Keeps write workers explicit, bounded, and ownership-scoped."
-              onChange={(checked) =>
-                setDraft((current) => ({
-                  ...current,
-                  write_worker_agents_allowed: checked,
-                  max_write_worker_count: checked ? Math.max(1, current.max_write_worker_count || 1) : 0,
-                }))
-              }
-            />
-            <ToggleRow
               checked={draft.automation_checkpoint_commits}
               label="Checkpoint commits"
               onChange={(checked) => updateDraft("automation_checkpoint_commits", checked)}
@@ -1447,25 +1563,6 @@ export function BriefWizard(props: {
               label="Allow remotes"
               onChange={(checked) => updateDraft("multi_role_allow_remotes", checked)}
             />
-          </div>
-          <div className="brief-form-grid two">
-            <FormField label="Max write-worker count">
-              <input
-                disabled={!draft.write_worker_agents_allowed}
-                max={10}
-                min={0}
-                type="number"
-                value={draft.max_write_worker_count}
-                onChange={(event) => updateDraft("max_write_worker_count", numberValue(event.target.value, 0))}
-              />
-            </FormField>
-            <FormField label="Write-worker guidance">
-              <textarea
-                value={draft.write_worker_guidance}
-                onChange={(event) => updateDraft("write_worker_guidance", event.target.value)}
-                rows={4}
-              />
-            </FormField>
           </div>
         </section>
       </div>
@@ -1592,7 +1689,7 @@ export function BriefWizard(props: {
   }
 
   function renderReviewStep() {
-    const modeLabel = `Multi-role conveyor · ${
+    const modeLabel = `DAG scheduler · ${
       automationScopeForDraft(draft) === "bounded" ? "bounded campaign" : "ongoing campaign"
     }`;
     const reviewTicketIssues = localTicketIssues(draft.ticket_run_seed_tickets);
@@ -1626,6 +1723,10 @@ export function BriefWizard(props: {
             <div>
               <span>Run controls</span>
               <strong>{scaffoldResult ? "Available now" : "Available after scaffold succeeds"}</strong>
+            </div>
+            <div>
+              <span>First run</span>
+              <strong>{runState.status}</strong>
             </div>
             {automationScopeForDraft(draft) === "bounded" && (
               <div>
@@ -1861,10 +1962,16 @@ export function BriefWizard(props: {
                   <ChevronRight size={17} />
                 </button>
               ) : (
-                <button className="primary-action" disabled={!targetPath || scaffoldBusy || saveState === "saving" || ticketIssues.length > 0} onClick={scaffoldBootstrap}>
-                  <Hammer size={17} />
-                  {scaffoldBusy ? "Working" : "Scaffold"}
-                </button>
+                <div className="setup-final-actions">
+                  <button className="secondary-action" disabled={!targetPath || scaffoldBusy || saveState === "saving" || ticketIssues.length > 0} onClick={scaffoldBootstrap}>
+                    <Hammer size={17} />
+                    {scaffoldBusy ? "Working" : "Scaffold"}
+                  </button>
+                  <button className="primary-action" disabled={!runState.enabled} onClick={() => props.onNavigate("Run")} title={runState.reason}>
+                    <RefreshCw size={17} />
+                    Run
+                  </button>
+                </div>
               )}
             </footer>
           </main>

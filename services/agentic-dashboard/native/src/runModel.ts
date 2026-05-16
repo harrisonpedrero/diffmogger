@@ -27,6 +27,120 @@ export type RunSafetyRow = {
   action: RunAction;
 };
 
+export type RunDagPhaseId =
+  | "orchestrate"
+  | "decompose"
+  | "scope"
+  | "build"
+  | "review"
+  | "validate"
+  | "repair"
+  | "integrate"
+  | "audit"
+  | "done";
+export type RunDagStatusKind = "pending" | "ready" | "running" | "completed" | "blocked" | "failed" | "skipped";
+export type RunDagBadgeTone = "good" | "warn" | "critical" | "info" | "quiet";
+export type RunDagRenderMode = "normal" | "large" | "oversized";
+
+export type RunDagBadge = {
+  kind: "attempt" | "validation" | "patch" | "blocker" | "worktree" | "lease";
+  label: string;
+  tone: RunDagBadgeTone;
+};
+
+export type RunDagNode = {
+  id: string;
+  ticketId: string;
+  actionType: string;
+  canonicalActionType: string;
+  status: string;
+  statusKind: RunDagStatusKind;
+  ownerRole: string;
+  phase: RunDagPhaseId;
+  attemptCount: number;
+  confidence: number;
+  confidenceLabel: string;
+  blockerReason: string;
+  validationReceiptRefs: string[];
+  ownershipScope: string;
+  patchId: string;
+  patchPath: string;
+  worktreePath: string;
+  startedAt: string;
+  finishedAt: string;
+  badges: RunDagBadge[];
+  detail: string;
+};
+
+export type RunDagEdge = {
+  id: string;
+  source: string;
+  target: string;
+  dependencyKind: string;
+  dependencyMode: string;
+  presentationKind: "hard" | "advisory" | "blocker";
+  reason: string;
+  confidence: number;
+  confidenceLabel: string;
+  detail: string;
+};
+
+export type RunDagColumn = {
+  id: RunDagPhaseId;
+  label: string;
+  nodes: RunDagNode[];
+};
+
+export type RunDagSummary = {
+  total: number;
+  pending: number;
+  ready: number;
+  running: number;
+  completed: number;
+  blocked: number;
+  failed: number;
+  skipped: number;
+};
+
+export type RunDagGroup = {
+  id: string;
+  label: string;
+  mode: string;
+  status: string;
+  kind: "proposed" | "active" | "completed";
+  nodeIds: string[];
+  detail: string;
+};
+
+export type RunDagCluster = {
+  id: string;
+  label: string;
+  phase: RunDagPhaseId;
+  kind: "phase_status";
+  statusKind: RunDagStatusKind;
+  nodeIds: string[];
+  nodeCount: number;
+  statusCounts: RunDagSummary;
+  ticketSamples: string[];
+  ownerSamples: string[];
+  actionSamples: string[];
+  plannedGroupNodeCount: number;
+  activeGroupNodeCount: number;
+  detail: string;
+};
+
+export type RunDagClusterEdge = {
+  id: string;
+  source: string;
+  target: string;
+  dependencyKind: string;
+  dependencyMode: string;
+  presentationKind: "hard" | "advisory" | "blocker";
+  count: number;
+  reason: string;
+  detail: string;
+};
+
 export type RunModel = {
   isScaffolded: boolean;
   isRunning: boolean;
@@ -56,16 +170,43 @@ export type RunModel = {
     lastUpdated: string;
     summary: string;
   };
-  stateMachine: {
-    stage: string;
-    stageStatus: string;
-    ownerRole: string;
-    validationStatus: string;
-    capability: string;
-    capabilityVersion: string;
-    continuationToken: string;
-    enteredAt: string;
-    nextActions: Array<{ role: string; state: string; reason: string }>;
+  executionDag: {
+    hasData: boolean;
+    authority: string;
+    digest: string;
+    summary: RunDagSummary;
+    columns: RunDagColumn[];
+    nodes: RunDagNode[];
+    edges: RunDagEdge[];
+    visibleNodes: RunDagNode[];
+    visibleEdges: RunDagEdge[];
+    groups: RunDagGroup[];
+    clusters: RunDagCluster[];
+    clusterEdges: RunDagClusterEdge[];
+    abstraction: {
+      enabled: boolean;
+      level: "node" | "phase-status";
+      clusterCount: number;
+      bundledEdgeCount: number;
+      sourceNodeCount: number;
+      sourceEdgeCount: number;
+    };
+    renderMode: RunDagRenderMode;
+    renderLimit: {
+      nodeCap: number;
+      edgeCap: number;
+      visibleNodeCount: number;
+      visibleEdgeCount: number;
+      hiddenNodeCount: number;
+      hiddenEdgeCount: number;
+    };
+    parallel: {
+      proposedGroups: number;
+      activeGroups: number;
+      completedGroups: number;
+      plannedNodeCount: number;
+      activeNodeCount: number;
+    };
   };
   runLog: {
     exists: boolean;
@@ -237,49 +378,6 @@ function workerRole(strategy: Record<string, unknown>): string {
     .replace(/^_+|_+$/g, "");
 }
 
-function stateMachineSnapshot(snapshot: ProjectSnapshot | null): Record<string, unknown> {
-  const state = record(snapshot?.run.state);
-  const machine = record(state.conveyor_machine);
-  if (Object.keys(machine).length) return machine;
-  return record(record(snapshot?.run.conveyor).state_machine);
-}
-
-function capabilityLabel(capability: Record<string, unknown>): string {
-  const languages = record(capability.languages);
-  const primary = text(languages.primary, "");
-  const commands = list(capability.commands).length;
-  if (primary && commands) return `${primary} / ${commands} command${commands === 1 ? "" : "s"}`;
-  if (primary) return primary;
-  if (commands) return `${commands} command${commands === 1 ? "" : "s"}`;
-  return "Not discovered";
-}
-
-function stateMachineModel(snapshot: ProjectSnapshot | null): RunModel["stateMachine"] {
-  const machine = stateMachineSnapshot(snapshot);
-  const workItem = record(machine.work_item);
-  const capability = record(machine.capability_manifest);
-  const state = record(snapshot?.run.state);
-  const actions = list(state.next_actions)
-    .map(record)
-    .slice(0, 4)
-    .map((item) => ({
-      role: text(item.owner_role, "idle"),
-      state: text(item.status, "planned"),
-      reason: text(item.reason, "No reason recorded."),
-    }));
-  return {
-    stage: text(workItem.current_stage, text(machine.current_stage, "intake")),
-    stageStatus: text(workItem.stage_status, text(machine.stage_status, "ready")),
-    ownerRole: text(workItem.owner_role, text(machine.owner_role, "planner")),
-    validationStatus: text(workItem.validation_status, "not recorded"),
-    capability: capabilityLabel(capability),
-    capabilityVersion: text(workItem.capability_manifest_version, text(capability.version, "0")),
-    continuationToken: text(workItem.continuation_token, ""),
-    enteredAt: text(workItem.entered_at, ""),
-    nextActions: actions,
-  };
-}
-
 function runLog(snapshot: ProjectSnapshot | null): RunModel["runLog"] {
   const raw = record(snapshot?.run.run_log);
   const lines = list(raw.lines)
@@ -295,6 +393,542 @@ function runLog(snapshot: ProjectSnapshot | null): RunModel["runLog"] {
     modifiedAt: text(raw.modified_at, ""),
     content: text(raw.content, ""),
     lines,
+  };
+}
+
+const NORMAL_DAG_NODE_CAP = 250;
+const NORMAL_DAG_EDGE_CAP = 700;
+const OVERSIZED_DAG_NODE_THRESHOLD = 800;
+const OVERSIZED_DAG_EDGE_THRESHOLD = 2500;
+
+const DAG_PHASES: Array<{ id: RunDagPhaseId; label: string }> = [
+  { id: "orchestrate", label: "Orchestrate" },
+  { id: "decompose", label: "Decompose" },
+  { id: "scope", label: "Scope" },
+  { id: "build", label: "Build" },
+  { id: "review", label: "Review" },
+  { id: "validate", label: "Validate" },
+  { id: "repair", label: "Repair" },
+  { id: "integrate", label: "Integrate" },
+  { id: "audit", label: "Audit/Calibrate" },
+  { id: "done", label: "Done" },
+];
+
+const DAG_ACTION_ALIASES: Record<string, string> = {
+  planning: "decompose",
+  scoping: "scope",
+  building: "build",
+  reviewing: "review",
+  validation: "validate",
+  integration: "integrate",
+  calibrate: "audit",
+  completion: "done",
+  blocker: "done",
+  ticket: "decompose",
+};
+
+const DAG_STATUS_ORDER: RunDagStatusKind[] = ["running", "ready", "blocked", "failed", "pending", "completed", "skipped"];
+
+function executionDagSnapshot(snapshot: ProjectSnapshot | null): Record<string, unknown> {
+  const state = record(snapshot?.run.state);
+  const dag = record(state.execution_dag);
+  if (Object.keys(dag).length) return dag;
+  const progress = record(state.progress_model);
+  if (text(progress.projection, "") === "execution_dag" || Array.isArray(progress.nodes)) return progress;
+  return {};
+}
+
+function textList(value: unknown): string[] {
+  return list(value)
+    .map((item) => text(item, ""))
+    .filter((item) => item.length > 0);
+}
+
+function compactText(value: unknown, fallback = ""): string {
+  return text(value, fallback).replace(/\s+/g, " ").trim();
+}
+
+function confidenceLabel(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0%";
+  return `${Math.round(Math.min(1, Math.max(0, value)) * 100)}%`;
+}
+
+function statusKind(rawStatus: string, dependencyBlocked: boolean, blockerReason: string): RunDagStatusKind {
+  const status = rawStatus.toLowerCase().replace(/[\s-]+/g, "_");
+  if (["skipped", "superseded"].includes(status)) return "skipped";
+  if (["failed", "failure", "cancelled", "canceled", "error"].includes(status)) return "failed";
+  if (["blocked", "blocked_on_user", "blocked_on_environment", "critical_stop"].includes(status) || blockerReason) return "blocked";
+  if (["done", "complete", "completed", "candidate_done", "passed", "validated", "reviewed", "integrated", "resolved", "closed"].includes(status)) {
+    return "completed";
+  }
+  if (["active", "running", "in_progress"].includes(status)) return "running";
+  if (status === "ready") return dependencyBlocked ? "pending" : "ready";
+  return "pending";
+}
+
+function canonicalDagAction(actionType: string): string {
+  const action = actionType.toLowerCase().replace(/[\s-]+/g, "_");
+  return DAG_ACTION_ALIASES[action] ?? action;
+}
+
+function dagPhase(actionType: string): RunDagPhaseId {
+  const action = canonicalDagAction(actionType);
+  if (DAG_PHASES.some((phase) => phase.id === action)) return action as RunDagPhaseId;
+  return "done";
+}
+
+function ownershipScope(metadata: Record<string, unknown>): string {
+  const paths = textList(metadata.paths || metadata.changed_files || metadata.target_paths);
+  if (paths.length) return paths.slice(0, 3).join(", ");
+  const scope = compactText(metadata.ownership_scope || metadata.scope || metadata.execution_mode, "");
+  return scope || "No ownership scope recorded";
+}
+
+function dagNodeDetail(node: {
+  id: string;
+  ticketId: string;
+  actionType: string;
+  canonicalActionType: string;
+  status: string;
+  ownerRole: string;
+  attemptCount: number;
+  confidenceLabel: string;
+  blockerReason: string;
+  validationReceiptRefs: string[];
+  ownershipScope: string;
+  patchId: string;
+  patchPath: string;
+  worktreePath: string;
+}): string {
+  return [
+    `${node.actionType} for ${node.ticketId || node.id}`,
+    `action ${node.canonicalActionType}`,
+    `status ${node.status}`,
+    `owner ${node.ownerRole}`,
+    `attempt ${node.attemptCount}`,
+    `confidence ${node.confidenceLabel}`,
+    `scope ${node.ownershipScope}`,
+    node.blockerReason ? `blocker ${node.blockerReason}` : "",
+    node.validationReceiptRefs.length ? `validation receipts ${node.validationReceiptRefs.join(", ")}` : "",
+    node.patchId || node.patchPath ? `patch ${[node.patchId, node.patchPath].filter(Boolean).join(" ")}` : "",
+    node.worktreePath ? `worktree ${node.worktreePath}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function dagBadges(node: {
+  attemptCount: number;
+  blockerReason: string;
+  validationReceiptRefs: string[];
+  patchId: string;
+  patchPath: string;
+  worktreePath: string;
+}): RunDagBadge[] {
+  const badges: RunDagBadge[] = [];
+  if (node.attemptCount > 1) badges.push({ kind: "attempt", label: `${node.attemptCount} attempts`, tone: "warn" });
+  if (node.validationReceiptRefs.length) badges.push({ kind: "validation", label: `${node.validationReceiptRefs.length} receipts`, tone: "good" });
+  if (node.patchId || node.patchPath) badges.push({ kind: "patch", label: "patch", tone: "info" });
+  if (node.blockerReason) badges.push({ kind: "blocker", label: "blocker", tone: "warn" });
+  if (node.worktreePath) badges.push({ kind: "worktree", label: "worktree", tone: "quiet" });
+  return badges;
+}
+
+function blockedReasonByNode(dag: Record<string, unknown>): Map<string, { hardBlocked: boolean; dependencyBlocked: boolean; reason: string }> {
+  const result = new Map<string, { hardBlocked: boolean; dependencyBlocked: boolean; reason: string }>();
+  for (const item of list(dag.blocked_nodes).map(record)) {
+    const id = text(item.node_id, "");
+    if (!id) continue;
+    const reasons = list(item.blocked_reasons).map(record);
+    const hardReason = reasons.find((reason) => ["status", "blocker"].includes(text(reason.kind, "")));
+    const dependencyReason = reasons.find((reason) => text(reason.kind, "") === "dependency");
+    result.set(id, {
+      hardBlocked: Boolean(hardReason),
+      dependencyBlocked: Boolean(dependencyReason),
+      reason: text(hardReason?.reason, text(dependencyReason?.reason, "")),
+    });
+  }
+  return result;
+}
+
+function groupItemNodeIds(group: Record<string, unknown>, nodes: RunDagNode[]): string[] {
+  const nodesByTaskAction = new Map<string, string>();
+  for (const node of nodes) {
+    nodesByTaskAction.set(`${node.ticketId}::${node.canonicalActionType}`, node.id);
+    nodesByTaskAction.set(`${node.ticketId}::${node.actionType}`, node.id);
+  }
+  const ids = new Set<string>();
+  for (const item of list(group.items).map(record)) {
+    const payload = record(item.payload);
+    const dagNodeId = text(payload.dag_node_id || item.dag_node_id, "");
+    if (dagNodeId) ids.add(dagNodeId);
+    const taskId = text(item.task_id || payload.task_id, "");
+    const action = canonicalDagAction(text(item.action_kind || payload.action_type || payload.canonical_action_type, ""));
+    const inferred = nodesByTaskAction.get(`${taskId}::${action}`);
+    if (inferred) ids.add(inferred);
+  }
+  return Array.from(ids).filter((id) => nodes.some((node) => node.id === id));
+}
+
+function dagGroups(snapshot: ProjectSnapshot | null, nodes: RunDagNode[]): RunDagGroup[] {
+  const state = record(snapshot?.run.state);
+  const proposed = list(state.proposed_execution_groups).map(record);
+  const groups: RunDagGroup[] = proposed
+    .map((group, index) => {
+      const id = text(group.execution_group_id, `proposed-wave-${index + 1}`);
+      const mode = text(group.mode, text(record(group.payload).execution_mode, "dry_run"));
+      const status = text(group.status, "proposed");
+      const nodeIds = groupItemNodeIds(group, nodes);
+      return {
+        id,
+        label: `planned wave ${index + 1}`,
+        mode,
+        status,
+        kind: "proposed" as const,
+        nodeIds,
+        detail: compactText(group.reason, `${nodeIds.length} DAG node(s) are safe to consider together.`),
+      };
+    })
+    .filter((group) => group.nodeIds.length > 0);
+
+  const byId = new Map(groups.map((group) => [group.id, group]));
+  const activeSources = [
+    ...list(state.active_read_only_workers).map(record),
+    ...list(state.active_write_workers).map(record),
+    ...list(state.active_validation_jobs).map(record),
+  ];
+  const activeIds = new Set(activeSources.map((item) => text(item.execution_group_id, "")).filter(Boolean));
+  for (const id of activeIds) {
+    const base = byId.get(id);
+    if (base) {
+      groups.push({ ...base, id: `${id}:active`, label: "running group", status: "running", kind: "active" });
+      continue;
+    }
+    const nodeIds = new Set<string>();
+    for (const item of activeSources.filter((source) => text(source.execution_group_id, "") === id)) {
+      const taskId = text(item.task_id || item.ticket_id, "");
+      const dagNodeId = text(item.dag_node_id || item.source_dag_node_id, "");
+      if (dagNodeId) nodeIds.add(dagNodeId);
+      if (taskId) {
+        for (const node of nodes) {
+          if (node.ticketId === taskId && ["running", "ready", "pending"].includes(node.statusKind)) nodeIds.add(node.id);
+        }
+      }
+    }
+    groups.push({
+      id: `${id}:active`,
+      label: "running group",
+      mode: "runtime",
+      status: "running",
+      kind: "active",
+      nodeIds: Array.from(nodeIds).filter((nodeId) => nodes.some((node) => node.id === nodeId)),
+      detail: "Runtime workers or validation jobs are active for this group.",
+    });
+  }
+
+  for (const item of list(state.completed_worker_reports).map(record).slice(0, 6)) {
+    const taskId = text(item.task_id || item.ticket_id, "");
+    const nodeIds = nodes.filter((node) => node.ticketId === taskId && node.statusKind === "completed").map((node) => node.id);
+    if (!nodeIds.length) continue;
+    groups.push({
+      id: text(item.report_id || item.worker_id, `completed-${groups.length + 1}`),
+      label: "completed group",
+      mode: "worker",
+      status: "completed",
+      kind: "completed",
+      nodeIds,
+      detail: "A worker report has completed for this ticket.",
+    });
+  }
+  return groups.filter((group, index, all) => all.findIndex((item) => item.id === group.id) === index);
+}
+
+function visibleDagSet(nodes: RunDagNode[], edges: RunDagEdge[], groups: RunDagGroup[]): Set<string> {
+  if (nodes.length <= NORMAL_DAG_NODE_CAP && edges.length <= NORMAL_DAG_EDGE_CAP) {
+    return new Set(nodes.map((node) => node.id));
+  }
+  const groupNodeIds = new Set(groups.flatMap((group) => group.nodeIds));
+  const important = new Set<string>();
+  for (const node of nodes) {
+    if (["running", "ready", "blocked", "failed"].includes(node.statusKind) || groupNodeIds.has(node.id)) important.add(node.id);
+  }
+  for (const edge of edges) {
+    if (important.has(edge.source) || important.has(edge.target)) {
+      important.add(edge.source);
+      important.add(edge.target);
+    }
+  }
+  if (important.size < NORMAL_DAG_NODE_CAP) {
+    for (const node of nodes) {
+      if (important.size >= NORMAL_DAG_NODE_CAP) break;
+      important.add(node.id);
+    }
+  }
+  return new Set(Array.from(important).slice(0, NORMAL_DAG_NODE_CAP));
+}
+
+function emptyDagSummary(): RunDagSummary {
+  return {
+    total: 0,
+    pending: 0,
+    ready: 0,
+    running: 0,
+    completed: 0,
+    blocked: 0,
+    failed: 0,
+    skipped: 0,
+  };
+}
+
+function summarizeClusterStatus(nodes: RunDagNode[]): RunDagSummary {
+  const summary = emptyDagSummary();
+  summary.total = nodes.length;
+  for (const node of nodes) {
+    summary[node.statusKind] += 1;
+  }
+  return summary;
+}
+
+function clusterStatusKind(nodes: RunDagNode[]): RunDagStatusKind {
+  const statusOrder: RunDagStatusKind[] = ["failed", "blocked", "running", "ready", "pending", "completed", "skipped"];
+  const statuses = new Set(nodes.map((node) => node.statusKind));
+  return statusOrder.find((status) => statuses.has(status)) ?? "pending";
+}
+
+function sampleUnique(values: string[], limit = 4): string[] {
+  return Array.from(new Set(values.filter(Boolean))).slice(0, limit);
+}
+
+function buildDagClusters(nodes: RunDagNode[], edges: RunDagEdge[], groups: RunDagGroup[]): {
+  clusters: RunDagCluster[];
+  clusterEdges: RunDagClusterEdge[];
+} {
+  const plannedNodeIds = new Set(groups.filter((group) => group.kind === "proposed").flatMap((group) => group.nodeIds));
+  const activeNodeIds = new Set(groups.filter((group) => group.kind === "active").flatMap((group) => group.nodeIds));
+  const buckets = new Map<string, RunDagNode[]>();
+  for (const node of nodes) {
+    const key = `${node.phase}::${node.statusKind}`;
+    buckets.set(key, [...(buckets.get(key) ?? []), node]);
+  }
+  const clusters = Array.from(buckets.entries())
+    .map(([key, bucket]) => {
+      const [phase, statusKind] = key.split("::") as [RunDagPhaseId, RunDagStatusKind];
+      const phaseLabel = DAG_PHASES.find((item) => item.id === phase)?.label ?? phase;
+      const statusCounts = summarizeClusterStatus(bucket);
+      const ticketSamples = sampleUnique(bucket.map((node) => node.ticketId || node.id));
+      const ownerSamples = sampleUnique(bucket.map((node) => node.ownerRole));
+      const actionSamples = sampleUnique(bucket.map((node) => node.canonicalActionType || node.actionType));
+      const plannedGroupNodeCount = bucket.filter((node) => plannedNodeIds.has(node.id)).length;
+      const activeGroupNodeCount = bucket.filter((node) => activeNodeIds.has(node.id)).length;
+      return {
+        id: `cluster:${key}`,
+        label: `${phaseLabel} / ${statusKind}`,
+        phase,
+        kind: "phase_status" as const,
+        statusKind: clusterStatusKind(bucket),
+        nodeIds: bucket.map((node) => node.id),
+        nodeCount: bucket.length,
+        statusCounts,
+        ticketSamples,
+        ownerSamples,
+        actionSamples,
+        plannedGroupNodeCount,
+        activeGroupNodeCount,
+        detail: [
+          `${bucket.length} DAG node${bucket.length === 1 ? "" : "s"}`,
+          `${phaseLabel} phase`,
+          `${statusKind} status`,
+          ticketSamples.length ? `tickets ${ticketSamples.join(", ")}` : "",
+          ownerSamples.length ? `owners ${ownerSamples.join(", ")}` : "",
+          activeGroupNodeCount ? `${activeGroupNodeCount} active grouped node${activeGroupNodeCount === 1 ? "" : "s"}` : "",
+          plannedGroupNodeCount ? `${plannedGroupNodeCount} planned wave node${plannedGroupNodeCount === 1 ? "" : "s"}` : "",
+        ].filter(Boolean).join(" / "),
+      };
+    })
+    .sort((first, second) => {
+      const phaseOrder = DAG_PHASES.findIndex((phase) => phase.id === first.phase) - DAG_PHASES.findIndex((phase) => phase.id === second.phase);
+      return phaseOrder || DAG_STATUS_ORDER.indexOf(first.statusKind) - DAG_STATUS_ORDER.indexOf(second.statusKind);
+    });
+  const clusterByNodeId = new Map<string, string>();
+  for (const cluster of clusters) {
+    for (const nodeId of cluster.nodeIds) {
+      clusterByNodeId.set(nodeId, cluster.id);
+    }
+  }
+  const edgeBuckets = new Map<string, { edge: RunDagEdge; source: string; target: string; count: number; reasons: string[] }>();
+  for (const edge of edges) {
+    const source = clusterByNodeId.get(edge.source);
+    const target = clusterByNodeId.get(edge.target);
+    if (!source || !target || source === target) continue;
+    const key = `${source}::${target}::${edge.dependencyKind}::${edge.dependencyMode}::${edge.presentationKind}`;
+    const current = edgeBuckets.get(key);
+    if (current) {
+      current.count += 1;
+      if (edge.reason && current.reasons.length < 3) current.reasons.push(edge.reason);
+    } else {
+      edgeBuckets.set(key, { edge, source, target, count: 1, reasons: edge.reason ? [edge.reason] : [] });
+    }
+  }
+  const clusterEdges: RunDagClusterEdge[] = Array.from(edgeBuckets.values()).map((bucket) => ({
+    id: `cluster-edge:${bucket.source}:${bucket.target}:${bucket.edge.dependencyKind}:${bucket.edge.dependencyMode}:${bucket.edge.presentationKind}`,
+    source: bucket.source,
+    target: bucket.target,
+    dependencyKind: bucket.edge.dependencyKind,
+    dependencyMode: bucket.edge.dependencyMode,
+    presentationKind: bucket.edge.presentationKind,
+    count: bucket.count,
+    reason: bucket.reasons[0] || "Bundled dependency edge.",
+    detail: `${bucket.count} bundled ${bucket.edge.dependencyMode} ${bucket.edge.dependencyKind} edge${bucket.count === 1 ? "" : "s"}${bucket.reasons.length ? ` / ${bucket.reasons.join(" / ")}` : ""}`,
+  }));
+  return { clusters, clusterEdges };
+}
+
+function executionDagModel(snapshot: ProjectSnapshot | null): RunModel["executionDag"] {
+  const dag = executionDagSnapshot(snapshot);
+  const rawNodes = list(dag.nodes).map(record);
+  const rawEdges = list(dag.edges).map(record);
+  const blockedReasons = blockedReasonByNode(dag);
+  const nodes: RunDagNode[] = rawNodes
+    .map((raw) => {
+      const metadata = record(raw.metadata);
+      const worktree = record(raw.worktree);
+      const patch = record(raw.patch);
+      const id = text(raw.node_id || raw.id, "");
+      const blocked = blockedReasons.get(id);
+      const blockerReason = compactText(raw.blocker_reason, blocked?.reason ?? "");
+      const confidence = number(raw.confidence);
+      const visualStatus = statusKind(text(raw.status, "pending"), Boolean(blocked?.dependencyBlocked), blockerReason);
+      const actionType = text(raw.action_type, "node");
+      const canonicalActionType = text(raw.canonical_action_type, canonicalDagAction(actionType));
+      const node: Omit<RunDagNode, "detail"> = {
+        id,
+        ticketId: text(raw.task_id || raw.ticket_id, ""),
+        actionType,
+        canonicalActionType,
+        status: text(raw.status, "pending"),
+        statusKind: visualStatus,
+        ownerRole: text(raw.owner_role, "unassigned"),
+        phase: dagPhase(actionType),
+        attemptCount: number(raw.attempt_count),
+        confidence,
+        confidenceLabel: confidenceLabel(confidence),
+        blockerReason,
+        validationReceiptRefs: textList(raw.validation_receipt_refs),
+        ownershipScope: ownershipScope(metadata),
+        patchId: text(patch.id || raw.patch_id, ""),
+        patchPath: text(patch.path || raw.patch_path, ""),
+        worktreePath: text(worktree.path || raw.worktree_path, ""),
+        startedAt: text(raw.started_at, ""),
+        finishedAt: text(raw.finished_at, ""),
+        badges: [],
+      };
+      const withBadges = { ...node, badges: dagBadges(node) };
+      return { ...withBadges, detail: dagNodeDetail(withBadges) };
+    })
+    .filter((node) => node.id);
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const edges: RunDagEdge[] = rawEdges
+    .map((raw) => {
+      const confidence = number(raw.confidence);
+      const dependencyKind = text(raw.dependency_kind, "depends_on");
+      const dependencyMode = text(raw.dependency_mode, "hard");
+      const presentationKind: RunDagEdge["presentationKind"] =
+        dependencyKind === "blocks" ? "blocker" : dependencyMode === "advisory" ? "advisory" : "hard";
+      const edge = {
+        id: text(raw.edge_id || raw.id, ""),
+        source: text(raw.source || raw.source_node_id, ""),
+        target: text(raw.target || raw.target_node_id, ""),
+        dependencyKind,
+        dependencyMode,
+        presentationKind,
+        reason: compactText(raw.reason, "No edge reason recorded."),
+        confidence,
+        confidenceLabel: confidenceLabel(confidence),
+      };
+      return {
+        ...edge,
+        detail: `${edge.dependencyKind} ${edge.dependencyMode} dependency · confidence ${edge.confidenceLabel} · ${edge.reason}`,
+      };
+    })
+    .filter((edge) => edge.source && edge.target && nodeIds.has(edge.source) && nodeIds.has(edge.target));
+  const summary: RunDagSummary = {
+    total: nodes.length,
+    pending: 0,
+    ready: 0,
+    running: 0,
+    completed: 0,
+    blocked: 0,
+    failed: 0,
+    skipped: 0,
+  };
+  for (const node of nodes) {
+    summary[node.statusKind] += 1;
+  }
+  const groups = dagGroups(snapshot, nodes);
+  const renderMode: RunDagRenderMode =
+    nodes.length > OVERSIZED_DAG_NODE_THRESHOLD || edges.length > OVERSIZED_DAG_EDGE_THRESHOLD
+      ? "oversized"
+      : nodes.length > NORMAL_DAG_NODE_CAP || edges.length > NORMAL_DAG_EDGE_CAP
+        ? "large"
+        : "normal";
+  const abstractionEnabled = renderMode !== "normal";
+  const clustered = abstractionEnabled ? buildDagClusters(nodes, edges, groups) : { clusters: [], clusterEdges: [] };
+  const visibleNodeIds = renderMode === "oversized" ? new Set<string>() : visibleDagSet(nodes, edges, groups);
+  const visibleNodes = nodes.filter((node) => visibleNodeIds.has(node.id));
+  const visibleEdges = edges
+    .filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target))
+    .slice(0, NORMAL_DAG_EDGE_CAP);
+  const activeGroupNodeIds = new Set(groups.filter((group) => group.kind === "active").flatMap((group) => group.nodeIds));
+  const plannedGroupNodeIds = new Set(groups.filter((group) => group.kind === "proposed").flatMap((group) => group.nodeIds));
+  const columns = DAG_PHASES.map((phase) => ({
+    ...phase,
+    nodes: visibleNodes
+      .filter((node) => node.phase === phase.id)
+      .sort((first, second) => {
+        return (
+          DAG_STATUS_ORDER.indexOf(first.statusKind) - DAG_STATUS_ORDER.indexOf(second.statusKind) ||
+          first.ticketId.localeCompare(second.ticketId) ||
+          first.actionType.localeCompare(second.actionType)
+        );
+      }),
+  }));
+  return {
+    hasData: nodes.length > 0,
+    authority: text(dag.authority, ""),
+    digest: text(dag.digest, ""),
+    summary,
+    columns,
+    nodes,
+    edges,
+    visibleNodes,
+    visibleEdges,
+    groups,
+    clusters: clustered.clusters,
+    clusterEdges: clustered.clusterEdges,
+    abstraction: {
+      enabled: abstractionEnabled,
+      level: abstractionEnabled ? "phase-status" : "node",
+      clusterCount: clustered.clusters.length,
+      bundledEdgeCount: clustered.clusterEdges.length,
+      sourceNodeCount: nodes.length,
+      sourceEdgeCount: edges.length,
+    },
+    renderMode,
+    renderLimit: {
+      nodeCap: NORMAL_DAG_NODE_CAP,
+      edgeCap: NORMAL_DAG_EDGE_CAP,
+      visibleNodeCount: visibleNodes.length,
+      visibleEdgeCount: visibleEdges.length,
+      hiddenNodeCount: Math.max(0, nodes.length - visibleNodes.length),
+      hiddenEdgeCount: Math.max(0, edges.length - visibleEdges.length),
+    },
+    parallel: {
+      proposedGroups: groups.filter((group) => group.kind === "proposed").length,
+      activeGroups: groups.filter((group) => group.kind === "active").length,
+      completedGroups: groups.filter((group) => group.kind === "completed").length,
+      plannedNodeCount: plannedGroupNodeIds.size,
+      activeNodeCount: activeGroupNodeIds.size,
+    },
   };
 }
 
@@ -401,12 +1035,15 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
   const automationState = text(automation.state, "").toLowerCase();
   const automationRunning = automationState === "running";
   const running = bool(controls.is_running) || statusUpper.includes("RUNNING") || automationRunning;
+  const canBootstrapAndStart = scaffolded && bool(controls.can_bootstrap_and_start) && !running;
 
   const startAutomation = makeAction(
     "Start",
-    scaffolded && bool(controls.can_start_automation),
-    scaffolded ? text(controls.start_automation_reason, text(automation.message, "Automation is not ready.")) : "Complete setup before running.",
-    "automation.start",
+    scaffolded && (bool(controls.can_start_automation) || canBootstrapAndStart),
+    canBootstrapAndStart
+      ? text(controls.bootstrap_start_reason, "First start will prepare the target, then automation will start.")
+      : scaffolded ? text(controls.start_automation_reason, text(automation.message, "Automation is not ready.")) : "Complete setup before running.",
+    canBootstrapAndStart ? "automation.bootstrap_start" : "automation.start",
   );
   const stopAutomation = makeAction(
     "Stop",
@@ -449,6 +1086,10 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
     subheadline = text(automation.message, "Refresh to inspect the latest run state.");
     badge = "Running";
     primaryAction = routeAction("Refresh", "Run", "Reload the latest run state.");
+  } else if (snapshot && canBootstrapAndStart) {
+    subheadline = "First start will prepare the target, then continuous automation will start.";
+    badge = "Ready";
+    primaryAction = startAutomation;
   } else if (snapshot && startAutomation.enabled) {
     subheadline = "The target files are present and continuous automation can start.";
     badge = "Ready";
@@ -488,7 +1129,7 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
       lastUpdated: text(task.last_updated, text(snapshot?.run.snapshot_generated_at, "Not recorded")),
       summary: text(snapshot?.run.progress_recent, text(task.suggested_next_task, "No run has been recorded yet.")),
     },
-    stateMachine: stateMachineModel(snapshot),
+    executionDag: executionDagModel(snapshot),
     runLog: runLog(snapshot),
     worker: {
       headline: workerHeadline(workerStrategy),

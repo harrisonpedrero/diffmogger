@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -14,24 +18,44 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from diffmogger.conveyor.state import load_state, write_state
+from diffmogger.runtime import state_store as state_store_module
 from diffmogger.runtime.state_store import (
     CONVEYOR_PROJECTION_NAME,
     RUNNER_PROJECTION_NAME,
     STATE_SCHEMA_VERSION,
     automation_control_state,
+    build_symbol_aware_validation_plan_conn,
     can_start_execution_group,
     can_start_worker,
     canonical_state_brief_path_for_target,
     connect,
+    create_repair_nodes_for_failed_validation_conn,
     database_path_for_target,
+    ensure_codebase_graph_conn,
+    compact_runtime_telemetry_conn,
+    execution_dag_action_capabilities,
+    execution_dag_edges_conn,
+    execution_dag_read_model,
+    failed_validation_jobs_requiring_dag_action_conn,
     load_conveyor_state,
     load_runner_state,
+    materialize_execution_dag_conn,
+    patch_lineage_summary_conn,
     parallelism_budgets_conn,
+    reconcile_worker_results_into_execution_dag_conn,
     render_canonical_state_brief,
+    record_runtime_phase_timing_conn,
+    refresh_capability_manifest_conn,
+    runtime_performance_summary_conn,
     run_parallel_validation_conn,
+    stable_json,
     state_snapshot,
+    upsert_execution_dag_edge,
+    upsert_execution_dag_node,
+    upsert_worker_patch_lineage_conn,
     validate_state_database,
     validation_jobs_conn,
+    worker_patch_lineage_conn,
     write_canonical_state_brief,
     write_runner_state,
     write_ticket_run_state,
@@ -64,6 +88,67 @@ class StateStoreTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _seed_worker_patch_for_preflight(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        patch_id: str,
+        changed_files: list[str] | None = None,
+        patch_path: str = "target/automation_queue/builder/run/changes.patch",
+        base_commit: str = "",
+        queued_at: str = "2026-05-15T00:00:00+00:00",
+        leases: list[dict[str, object]] | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        worker_id = f"worker:{patch_id}"
+        conn.execute(
+            """
+            INSERT INTO worker_agents(
+                worker_id, execution_group_id, run_id, mode, role, status,
+                context_pack_id, started_at, finished_at, payload_json
+            )
+            VALUES(?, 'execution-group:test', ?, 'write', 'builder', 'completed', '', ?, ?, '{}')
+            """,
+            (worker_id, patch_id, queued_at, queued_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO worker_patches(
+                patch_id, worker_id, execution_group_id, status, manifest_path,
+                patch_path, changed_files_json, base_commit, leases_json,
+                validation_evidence_json, conflict_signature, created_at,
+                queued_at, integrated_at, payload_json
+            )
+            VALUES(?, ?, 'execution-group:test', 'queued', ?, ?, ?, ?, ?, '[]', '', ?, ?, '', ?)
+            """,
+            (
+                patch_id,
+                worker_id,
+                f"target/automation_queue/builder/{patch_id}/manifest.json",
+                patch_path,
+                stable_json(changed_files or []),
+                base_commit,
+                stable_json(leases or []),
+                queued_at,
+                queued_at,
+                stable_json(payload or {}),
+            ),
+        )
+
+    def _seed_ready_integration_node(self, conn: sqlite3.Connection, patch_id: str, *, status: str = "ready") -> None:
+        upsert_execution_dag_node(
+            conn,
+            node_id=f"dag-node:test:integrate:{patch_id}",
+            task_id=f"task:{patch_id}",
+            action_type="integrate",
+            status=status,
+            owner_role="integrator",
+            patch_id=patch_id,
+            patch_path=f"target/automation_queue/builder/{patch_id}/changes.patch",
+            confidence=0.92,
+            metadata={"source": "worker_patches", "patch_id": patch_id},
+        )
+
     def test_initializes_sqlite_and_generated_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -89,10 +174,418 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(STATE_SCHEMA_VERSION, snapshot["database"]["user_version"])
             self.assertIn("schema_migrations", snapshot["counts"])
             self.assertIn(STATE_SCHEMA_VERSION, {item["version"] for item in snapshot["schema_migrations"]})
+            self.assertIn("execution_dag", snapshot)
+            self.assertEqual("sqlite", snapshot["execution_dag"]["authority"])
+            self.assertGreater(snapshot["execution_dag"]["node_count"], 0)
+            self.assertEqual(snapshot["execution_dag"], snapshot["progress_model"])
             self.assertEqual("pass", snapshot["state_health_summary"]["status"])
             self.assertTrue(all(item["ok"] for item in snapshot["invariant_results"]))
 
-    def test_parallelism_budget_defaults_disable_write_workers_until_enabled(self) -> None:
+    def test_worker_patch_integration_preflight_orders_independent_patches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:a",
+                        changed_files=["src/a.py"],
+                        queued_at="2026-05-15T00:00:00+00:00",
+                    )
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:b",
+                        changed_files=["src/b.py"],
+                        queued_at="2026-05-15T00:01:00+00:00",
+                    )
+                    self._seed_ready_integration_node(conn, "patch:a")
+                    self._seed_ready_integration_node(conn, "patch:b")
+
+                preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
+
+            self.assertEqual(["patch:a", "patch:b"], preflight["safe_patch_ids"])
+            self.assertEqual(0, preflight["likely_conflict_count"])
+            self.assertEqual(
+                [("patch:a", 1), ("patch:b", 2)],
+                [(item["patch_id"], item["safe_order"]) for item in preflight["safe_order"]],
+            )
+
+    def test_worker_patch_integration_preflight_blocks_overlapping_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:first",
+                        changed_files=["src/app.py"],
+                        queued_at="2026-05-15T00:00:00+00:00",
+                    )
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:second",
+                        changed_files=["src/app.py"],
+                        queued_at="2026-05-15T00:01:00+00:00",
+                    )
+                    self._seed_ready_integration_node(conn, "patch:first")
+                    self._seed_ready_integration_node(conn, "patch:second")
+
+                preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
+
+            self.assertEqual(["patch:first"], preflight["safe_patch_ids"])
+            self.assertEqual(1, preflight["likely_conflict_count"])
+            conflict = preflight["likely_conflicts"][0]
+            self.assertEqual("patch:second", conflict["patch_id"])
+            self.assertEqual(["patch:first"], conflict["conflict_patch_ids"])
+
+    def test_worker_patch_integration_preflight_blocks_stale_base_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "src").mkdir(parents=True)
+            (target / "src" / "app.py").write_text("value = 1\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+            subprocess.run(["git", "add", "src/app.py"], cwd=target, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=Diffmogger", "-c", "user.email=diffmogger@example.invalid", "commit", "-q", "-m", "base"],
+                cwd=target,
+                check=True,
+            )
+            base_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=target,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            (target / "src" / "app.py").write_text("value = 2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "src/app.py"], cwd=target, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=Diffmogger", "-c", "user.email=diffmogger@example.invalid", "commit", "-q", "-m", "advance"],
+                cwd=target,
+                check=True,
+            )
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:stale",
+                        changed_files=["src/app.py"],
+                        base_commit=base_commit,
+                    )
+                    self._seed_ready_integration_node(conn, "patch:stale")
+
+                preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
+
+            record = preflight["records"][0]
+            self.assertEqual("stale_base", record["status"])
+            self.assertEqual(1, preflight["stale_base_count"])
+            self.assertEqual([], preflight["safe_patch_ids"])
+            self.assertTrue(any(reason["kind"] == "stale_base_changed_files" for reason in record["reasons"]))
+
+    def test_worker_patch_integration_preflight_blocks_missing_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:missing",
+                        changed_files=[],
+                        patch_path="",
+                    )
+                    self._seed_ready_integration_node(conn, "patch:missing")
+
+                preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
+                row = conn.execute(
+                    "SELECT status, missing_metadata FROM worker_patch_integration_preflight WHERE patch_id = 'patch:missing'",
+                ).fetchone()
+
+            record = preflight["records"][0]
+            self.assertEqual("missing_metadata", record["status"])
+            self.assertEqual(1, preflight["missing_metadata_count"])
+            self.assertEqual([], preflight["safe_patch_ids"])
+            self.assertEqual("missing_metadata", row["status"])
+            self.assertEqual(1, row["missing_metadata"])
+
+    def test_state_snapshot_exposes_runtime_performance_timings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "src").mkdir()
+            (target / "src" / "app.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+
+            snapshot = state_snapshot(target)
+            performance = snapshot["runtime_performance"]
+            latest_by_phase = performance["latest_by_phase"]
+
+            for phase in ["indexing", "resolution", "impact_scoring", "scheduling", "dashboard_rendering"]:
+                self.assertIn(phase, latest_by_phase)
+                self.assertGreaterEqual(latest_by_phase[phase]["elapsed_ms"], 0)
+            self.assertEqual(performance, snapshot["performance"])
+            self.assertIsInstance(snapshot["slow_phase_warnings"], list)
+            brief = render_canonical_state_brief(snapshot, target=target)
+            self.assertIn("## Performance Guardrails", brief)
+            self.assertIn("phase_timing", brief)
+
+    def test_runtime_timing_compaction_bounds_old_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with closing(connect(database_path_for_target(target))) as conn:
+                with mock.patch.object(state_store_module, "RUNTIME_PHASE_TIMING_RETENTION_LIMIT", 5):
+                    for index in range(9):
+                        record_runtime_phase_timing_conn(
+                            conn,
+                            phase="indexing",
+                            source="test",
+                            started_at=f"2026-05-15T00:00:{index:02d}+00:00",
+                            finished_at=f"2026-05-15T00:00:{index:02d}+00:00",
+                            elapsed_ms=float(index),
+                        )
+                    summary = compact_runtime_telemetry_conn(conn)
+                    remaining = conn.execute("SELECT COUNT(*) AS count FROM runtime_phase_timings").fetchone()["count"]
+                    performance = runtime_performance_summary_conn(conn)
+
+            self.assertEqual(4, summary["deleted_runtime_phase_timing_count"])
+            self.assertEqual(5, remaining)
+            self.assertEqual(5, performance["phase_counts"]["indexing"])
+
+    def test_execution_dag_node_and_edge_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with closing(connect(database_path_for_target(target))) as conn:
+                plan = upsert_execution_dag_node(
+                    conn,
+                    task_id="T-100",
+                    action_type="decompose",
+                    status="done",
+                    owner_role="planner",
+                    confidence=0.91,
+                    attempt_count=1,
+                    metadata={"summary": "Plan reusable work"},
+                )
+                build = upsert_execution_dag_node(
+                    conn,
+                    task_id="T-100",
+                    action_type="build",
+                    status="ready",
+                    owner_role="builder",
+                    worktree_id="wt-builder",
+                    worktree_path="/tmp/wt-builder",
+                    patch_id="patch-100",
+                    patch_path="target/automation_queue/builder/run/patch.diff",
+                    confidence=0.82,
+                    attempt_count=2,
+                    validation_receipt_refs=["receipt:unit"],
+                    metadata={"summary": "Build reusable work"},
+                )
+                edge = upsert_execution_dag_edge(
+                    conn,
+                    source_node_id=plan["node_id"],
+                    target_node_id=build["node_id"],
+                    dependency_kind="depends_on",
+                    dependency_mode="hard",
+                    reason="implementation depends on decomposition",
+                    confidence=0.88,
+                )
+                model = execution_dag_read_model(conn)
+
+            node_by_id = {node["node_id"]: node for node in model["nodes"]}
+            persisted = node_by_id[build["node_id"]]
+            self.assertEqual("T-100", persisted["task_id"])
+            self.assertEqual("build", persisted["action_type"])
+            self.assertEqual("build", persisted["canonical_action_type"])
+            self.assertEqual("exclusive_write", persisted["lease_behavior"])
+            self.assertEqual("builder", persisted["owner_role"])
+            self.assertEqual("wt-builder", persisted["worktree"]["id"])
+            self.assertEqual("patch-100", persisted["patch"]["id"])
+            self.assertEqual(["receipt:unit"], persisted["validation_receipt_refs"])
+            self.assertEqual(2, persisted["attempt_count"])
+            self.assertTrue(any(item["node_id"] == build["node_id"] for item in model["ready_nodes"]))
+            self.assertEqual("hard", edge["dependency_mode"])
+            self.assertEqual("implementation depends on decomposition", edge["reason"])
+
+    def test_execution_dag_action_capability_contract(self) -> None:
+        capabilities = execution_dag_action_capabilities()
+        expected = {
+            "orchestrate",
+            "decompose",
+            "scope",
+            "build",
+            "review",
+            "validate",
+            "repair",
+            "integrate",
+            "audit",
+            "calibrate",
+        }
+
+        self.assertEqual(expected, set(capabilities))
+        for action_type, capability in capabilities.items():
+            with self.subTest(action_type=action_type):
+                self.assertTrue(capability["permissions"])
+                self.assertTrue(capability["required_inputs"])
+                self.assertTrue(capability["outputs"])
+                self.assertIn(capability["lease_behavior"], {"none", "read_only", "exclusive_write", "validation_budget", "serialized_repo"})
+                self.assertIn(capability["execution_mode"], {"read_only", "write_workers", "validation", "mixed"})
+                self.assertIn(capability["role_family"], {"planner", "builder", "hardener", "integrator"})
+                self.assertIn("required_by_default", capability)
+                self.assertIn("optional_by_default", capability)
+
+        self.assertEqual("exclusive_write", capabilities["build"]["lease_behavior"])
+        self.assertTrue(capabilities["integrate"]["serialized"])
+
+    def test_execution_dag_snapshot_rendering_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "dag-idempotent",
+                    "tickets": [{"id": "T-1", "summary": "Update a reusable module", "status": "pending"}],
+                },
+                actor_role="test",
+                event_type="ticket.run_seeded",
+            )
+
+            first = state_snapshot(target)
+            second = state_snapshot(target)
+            self.assertEqual(first["execution_dag"]["digest"], second["execution_dag"]["digest"])
+            self.assertEqual(first["execution_dag"]["node_count"], second["execution_dag"]["node_count"])
+            self.assertEqual(first["execution_dag"]["edge_count"], second["execution_dag"]["edge_count"])
+
+            def dag_section(markdown: str) -> str:
+                return markdown.split("## Execution DAG", 1)[1].split("## Runner And Compatibility Conveyor", 1)[0]
+
+            rendered_first = dag_section(render_canonical_state_brief(first, target=target))
+            rendered_second = dag_section(render_canonical_state_brief(second, target=target))
+            self.assertEqual(rendered_first, rendered_second)
+            self.assertIn("ready_node", rendered_first)
+            self.assertIn("T-1", rendered_first)
+
+    def test_execution_dag_blocker_status_transitions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "dag-blocker",
+                    "tickets": [
+                        {
+                            "id": "T-2",
+                            "summary": "Implement blocked work",
+                            "status": "blocked",
+                            "blocker": "needs reusable configuration",
+                        }
+                    ],
+                },
+                actor_role="test",
+                event_type="ticket.run_seeded",
+            )
+            blocked = state_snapshot(target)["execution_dag"]
+            blocked_build = [
+                item
+                for item in blocked["blocked_nodes"]
+                if item.get("task_id") == "T-2" and item.get("action_type") == "build"
+            ]
+            self.assertEqual(1, len(blocked_build))
+            self.assertIn("needs reusable configuration", json.dumps(blocked_build[0]))
+
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "dag-blocker",
+                    "tickets": [
+                        {
+                            "id": "T-2",
+                            "summary": "Implement blocked work",
+                            "status": "pending",
+                        }
+                    ],
+                },
+                actor_role="test",
+                event_type="ticket.run_unblocked",
+            )
+            unblocked = state_snapshot(target)["execution_dag"]
+            ready_scope = [
+                item
+                for item in unblocked["ready_nodes"]
+                if item.get("task_id") == "T-2" and item.get("action_type") == "scope"
+            ]
+            blocked_build = [
+                item
+                for item in unblocked["blocked_nodes"]
+                if item.get("task_id") == "T-2" and item.get("action_type") == "build"
+            ]
+            self.assertEqual(1, len(ready_scope))
+            self.assertEqual(1, len(blocked_build))
+            self.assertIn("scope", json.dumps(blocked_build[0]))
+
+    def test_queued_builder_patch_materializes_in_progress_ticket_build_as_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "dag-handoff",
+                    "tickets": [
+                        {
+                            "id": "TICKET-001",
+                            "summary": "Create repository skeleton",
+                            "status": "in_progress",
+                        }
+                    ],
+                },
+                actor_role="test",
+                event_type="ticket.run_seeded",
+            )
+            now = "2026-05-15T00:00:00+00:00"
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO worker_agents(
+                            worker_id, execution_group_id, run_id, mode, role, status,
+                            context_pack_id, started_at, finished_at, payload_json
+                        )
+                        VALUES('role-manifest:builder:run-001', 'serial-role:builder:run-001',
+                               'run-001', 'write', 'builder', 'completed', '', ?, ?, ?)
+                        """,
+                        (
+                            now,
+                            now,
+                            stable_json({"task_id": "TICKET-001", "dag_node_id": "dag-node:test:build"}),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_patches(
+                            patch_id, worker_id, execution_group_id, status, manifest_path,
+                            patch_path, changed_files_json, base_commit, leases_json,
+                            validation_evidence_json, conflict_signature, created_at,
+                            queued_at, integrated_at, payload_json
+                        )
+                        VALUES('role-patch:test', 'role-manifest:builder:run-001',
+                               'serial-role:builder:run-001', 'queued',
+                               'target/automation_queue/builder/run-001/manifest.json',
+                               'target/automation_queue/builder/run-001/changes.patch',
+                               ?, '', '[]', '[]', '', ?, ?, '', '{}')
+                        """,
+                        (json.dumps(["src/app.py"]), now, now),
+                    )
+                    materialize_execution_dag_conn(conn, target, {}, event_type="test.materialize")
+                    model = execution_dag_read_model(conn)
+                    ticket_row = conn.execute(
+                        "SELECT status FROM ticket_items WHERE ticket_id = 'TICKET-001'",
+                    ).fetchone()
+
+            build_node = next(node for node in model["nodes"] if node["task_id"] == "TICKET-001" and node["action_type"] == "build")
+            ticket_node = next(node for node in model["nodes"] if node["task_id"] == "TICKET-001" and node["action_type"] == "ticket")
+            self.assertEqual("done", build_node["status"])
+            self.assertEqual("in_progress", ticket_node["status"])
+            self.assertEqual("in_progress", ticket_row["status"])
+            self.assertEqual("role-patch:test", build_node["metadata"]["worker_patch_handoffs"][0]["patch_id"])
+
+    def test_parallelism_budget_ignores_disabled_legacy_write_worker_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self._write_intake(
@@ -107,16 +600,15 @@ class StateStoreTests(unittest.TestCase):
 
             self.assertTrue(budget_by_scope["read_only_workers"]["enabled"])
             self.assertEqual(3, budget_by_scope["read_only_workers"]["max_concurrent"])
-            self.assertFalse(budget_by_scope["write_workers"]["enabled"])
-            self.assertEqual(0, budget_by_scope["write_workers"]["max_concurrent"])
+            self.assertTrue(budget_by_scope["write_workers"]["enabled"])
+            self.assertEqual(5, budget_by_scope["write_workers"]["max_concurrent"])
             self.assertIn("active_parallel_counts", snapshot)
             self.assertIn("budget_exhaustion_reasons", snapshot)
 
             with closing(connect(database_path_for_target(target))) as conn:
                 self.assertTrue(can_start_worker(conn, "read_only", owner_role="builder")["allowed"])
                 write_check = can_start_worker(conn, "write", owner_role="builder")
-            self.assertFalse(write_check["allowed"])
-            self.assertTrue(any("write_workers" in reason for reason in write_check["reasons"]))
+            self.assertTrue(write_check["allowed"])
 
     def test_write_worker_budget_respects_max_write_worker_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -165,7 +657,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertFalse(check["allowed"])
             self.assertTrue(any("global" in reason for reason in check["reasons"]))
 
-    def test_read_only_budget_does_not_authorize_write_workers(self) -> None:
+    def test_disabled_legacy_write_worker_count_uses_default_capacity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self._write_intake(
@@ -179,9 +671,11 @@ class StateStoreTests(unittest.TestCase):
             with closing(connect(database_path_for_target(target))) as conn:
                 read_only_check = can_start_worker(conn, "read_only", owner_role="planner")
                 write_check = can_start_worker(conn, "write", owner_role="planner")
+                budgets = {item["scope"]: item for item in parallelism_budgets_conn(conn)}
 
             self.assertTrue(read_only_check["allowed"])
-            self.assertFalse(write_check["allowed"])
+            self.assertTrue(write_check["allowed"])
+            self.assertEqual(3, budgets["write_workers"]["max_concurrent"])
 
     def test_parallelism_budget_summary_appears_in_snapshot_and_brief(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -202,6 +696,92 @@ class StateStoreTests(unittest.TestCase):
             self.assertTrue(any(item["scope"] == "write_workers" for item in snapshot["parallelism_budgets"]))
             self.assertEqual(0, snapshot["active_parallel_counts"]["active_write_workers"])
             self.assertIn("scope=write_workers", rendered)
+
+    def test_why_not_parallel_read_model_groups_normalized_reasons(self) -> None:
+        model = state_store_module.why_not_parallel_read_model(
+            [
+                {
+                    "candidate_id": "candidate:missing",
+                    "task_id": "T1",
+                    "owner_role": "builder",
+                    "action_kind": "build",
+                    "reason_kind": "missing_direct_write_signal",
+                    "reason": "write task needs a direct path or exact symbol",
+                    "confidence_signals": ["keyword_advisory"],
+                    "missing_confidence_signal": "direct_path_or_exact_symbol",
+                },
+                {
+                    "candidate_id": "candidate:stale",
+                    "task_id": "T2",
+                    "owner_role": "builder",
+                    "action_kind": "build",
+                    "reason_kind": "missing_direct_write_signal",
+                    "reason": "write task has stale symbol evidence only",
+                    "confidence_signals": ["stale_symbol"],
+                },
+                {
+                    "candidate_id": "candidate:lease",
+                    "task_id": "T3",
+                    "owner_role": "builder",
+                    "action_kind": "build",
+                    "reason_kind": "active_lease_conflict",
+                    "reason": "required lease conflicts with an active lease",
+                    "lease_conflicts": [{"lease_id": "lease:active"}],
+                },
+                {
+                    "candidate_id": "candidate:scope",
+                    "task_id": "T4",
+                    "owner_role": "planner",
+                    "action_kind": "scope",
+                    "reason_kind": "insufficient_scoping_confidence",
+                    "reason": "scope node has low confidence context",
+                },
+            ],
+            skipped_scheduler_candidates=[
+                {
+                    "candidate_id": "scheduler:scope",
+                    "execution_group_id": "execution-group:scope",
+                    "action_kind": "launch_scope_group",
+                    "skipped_reason": "read-only scope fanout unavailable: read_only_workers budget has 2 active item(s) for 2 slot(s)",
+                    "blockers": [
+                        {
+                            "reason_kind": "read_only_scope_budget_blocked",
+                            "reason": "read_only_workers budget has 2 active item(s) for 2 slot(s)",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        groups = {item["reason_kind"]: item for item in model["reason_groups"]}
+
+        self.assertEqual("blocked", model["status"])
+        self.assertEqual(1, model["reason_counts"]["missing_direct_write_signal"])
+        self.assertEqual(1, model["reason_counts"]["stale_symbol"])
+        self.assertEqual(1, model["reason_counts"]["lease_conflict"])
+        self.assertEqual(1, model["reason_counts"]["insufficient_scoping_confidence"])
+        self.assertEqual(1, model["reason_counts"]["budget_blocked"])
+        self.assertIn("Refresh the codebase index", groups["stale_symbol"]["next_action"])
+        self.assertIn("Raise or free", groups["budget_blocked"]["next_action"])
+        self.assertFalse(model["policy"]["worker_text_authorizes_writes"])
+
+    def test_why_not_parallel_read_model_is_clear_for_exact_owner_group(self) -> None:
+        model = state_store_module.why_not_parallel_read_model(
+            [],
+            parallelization_summary={"mode": "dry_run", "group_count": 1},
+            proposed_execution_groups=[
+                {
+                    "execution_group_id": "execution-group:exact-owner",
+                    "payload": {"execution_mode": "write_workers"},
+                    "items": [{"task_id": "T1"}],
+                }
+            ],
+        )
+
+        self.assertEqual("clear", model["status"])
+        self.assertEqual({}, model["reason_counts"])
+        self.assertEqual(1, model["proposed_group_count"])
+        self.assertEqual("Parallel dry run has proposed group(s) and no blocked candidate reason groups.", model["summary"])
 
     def test_parallel_validation_runs_independent_commands_as_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -224,7 +804,75 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(0, result["serial_job_count"])
             self.assertEqual(2, len(result["jobs"]))
             self.assertEqual({"passed"}, {job["status"] for job in jobs})
-            self.assertEqual({"read_only_check"}, {job["payload"]["classification"] for job in jobs})
+            self.assertEqual({"typecheck"}, {job["payload"]["classification"] for job in jobs})
+            self.assertEqual({"parallel"}, {job["payload"]["run_lane"] for job in jobs})
+
+    def test_validation_command_classification_covers_parallel_safe_families(self) -> None:
+        classify = state_store_module.classify_validation_command
+
+        self.assertEqual("unit_test", classify("python3 -m pytest tests/test_auth.py"))
+        self.assertEqual("lint", classify("npm run lint"))
+        self.assertEqual("typecheck", classify("pnpm run typecheck"))
+        self.assertEqual("smoke", classify("python3 scripts/smoke_check.py"))
+        self.assertEqual("docs_check", classify("markdownlint docs"))
+        self.assertEqual("generated_helper", classify("python3 scripts/check_required_files.py ."))
+        self.assertEqual("build", classify("npm run build"))
+        self.assertEqual("resource_heavy", classify("bash scripts/validate_starter_kit.sh"))
+        self.assertEqual("browser", classify("npx playwright test"))
+        self.assertEqual("environment_repair", classify("npm ci"))
+        self.assertEqual("exclusive", classify("python3 manage.py migrate deploy"))
+
+    def test_parallel_validation_splits_safe_checks_from_resource_heavy_serial_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            active = 0
+            max_active = 0
+            calls: list[tuple[str, str]] = []
+            lock = threading.Lock()
+
+            def fake_run(spec: dict[str, object]) -> dict[str, object]:
+                nonlocal active, max_active
+                lane = str(spec.get("run_lane") or "")
+                classification = str(spec.get("classification") or "")
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                    calls.append((lane, classification))
+                if lane == "parallel":
+                    time.sleep(0.05)
+                with lock:
+                    active -= 1
+                return {
+                    "started_at": "2026-05-16T00:00:00+00:00",
+                    "finished_at": "2026-05-16T00:00:01+00:00",
+                    "duration_seconds": 1.0,
+                    "exit_code": 0,
+                    "stdout": classification,
+                    "stderr": "",
+                }
+
+            commands = [
+                {"command": "python3 -m pytest tests", "gate_id": "gate:unit"},
+                {"command": "npm run lint", "gate_id": "gate:lint"},
+                {"command": "python3 scripts/check_required_files.py .", "gate_id": "gate:helper"},
+                {"command": "npm run build", "gate_id": "gate:build"},
+                {"command": "npm ci", "gate_id": "gate:setup"},
+            ]
+            with mock.patch.object(state_store_module, "_run_validation_command", fake_run):
+                with closing(connect(database_path_for_target(target))) as conn:
+                    result = run_parallel_validation_conn(conn, target, commands, selected_by="test", plan_id="plan:split")
+                    jobs = validation_jobs_conn(conn, limit=10)
+
+            self.assertEqual("passed", result["status"])
+            self.assertEqual(3, result["parallel_job_count"])
+            self.assertEqual(2, result["serial_job_count"])
+            self.assertGreaterEqual(max_active, 2)
+            self.assertEqual({"unit_test", "lint", "generated_helper", "build", "environment_repair"}, {job["payload"]["classification"] for job in jobs})
+            self.assertEqual(3, result["planning_evidence"]["run_lane_counts"]["parallel"])
+            self.assertEqual(2, result["planning_evidence"]["run_lane_counts"]["serial"])
+            self.assertTrue(all(job["payload"]["planning_evidence"]["run_lane"] in {"parallel", "serial"} for job in jobs))
+            self.assertIn(("serial", "build"), calls)
+            self.assertIn(("serial", "environment_repair"), calls)
 
     def test_parallel_validation_exclusive_command_runs_serially(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,6 +920,175 @@ class StateStoreTests(unittest.TestCase):
             self.assertIsNotNone(receipt)
             self.assertEqual("fail", receipt["status"])
 
+    def test_parallel_validation_records_repaired_missing_pytest_as_passed(self) -> None:
+        from diffmogger.runtime import repair_environment as repair_environment_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp).resolve()
+            command = (
+                f"{sys.executable} -c \"import sys; "
+                "print('No module named pytest', file=sys.stderr); "
+                "sys.exit(1)\""
+            )
+            diagnostics = [{"kind": "missing_pytest", "name": "pytest", "detail": "No module named pytest"}]
+
+            def fake_diagnose_failure(_command: str, _exit_code: int, _output: str) -> list[dict[str, str]]:
+                return diagnostics
+
+            def fake_diagnose_and_repair(
+                target_arg: Path,
+                command_arg: str,
+                exit_code: int,
+                output: str,
+                *,
+                rerun: bool = False,
+            ) -> repair_environment_module.EnvironmentRepairOutcome:
+                self.assertEqual(target, target_arg)
+                self.assertTrue(rerun)
+                self.assertIn("No module named pytest", output)
+                return repair_environment_module.EnvironmentRepairOutcome(
+                    command=command_arg,
+                    initial_exit_code=exit_code,
+                    initial_output=output,
+                    diagnostics=diagnostics,
+                    repairs=["installed Python dependencies from pyproject extra `test` into target/automation_venvs/root"],
+                    repair_performed=True,
+                    final_command="target/automation_venvs/root/bin/python -m pytest",
+                    final_exit_code=0,
+                    final_output="1 passed",
+                    environment_failure=False,
+                )
+
+            with mock.patch.object(repair_environment_module, "diagnose_failure", fake_diagnose_failure):
+                with mock.patch.object(repair_environment_module, "diagnose_and_repair", fake_diagnose_and_repair):
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        result = run_parallel_validation_conn(
+                            conn,
+                            target,
+                            [{"command": command, "classification": "test", "required": True, "gate_id": "gate:pytest"}],
+                            selected_by="test",
+                            plan_id="plan:pytest-repair",
+                        )
+                        jobs = validation_jobs_conn(conn, limit=5)
+                        receipt = conn.execute(
+                            "SELECT status, payload_json FROM validation_receipts WHERE run_id = ?",
+                            (result["execution_group_id"],),
+                        ).fetchone()
+                        artifact = conn.execute(
+                            "SELECT path FROM artifacts WHERE artifact_id = ?",
+                            (result["jobs"][0]["log_artifact_id"],),
+                        ).fetchone()
+
+            self.assertEqual("passed", result["status"])
+            self.assertEqual("passed", result["jobs"][0]["status"])
+            self.assertEqual("passed", jobs[0]["status"])
+            payload = jobs[0]["payload"]
+            self.assertEqual(1, payload["initial_exit_code"])
+            self.assertTrue(payload["repair_performed"])
+            self.assertFalse(payload["environment_failure"])
+            self.assertEqual("verification_environment_failure", payload["failure_reason"])
+            self.assertEqual("missing_pytest", payload["failure_category"])
+            self.assertTrue(payload["validation_failure_signature"].startswith("verification_environment_failure:missing_pytest:"))
+            self.assertIsNotNone(receipt)
+            self.assertEqual("pass", receipt["status"])
+            receipt_payload = json.loads(receipt["payload_json"])
+            self.assertTrue(receipt_payload["repair_performed"])
+            self.assertIsNotNone(artifact)
+            log_text = (target / artifact["path"]).read_text(encoding="utf-8")
+            self.assertIn("## environment repair", log_text)
+            self.assertIn("initial_exit=1", log_text)
+            self.assertIn("No module named pytest", log_text)
+            self.assertIn("1 passed", log_text)
+
+    def test_unrepaired_environment_validation_failure_creates_single_blocker_by_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            now = "2026-05-15T00:00:00+00:00"
+            signature = "verification_environment_failure:missing_pytest:deadbeef1234"
+            payload = {
+                "required": True,
+                "classification": "test",
+                "environment_failure": True,
+                "repair_performed": False,
+                "failure_reason": "verification_environment_failure",
+                "failure_category": "missing_pytest",
+                "failure_root_cause": "Missing pytest in the validation environment.",
+                "validation_failure_signature": signature,
+                "environment_repair": {
+                    "blocked_reason": "No ignored local Python venv with declared requirements could satisfy the missing module."
+                },
+            }
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:test:env-validation",
+                        task_id="T-env",
+                        action_type="validate",
+                        status="blocked",
+                        owner_role="hardener",
+                        confidence=0.9,
+                        attempt_count=1,
+                        metadata={"paths": ["tests/test_app.py"]},
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO execution_groups(
+                            execution_group_id, status, mode, created_at, started_at, finished_at,
+                            selected_by, reason, payload_json
+                        )
+                        VALUES('validation-group:env', 'failed', 'validation', ?, ?, ?, 'test', 'validation failed', '{}')
+                        """,
+                        (now, now, now),
+                    )
+                    for index in (1, 2):
+                        conn.execute(
+                            """
+                            INSERT INTO validation_jobs(
+                                job_id, execution_group_id, plan_id, gate_id, command, cwd,
+                                status, started_at, finished_at, exit_code, log_artifact_id,
+                                resource_profile, payload_json
+                            )
+                            VALUES(?, 'validation-group:env', 'validation-group:env', 'T-env',
+                                   'python3 -m pytest', ?, 'failed', ?, ?, 1, ?, 'cpu', ?)
+                            """,
+                            (
+                                f"validation-job:env-{index}",
+                                str(target),
+                                now,
+                                now,
+                                f"artifact:validation-log:env-{index}",
+                                stable_json(payload),
+                            ),
+                        )
+
+                jobs = validation_jobs_conn(conn, statuses={"failed"}, limit=10)
+                self.assertEqual(2, len(failed_validation_jobs_requiring_dag_action_conn(conn, jobs)))
+                created = create_repair_nodes_for_failed_validation_conn(conn, selected_by="test")
+                skipped = create_repair_nodes_for_failed_validation_conn(conn, selected_by="test")
+                remaining = failed_validation_jobs_requiring_dag_action_conn(conn, jobs)
+                model = execution_dag_read_model(conn)
+                edges = execution_dag_edges_conn(conn)
+
+            self.assertEqual(0, created["repair_node_count"])
+            self.assertEqual(1, created["blocker_node_count"])
+            self.assertEqual("skipped", skipped["status"])
+            self.assertEqual([], remaining)
+            env_blockers = [
+                node
+                for node in model["nodes"]
+                if node["action_type"] == "blocker" and node["status"] == "blocked_on_environment"
+            ]
+            self.assertEqual(1, len(env_blockers))
+            blocker = env_blockers[0]
+            self.assertIn("Missing pytest", blocker["blocker_reason"])
+            self.assertEqual(signature, blocker["metadata"]["failure_signature"])
+            self.assertEqual([], [node for node in model["nodes"] if node["action_type"] == "repair"])
+            self.assertIn(
+                (blocker["node_id"], "dag-node:test:env-validation", "blocks"),
+                {(edge["source"], edge["target"], edge["dependency_kind"]) for edge in edges},
+            )
+
     def test_parallel_validation_optional_failed_job_warns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -303,7 +1120,7 @@ class StateStoreTests(unittest.TestCase):
                 result = run_parallel_validation_conn(
                     conn,
                     target,
-                    [{"command": command, "classification": "test", "gate_id": "gate:logs"}],
+                    [{"command": command, "classification": "unit_test", "gate_id": "gate:logs"}],
                     selected_by="test",
                     plan_id="plan:logs",
                 )
@@ -311,20 +1128,351 @@ class StateStoreTests(unittest.TestCase):
                     "SELECT * FROM artifacts WHERE artifact_id = ?",
                     (result["jobs"][0]["log_artifact_id"],),
                 ).fetchone()
+                receipt = conn.execute(
+                    "SELECT payload_json FROM validation_receipts WHERE run_id = ?",
+                    (result["execution_group_id"],),
+                ).fetchone()
 
             self.assertIsNotNone(artifact)
+            self.assertIsNotNone(receipt)
             log_path = target / artifact["path"]
             log_text = log_path.read_text(encoding="utf-8")
             self.assertIn("validation stdout marker", log_text)
             self.assertIn("validation stderr marker", log_text)
+            receipt_payload = json.loads(receipt["payload_json"])
+            self.assertEqual("unit_test", receipt_payload["classification"])
+            self.assertEqual("parallel", receipt_payload["run_lane"])
+            self.assertEqual("unit_tests", receipt_payload["command_family"])
+            self.assertTrue(receipt_payload["planning_evidence"]["parallel_safe"])
 
             snapshot = state_snapshot(target)
             rendered = render_canonical_state_brief(snapshot, target=target)
             self.assertEqual("passed", snapshot["validation_job_summary"]["aggregate_status"])
             self.assertTrue(snapshot["parallel_validation_available"])
+            self.assertEqual({"unit_test": 1}, snapshot["validation_job_summary"]["classification_counts"])
+            self.assertEqual(1, snapshot["validation_job_summary"]["parallel_job_count"])
             self.assertIn("validation_jobs:", rendered)
             self.assertNotIn("## stdout", json.dumps(snapshot["validation_job_summary"]))
             self.assertNotIn("## stderr", json.dumps(snapshot["validation_job_summary"]))
+
+    def test_worker_validation_node_includes_symbol_aware_validation_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / ".agentic").mkdir(parents=True)
+            (target / ".agentic" / "verification_commands.txt").write_text(
+                "python3 -m unittest\npython3 -m py_compile src/auth.py\n",
+                encoding="utf-8",
+            )
+            (target / "src").mkdir()
+            (target / "tests").mkdir()
+            (target / "src" / "auth.py").write_text("def login():\n    return True\n", encoding="utf-8")
+            (target / "tests" / "test_auth.py").write_text(
+                "from src.auth import login\n\n"
+                "def test_login():\n"
+                "    assert login()\n",
+                encoding="utf-8",
+            )
+
+            now = "2026-05-15T00:00:00+00:00"
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    refresh_capability_manifest_conn(conn, target)
+                    ensure_codebase_graph_conn(conn, target)
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:test:auth-build",
+                        task_id="T-auth",
+                        action_type="build",
+                        status="done",
+                        owner_role="builder",
+                        confidence=0.91,
+                        metadata={"summary": "Update auth login", "paths": ["src/auth.py"]},
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_agents(
+                            worker_id, execution_group_id, run_id, mode, role, status,
+                            context_pack_id, started_at, finished_at, payload_json
+                        )
+                        VALUES('worker:test-auth', 'execution-group:test-auth', 'run:test-auth',
+                               'write', 'builder', 'completed', '', ?, ?, ?)
+                        """,
+                        (
+                            now,
+                            now,
+                            stable_json({"task_id": "T-auth", "dag_node_id": "dag-node:test:auth-build"}),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_patches(
+                            patch_id, worker_id, execution_group_id, status, manifest_path,
+                            patch_path, changed_files_json, base_commit, leases_json,
+                            validation_evidence_json, conflict_signature, created_at,
+                            queued_at, integrated_at, payload_json
+                        )
+                        VALUES('patch:test-auth', 'worker:test-auth', 'execution-group:test-auth', 'queued',
+                               'target/automation_queue/builder/run:test-auth/manifest.json',
+                               'target/automation_queue/builder/run:test-auth/changes.patch',
+                               ?, '', '[]', '[]', '', ?, ?, '', '{}')
+                        """,
+                        (json.dumps(["src/auth.py"]), now, now),
+                    )
+                result = reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="test")
+
+            self.assertEqual(1, result["validation_node_count"])
+            metadata = result["validation_nodes"][0]["metadata"]
+            plan = metadata["validation_plan"]
+            self.assertEqual("targeted", plan["strategy"])
+            self.assertTrue(metadata["validation_commands"])
+            self.assertTrue(plan["selection_reasons"])
+            self.assertTrue(
+                any(
+                    command["selection_kind"] == "likely_test"
+                    and "tests.test_auth" in command["command"]
+                    and "tests/test_auth.py" in command["payload"]["selected_paths"]
+                    for command in metadata["validation_commands"]
+                )
+            )
+
+    def test_parallel_validation_uses_dag_node_validation_plan_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            command = f"{sys.executable} -c \"print('planned dag validation')\""
+            node_id = "dag-node:test:planned-validation"
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id=node_id,
+                        task_id="T-plan",
+                        action_type="validate",
+                        status="ready",
+                        owner_role="hardener",
+                        confidence=0.9,
+                        metadata={
+                            "paths": ["src/app.py"],
+                            "validation_plan": {
+                                "schema_version": 1,
+                                "strategy": "targeted",
+                                "selection_reasons": ["unit test selected for impacted app symbol"],
+                                "commands": [
+                                    {
+                                        "command": command,
+                                        "classification": "test",
+                                        "required": True,
+                                        "gate_id": "gate:test:planned",
+                                        "selection_kind": "likely_test",
+                                        "selection_reason": "unit test selected for impacted app symbol",
+                                        "selection_reasons": ["unit test selected for impacted app symbol"],
+                                        "payload": {
+                                            "schema_version": 1,
+                                            "selection_kind": "likely_test",
+                                            "selection_reason": "unit test selected for impacted app symbol",
+                                            "selection_reasons": ["unit test selected for impacted app symbol"],
+                                            "selected_paths": ["tests/test_app.py"],
+                                        },
+                                    }
+                                ],
+                            },
+                        },
+                    )
+                result = run_parallel_validation_conn(
+                    conn,
+                    target,
+                    commands=None,
+                    selected_by="test",
+                    plan_id=node_id,
+                )
+                jobs = validation_jobs_conn(conn, limit=5)
+
+            self.assertEqual("passed", result["status"])
+            self.assertEqual([command], [job["command"] for job in jobs])
+            self.assertEqual("likely_test", jobs[0]["payload"]["selection"]["selection_kind"])
+
+    def test_symbol_aware_validation_plan_broadens_for_low_confidence_interface_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "src").mkdir(parents=True)
+            (target / "api").mkdir()
+            (target / "package.json").write_text(
+                json.dumps({"scripts": {"test": "vitest run", "typecheck": "tsc --noEmit", "build": "vite build"}}),
+                encoding="utf-8",
+            )
+            (target / "src" / "client.ts").write_text("export function fetchUser() { return '/users'; }\n", encoding="utf-8")
+            (target / "api" / "openapi.yaml").write_text("openapi: 3.0.0\npaths: {}\n", encoding="utf-8")
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                refresh_capability_manifest_conn(conn, target)
+                ensure_codebase_graph_conn(conn, target)
+                node = upsert_execution_dag_node(
+                    conn,
+                    node_id="dag-node:test:validate-interface",
+                    task_id="T-api",
+                    action_type="validate",
+                    status="ready",
+                    owner_role="hardener",
+                    confidence=0.52,
+                    metadata={
+                        "summary": "Validate client and OpenAPI contract changes",
+                        "paths": ["src/client.ts", "api/openapi.yaml"],
+                    },
+                )
+                plan = build_symbol_aware_validation_plan_conn(conn, target, dag_node=node)
+
+            self.assertEqual("broader", plan["strategy"])
+            self.assertIn("shared_interface_impact", plan["escalation_reasons"])
+            self.assertTrue(any(reason.startswith("low_confidence:") for reason in plan["escalation_reasons"]))
+            self.assertIn("cross_language_interface_impact", plan["escalation_reasons"])
+            self.assertTrue(plan["commands"])
+            self.assertTrue(any(command["selection_kind"] == "interface_contract" for command in plan["commands"]))
+            self.assertTrue(all(command["selection_reasons"] for command in plan["commands"]))
+
+    def test_worker_patch_lineage_records_predicted_and_actual_impact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "src").mkdir()
+            (target / "src" / "app.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+            (target / "src" / "extra.py").write_text("def extra():\n    return 2\n", encoding="utf-8")
+            now = "2026-05-15T00:00:00+00:00"
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                refresh_capability_manifest_conn(conn, target)
+                ensure_codebase_graph_conn(conn, target)
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO worker_agents(
+                            worker_id, execution_group_id, run_id, mode, role, status,
+                            context_pack_id, started_at, finished_at, payload_json
+                        )
+                        VALUES('worker:lineage', 'execution-group:lineage', 'run:lineage',
+                               'write', 'builder', 'completed', '', ?, ?, ?)
+                        """,
+                        (
+                            now,
+                            "2026-05-15T00:00:10+00:00",
+                            stable_json(
+                                {
+                                    "task_id": "T-lineage",
+                                    "dag_node_id": "dag-node:test:lineage-build",
+                                    "predicted_files": ["src/app.py"],
+                                    "predicted_symbols": [
+                                        {
+                                            "symbol_node_id": "symbol:src/app.py:main",
+                                            "symbol_name": "main",
+                                            "qualified_name": "src.app.main",
+                                            "path": "src/app.py",
+                                            "confidence": 0.96,
+                                        }
+                                    ],
+                                }
+                            ),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_patches(
+                            patch_id, worker_id, execution_group_id, status, manifest_path,
+                            patch_path, changed_files_json, base_commit, leases_json,
+                            validation_evidence_json, conflict_signature, created_at,
+                            queued_at, integrated_at, payload_json
+                        )
+                        VALUES('patch:lineage', 'worker:lineage', 'execution-group:lineage',
+                               'queued', 'target/manifest.json', 'target/changes.patch',
+                               ?, '', '[]', '[]', '', ?, ?, '', '{}')
+                        """,
+                        (json.dumps(["src/app.py", "src/extra.py"]), now, now),
+                    )
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:test:lineage-build",
+                        task_id="T-lineage",
+                        action_type="build",
+                        status="done",
+                        owner_role="builder",
+                        confidence=0.92,
+                        metadata={"paths": ["src/app.py"]},
+                    )
+                result = reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="test")
+                lineages = worker_patch_lineage_conn(conn, patch_id="patch:lineage")
+
+            self.assertEqual(1, result["validation_node_count"])
+            self.assertEqual(["src/app.py"], lineages[0]["predicted_files"])
+            self.assertEqual(["src/app.py", "src/extra.py"], lineages[0]["actual_files"])
+            self.assertLess(lineages[0]["prediction_accuracy"]["files"]["recall"], 1.0)
+            self.assertTrue(lineages[0]["actual_symbols"])
+
+    def test_patch_lineage_summary_reports_rates_and_wall_clock_savings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with closing(connect(database_path_for_target(target))) as conn:
+                now = "2026-05-15T00:00:00+00:00"
+                with conn:
+                    for patch_id, worker_id in (("patch:ok", "worker:ok"), ("patch:retry", "worker:retry")):
+                        conn.execute(
+                            """
+                            INSERT INTO worker_agents(worker_id, execution_group_id, run_id, mode, role, status, started_at, finished_at, payload_json)
+                            VALUES(?, 'execution-group:lineage-wave', ?, 'write', 'builder', 'completed', ?, ?, '{}')
+                            """,
+                            (worker_id, worker_id, now, "2026-05-15T00:00:10+00:00"),
+                        )
+                        conn.execute(
+                            """
+                            INSERT INTO worker_patches(
+                                patch_id, worker_id, execution_group_id, status, manifest_path,
+                                patch_path, changed_files_json, base_commit, leases_json,
+                                validation_evidence_json, conflict_signature, created_at,
+                                queued_at, integrated_at, payload_json
+                            )
+                            VALUES(?, ?, 'execution-group:lineage-wave', 'queued',
+                                   '', '', '[]', '', '[]', '[]', '', ?, ?, '', '{}')
+                            """,
+                            (patch_id, worker_id, now, now),
+                        )
+                    upsert_worker_patch_lineage_conn(
+                        conn,
+                        patch_id="patch:ok",
+                        worker_id="worker:ok",
+                        execution_group_id="execution-group:lineage-wave",
+                        status="integrated",
+                        predicted_files=["src/app.py"],
+                        actual_files=["src/app.py"],
+                        validations=[{"job_id": "job:ok", "status": "passed", "command": "test"}],
+                        integration_result="integrated",
+                        started_at="2026-05-15T00:00:00+00:00",
+                        finished_at="2026-05-15T00:00:10+00:00",
+                    )
+                    upsert_worker_patch_lineage_conn(
+                        conn,
+                        patch_id="patch:retry",
+                        worker_id="worker:retry",
+                        execution_group_id="execution-group:lineage-wave",
+                        status="repair_created",
+                        predicted_files=["src/api.py"],
+                        actual_files=["src/api.py", "tests/test_api.py"],
+                        validations=[{"job_id": "job:retry", "status": "failed", "command": "test"}],
+                        conflicts=[{"conflict_signature": "abc", "source": "test"}],
+                        repair_node_ids=["dag-node:repair"],
+                        integration_result="repair_required",
+                        started_at="2026-05-15T00:00:00+00:00",
+                        finished_at="2026-05-15T00:00:08+00:00",
+                    )
+                summary = patch_lineage_summary_conn(conn)
+
+            self.assertEqual(2, summary["lineage_count"])
+            self.assertEqual(0.5, summary["telemetry"]["conflict_rate"])
+            self.assertEqual(0.5, summary["telemetry"]["validation_failure_rate"])
+            self.assertEqual(0.5, summary["telemetry"]["retry_rate"])
+            self.assertEqual(0.5, summary["telemetry"]["integration_success_rate"])
+            self.assertEqual(8.0, summary["telemetry"]["wall_clock_savings_seconds"])
+            self.assertGreater(summary["prediction_accuracy"]["average_file_f1"], 0)
+            snapshot = state_snapshot(target)
+            rendered = render_canonical_state_brief(snapshot, target=target)
+            self.assertEqual(summary["prediction_accuracy"], snapshot["patch_prediction_accuracy"])
+            self.assertEqual(summary["telemetry"], snapshot["patch_telemetry"])
+            self.assertIn("patch_lineage:", rendered)
 
     def test_older_user_version_upgrades_through_schema_migrations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

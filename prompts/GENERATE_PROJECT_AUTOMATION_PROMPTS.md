@@ -8,7 +8,7 @@ You are generating project-specific Codex automation files from a project intake
 
 Read the intake brief first. If values are missing, make reasonable defaults and document assumptions. Do not ask questions unless a missing value would make the workflow unsafe.
 
-Respect the intake's project mode. For `fresh_project`, generate files for a new target repo. For `existing_project`, preserve existing architecture, commands, docs, and project-specific instructions; add Diffmogger guidance as a clearly marked managed section when updating existing `AGENTS.md` or existing project-owned development docs. Generated Diffmogger-owned runtime state should live under `.diffmogger/`; canonical live orchestration state is `.diffmogger/runtime/orchestration.sqlite3`, with typed automation control, conveyor stage contracts, the current work item, repository capability manifest, validation receipts, blockers, and next actions exposed through `.diffmogger/runtime/canonical_state_brief.md`.
+Respect the intake's project mode. For `fresh_project`, generate files for a new target repo. For `existing_project`, preserve existing architecture, commands, docs, and project-specific instructions; add Diffmogger guidance as a clearly marked managed section when updating existing `AGENTS.md` or existing project-owned development docs. Generated Diffmogger-owned runtime state should live under `.diffmogger/`; canonical live orchestration state is `.diffmogger/runtime/orchestration.sqlite3`, with typed automation control, execution DAG nodes/edges, repository capability manifest, validation receipts, blockers, and next actions exposed through `.diffmogger/runtime/canonical_state_brief.md`.
 
 Create these files as complete Markdown drafts:
 
@@ -55,7 +55,7 @@ It must explicitly read and follow:
 .diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md if present
 ```
 
-It must say that the task file is dynamic and rewritten at the end of every run, but is not the runtime authority. It must say canonical runtime state lives in `.diffmogger/runtime/orchestration.sqlite3`; typed automation control, conveyor stage contracts, the current work item, repository capability manifest, validation receipts, blockers, human messages, and next actions live there; `.diffmogger/runtime/canonical_state_brief.md` is the generated view agents read instead of inspecting SQLite manually; `.diffmogger/runtime/automation_conveyor_state.json` is generated for compatibility. It must say the guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
+It must say that the task file is dynamic and rewritten at the end of every run, but is not the runtime authority. It must say canonical runtime state lives in `.diffmogger/runtime/orchestration.sqlite3`; typed automation control, execution DAG nodes/edges, repository capability manifest, validation receipts, blockers, human messages, and next actions live there; conveyor stage fields and `.diffmogger/runtime/automation_conveyor_state.json` are generated compatibility projections. `.diffmogger/runtime/canonical_state_brief.md` is the generated view agents read instead of inspecting SQLite manually. It must say the guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
 
 The automation prompt must include this exact language:
 
@@ -151,7 +151,7 @@ It must check availability with `command -v codex` before using Codex CLI worker
 
 Preserve read-only worker-report behavior. Read-only workers are the default for exploration, review, risk checks, product polish, and test-gap analysis.
 
-Support optional bounded write workers only when the project intake explicitly enables `write_worker_agents_allowed`. The intake should also provide `max_write_worker_count`, capped at 10, and `write_worker_guidance`. Generated projects must keep write workers disabled when that field is absent or false, but enabled targets should treat write workers as bounded acceleration rather than a last resort.
+Support bounded write workers as an always-available capability. `write_worker_agents_allowed` is a deprecated compatibility mirror and must not disable write workers when absent or false. Use `max_write_worker_count`, capped at 10 with a default of 3, and `write_worker_guidance` to shape how many write workers the main agent may choose per run. Generated targets should treat write workers as optional bounded acceleration rather than a last resort.
 
 When write workers are enabled, the generated automation prompt must teach the main agent to:
 
@@ -171,7 +171,9 @@ Generated guardrails must prohibit unbounded recursive agents, overlapping write
 
 If the target helper script supports write workers, keep read-only as the default mode and require an explicit write mode plus ownership scope for write-capable workers.
 
-Support one continuous automation architecture: the `planner_builder_hardener_integrator` conveyor. Treat `campaign_mode` as the user-facing setup choice: `bounded` stops after seeded/imported tickets are complete or blocked, while `ongoing` drafts/enqueues safe project-agnostic follow-up tickets from typed runtime context and continues.
+Support one continuous automation architecture: the typed execution DAG scheduler with the `planner_builder_hardener_integrator` role profile. Treat `campaign_mode` as the user-facing setup choice: `bounded` stops after seeded/imported tickets are complete or blocked, while `ongoing` drafts/enqueues safe project-agnostic follow-up tickets from typed runtime context and continues.
+
+Generated docs and config must document DAG scheduler fields: `parallel_execution_mode`, `symbol_graph_languages`, `parallel_write_min_confidence`, `parallel_write_direct_confidence`, `max_parallel_write_workers`, and `max_parallel_scope_workers`.
 
 Generated targets must include `.diffmogger/scripts/run_conveyor_automation.sh`, `.diffmogger/scripts/run_conveyor_automation.py`, `.diffmogger/scripts/run_role_automation.sh`, `.diffmogger/scripts/integrate_role_outputs.py`, `.diffmogger/scripts/list_deferred_patches.py`, `.diffmogger/scripts/run_observatory.py`, `.diffmogger/scripts/repair_environment.py`, `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, `.diffmogger/agentic/roles/integrator.md`, `.diffmogger/state/MULTI_ROLE_PROGRESS.md`, and `.diffmogger/schemas/orchestration_state.schema.json` as local automation helpers/contracts.
 
@@ -179,7 +181,7 @@ Generated multi-role prompts must state that:
 
 - every role is local-only and must never push, fetch, pull, configure remotes, set upstream tracking, or run remote-affecting git commands
 - no-remote violations are `CRITICAL_STOP`
-- continuous conveyor mode prioritizes queued integration first, baseline repair and blocked-state triage when needed, builder momentum by default, and one hardener pass after integrated builder work
+- continuous DAG scheduler mode prioritizes queued integration first, baseline repair and blocked-state triage when needed, compatible build waves, review/hardening, validation, targeted repairs, and serialized integration
 - builder and hardener start from latest main `HEAD` in isolated worktrees and may see partially integrated state from earlier patches in the cycle
 - integrator owns the main checkout, dirty-checkpoint commits, FIFO patch application, batched verification with individual fallback, local commits, canonical state/projection updates, progress updates, and retention
 - successful empty role patches are recorded as `skipped` instead of queued for integration
@@ -187,7 +189,7 @@ Generated multi-role prompts must state that:
 
 Generated guardrails must prohibit recursive role spawning, unbounded write ownership, blind acceptance of role patches, destructive cleanup, remote git operations, and hook-based pushes.
 
-Lock-file instructions should reference the target repo's local role/conveyor wrappers, `.diffmogger/scripts/acquire_codex_lock.sh`, and `.diffmogger/scripts/release_codex_lock.sh` helpers, the default `.diffmogger/runtime/codex_automation.lock` path, `CODEX_LOCK_PATH` overrides, stale-lock detection, `CODEX_RUN_ID` identity for safe release, and `CODEX_LOCK_ALREADY_ACQUIRED=true` for wrapper-owned runs.
+Lock-file instructions should reference the target repo's local DAG scheduler and role wrappers, `.diffmogger/scripts/acquire_codex_lock.sh`, and `.diffmogger/scripts/release_codex_lock.sh` helpers, the default `.diffmogger/runtime/codex_automation.lock` path, `CODEX_LOCK_PATH` overrides, stale-lock detection, `CODEX_RUN_ID` identity for safe release, and `CODEX_LOCK_ALREADY_ACQUIRED=true` for wrapper-owned runs.
 
 State-compaction instructions should reference `.diffmogger/scripts/compact_agent_state.py --dry-run <target-project>`, preserve unresolved human requests and deferred multi-role manifests, summarize transient multi-role artifacts, and archive concise rollups rather than silently deleting active state.
 

@@ -44,12 +44,15 @@ AGENTS.md
 .diffmogger/lib/diffmogger/observatory/snapshots.py
 .diffmogger/lib/diffmogger/runtime/__init__.py
 .diffmogger/lib/diffmogger/runtime/build_replay.py
+.diffmogger/lib/diffmogger/runtime/code_intelligence.py
 .diffmogger/lib/diffmogger/runtime/compact_agent_state.py
 .diffmogger/lib/diffmogger/runtime/diffmogger_browser.py
 .diffmogger/lib/diffmogger/runtime/integrate_role_outputs.py
 .diffmogger/lib/diffmogger/runtime/list_deferred_patches.py
 .diffmogger/lib/diffmogger/runtime/load_automation_env.py
 .diffmogger/lib/diffmogger/runtime/paths.py
+.diffmogger/lib/diffmogger/runtime/preflight.py
+.diffmogger/lib/diffmogger/runtime/readiness_eval.py
 .diffmogger/lib/diffmogger/runtime/repair_environment.py
 .diffmogger/lib/diffmogger/runtime/run_conveyor_automation.py
 .diffmogger/lib/diffmogger/runtime/run_observatory.py
@@ -81,6 +84,7 @@ AGENTS.md
 .diffmogger/scripts/integrate_role_outputs.py
 .diffmogger/scripts/list_deferred_patches.py
 .diffmogger/scripts/load_automation_env.py
+.diffmogger/scripts/preflight_parallelization_readiness.py
 .diffmogger/scripts/state_brief.py
 .diffmogger/scripts/ticket_run.py
 .diffmogger/scripts/repair_environment.py

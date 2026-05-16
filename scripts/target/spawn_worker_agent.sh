@@ -6,7 +6,7 @@ usage() {
 Usage: .diffmogger/scripts/spawn_worker_agent.sh [options]
 
 Spawn one bounded Codex CLI worker report. The default mode is read-only review:
-the worker may only write its assigned report under target/agent_runs/<run_id>/.
+the worker may only write its assigned report path.
 
 Options:
   --target PATH              Target project directory. Default: current directory
@@ -18,6 +18,8 @@ Options:
   --ownership TEXT           Required ownership scope for --mode write
   --prompt TEXT              Worker assignment
   --prompt-file PATH         Read worker assignment from a file
+  --report-path PATH         Exact worker report path. Default: target/agent_runs/<run_id>/worker_<role>.md
+  --output-path PATH         Alias for --report-path
   --max-prompt-chars N       Bound assignment text. Default: 12000
   -h, --help                 Show this help
 
@@ -37,6 +39,7 @@ mode="${CODEX_WORKER_MODE:-read-only}"
 ownership_scope=""
 prompt_text=""
 prompt_file=""
+report_path=""
 max_prompt_chars="${CODEX_WORKER_MAX_PROMPT_CHARS:-12000}"
 
 while [[ $# -gt 0 ]]; do
@@ -75,6 +78,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --prompt-file)
       prompt_file="${2:?--prompt-file requires a path}"
+      shift 2
+      ;;
+    --report-path|--output-path)
+      report_path="${2:?$1 requires a path}"
       shift 2
       ;;
     --max-prompt-chars)
@@ -129,9 +136,23 @@ if [[ -z "$role_slug" ]]; then
 fi
 
 target_abs="$(cd "$target_dir" && pwd)"
-run_dir="$target_abs/target/agent_runs/$run_id"
-output_path="$run_dir/worker_${role_slug}.md"
-raw_log="$run_dir/worker_${role_slug}.raw.log"
+if [[ -n "$report_path" ]]; then
+  if [[ "$report_path" = /* ]]; then
+    output_path="$report_path"
+  else
+    output_path="$target_abs/$report_path"
+  fi
+  run_dir="$(dirname "$output_path")"
+else
+  run_dir="$target_abs/target/agent_runs/$run_id"
+  output_path="$run_dir/worker_${role_slug}.md"
+fi
+output_name="$(basename "$output_path")"
+output_stem="${output_name%.*}"
+if [[ -z "$output_stem" || "$output_stem" == "$output_name" ]]; then
+  output_stem="$output_name"
+fi
+raw_log="$run_dir/${output_stem}.raw.log"
 mkdir -p "$run_dir"
 
 if [[ -n "$prompt_file" ]]; then

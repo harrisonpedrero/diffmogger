@@ -12,6 +12,11 @@
     "contract",
     "counts",
     "recent_events",
+    "execution_dag",
+    "progress_model",
+    "ready_dag_nodes",
+    "blocked_dag_nodes",
+    "active_dag_nodes",
     "codebase_graph_summary",
     "latest_graph_snapshot",
     "graph_refresh_mode",
@@ -49,6 +54,7 @@
     "proposed_execution_groups",
     "parallelization_summary",
     "blocked_parallel_candidates",
+    "why_not_parallel",
     "scheduler_parallel_dry_run",
     "parallelism_budgets",
     "active_parallel_counts",
@@ -57,11 +63,16 @@
     "pending_worker_reports",
     "completed_worker_reports",
     "worker_finding_disposition_required",
+    "scope_evidence_records",
+    "accepted_scope_evidence_records",
+    "scope_fanout_outcomes",
+    "exhausted_scope_fanout_outcomes",
     "active_write_workers",
     "queued_worker_patches",
     "write_worker_conflicts",
     "lease_conflict_summary",
     "integration_backlog_from_parallel_workers",
+    "worker_patch_integration_preflight",
     "active_validation_jobs",
     "validation_job_summary",
     "parallel_validation_available",
@@ -127,6 +138,38 @@
           "contains": {"const": "ACTIVE"}
         },
         "canonical_runtime_state": {"type": "string"},
+        "execution_dag_action_types": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "execution_dag_canonical_action_types": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "execution_dag_action_capabilities": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["permissions", "required_inputs", "outputs", "lease_behavior", "required_by_default", "optional_by_default"],
+            "properties": {
+              "permissions": {"type": "array", "items": {"type": "string"}},
+              "required_inputs": {"type": "array", "items": {"type": "string"}},
+              "outputs": {"type": "array", "items": {"type": "string"}},
+              "lease_behavior": {"type": "string"},
+              "required_by_default": {"type": "boolean"},
+              "optional_by_default": {"type": "boolean"}
+            },
+            "additionalProperties": true
+          }
+        },
+        "execution_dag_legacy_action_aliases": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "execution_dag_dependency_kinds": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
         "conveyor_stages": {
           "type": "array",
           "items": {"type": "string"}
@@ -230,6 +273,85 @@
       "type": "object",
       "additionalProperties": true
     },
+    "execution_dag": {
+      "type": "object",
+      "required": ["schema_version", "authority", "projection", "digest", "node_count", "edge_count", "nodes", "edges", "ready_nodes", "blocked_nodes", "active_nodes"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "authority": {"const": "sqlite"},
+        "projection": {"const": "execution_dag"},
+        "digest": {"type": "string"},
+        "node_count": {"type": "integer"},
+        "edge_count": {"type": "integer"},
+        "node_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "edge_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "status_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["node_id", "task_id", "action_type", "status", "owner_role", "worktree", "patch", "confidence", "attempt_count", "created_at", "updated_at", "blocker_reason", "validation_receipt_refs"],
+            "properties": {
+              "node_id": {"type": "string"},
+              "task_id": {"type": "string"},
+              "action_type": {"type": "string"},
+              "status": {"type": "string"},
+              "owner_role": {"type": "string"},
+              "worktree": {"type": "object", "additionalProperties": true},
+              "patch": {"type": "object", "additionalProperties": true},
+              "confidence": {"type": "number"},
+              "attempt_count": {"type": "integer"},
+              "created_at": {"type": "string"},
+              "updated_at": {"type": "string"},
+              "started_at": {"type": "string"},
+              "finished_at": {"type": "string"},
+              "blocker_reason": {"type": "string"},
+              "validation_receipt_refs": {"type": "array", "items": {"type": "string"}}
+            },
+            "additionalProperties": true
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["edge_id", "source", "target", "dependency_kind", "reason", "confidence", "dependency_mode"],
+            "properties": {
+              "edge_id": {"type": "string"},
+              "source": {"type": "string"},
+              "target": {"type": "string"},
+              "dependency_kind": {"type": "string"},
+              "reason": {"type": "string"},
+              "confidence": {"type": "number"},
+              "dependency_mode": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        },
+        "ready_nodes": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "blocked_nodes": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "active_nodes": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "terminal_nodes": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "primary_progress_node": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": true
+    },
+    "progress_model": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "ready_dag_nodes": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "blocked_dag_nodes": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "active_dag_nodes": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
     "conveyor_state": {
       "type": "object",
       "additionalProperties": true
@@ -317,6 +439,20 @@
       },
       "additionalProperties": true
     },
+    "code_intelligence": {
+      "type": "object",
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "provider_availability": {"type": "object", "additionalProperties": true},
+        "latest_codebase_snapshot_id": {"type": "string"},
+        "fact_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "fact_count": {"type": "integer"},
+        "diagnostic_count": {"type": "integer"},
+        "latest_facts": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "fallback": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
     "codebase_graph_summary": {
       "type": "object",
       "required": ["schema_version", "graph_namespace", "exists", "stale_node_count", "indexed_file_count", "command_node_count", "test_node_count"],
@@ -341,7 +477,11 @@
         "indexed_paths_truncated": {"type": "boolean"},
         "indexed_path_sample": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
         "node_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
-        "edge_counts": {"type": "object", "additionalProperties": {"type": "integer"}}
+        "edge_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "file_nodes": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "symbol_nodes": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "ownership_edges": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "import_edges": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
       },
       "additionalProperties": true
     },
@@ -362,7 +502,13 @@
         "digest": {"type": "string"},
         "graph_inventory_digest": {"type": "string"},
         "indexed_path_count": {"type": "integer"},
-        "indexed_paths_truncated": {"type": "boolean"}
+        "indexed_paths_truncated": {"type": "boolean"},
+        "node_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "edge_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "file_nodes": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "symbol_nodes": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "ownership_edges": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "import_edges": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
       },
       "additionalProperties": true
     },
@@ -504,6 +650,10 @@
       "type": "array",
       "items": {"type": "object", "additionalProperties": true}
     },
+    "why_not_parallel": {
+      "type": "object",
+      "additionalProperties": true
+    },
     "scheduler_parallel_dry_run": {
       "type": "object",
       "additionalProperties": true
@@ -533,6 +683,22 @@
       "items": {"type": "object", "additionalProperties": true}
     },
     "worker_finding_disposition_required": {"type": "boolean"},
+    "scope_evidence_records": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "accepted_scope_evidence_records": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "scope_fanout_outcomes": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
+    "exhausted_scope_fanout_outcomes": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": true}
+    },
     "active_write_workers": {
       "type": "array",
       "items": {"type": "object", "additionalProperties": true}
@@ -552,6 +718,10 @@
     "integration_backlog_from_parallel_workers": {
       "type": "array",
       "items": {"type": "object", "additionalProperties": true}
+    },
+    "worker_patch_integration_preflight": {
+      "type": "object",
+      "additionalProperties": true
     },
     "candidate_lanes": {
       "type": "array",

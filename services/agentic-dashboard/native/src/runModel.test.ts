@@ -110,6 +110,40 @@ describe("buildRunModel", () => {
     expect(model.controls.safetyCheck.enabled).toBe(true);
   });
 
+  it("lets Start handle pending bootstrap as first-run preparation", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          task: {
+            status: "ACTIVE",
+            bootstrap_status: "pending",
+            bootstrap_pending: true,
+          },
+          controls: {
+            is_scaffolded: true,
+            is_running: false,
+            can_start_automation: false,
+            start_automation_reason: "Continuous automation is not ready. Bootstrap has not completed yet.",
+            can_bootstrap_and_start: true,
+            bootstrap_start_reason: "Ready to run initial bootstrap before starting automation.",
+            can_stop_automation: false,
+            can_run_safety_check: true,
+          },
+          automation: {
+            state: "not_ready",
+            message: "Continuous automation is not ready. Bootstrap has not completed yet.",
+          },
+        },
+      }),
+    );
+
+    expect(model.banner.badge).toBe("Ready");
+    expect(model.banner.subheadline).toContain("prepare the target");
+    expect(model.banner.primaryAction.label).toBe("Start");
+    expect(model.controls.startAutomation.command).toBe("automation.bootstrap_start");
+    expect(model.controls.startAutomation.enabled).toBe(true);
+  });
+
   it("labels a missing first safety result as pending", () => {
     const model = buildRunModel(snapshot());
     const safety = model.safety.find((row) => row.label === "Integration safety");
@@ -231,44 +265,240 @@ describe("buildRunModel", () => {
     expect(model.worker.actions.write.enabled).toBe(false);
   });
 
-  it("maps typed conveyor state machine data into the run model", () => {
+  it("maps execution DAG data into the run model", () => {
     const model = buildRunModel(
       snapshot({
         run: {
           state: {
-            next_actions: [{ owner_role: "builder", status: "next", reason: "Implement the selected work item." }],
-            conveyor_machine: {
-              current_stage: "implementation",
-              stage_status: "ready",
-              owner_role: "builder",
-              work_item: {
-                id: "workitem:default",
-                status: "ACTIVE",
-                current_stage: "implementation",
-                stage_status: "ready",
-                owner_role: "builder",
-                capability_manifest_id: "capability:repo",
-                capability_manifest_version: 3,
-                validation_status: "passed",
-                continuation_token: "workitem:default:implementation:42",
-              },
-              capability_manifest: {
-                version: 3,
-                languages: { primary: "TypeScript" },
-                commands: [{ kind: "test", command: "npm test" }],
-              },
+            execution_dag: {
+              authority: "sqlite",
+              digest: "dag123",
+              nodes: [
+                {
+                  node_id: "dag-node:scope",
+                  task_id: "TICKET-001",
+                  action_type: "scoping",
+                  status: "done",
+                  owner_role: "planner",
+                  attempt_count: 1,
+                  confidence: 0.92,
+                  metadata: { paths: ["src/app.ts"] },
+                },
+                {
+                  node_id: "dag-node:build",
+                  task_id: "TICKET-001",
+                  action_type: "building",
+                  status: "ready",
+                  owner_role: "builder",
+                  attempt_count: 2,
+                  confidence: 0.82,
+                  patch: { id: "patch:1", path: "target/changes.patch" },
+                  metadata: { paths: ["src/app.ts"] },
+                },
+              ],
+              edges: [
+                {
+                  edge_id: "edge:scope-build",
+                  source: "dag-node:scope",
+                  target: "dag-node:build",
+                  dependency_kind: "depends_on",
+                  dependency_mode: "hard",
+                  confidence: 0.95,
+                  reason: "scope before build",
+                },
+              ],
             },
           },
         },
       }),
     );
 
-    expect(model.stateMachine.stage).toBe("implementation");
-    expect(model.stateMachine.ownerRole).toBe("builder");
-    expect(model.stateMachine.validationStatus).toBe("passed");
-    expect(model.stateMachine.capability).toBe("TypeScript / 1 command");
-    expect(model.stateMachine.continuationToken).toBe("workitem:default:implementation:42");
-    expect(model.stateMachine.nextActions[0]).toMatchObject({ role: "builder", state: "next" });
+    expect(model.executionDag.hasData).toBe(true);
+    expect(model.executionDag.authority).toBe("sqlite");
+    expect(model.executionDag.summary).toMatchObject({ total: 2, ready: 1, completed: 1 });
+    expect(model.executionDag.columns.find((column) => column.id === "scope")?.nodes[0].id).toBe("dag-node:scope");
+    expect(model.executionDag.columns.find((column) => column.id === "build")?.nodes[0]).toMatchObject({
+      ticketId: "TICKET-001",
+      actionType: "building",
+      confidenceLabel: "82%",
+      patchId: "patch:1",
+    });
+    expect(model.executionDag.edges[0]).toMatchObject({ dependencyKind: "depends_on", confidenceLabel: "95%" });
+  });
+
+  it("maps execution groups into live graph overlays", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          state: {
+            execution_dag: {
+              nodes: [
+                {
+                  node_id: "dag-node:T1:build",
+                  task_id: "T1",
+                  action_type: "build",
+                  status: "ready",
+                  owner_role: "builder",
+                  confidence: 0.9,
+                },
+                {
+                  node_id: "dag-node:T2:build",
+                  task_id: "T2",
+                  action_type: "build",
+                  status: "ready",
+                  owner_role: "builder",
+                  confidence: 0.91,
+                },
+              ],
+              edges: [],
+            },
+            proposed_execution_groups: [
+              {
+                execution_group_id: "group:1",
+                mode: "dry_run",
+                status: "proposed",
+                items: [
+                  { task_id: "T1", action_kind: "build", payload: { dag_node_id: "dag-node:T1:build" } },
+                  { task_id: "T2", action_kind: "build", payload: { dag_node_id: "dag-node:T2:build" } },
+                ],
+              },
+            ],
+            active_write_workers: [{ execution_group_id: "group:1", task_id: "T1" }],
+          },
+        },
+      }),
+    );
+
+    expect(model.executionDag.groups.some((group) => group.kind === "proposed" && group.nodeIds.length === 2)).toBe(true);
+    expect(model.executionDag.groups.some((group) => group.kind === "active")).toBe(true);
+    expect(model.executionDag.parallel.proposedGroups).toBe(1);
+    expect(model.executionDag.parallel.activeGroups).toBe(1);
+  });
+
+  it("bounds large and oversized DAG rendering", () => {
+    const boundedNodes = Array.from({ length: 300 }, (_, index) => ({
+      node_id: `dag-node:large:${index}`,
+      task_id: `T${index}`,
+      action_type: index % 2 === 0 ? "build" : "validate",
+      status: index < 6 ? "ready" : "pending",
+      owner_role: "builder",
+      confidence: 0.8,
+    }));
+    const bounded = buildRunModel(
+      snapshot({
+        run: {
+          state: {
+            execution_dag: {
+              nodes: boundedNodes,
+              edges: Array.from({ length: 30 }, (_, index) => ({
+                edge_id: `edge:large:${index}`,
+                source: `dag-node:large:${index}`,
+                target: `dag-node:large:${index + 31}`,
+                dependency_kind: "depends_on",
+                dependency_mode: "hard",
+                reason: "large graph dependency",
+              })),
+            },
+          },
+        },
+      }),
+    );
+
+    expect(bounded.executionDag.renderMode).toBe("large");
+    expect(bounded.executionDag.abstraction).toMatchObject({ enabled: true, level: "phase-status" });
+    expect(bounded.executionDag.clusters.length).toBeGreaterThan(0);
+    expect(bounded.executionDag.clusterEdges.some((edge) => edge.count > 1)).toBe(true);
+    expect(bounded.executionDag.visibleNodes.length).toBeLessThanOrEqual(250);
+    expect(bounded.executionDag.visibleNodes.some((node) => node.statusKind === "ready")).toBe(true);
+
+    const largeNodes = Array.from({ length: 820 }, (_, index) => ({
+      node_id: `dag-node:${index}`,
+      task_id: `T${index}`,
+      action_type: index % 2 === 0 ? "build" : "validate",
+      status: index < 6 ? "ready" : "pending",
+      owner_role: "builder",
+      confidence: 0.8,
+    }));
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          state: {
+            execution_dag: {
+              nodes: largeNodes,
+              edges: [],
+            },
+          },
+        },
+      }),
+    );
+
+    expect(model.executionDag.renderMode).toBe("oversized");
+    expect(model.executionDag.abstraction.enabled).toBe(true);
+    expect(model.executionDag.clusters.length).toBeGreaterThan(0);
+    expect(model.executionDag.clusters.some((cluster) => cluster.nodeCount > 1)).toBe(true);
+    expect(model.executionDag.visibleNodes).toHaveLength(0);
+    expect(model.executionDag.renderLimit.hiddenNodeCount).toBe(820);
+  });
+
+  it("keeps empty execution DAG snapshots compact", () => {
+    const model = buildRunModel(snapshot({ run: { state: { execution_dag: { nodes: [], edges: [] } } } }));
+
+    expect(model.executionDag.hasData).toBe(false);
+    expect(model.executionDag.summary.total).toBe(0);
+    expect(model.executionDag.columns.map((column) => column.label)).toEqual([
+      "Orchestrate",
+      "Decompose",
+      "Scope",
+      "Build",
+      "Review",
+      "Validate",
+      "Repair",
+      "Integrate",
+      "Audit/Calibrate",
+      "Done",
+    ]);
+  });
+
+  it("normalizes blocked and failed DAG nodes for progress counts", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          state: {
+            execution_dag: {
+              nodes: [
+                {
+                  node_id: "dag-node:validation",
+                  task_id: "TICKET-002",
+                  action_type: "validation",
+                  status: "failed",
+                  owner_role: "hardener",
+                  confidence: 0.7,
+                  blocker_reason: "pytest failed",
+                  validation_receipt_refs: ["receipt:validation-job"],
+                  metadata: { paths: ["tests/test_app.py"] },
+                },
+                {
+                  node_id: "dag-node:blocker",
+                  task_id: "TICKET-002",
+                  action_type: "blocker",
+                  status: "blocked",
+                  owner_role: "planner",
+                  confidence: 0.95,
+                  blocker_reason: "retry limit exhausted",
+                },
+              ],
+              edges: [],
+            },
+          },
+        },
+      }),
+    );
+
+    expect(model.executionDag.summary.failed).toBe(1);
+    expect(model.executionDag.summary.blocked).toBe(1);
+    expect(model.executionDag.columns.find((column) => column.id === "validate")?.nodes).toHaveLength(1);
+    expect(model.executionDag.columns.find((column) => column.id === "done")?.nodes).toHaveLength(1);
+    expect(model.executionDag.nodes[0].detail).toContain("validation receipts receipt:validation-job");
   });
 
   it("maps baseline blockers to the recheck command instead of generic diagnostics", () => {

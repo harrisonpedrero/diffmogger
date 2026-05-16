@@ -824,6 +824,62 @@ class RunRoleAutomationTests(unittest.TestCase):
                         with self.assertRaises(ProcessLookupError):
                             os.kill(pid, 0)
 
+    def test_idle_hanging_codex_is_timed_out_and_marked_idle(self) -> None:
+        for path in ROLE_RUNNER_PATHS:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    target = tmp_path / "target"
+                    target.mkdir()
+                    self.seed_git_target(target)
+                    fake_bin = self.write_hanging_codex(tmp_path)
+                    pid_file = tmp_path / "codex.pid"
+
+                    env = os.environ.copy()
+                    env["CODEX_AUTOMATION_PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+                    env["CODEX_RUN_ID"] = "watchdog-idle-timeout"
+                    env["CODEX_ROLE_TIMEOUT_SECONDS"] = "30"
+                    env["CODEX_ROLE_IDLE_TIMEOUT_SECONDS"] = "1"
+                    env["CODEX_ROLE_TERMINATION_GRACE_SECONDS"] = "0"
+                    env["FAKE_CODEX_PID_FILE"] = str(pid_file)
+
+                    result = subprocess.run(
+                        ["bash", str(path), "--target", str(target), "--role", "builder"],
+                        cwd=ROOT,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        check=False,
+                    )
+
+                    self.assertEqual(124, result.returncode, result.stdout + result.stderr)
+                    queue_dir = target / "target" / "automation_queue" / "builder" / "watchdog-idle-timeout"
+                    status = json.loads((queue_dir / "codex.watchdog.json").read_text(encoding="utf-8"))
+                    self.assertTrue(status["idle_timed_out"])
+                    self.assertFalse(status["timed_out"])
+                    self.assertEqual("idle_timeout", status["termination_reason"])
+
+                    manifest = json.loads((queue_dir / "manifest.json").read_text(encoding="utf-8"))
+                    self.assertEqual("failed", manifest["status"])
+                    self.assertTrue(manifest["watchdog_idle_timed_out"])
+                    self.assertEqual(124, manifest["watchdog_exit_code"])
+
+                    summary = (queue_dir / "summary.md").read_text(encoding="utf-8")
+                    self.assertIn("Watchdog idle timed out: true", summary)
+
+                    if pid_file.exists():
+                        pid = int(pid_file.read_text(encoding="utf-8").strip())
+                        deadline = time.monotonic() + 3
+                        while time.monotonic() < deadline:
+                            try:
+                                os.kill(pid, 0)
+                            except ProcessLookupError:
+                                break
+                            time.sleep(0.05)
+                        with self.assertRaises(ProcessLookupError):
+                            os.kill(pid, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

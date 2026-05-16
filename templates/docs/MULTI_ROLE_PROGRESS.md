@@ -4,7 +4,7 @@ Generated dashboard/export projection for optional multi-role automation. SQLite
 
 Role profile: `{{AUTOMATION_ROLE_PROFILE}}`
 
-Continuous conveyor mode uses one local dispatcher that prioritizes queued integration first, baseline preflight/repair, safety triage, typed human-message handling, fast-follow replanning after planner deferral changes, one focused hardener pass after integrated builder work, catch-up hardening for the oldest unverified `candidate_done` cluster, planner-needed transitions, and builder momentum by default.
+Continuous DAG scheduler mode uses one local dispatcher that launches ready execution DAG nodes and compatible waves. It prioritizes queued integration, baseline preflight/repair, safety triage, typed human-message handling, fast-follow replanning after planner deferral changes, review/hardening, validation, targeted repairs, and compatible build waves while keeping integration serialized.
 
 ## Project State At Last Integration
 

@@ -3815,8 +3815,18 @@ textarea:focus-visible {
 }
 
 .setup-footer {
+  flex-wrap: wrap;
   justify-content: space-between;
   padding: 0;
+}
+
+.setup-final-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
 }
 
 .brief-error,
@@ -4884,7 +4894,8 @@ textarea:focus-visible {
   grid-template-columns: repeat(12, minmax(0, 1fr));
   grid-template-areas:
     "controls controls controls controls readiness readiness readiness readiness process process process process"
-    "safety safety safety safety safety safety machine machine machine machine machine machine"
+    "dag dag dag dag dag dag dag dag dag dag dag dag"
+    "safety safety safety safety safety safety safety safety safety safety safety safety"
     "graph graph graph graph graph graph graph graph graph graph graph graph"
     "parallel parallel parallel parallel parallel parallel parallel parallel parallel parallel parallel parallel"
     "blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers blockers"
@@ -4909,8 +4920,8 @@ textarea:focus-visible {
   grid-area: safety;
 }
 
-.run-state-machine-panel {
-  grid-area: machine;
+.run-dag-panel {
+  grid-area: dag;
 }
 
 .run-control-layout > .graph-insights-panel {
@@ -4960,7 +4971,7 @@ textarea:focus-visible {
   align-content: start;
 }
 
-.run-state-machine-panel {
+.run-dag-panel {
   align-content: start;
 }
 
@@ -4972,16 +4983,16 @@ textarea:focus-visible {
   overflow: hidden;
 }
 
-.run-state-machine-panel .panel-heading-row {
+.run-dag-panel .panel-heading-row {
   align-items: start;
   min-width: 0;
 }
 
-.run-state-machine-panel .panel-heading-row > div {
+.run-dag-panel .panel-heading-row > div {
   min-width: 0;
 }
 
-.run-state-machine-panel .panel-heading-row p {
+.run-dag-panel .panel-heading-row p {
   max-width: 100%;
   margin: 3px 0 0;
   overflow: hidden;
@@ -5314,61 +5325,572 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.state-machine-grid {
+.dag-summary-strip {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 12px;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 7px;
 }
 
-.state-machine-next {
+.dag-summary-strip .data-row {
   display: grid;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.state-machine-action {
-  display: grid;
-  grid-template-areas:
-    "role state"
-    "reason reason";
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 5px 8px;
+  grid-template-columns: 1fr;
+  gap: 3px;
   min-width: 0;
-  padding: 8px;
+  padding: 7px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--color-panel-alt);
 }
 
-.state-machine-action strong {
-  grid-area: role;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-primary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.dag-scroll-frame {
+  width: 100%;
+  margin-top: 10px;
+  overflow: auto hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-alt);
 }
 
-.state-machine-action span {
-  grid-area: state;
+.dag-progress-svg {
+  display: block;
+  min-width: 1060px;
+  width: 100%;
+  height: auto;
+  font-family: inherit;
+}
+
+.dag-phase-heading text {
+  fill: var(--text-muted);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dag-phase-heading line {
+  stroke: var(--border-subtle);
+  stroke-width: 1;
+}
+
+.dag-edge {
+  fill: none;
+  stroke: rgba(137, 156, 190, 0.55);
+  stroke-width: 1.4;
+}
+
+.dag-edge.advisory {
+  stroke-dasharray: 4 4;
+  stroke: rgba(240, 179, 82, 0.55);
+}
+
+.dag-progress-svg marker path {
+  fill: rgba(137, 156, 190, 0.72);
+}
+
+.dag-node {
+  outline: none;
+}
+
+.dag-node rect {
+  fill: var(--color-panel);
+  stroke: var(--border-subtle);
+  stroke-width: 1;
+}
+
+.dag-node:focus-visible rect,
+.dag-node:hover rect {
+  stroke-width: 2;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.24));
+}
+
+.dag-node circle,
+.dag-legend-item i {
+  fill: var(--text-muted);
+  background: var(--text-muted);
+}
+
+.dag-node text {
+  pointer-events: none;
+}
+
+.dag-node-action {
+  fill: var(--text-primary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.dag-node-ticket,
+.dag-node-owner {
+  fill: var(--text-secondary);
+  font-size: 11px;
+}
+
+.dag-node-status {
+  fill: var(--text-muted);
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.dag-node.status-pending rect,
+.dag-detail-card.status-pending {
+  border-color: rgba(154, 154, 154, 0.24);
+  stroke: rgba(154, 154, 154, 0.42);
+}
+
+.dag-node.status-pending circle,
+.dag-legend-item.status-pending i {
+  fill: var(--text-muted);
+  background: var(--text-muted);
+}
+
+.dag-node.status-ready rect,
+.dag-detail-card.status-ready {
+  border-color: rgba(94, 214, 154, 0.4);
+  stroke: rgba(94, 214, 154, 0.72);
+}
+
+.dag-node.status-ready circle,
+.dag-legend-item.status-ready i {
+  fill: var(--status-good);
+  background: var(--status-good);
+}
+
+.dag-node.status-running rect,
+.dag-detail-card.status-running {
+  border-color: rgba(90, 169, 255, 0.42);
+  stroke: rgba(90, 169, 255, 0.72);
+}
+
+.dag-node.status-running circle,
+.dag-legend-item.status-running i {
+  fill: var(--status-info);
+  background: var(--status-info);
+}
+
+.dag-node.status-completed rect,
+.dag-detail-card.status-completed {
+  border-color: rgba(94, 214, 154, 0.26);
+  stroke: rgba(94, 214, 154, 0.36);
+}
+
+.dag-node.status-completed circle,
+.dag-legend-item.status-completed i {
+  fill: rgba(94, 214, 154, 0.72);
+  background: rgba(94, 214, 154, 0.72);
+}
+
+.dag-node.status-blocked rect,
+.dag-detail-card.status-blocked {
+  border-color: rgba(240, 179, 82, 0.46);
+  stroke: rgba(240, 179, 82, 0.82);
+}
+
+.dag-node.status-blocked circle,
+.dag-legend-item.status-blocked i {
+  fill: var(--status-warn);
+  background: var(--status-warn);
+}
+
+.dag-node.status-failed rect,
+.dag-detail-card.status-failed {
+  border-color: rgba(255, 103, 117, 0.52);
+  stroke: rgba(255, 103, 117, 0.84);
+}
+
+.dag-node.status-failed circle,
+.dag-legend-item.status-failed i {
+  fill: var(--status-critical);
+  background: var(--status-critical);
+}
+
+.dag-node.status-skipped rect,
+.dag-detail-card.status-skipped {
+  opacity: 0.74;
+  stroke-dasharray: 5 4;
+}
+
+.dag-node.status-skipped circle,
+.dag-legend-item.status-skipped i {
+  fill: var(--text-faint);
+  background: var(--text-faint);
+}
+
+.dag-legend,
+.dag-detail-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.dag-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 3px 8px;
   color: var(--text-muted);
   font-size: 10px;
   font-weight: 900;
   text-transform: uppercase;
+}
+
+.dag-legend-item i {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+
+.dag-detail-card,
+.dag-empty-state {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--color-panel-alt);
+}
+
+.dag-detail-card {
+  flex: 1 1 190px;
+}
+
+.dag-detail-card strong,
+.dag-detail-card span,
+.dag-detail-card p {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.state-machine-action p {
-  grid-area: reason;
-  min-width: 0;
+.dag-detail-card strong,
+.dag-empty-state strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.dag-detail-card span,
+.dag-empty-state p {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.dag-detail-card p {
   margin: 0;
-  overflow: hidden;
+  margin-top: 5px;
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.dag-empty-state {
+  margin-top: 10px;
+  min-height: 96px;
+  display: grid;
+  align-content: center;
+  border-style: dashed;
+}
+
+.live-dag-panel {
+  min-height: 430px;
+  overflow: hidden;
+}
+
+.dag-heading-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: end;
+  gap: 7px;
+}
+
+.dag-heading-pills .run-tone-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dag-live-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.25fr);
+  gap: 10px;
+  margin-top: 10px;
+  min-width: 0;
+}
+
+.live-dag-panel .dag-scroll-frame {
+  position: relative;
+  min-height: 330px;
+  overflow: auto;
+  border-color: rgba(137, 156, 190, 0.22);
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    radial-gradient(circle at top left, rgba(90, 169, 255, 0.14), transparent 32%),
+    var(--color-panel-alt);
+  background-size: 28px 28px, 28px 28px, auto, auto;
+}
+
+.dag-live-svg {
+  display: block;
+  min-width: 1780px;
+  width: 100%;
+  height: auto;
+  font-family: inherit;
+}
+
+.dag-live-svg marker path {
+  fill: rgba(137, 156, 190, 0.72);
+}
+
+.dag-wave rect {
+  fill: rgba(90, 169, 255, 0.07);
+  stroke: rgba(90, 169, 255, 0.22);
+  stroke-width: 1;
+}
+
+.dag-wave text {
+  fill: rgba(194, 214, 255, 0.72);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dag-wave-active rect {
+  fill: rgba(94, 214, 154, 0.08);
+  stroke: rgba(94, 214, 154, 0.46);
+}
+
+.dag-wave-completed rect {
+  fill: rgba(154, 154, 154, 0.06);
+  stroke: rgba(154, 154, 154, 0.2);
+}
+
+.dag-edge.hard {
+  stroke: rgba(137, 156, 190, 0.6);
+}
+
+.dag-edge.advisory {
+  stroke: rgba(240, 179, 82, 0.5);
+  stroke-dasharray: 5 5;
+}
+
+.dag-edge.blocker {
+  stroke: rgba(255, 103, 117, 0.72);
+  stroke-width: 1.8;
+}
+
+.dag-edge.is-dimmed,
+.dag-node.is-dimmed {
+  opacity: 0.22;
+}
+
+.dag-node {
+  cursor: pointer;
+}
+
+.dag-node.is-selected rect {
+  stroke-width: 2.2;
+  filter: drop-shadow(0 0 12px rgba(90, 169, 255, 0.32));
+}
+
+.dag-node.is-live rect {
+  filter: drop-shadow(0 0 12px rgba(94, 214, 154, 0.28));
+}
+
+.dag-node.is-live .dag-node-pulse {
+  animation: dag-live-pulse 1.2s ease-out infinite;
+}
+
+.dag-cluster {
+  cursor: pointer;
+  outline: none;
+}
+
+.dag-cluster-shell {
+  fill: rgba(18, 24, 38, 0.92);
+  stroke: var(--border-subtle);
+  stroke-width: 1.2;
+}
+
+.dag-cluster:focus-visible .dag-cluster-shell,
+.dag-cluster:hover .dag-cluster-shell,
+.dag-cluster.is-selected .dag-cluster-shell {
+  stroke-width: 2.2;
+  filter: drop-shadow(0 0 14px rgba(90, 169, 255, 0.28));
+}
+
+.dag-cluster.is-dimmed {
+  opacity: 0.24;
+}
+
+.dag-cluster.is-live .dag-cluster-shell {
+  filter: drop-shadow(0 0 14px rgba(94, 214, 154, 0.26));
+}
+
+.dag-cluster.status-ready .dag-cluster-shell {
+  stroke: rgba(94, 214, 154, 0.66);
+}
+
+.dag-cluster.status-running .dag-cluster-shell {
+  stroke: rgba(90, 169, 255, 0.72);
+}
+
+.dag-cluster.status-blocked .dag-cluster-shell {
+  stroke: rgba(240, 179, 82, 0.76);
+}
+
+.dag-cluster.status-failed .dag-cluster-shell {
+  stroke: rgba(255, 103, 117, 0.8);
+}
+
+.dag-cluster.status-completed .dag-cluster-shell {
+  stroke: rgba(94, 214, 154, 0.34);
+}
+
+.dag-cluster-wave-count {
+  fill: var(--text-muted);
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.dag-cluster-heat rect {
+  fill: var(--text-muted);
+}
+
+.dag-cluster-heat .status-running {
+  fill: var(--status-info);
+}
+
+.dag-cluster-heat .status-ready {
+  fill: var(--status-good);
+}
+
+.dag-cluster-heat .status-blocked {
+  fill: var(--status-warn);
+}
+
+.dag-cluster-heat .status-failed {
+  fill: var(--status-critical);
+}
+
+.dag-cluster-heat .status-completed {
+  fill: rgba(94, 214, 154, 0.68);
+}
+
+.dag-cluster-heat .status-skipped {
+  fill: var(--text-faint);
+}
+
+.dag-node-badge rect {
+  fill: rgba(137, 156, 190, 0.16);
+  stroke: rgba(137, 156, 190, 0.24);
+}
+
+.dag-node-badge text {
+  fill: var(--text-secondary);
+  font-size: 7px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.dag-node-badge.tone-good rect,
+.dag-badge.tone-good {
+  border-color: rgba(94, 214, 154, 0.34);
+  background: rgba(94, 214, 154, 0.1);
+  color: var(--status-good);
+}
+
+.dag-node-badge.tone-warn rect,
+.dag-badge.tone-warn {
+  border-color: rgba(240, 179, 82, 0.36);
+  background: rgba(240, 179, 82, 0.1);
+  color: var(--status-warn);
+}
+
+.dag-node-badge.tone-info rect,
+.dag-badge.tone-info {
+  border-color: rgba(90, 169, 255, 0.34);
+  background: rgba(90, 169, 255, 0.1);
+  color: var(--status-info);
+}
+
+.dag-detail-rail {
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  min-width: 0;
+}
+
+.dag-detail-rail .dag-detail-card {
+  flex: initial;
+  min-height: 156px;
+}
+
+.dag-detail-rail .dag-detail-card p {
+  display: block;
+  white-space: normal;
+}
+
+.dag-badge-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dag-badge {
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.dag-empty-state.oversized,
+.dag-empty-state.critical {
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: center;
+}
+
+.dag-empty-state.oversized p,
+.dag-empty-state.critical p {
+  grid-column: 2;
+}
+
+@keyframes dag-live-pulse {
+  0% {
+    opacity: 1;
+    r: 5px;
+  }
+  100% {
+    opacity: 0.2;
+    r: 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dag-node.is-live .dag-node-pulse {
+    animation: none;
+  }
+}
+
+@media (max-width: 1080px) {
+  .dag-live-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .dag-heading-pills {
+    justify-content: start;
+  }
 }
 
 .run-ticket-panel .panel-heading-row {
@@ -9217,9 +9739,10 @@ select option {
       "controls"
       "readiness"
       "process"
+      "dag"
       "safety"
-      "machine"
       "graph"
+      "parallel"
       "blockers"
       "queue"
       "logs"
@@ -9294,9 +9817,10 @@ select option {
       "controls"
       "readiness"
       "process"
+      "dag"
       "safety"
-      "machine"
       "graph"
+      "parallel"
       "blockers"
       "queue"
       "logs"

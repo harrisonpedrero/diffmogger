@@ -70,6 +70,8 @@ export type CanonicalStateSnapshot = {
   validations: Record<string, unknown>;
   conveyor_state?: Record<string, unknown>;
   conveyor_machine?: ConveyorMachineSnapshot | Record<string, unknown>;
+  execution_dag?: Record<string, unknown>;
+  progress_model?: Record<string, unknown>;
   capability_manifest?: Record<string, unknown>;
   codebase_graph_summary?: Record<string, unknown>;
   task_graph_summary?: Record<string, unknown>;
@@ -89,6 +91,7 @@ export type CanonicalStateSnapshot = {
   proposed_execution_groups?: Array<Record<string, unknown>>;
   parallelization_summary?: Record<string, unknown>;
   blocked_parallel_candidates?: Array<Record<string, unknown>>;
+  why_not_parallel?: Record<string, unknown>;
   scheduler_parallel_dry_run?: Record<string, unknown>;
   parallelism_budgets?: Array<Record<string, unknown>>;
   active_parallel_counts?: Record<string, number>;
@@ -102,6 +105,7 @@ export type CanonicalStateSnapshot = {
   write_worker_conflicts?: Array<Record<string, unknown>>;
   lease_conflict_summary?: Record<string, unknown>;
   integration_backlog_from_parallel_workers?: Array<Record<string, unknown>>;
+  worker_patch_integration_preflight?: Record<string, unknown>;
   active_validation_jobs?: Array<Record<string, unknown>>;
   validation_job_summary?: Record<string, unknown>;
   parallel_validation_available?: boolean;
@@ -483,6 +487,17 @@ export type BackendLogEvent = {
   data?: Record<string, unknown>;
 };
 
+export type RuntimeStateEvent = {
+  watchId: string;
+  target: string;
+  event: "runtime_state" | "runtime_state_heartbeat" | "runtime_state_error" | "runtime_state_closed" | string;
+  runtimeEvent?: Record<string, unknown>;
+  afterEventId?: number;
+  emittedAt?: string;
+  message?: string;
+  data?: Record<string, unknown>;
+};
+
 export function listRecentProjects(): Promise<RecentTarget[]> {
   return invoke<RecentTarget[]>("list_recent_projects");
 }
@@ -625,6 +640,33 @@ export function listenBackendLogs(
   return listen<BackendLogEvent>("backend-log", (event) => {
     if (event.payload.runId === runId) {
       onLog(event.payload);
+    }
+  });
+}
+
+export function startRuntimeStateWatch(request: {
+  watchId: string;
+  target: string;
+  afterEventId?: number;
+}): Promise<void> {
+  return invoke<void>("start_runtime_state_watch", {
+    watchId: request.watchId,
+    target: request.target,
+    afterEventId: request.afterEventId ?? 0,
+  });
+}
+
+export function stopRuntimeStateWatch(watchId: string): Promise<void> {
+  return invoke<void>("stop_runtime_state_watch", { watchId });
+}
+
+export function listenRuntimeStateEvents(
+  watchId: string,
+  onEvent: (event: RuntimeStateEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<RuntimeStateEvent>("runtime-state-watch", (event) => {
+    if (event.payload.watchId === watchId) {
+      onEvent(event.payload);
     }
   });
 }

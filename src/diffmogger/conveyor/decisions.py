@@ -1,154 +1,18 @@
 from __future__ import annotations
 
+import re
 from contextlib import closing
 
-from .baseline import automation_status, baseline_preflight_needed, baseline_repair_route
-from .locks import lock_is_active
-from .progress import (
-    no_progress_active,
-    no_progress_info,
-    planner_fast_follow_reason_after_deferral_change,
-    post_builder_hardener_pending,
-    post_builder_hardener_reason,
-    role_after_integrator,
-)
-from .queue_state import (
-    builder_triage_followup_info,
-    duplicate_builder_deferral_info,
-    queued_manifests,
-    repeated_hardener_guardrail_deferral_info,
-    target_has_multi_role,
-    unhandled_human_message_count,
-)
-from .scheduler import choose_next_graph_aware
+from .scheduler import choose_next_dag
 from .state import *
-from .tickets import candidate_done_hardener_catchup_reason, ticket_campaign_terminal, unverified_candidate_done_cluster_info
 from diffmogger.runtime.state_store import connect, database_path_for_target, latest_scheduler_decision_conn
-
-def _choose_next_legacy(
-    target: Path,
-    state: dict[str, Any],
-    no_progress_threshold: int = DEFAULT_NO_PROGRESS_THRESHOLD,
-) -> tuple[str | None, str, bool]:
-    status = automation_status(target)
-    if status == "CRITICAL_STOP":
-        return None, "automation status is CRITICAL_STOP", True
-    if status not in ACTIVE_STATUSES:
-        return None, f"automation status is {status}; waiting", False
-
-    active, detail = lock_is_active(runtime_path(target, "target/codex_automation.lock"))
-    if active:
-        return None, f"main automation lock active: {detail}", False
-
-    multi_role_available = target_has_multi_role(target)
-
-    ticket_state, ticket_reason = ticket_campaign_terminal(target)
-    if ticket_state == "complete":
-        return None, ticket_reason, True
-    if ticket_state == "blocked":
-        if baseline_preflight_needed(target):
-            return "integrator", (
-                "bounded campaign is blocked, but baseline verification may be repairable; "
-                "running clean-HEAD preflight"
-            ), False
-        blocked_baseline_route = baseline_repair_route(target, state)
-        if blocked_baseline_route:
-            return blocked_baseline_route
-        return None, ticket_reason, True
-
-    if not multi_role_available:
-        return None, "multi-role conveyor files not found; scaffold the target before launching automation", False
-
-    queue_depth = len(queued_manifests(target))
-    if queue_depth:
-        return "integrator", f"{queue_depth} queued role patch(es) need integration", False
-
-    if baseline_preflight_needed(target):
-        return "integrator", "baseline verification ledger is missing or stale; running clean-HEAD preflight", False
-
-    baseline_route = baseline_repair_route(target, state)
-    if baseline_route:
-        return baseline_route
-
-    duplicate_builder = duplicate_builder_deferral_info(target)
-    if duplicate_builder:
-        return (
-            "integrator",
-            (
-                f"duplicate builder deferred patches need triage before more builder work: "
-                f"{duplicate_builder['count']} patch(es), {duplicate_builder['signature']}, {duplicate_builder['files']}"
-            ),
-            False,
-        )
-
-    repeated_hardener_guardrail = repeated_hardener_guardrail_deferral_info(target)
-    if repeated_hardener_guardrail:
-        return (
-            "planner",
-            (
-                "repeated hardener guardrail deferrals need repair planning before another normal hardener retry: "
-                f"{repeated_hardener_guardrail['count']} patch(es) for "
-                f"{repeated_hardener_guardrail['match_type']}={repeated_hardener_guardrail['match_value']}; "
-                f"{repeated_hardener_guardrail['signature']}; root_cause={repeated_hardener_guardrail['root_cause']}; "
-                "hardener must correct the deferral reason first, including "
-                "`Test change rationale: <one concise reason this preserves or improves meaningful coverage>` "
-                "when touching tests"
-            ),
-            False,
-        )
-
-    if no_progress_active(state, no_progress_threshold):
-        info = no_progress_info(state)
-        reason = str(info.get("reason") or "integrator made no patch progress")
-        if not info.get("planner_requested_at"):
-            return "planner", f"no-progress circuit breaker tripped: {reason}", False
-        return None, f"no-progress circuit breaker active after planner handoff: {reason}", False
-
-    if str(state.get("last_completed_role") or "") == "integrator":
-        builder_followup = builder_triage_followup_info(target)
-        if builder_followup:
-            return (
-                "planner",
-                (
-                    f"builder deferred patch triaged as {builder_followup['triage_status']}; "
-                    f"planner should choose retry, supersede, or replace-from-current-HEAD for {builder_followup['run_id']}"
-                ),
-                False,
-            )
-
-    if unhandled_human_message_count(target):
-        return "planner", "unhandled human message(s) need triage", False
-
-    if post_builder_hardener_pending(state):
-        return "hardener", post_builder_hardener_reason(target), False
-
-    candidate_catchup = unverified_candidate_done_cluster_info(target)
-    if candidate_catchup:
-        return "hardener", candidate_done_hardener_catchup_reason(candidate_catchup), False
-
-    fast_follow_reason = planner_fast_follow_reason_after_deferral_change(state)
-    if fast_follow_reason:
-        return "planner", fast_follow_reason, False
-
-    last_role = str(state.get("last_completed_role") or "")
-    if last_role == "integrator":
-        role, reason = role_after_integrator(state)
-        return role, reason, False
-    if last_role == "builder":
-        return "hardener", "builder lane completed without queued work; hardener gets the next look", False
-    if last_role == "hardener":
-        return "planner", "hardener completed; planner gets the next state-machine pass", False
-    if last_role == "planner":
-        return "builder", "planner completed; builder gets the next implementation pass", False
-    return "builder", "builder lane is next runnable work", False
 
 def choose_next(
     target: Path,
     state: dict[str, Any],
     no_progress_threshold: int = DEFAULT_NO_PROGRESS_THRESHOLD,
 ) -> tuple[str | None, str, bool]:
-    legacy_result = _choose_next_legacy(target, state, no_progress_threshold)
-    return choose_next_graph_aware(target, state, legacy_result)
+    return choose_next_dag(target, state, no_progress_threshold)
 
 def conveyor_decision_queue(
     target: Path,
@@ -157,164 +21,76 @@ def conveyor_decision_queue(
     next_reason: str,
     no_progress_threshold: int,
 ) -> list[dict[str, str]]:
-    """Build a small display queue for observability; choose_next remains authoritative."""
+    """Build a display queue from the latest execution-DAG scheduler decision."""
+    del state, no_progress_threshold
     entries: list[dict[str, str]] = []
     seen: set[str] = set()
 
-    def add(role: str | None, state_name: str, reason: str) -> None:
+    def add(role: str | None, state_name: str, reason: str, *, action_kind: str = "") -> None:
         key = role or "idle"
-        seen_key = f"{key}:{state_name}" if state_name == "skipped" else key
+        action = action_kind or key
+        seen_key = f"{key}:{action}:{state_name}"
         if seen_key in seen:
             return
         seen.add(seen_key)
         entries.append(
             {
                 "role": key,
+                "action_kind": action_kind,
                 "state": state_name,
                 "reason": re.sub(r"\s+", " ", reason).strip()[:240],
             }
         )
-
-    add(next_role, "next" if next_role else "idle", next_reason)
-    if len(entries) >= DECISION_QUEUE_LIMIT:
-        return entries
-
-    status = automation_status(target)
-    if status == "CRITICAL_STOP":
-        add(None, "blocked", "automation status is CRITICAL_STOP")
-        return entries[:DECISION_QUEUE_LIMIT]
-    if status not in ACTIVE_STATUSES:
-        add(None, "blocked", f"automation status is {status}; waiting")
-        return entries[:DECISION_QUEUE_LIMIT]
-
-    active, detail = lock_is_active(runtime_path(target, "target/codex_automation.lock"))
-    if active:
-        add(None, "blocked", f"main automation lock active: {detail}")
-        return entries[:DECISION_QUEUE_LIMIT]
-
-    multi_role_available = target_has_multi_role(target)
-
-    ticket_state, ticket_reason = ticket_campaign_terminal(target)
-    if ticket_state == "complete":
-        add(None, "blocked", ticket_reason)
-        return entries[:DECISION_QUEUE_LIMIT]
-    if ticket_state == "blocked":
-        if baseline_preflight_needed(target):
-            add("integrator", "ready", "bounded campaign is blocked, but baseline verification may be repairable")
-        else:
-            blocked_baseline_route = baseline_repair_route(target, state)
-            if blocked_baseline_route:
-                role, reason, _stop = blocked_baseline_route
-                add(role, "ready" if role else "blocked", reason)
-            else:
-                add(None, "blocked", ticket_reason)
-        return entries[:DECISION_QUEUE_LIMIT]
-
-    if not multi_role_available:
-        add(None, "blocked", "multi-role conveyor files not found; scaffold the target before launching automation")
-        return entries[:DECISION_QUEUE_LIMIT]
-
-    queue_depth = len(queued_manifests(target))
-    if queue_depth:
-        add("integrator", "ready", f"{queue_depth} queued role patch(es) need integration")
-
-    duplicate_builder = duplicate_builder_deferral_info(target)
-    if duplicate_builder:
-        add(
-            "integrator",
-            "ready",
-            (
-                f"duplicate builder deferred patches need triage: {duplicate_builder['count']} patch(es), "
-                f"{duplicate_builder['signature']}, {duplicate_builder['files']}"
-            ),
-        )
-
-    repeated_hardener_guardrail = repeated_hardener_guardrail_deferral_info(target)
-    if repeated_hardener_guardrail:
-        add(
-            "planner",
-            "ready",
-            (
-                "repeated hardener guardrail deferrals need repair planning: "
-                f"{repeated_hardener_guardrail['count']} patch(es) for "
-                f"{repeated_hardener_guardrail['match_type']}={repeated_hardener_guardrail['match_value']}; "
-                f"{repeated_hardener_guardrail['signature']}; root_cause={repeated_hardener_guardrail['root_cause']}"
-            ),
-        )
-
-    no_progress_blocked = no_progress_active(state, no_progress_threshold)
-    if no_progress_blocked:
-        info = no_progress_info(state)
-        reason = str(info.get("reason") or "integrator made no patch progress")
-        if not info.get("planner_requested_at"):
-            add("planner", "ready", f"no-progress circuit breaker tripped: {reason}")
-        else:
-            add(None, "blocked", f"no-progress circuit breaker active after planner handoff: {reason}")
-    elif unhandled_human_message_count(target):
-        add("planner", "ready", "unhandled human message(s) need triage")
-    else:
-        fast_follow_reason = planner_fast_follow_reason_after_deferral_change(state)
-        if fast_follow_reason:
-            add("planner", "ready", fast_follow_reason)
-
-    if not no_progress_blocked and str(state.get("last_completed_role") or "") == "integrator":
-        builder_followup = builder_triage_followup_info(target)
-        if builder_followup:
-            add(
-                "planner",
-                "ready",
-                f"builder deferred patch triaged as {builder_followup['triage_status']}; choose retry, supersede, or replace-from-current-HEAD",
-            )
-
-    if post_builder_hardener_pending(state):
-        add("hardener", "planned", post_builder_hardener_reason(target))
-    else:
-        candidate_catchup = unverified_candidate_done_cluster_info(target)
-        if candidate_catchup:
-            add("hardener", "planned", candidate_done_hardener_catchup_reason(candidate_catchup))
-
-    last_role = str(state.get("last_completed_role") or "")
-    if last_role == "integrator":
-        role, reason = role_after_integrator(state)
-        add(role, "planned", reason)
-    elif last_role == "builder":
-        add("hardener", "planned", "builder lane completed without queued work")
-    elif last_role == "hardener":
-        add("planner", "planned", "hardener completed; planner gets the next state-machine pass")
-    elif last_role == "planner":
-        add("builder", "planned", "planner completed; builder gets the next implementation pass")
-    else:
-        add("builder", "planned", "builder lane is the default momentum lane")
 
     try:
         with closing(connect(database_path_for_target(target))) as conn:
             scheduler_decision = latest_scheduler_decision_conn(conn)
     except Exception:
         scheduler_decision = {}
-    skipped_candidates = (
-        scheduler_decision.get("skipped_candidates")
-        if isinstance(scheduler_decision.get("skipped_candidates"), list)
+    candidates = (
+        scheduler_decision.get("scheduling_candidates")
+        if isinstance(scheduler_decision.get("scheduling_candidates"), list)
         else []
     )
-    for candidate in skipped_candidates[:3]:
+    if not candidates:
+        add(next_role, "next" if next_role else "idle", next_reason)
+        return entries[:DECISION_QUEUE_LIMIT]
+
+    selected = scheduler_decision.get("selected_candidate") if isinstance(scheduler_decision.get("selected_candidate"), dict) else {}
+    if selected:
+        reason_items = selected.get("reasons") if isinstance(selected.get("reasons"), list) else []
+        reason = "; ".join(str(item) for item in reason_items[:2]) or next_reason
+        add(
+            str(selected.get("role") or next_role or ""),
+            "next" if not bool(selected.get("stop")) else "blocked",
+            reason,
+            action_kind=str(selected.get("action_kind") or ""),
+        )
+    else:
+        add(next_role, "next" if next_role else "idle", next_reason)
+
+    for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
-        role = str(candidate.get("role") or "idle")
-        task_label = str(candidate.get("public_task_id") or candidate.get("task_id") or candidate.get("action_kind") or "candidate")
-        skipped_reason = str(candidate.get("skipped_reason") or "not selected")
-        context = candidate.get("context_pack_preview") if isinstance(candidate.get("context_pack_preview"), dict) else {}
-        context_count = context.get("item_count")
-        lease_count = len(candidate.get("required_leases") if isinstance(candidate.get("required_leases"), list) else [])
+        state_name = str(candidate.get("state") or "ready")
+        if state_name == "selected":
+            continue
+        task_label = str(candidate.get("public_task_id") or candidate.get("task_id") or candidate.get("execution_group_id") or "")
+        action_kind = str(candidate.get("action_kind") or "")
+        reason_items = candidate.get("reasons") if isinstance(candidate.get("reasons"), list) else []
+        reason = "; ".join(str(item) for item in reason_items[:2])
+        if state_name == "skipped":
+            reason = str(candidate.get("skipped_reason") or reason or "DAG candidate is not currently runnable")
+        if task_label:
+            reason = f"{action_kind or 'dag action'} for {task_label}: {reason or state_name}"
+        else:
+            reason = f"{action_kind or 'dag action'}: {reason or state_name}"
         add(
-            role,
-            "skipped",
-            (
-                f"graph scheduler skipped {task_label}: {skipped_reason}; "
-                f"context_items={context_count if context_count is not None else 'unknown'}; "
-                f"required_leases={lease_count}"
-            ),
+            str(candidate.get("role") or ""),
+            state_name if state_name in {"ready", "skipped", "blocked"} else "ready",
+            reason,
+            action_kind=action_kind,
         )
-
-    add("hardener", "standby", "hardener verifies recently changed work when integration or builder output exists")
-    add("builder", "standby", "builder can create the next implementation patch when planning is fresh")
+        if len(entries) >= DECISION_QUEUE_LIMIT:
+            break
     return entries[:DECISION_QUEUE_LIMIT]

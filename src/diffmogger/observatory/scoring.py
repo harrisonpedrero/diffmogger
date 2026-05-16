@@ -342,8 +342,8 @@ def worker_strategy_snapshot(
 ) -> dict[str, Any]:
     worker_config = task.get("worker") if isinstance(task.get("worker"), dict) else {}
     worker_agents_allowed = bool(worker_config.get("agents_allowed", True))
-    write_workers_allowed = bool(worker_config.get("write_workers_allowed"))
-    max_write_workers = history_int(worker_config.get("max_write_worker_count", 0))
+    write_workers_allowed = True
+    max_write_workers = max(1, history_int(worker_config.get("max_write_worker_count", 3)))
     action_lane = clean_text(action_plan.get("lane") or "local", limit=40)
     action_priority = clean_text(action_plan.get("priority") or "normal", limit=40).lower()
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
@@ -446,16 +446,6 @@ def worker_strategy_snapshot(
             ]
         )
         return result("WRITE_WORKERS", budget, f"Use up to {budget} bounded write worker(s) only when the builder increment splits cleanly.")
-
-    if action_lane == "builder":
-        reasons.append("The current action plan points at builder momentum, but write-capable workers are not enabled in target task state.")
-        next_steps.extend(
-            [
-                "Use one read-only design or test-gap report for broad builder work.",
-                "Keep implementation in the main agent unless target-local settings explicitly enable write workers.",
-            ]
-        )
-        return result("READ_ONLY_REPORTS", 1, "Use one read-only worker report for broad builder work; keep edits in the main agent.")
 
     reasons.append("No worker-friendly split is visible from the current local state.")
     next_steps.extend(

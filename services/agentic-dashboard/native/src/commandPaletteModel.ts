@@ -61,6 +61,10 @@ function automationState(snapshot: ProjectSnapshot | null): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
+function canBootstrapAndStart(snapshot: ProjectSnapshot | null): boolean {
+  return snapshot?.run.controls?.can_bootstrap_and_start === true;
+}
+
 function rawAutomationTasksReason(snapshot: ProjectSnapshot | null): string | undefined {
   const targetReason = reasonForTarget(snapshot);
   if (targetReason) return targetReason;
@@ -212,13 +216,15 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       id: "start-automation",
       title: "Start",
       section: "Run",
-      description: "Start automation.",
-      keywords: ["automation", "conveyor", "start"],
+      description: canBootstrapAndStart(snapshot)
+        ? "Start automation; first start prepares the target if needed."
+        : "Start automation.",
+      keywords: ["automation", "conveyor", "start", "bootstrap"],
       dangerous: true,
       disabledReason:
         busyReason ??
         targetReason ??
-        (snapshot?.run.controls?.can_start_automation === true
+        (snapshot?.run.controls?.can_start_automation === true || canBootstrapAndStart(snapshot)
           ? undefined
           : String(snapshot?.run.controls?.start_automation_reason ?? "Automation is not ready to start.")),
     },

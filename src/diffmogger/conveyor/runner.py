@@ -1,6 +1,23 @@
 from __future__ import annotations
 
+from contextlib import closing
+
 from .state import *
+from diffmogger.runtime.state_store import (
+    connect,
+    create_repair_nodes_for_failed_validation_conn,
+    database_path_for_target,
+    launch_read_only_execution_group_conn,
+    launch_write_execution_group_conn,
+    mark_worker_patches_integrated_conn,
+    plan_parallel_execution_groups_conn,
+    record_validation_group_result_on_execution_dag_conn,
+    reconcile_worker_results_into_execution_dag_conn,
+    run_parallel_validation_conn,
+    sync_queued_role_manifests_into_worker_patches_conn,
+    update_execution_dag_node_status_conn,
+    update_execution_group_dag_nodes_conn,
+)
 
 CHILD: subprocess.Popen[str] | None = None
 TERMINATE_REQUESTED = False
@@ -115,6 +132,165 @@ def run_role(
                 continue
     finally:
         CHILD = None
+
+
+def _action_success(status: str) -> bool:
+    return str(status or "") in {"completed", "passed", "warning", "already_launched", "reconciled", "created", "integrated", "skipped"}
+
+
+def run_scheduler_action(
+    target: Path,
+    candidate: dict[str, Any],
+    allow_remotes: bool,
+    *,
+    state_path: Path | None = None,
+    reason: str = "",
+    started_at: str = "",
+) -> int:
+    action = str(candidate.get("action_kind") or "").strip()
+    if action in {"", "idle", "terminal_stop"}:
+        return 0
+    run_id_value = run_id(action)
+    if state_path is not None:
+        state = load_state(state_path)
+        state["active_role_run"] = {
+            "role": str(candidate.get("role") or ""),
+            "action_kind": action,
+            "run_id": run_id_value,
+            "reason": reason,
+            "started_at": started_at or utc_now(),
+            "pid": os.getpid(),
+            "started_at_epoch": int(time.time()),
+            "command": ["dag_scheduler_action", action],
+            "command_display": f"dag_scheduler_action {action}",
+            "status": "running",
+            "dag_node_id": str(candidate.get("dag_node_id") or ""),
+            "execution_group_id": str(candidate.get("execution_group_id") or ""),
+        }
+        write_state(
+            state_path,
+            state,
+            event_type="dag_scheduler.action_started",
+            actor_role=str(candidate.get("role") or "scheduler"),
+            phase="dag_scheduler",
+            payload={"action_kind": action, "candidate": candidate},
+        )
+    print(f"DAG_SCHEDULER_ACTION action={action} run_id={run_id_value}", flush=True)
+    target = target.expanduser().resolve()
+    result: dict[str, Any]
+    if action == "run_serial_role":
+        role = str(candidate.get("role") or "").strip()
+        if role not in ROLES:
+            print(f"DAG_SCHEDULER_RESULT action={action} status=failed", flush=True)
+            return 1
+        exit_code = run_role(
+            target,
+            role,
+            allow_remotes,
+            state_path=None,
+            reason=reason or "serialized ticket role fallback",
+            started_at=started_at,
+        )
+        if exit_code == 0:
+            with closing(connect(database_path_for_target(target))) as conn:
+                dag_node_id = str(candidate.get("dag_node_id") or "")
+                if dag_node_id:
+                    update_execution_dag_node_status_conn(conn, dag_node_id, status="done", selected_by="dag_scheduler.run_serial_role")
+                sync_queued_role_manifests_into_worker_patches_conn(
+                    conn,
+                    target,
+                    selected_by="dag_scheduler.run_serial_role",
+                )
+        return exit_code
+    if action == "run_serial_integration":
+        patch_ids = [str(item) for item in (candidate.get("patch_ids") or []) if str(item)]
+        exit_code = run_role(
+            target,
+            "integrator",
+            allow_remotes,
+            state_path=None,
+            reason=reason or "serialized integration DAG action",
+            started_at=started_at,
+        )
+        if exit_code == 0:
+            with closing(connect(database_path_for_target(target))) as conn:
+                mark_worker_patches_integrated_conn(
+                    conn,
+                    selected_by="dag_scheduler.run_serial_integration",
+                    patch_ids=patch_ids or None,
+                )
+        return exit_code
+    with closing(connect(database_path_for_target(target))) as conn:
+        if action in {"launch_scope_group", "launch_review_group"}:
+            plan_parallel_execution_groups_conn(conn, target, selected_by=f"dag_scheduler.{action}")
+            result = launch_read_only_execution_group_conn(
+                conn,
+                target,
+                execution_group_id=str(candidate.get("execution_group_id") or ""),
+                selected_by=f"dag_scheduler.{action}",
+            )
+            if _action_success(str(result.get("status") or "")) and str(result.get("execution_group_id") or ""):
+                update_execution_group_dag_nodes_conn(
+                    conn,
+                    str(result.get("execution_group_id") or ""),
+                    status="done",
+                    selected_by=f"dag_scheduler.{action}",
+                )
+            elif _action_success(str(result.get("status") or "")) and str(candidate.get("dag_node_id") or ""):
+                update_execution_dag_node_status_conn(
+                    conn,
+                    str(candidate.get("dag_node_id") or ""),
+                    status="done",
+                    selected_by=f"dag_scheduler.{action}",
+                )
+        elif action == "launch_write_group":
+            plan_parallel_execution_groups_conn(conn, target, selected_by="dag_scheduler.launch_write_group")
+            result = launch_write_execution_group_conn(
+                conn,
+                target,
+                execution_group_id=str(candidate.get("execution_group_id") or ""),
+                selected_by="dag_scheduler.launch_write_group",
+            )
+            if _action_success(str(result.get("status") or "")) and str(result.get("execution_group_id") or ""):
+                update_execution_group_dag_nodes_conn(
+                    conn,
+                    str(result.get("execution_group_id") or ""),
+                    status="done",
+                    selected_by="dag_scheduler.launch_write_group",
+                )
+                reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="dag_scheduler.launch_write_group")
+        elif action == "launch_validation_group":
+            dag_group_id = str(candidate.get("execution_group_id") or candidate.get("dag_node_id") or "")
+            result = run_parallel_validation_conn(
+                conn,
+                target,
+                selected_by="dag_scheduler.launch_validation_group",
+                plan_id=dag_group_id,
+            )
+            if dag_group_id:
+                record_validation_group_result_on_execution_dag_conn(
+                    conn,
+                    dag_group_id,
+                    result,
+                    selected_by="dag_scheduler.launch_validation_group",
+                )
+            if str(result.get("status") or "") == "failed":
+                repair_result = create_repair_nodes_for_failed_validation_conn(conn, selected_by="dag_scheduler.launch_validation_group")
+                if _action_success(str(repair_result.get("status") or "")):
+                    result = {
+                        **result,
+                        "status": str(repair_result.get("status") or "created"),
+                        "validation_status": "failed",
+                        "repair_result": repair_result,
+                    }
+        elif action == "reconcile_worker_results":
+            result = reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="dag_scheduler.reconcile_worker_results")
+        elif action == "create_repair_nodes":
+            result = create_repair_nodes_for_failed_validation_conn(conn, selected_by="dag_scheduler.create_repair_nodes")
+        else:
+            result = {"status": "failed", "reason": f"unsupported DAG scheduler action: {action}"}
+    print(f"DAG_SCHEDULER_RESULT action={action} status={result.get('status')}", flush=True)
+    return 0 if _action_success(str(result.get("status") or "")) else 1
 
 def finish_active_role_run(state: dict[str, Any], *, exit_code: int, finished_at: str) -> None:
     active = state.get("active_role_run")

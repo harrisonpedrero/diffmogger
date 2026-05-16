@@ -20,6 +20,7 @@
       "docs/OPERATING_MODEL.md",
       "docs/TROUBLESHOOTING.md",
       "docs/WORKER_AGENTS.md",
+      "docs/architecture/concurrency-readiness-audit.md",
       "docs/architecture/native-dashboard.md",
       "docs/archive/decision-records.md",
       "docs/archive/native-dashboard-command-inventory.md"
@@ -64,12 +65,15 @@
       "scripts/check_required_files.py",
       "scripts/runtime/compact_agent_state.py",
       "scripts/dashboard_backend_cli.py",
+      "scripts/evaluate_symbol_scheduler_readiness.py",
       "scripts/runtime/diffmogger_browser.py",
       "scripts/runtime/diffmogger_paths.py",
       "scripts/runtime/integrate_role_outputs.py",
       "scripts/runtime/list_deferred_patches.py",
       "scripts/runtime/load_automation_env.py",
       "scripts/target/release_codex_lock.sh",
+      "scripts/preflight_parallelization_readiness.py",
+      "scripts/runtime/preflight_parallelization_readiness.py",
       "scripts/runtime/repair_environment.py",
       "scripts/runtime/run_conveyor_automation.py",
       "scripts/target/run_conveyor_automation.sh",
@@ -128,6 +132,8 @@
       "tests/runtime/test_list_deferred_patches.py",
       "tests/runtime/test_load_automation_env.py",
       "tests/kit/test_native_rebuild_guardrails.py",
+      "tests/runtime/test_preflight.py",
+      "tests/runtime/test_readiness_eval.py",
       "tests/runtime/test_repair_environment.py",
       "tests/runtime/test_run_conveyor_automation.py",
       "tests/dashboard/test_dashboard_env_loading.py",
@@ -346,6 +352,7 @@
       "src/diffmogger/runtime/list_deferred_patches.py",
       "src/diffmogger/runtime/load_automation_env.py",
       "src/diffmogger/runtime/paths.py",
+      "src/diffmogger/runtime/preflight.py",
       "src/diffmogger/runtime/repair_environment.py",
       "src/diffmogger/runtime/run_conveyor_automation.py",
       "src/diffmogger/runtime/run_observatory.py",
@@ -421,6 +428,12 @@
       "source_script": "scripts/runtime/load_automation_env.py"
     },
     {
+      "script": "scripts/preflight_parallelization_readiness.py",
+      "module": "diffmogger.runtime.preflight",
+      "source": "src/diffmogger/runtime/preflight.py",
+      "source_script": "scripts/runtime/preflight_parallelization_readiness.py"
+    },
+    {
       "script": "scripts/repair_environment.py",
       "module": "diffmogger.runtime.repair_environment",
       "source": "src/diffmogger/runtime/repair_environment.py",
@@ -486,6 +499,16 @@
       "source": "src/diffmogger/dashboard/cli.py"
     },
     {
+      "script": "scripts/evaluate_symbol_scheduler_readiness.py",
+      "module": "diffmogger.runtime.readiness_eval",
+      "source": "src/diffmogger/runtime/readiness_eval.py"
+    },
+    {
+      "script": "scripts/preflight_parallelization_readiness.py",
+      "module": "diffmogger.runtime.preflight",
+      "source": "src/diffmogger/runtime/preflight.py"
+    },
+    {
       "script": "scripts/scaffold_project_docs.py",
       "module": "diffmogger.kit.scaffold_project_docs",
       "source": "src/diffmogger/kit/scaffold_project_docs.py"
@@ -528,7 +551,10 @@
       "docs/OPERATING_MODEL.md",
       "docs/TROUBLESHOOTING.md",
       "docs/WORKER_AGENTS.md",
+      "docs/architecture/concurrency-readiness-audit.md",
+      "docs/architecture/dag-symbol-scheduler-audit.md",
       "docs/architecture/native-dashboard.md",
+      "docs/architecture/symbol-identity-contract.md",
       "services/agentic-dashboard/README.md",
       "services/agentic-dashboard/native/README.md",
       "services/agentic-notifier/README.md"

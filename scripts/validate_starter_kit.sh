@@ -275,13 +275,16 @@ for marker in [
 watchdog = Path("src/diffmogger/runtime/run_process_watchdog.py").read_text(encoding="utf-8")
 for marker in [
     "CODEX_ROLE_TIMEOUT_SECONDS",
+    "CODEX_ROLE_IDLE_TIMEOUT_SECONDS",
     "CODEX_ROLE_TERMINATION_GRACE_SECONDS",
     "DEFAULT_TIMEOUT_SECONDS = 5400",
+    "DEFAULT_IDLE_TIMEOUT_SECONDS = 600",
     "TIMEOUT_EXIT_CODE = 124",
     "start_new_session=True",
     "os.killpg",
     "timed_out",
     "idle_timed_out",
+    "progress_path_changed",
 ]:
     if marker not in watchdog:
         print(f"Watchdog helper template missing marker: {marker}", file=sys.stderr)
@@ -385,6 +388,9 @@ for marker in [
     "conveyor_work_items",
     "conveyor_stage_contracts",
     "conveyor_stage_attempts",
+    "execution_dag_nodes",
+    "execution_dag_edges",
+    "execution_dag",
     "capability_manifests",
     "validation_receipts",
     "automation_control",
@@ -881,7 +887,7 @@ for marker in [
     "Add context files",
     "Context7 MCP",
     "Playwright MCP",
-    "Write workers",
+    "Checkpoint commits",
     "FIRST_REVIEW_NEEDED",
     "progress-log",
     "Open Debug",
@@ -1266,7 +1272,9 @@ for marker in [
         raise SystemExit(1)
 PY
 
-python3 -m unittest tests.runtime.test_state_store tests.runtime.test_codebase_graph tests.runtime.test_worker_agents tests.runtime.test_run_observatory tests.dashboard.test_dashboard_backend_cli tests.dashboard.test_dashboard_env_loading tests.kit.test_native_rebuild_guardrails tests.kit.test_starter_kit_manifest tests.runtime.test_run_conveyor_automation tests.runtime.test_run_role_automation tests.runtime.test_load_automation_env tests.runtime.test_repair_environment tests.runtime.test_integrate_role_outputs tests.runtime.test_list_deferred_patches tests.runtime.test_ticket_run tests.kit.test_check_integration_safety tests.kit.test_check_required_files tests.runtime.test_summarize_worker_outputs
+python3 -m unittest tests.runtime.test_state_store tests.runtime.test_codebase_graph tests.runtime.test_worker_agents tests.runtime.test_run_observatory tests.dashboard.test_dashboard_backend_cli tests.dashboard.test_dashboard_env_loading tests.kit.test_native_rebuild_guardrails tests.kit.test_starter_kit_manifest tests.runtime.test_run_conveyor_automation tests.runtime.test_run_role_automation tests.runtime.test_run_process_watchdog tests.runtime.test_load_automation_env tests.runtime.test_repair_environment tests.runtime.test_integrate_role_outputs tests.runtime.test_list_deferred_patches tests.runtime.test_ticket_run tests.runtime.test_readiness_eval tests.runtime.test_preflight tests.kit.test_check_integration_safety tests.kit.test_check_required_files tests.runtime.test_summarize_worker_outputs
+
+python3 scripts/evaluate_symbol_scheduler_readiness.py --first-24h >/tmp/Diffmogger-readiness-eval.log
 
 python3 scripts/check_integration_safety.py >/tmp/Diffmogger-integration-safety.log
 
@@ -1470,7 +1478,7 @@ for marker in \
     "T4 Completion report and stop" \
     "Bounded campaign bootstrap is readiness-only" \
     "python3 .diffmogger/scripts/ticket_run.py . next --json" \
-    "at most one dependency-ready ticket per run" \
+    "let execution DAG dependencies, confidence, and ownership scopes determine" \
     "depends_on" \
     "## Deferred / Follow-Up Tickets"; do
     if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" "$tmp_dir/.diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md" >/tmp/Diffmogger-ticket-horizon-grep.log 2>&1; then
@@ -1523,14 +1531,13 @@ cat >"$tmp_intake" <<'JSON'
   "human_bridge_enabled": false,
   "human_bridge_mode": "disabled",
   "worker_agents_allowed": true,
-  "write_worker_agents_allowed": true,
   "max_write_worker_count": 25,
   "write_worker_guidance": "Use write workers only for planned disjoint modules.",
   "verification_commands": ["npm test"]
 }
 JSON
 python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-write-workers.log
-python3 scripts/check_required_files.py --human-bridge-mode disabled --write-workers-enabled "$tmp_dir" >/tmp/Diffmogger-check-write-workers.log
+python3 scripts/check_required_files.py --human-bridge-mode disabled "$tmp_dir" >/tmp/Diffmogger-check-write-workers.log
 for marker in \
     "Write-capable worker agents allowed: true" \
     "Max write worker count: 10" \
@@ -1991,175 +1998,121 @@ module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
+from contextlib import closing
+from diffmogger.runtime.state_store import (
+    connect,
+    database_path_for_target,
+    execution_dag_read_model,
+    latest_scheduler_decision_conn,
+    stable_json,
+    upsert_execution_dag_node,
+)
 
-def conveyor_state(
-    last_role="integrator",
-    accepted_by_role=None,
-    deferred_delta_by_role=None,
-    include_metadata=True,
-):
-    entry = {"role": "integrator", "exit_code": 0, "progress_success": True}
-    if include_metadata:
-        entry["metadata"] = {
-            "accepted_by_role": accepted_by_role or {"planner": 0, "builder": 0, "hardener": 0},
-            "deferred_delta_by_role": deferred_delta_by_role or {"planner": 0, "builder": 0, "hardener": 0},
-        }
-    return {
-        "schema_version": 1,
-        "cycles": 1,
-        "role_counts": {},
-        "history": [entry],
-        "last_success_by_role": {"planner": module.utc_now()},
-        "last_completed_role": last_role,
-    }
+(target / "src").mkdir(parents=True)
+(target / "src/app.py").write_text("VALUE = 1\n", encoding="utf-8")
+with closing(connect(database_path_for_target(target))) as conn:
+    with conn:
+        upsert_execution_dag_node(
+            conn,
+            node_id="dag-node:validation-smoke:build",
+            task_id="T1",
+            action_type="building",
+            status="ready",
+            owner_role="builder",
+            confidence=0.9,
+            metadata={
+                "source": "validation.dag_scheduler_smoke",
+                "summary": "Update src/app.py",
+                "paths": ["src/app.py"],
+            },
+        )
 
-role, reason, stop = module.choose_next(
-    target,
-    conveyor_state(accepted_by_role={"planner": 1, "builder": 0, "hardener": 0}),
-    2,
-)
-if role != "builder" or "builder-first" not in reason or stop:
-    print(("planner-integrated", role, reason, stop), file=sys.stderr)
+role, reason, stop = module.choose_next(target, {"last_completed_role": "integrator"}, 2)
+with closing(connect(database_path_for_target(target))) as conn:
+    decision = latest_scheduler_decision_conn(conn)
+candidate = decision["selected_candidate"]
+if role != "builder" or candidate.get("action_kind") != "launch_write_group" or stop:
+    print(("dag-write-launch", role, reason, stop, candidate), file=sys.stderr)
     raise SystemExit(1)
-role, reason, stop = module.choose_next(
-    target,
-    conveyor_state(accepted_by_role={"planner": 0, "builder": 0, "hardener": 1}),
-    2,
-)
-if role != "builder" or "builder-first" not in reason or stop:
-    print(("hardener-integrated", role, reason, stop), file=sys.stderr)
-    raise SystemExit(1)
-role, reason, stop = module.choose_next(
-    target,
-    conveyor_state(accepted_by_role={"planner": 0, "builder": 1, "hardener": 0}),
-    2,
-)
-if role != "hardener" or "builder patch integrated" not in reason or stop:
-    print(("builder-integrated", role, reason, stop), file=sys.stderr)
-    raise SystemExit(1)
-role, reason, stop = module.choose_next(target, conveyor_state(include_metadata=False), 2)
-if role != "builder" or "builder-first" not in reason or stop:
-    print(("missing-metadata", role, reason, stop), file=sys.stderr)
+if decision.get("scheduler_fallback_used") or decision.get("legacy_result"):
+    print(("legacy-fallback-used", decision), file=sys.stderr)
     raise SystemExit(1)
 
-role, reason, stop = module.choose_next(
-    target,
-    conveyor_state(
-        accepted_by_role={"planner": 0, "builder": 0, "hardener": 0},
-        deferred_delta_by_role={"planner": 1, "builder": 0, "hardener": 0},
-    ),
-    2,
-)
-if role != "planner" or "fast-follow replanning" not in reason or stop:
-    print(("planner-deferral-fast-follow", role, reason, stop), file=sys.stderr)
-    raise SystemExit(1)
-role, reason, stop = module.choose_next(
-    target,
-    conveyor_state(
-        accepted_by_role={"planner": 0, "builder": 0, "hardener": 0},
-        deferred_delta_by_role={"planner": -1, "builder": 0, "hardener": 0},
-    ),
-    2,
-)
-if role != "planner" or "resolved" not in reason or "fast-follow replanning" not in reason or stop:
-    print(("planner-deferral-resolved-fast-follow", role, reason, stop), file=sys.stderr)
-    raise SystemExit(1)
-
-(target / "target/automation_queue/hardener/run-skipped").mkdir(parents=True)
-(target / "target/automation_queue/hardener/run-skipped/manifest.json").write_text(
-    '{"role":"hardener","run_id":"run-skipped","status":"skipped"}\n',
-    encoding="utf-8",
-)
-role, reason, stop = module.choose_next(target, conveyor_state(include_metadata=False), 2)
-if role == "integrator" or stop:
-    print(("skipped-counted-as-queued", role, reason, stop), file=sys.stderr)
-    raise SystemExit(1)
 (target / "target/automation_queue/planner/run-queued").mkdir(parents=True)
-queued_manifest = target / "target/automation_queue/planner/run-queued/manifest.json"
-queued_manifest.write_text(
+(target / "target/automation_queue/planner/run-queued/manifest.json").write_text(
     '{"role":"planner","run_id":"run-queued","status":"queued"}\n',
     encoding="utf-8",
 )
-role, reason, stop = module.choose_next(target, conveyor_state(include_metadata=False), 2)
-if role != "integrator" or stop:
-    print(("queued-did-not-preempt", role, reason, stop), file=sys.stderr)
+role, reason, stop = module.choose_next(target, {"last_completed_role": "hardener"}, 2)
+with closing(connect(database_path_for_target(target))) as conn:
+    decision = latest_scheduler_decision_conn(conn)
+if role != "builder" or decision["selected_candidate"].get("action_kind") != "launch_write_group" or stop:
+    print(("legacy-queue-preempted-dag", role, reason, stop, decision["selected_candidate"]), file=sys.stderr)
     raise SystemExit(1)
-queued_manifest.unlink()
 
-state = {"schema_version": 1, "cycles": 0, "role_counts": {}, "history": []}
-before = {"queued": 1, "deferred": 0, "applied": 0, "failed": 0, "deferred_signature": "none"}
-after = {
-    "queued": 0,
-    "deferred": 1,
-    "applied": 0,
-    "failed": 0,
-    "deferred_signature": "verification_environment_failure:missing_pytest",
-}
-module.update_integrator_no_progress(
-    state,
-    before=before,
-    after=after,
-    exit_code=0,
-    threshold=2,
-    finished_at=module.utc_now(),
-)
-before = after
-after = {
-    "queued": 0,
-    "deferred": 1,
-    "applied": 0,
-    "failed": 0,
-    "deferred_signature": "verification_environment_failure:missing_pytest",
-}
-metadata = module.update_integrator_no_progress(
-    state,
-    before=before,
-    after=after,
-    exit_code=0,
-    threshold=2,
-    finished_at=module.utc_now(),
-)
-if not metadata.get("just_tripped") or not module.no_progress_active(state, 2):
-    print(state, file=sys.stderr)
-    raise SystemExit(1)
-module.write_no_progress_progress_note(target, state["integrator_no_progress"])
-role, reason, stop = module.choose_next(target, state, 2)
-if role != "planner" or stop:
-    print((role, reason, stop), file=sys.stderr)
-    raise SystemExit(1)
-state["integrator_no_progress"]["planner_requested_at"] = module.utc_now()
-role, reason, stop = module.choose_next(target, state, 2)
-if role is not None or "circuit breaker active" not in reason:
-    print((role, reason, stop), file=sys.stderr)
-    raise SystemExit(1)
-progress = (target / "docs/MULTI_ROLE_PROGRESS.md").read_text(encoding="utf-8")
-if "conveyor-no-progress" not in progress:
-    print(progress, file=sys.stderr)
-    raise SystemExit(1)
-resolved_metadata = module.update_integrator_no_progress(
-    state,
-    before={
-        "queued": 0,
-        "deferred": 1,
-        "applied": 0,
-        "failed": 0,
-        "deferred_signature": "staleness:no_detail",
-        "deferred_by_role": {"planner": 1, "builder": 0, "hardener": 0},
+with closing(connect(database_path_for_target(target))) as conn:
+    with conn:
+        upsert_execution_dag_node(
+            conn,
+            node_id="dag-node:validation-smoke:build",
+            task_id="T1",
+            action_type="building",
+            status="done",
+            owner_role="builder",
+            confidence=0.9,
+            metadata={
+                "source": "validation.dag_scheduler_smoke",
+                "summary": "Update src/app.py",
+                "paths": ["src/app.py"],
+            },
+        )
+
+state = {
+    "schema_version": 1,
+    "cycles": 3,
+    "last_completed_role": "builder",
+    "integrator_no_progress": {
+        "active": True,
+        "streak": 2,
+        "threshold": 2,
+        "reason": "legacy no-progress smoke",
     },
-    after={
-        "queued": 0,
-        "deferred": 0,
-        "applied": 0,
-        "failed": 0,
-        "deferred_signature": "none",
-        "deferred_by_role": {"planner": 0, "builder": 0, "hardener": 0},
-    },
-    exit_code=0,
-    threshold=2,
-    finished_at=module.utc_now(),
-)
-if module.no_progress_active(state, 2) or not resolved_metadata.get("progress_success"):
-    print(("deferral-resolution-did-not-clear-no-progress", state, resolved_metadata), file=sys.stderr)
+}
+role, reason, stop = module.choose_next(target, state, 2)
+queue = module.conveyor_decision_queue(target, state, role, reason, 2)
+with closing(connect(database_path_for_target(target))) as conn:
+    decision = latest_scheduler_decision_conn(conn)
+    model = execution_dag_read_model(conn)
+if role is not None or "no DAG-ready scheduler action" not in reason or stop:
+    print(("idle-without-dag-work", role, reason, stop), file=sys.stderr)
+    raise SystemExit(1)
+if decision["selected_candidate"].get("action_kind") != "idle" or queue[0].get("action_kind") != "idle":
+    print(("idle-candidate-missing", decision["selected_candidate"], queue), file=sys.stderr)
+    raise SystemExit(1)
+if not any(item.get("action_type") == "building" and item.get("status") == "done" for item in model["terminal_nodes"]):
+    print(("done-dag-node-missing", model), file=sys.stderr)
+    raise SystemExit(1)
+
+with closing(connect(database_path_for_target(target))) as conn:
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO validation_jobs(
+                job_id, execution_group_id, plan_id, gate_id, command, cwd,
+                status, started_at, finished_at, exit_code, log_artifact_id,
+                resource_profile, payload_json
+            )
+            VALUES('validation-job:smoke', 'execution-group:validation-smoke', 'validation-plan:smoke',
+                   'T1', 'python -m pytest', '', 'failed', '2026-05-15T00:00:00+00:00',
+                   '2026-05-15T00:00:01+00:00', 1, 'log:validation-job:smoke', 'cpu', ?)
+            """,
+            (stable_json({"required": True}),),
+        )
+role, reason, stop = module.choose_next(target, state, 2)
+with closing(connect(database_path_for_target(target))) as conn:
+    decision = latest_scheduler_decision_conn(conn)
+if role != "builder" or decision["selected_candidate"].get("action_kind") != "create_repair_nodes" or stop:
+    print(("validation-repair-action-missing", role, reason, stop, decision["selected_candidate"]), file=sys.stderr)
     raise SystemExit(1)
 PY
 rm -rf "$tmp_dir"

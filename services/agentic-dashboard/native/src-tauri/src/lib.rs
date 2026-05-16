@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Stdio};
+use std::process::{Child, Command as ProcessCommand, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -14,6 +16,7 @@ const RECENT_CONFIG_FILE: &str = "recent-targets.json";
 const MAX_RECENT_TARGETS: usize = 12;
 const ALLOWED_EDITOR_COMMANDS: &[&str] = &["code", "cursor", "zed", "subl"];
 const DEFAULT_AUTOMATION_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+static RUNTIME_STATE_WATCHES: OnceLock<Mutex<HashMap<String, Child>>> = OnceLock::new();
 
 const READ_ONLY_BACKEND_COMMANDS: &[&str] = &[
     "project.load_snapshot",
@@ -27,6 +30,7 @@ const READ_ONLY_BACKEND_COMMANDS: &[&str] = &[
     "run.load_log",
     "state.snapshot",
     "state.validate",
+    "state.watch",
     "execution_group.load",
     "validation_jobs.load",
     "observatory.snapshot",
@@ -41,6 +45,7 @@ const MUTATING_BACKEND_COMMANDS: &[&str] = &[
     "brief.generate_intake",
     "brief.save_draft",
     "brief.scaffold_bootstrap",
+    "brief.run_bootstrap",
     "context.import",
     "ticket.add",
     "ticket.update",
@@ -1368,6 +1373,169 @@ async fn run_backend_command_streamed(
     })?
 }
 
+fn runtime_state_watches() -> &'static Mutex<HashMap<String, Child>> {
+    RUNTIME_STATE_WATCHES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn stop_runtime_state_watch_inner(watch_id: &str) -> Result<(), CommandError> {
+    let mut watches = runtime_state_watches().lock().map_err(|error| {
+        CommandError::new(
+            "watch_registry_failed",
+            "Could not lock runtime state watch registry.",
+            json!({ "exception": error.to_string() }),
+        )
+    })?;
+    if let Some(mut child) = watches.remove(watch_id) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn start_runtime_state_watch(
+    app: AppHandle,
+    watch_id: String,
+    target: String,
+    after_event_id: Option<u64>,
+) -> Result<(), CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let watch_id = watch_id.trim().to_string();
+        if watch_id.is_empty() || watch_id.len() > 120 {
+            return Err(CommandError::new(
+                "invalid_watch_id",
+                "Runtime state watch id must be non-empty and reasonably short.",
+                json!({ "watchId": watch_id }),
+            ));
+        }
+        stop_runtime_state_watch_inner(&watch_id)?;
+        let root = kit_root()?;
+        let resolved = validate_target_path(&target)?;
+        let target_text = resolved.display().to_string();
+        let cli = root.join(BACKEND_CLI);
+        let args = vec![
+            cli.display().to_string(),
+            "--stream-jsonl".to_string(),
+            "state.watch".to_string(),
+            "--target".to_string(),
+            target_text.clone(),
+            "--after-event-id".to_string(),
+            after_event_id.unwrap_or(0).to_string(),
+            "--heartbeat-seconds".to_string(),
+            "5".to_string(),
+            "--poll-interval".to_string(),
+            "0.75".to_string(),
+        ];
+        let mut child = prepare_backend_process(&args)
+            .current_dir(&root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                CommandError::new(
+                    "watch_process_failed",
+                    "Could not start runtime state watch.",
+                    json!({ "exception": error.to_string() }),
+                )
+            })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            CommandError::new(
+                "watch_process_failed",
+                "Could not capture runtime state watch stdout.",
+                json!({ "watchId": watch_id }),
+            )
+        })?;
+        runtime_state_watches()
+            .lock()
+            .map_err(|error| {
+                CommandError::new(
+                    "watch_registry_failed",
+                    "Could not lock runtime state watch registry.",
+                    json!({ "exception": error.to_string() }),
+                )
+            })?
+            .insert(watch_id.clone(), child);
+
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else {
+                    let _ = app.emit(
+                        "runtime-state-watch",
+                        json!({
+                            "watchId": watch_id,
+                            "target": target_text,
+                            "event": "runtime_state_error",
+                            "message": "Could not read runtime state watch output."
+                        }),
+                    );
+                    break;
+                };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let payload: Value = match serde_json::from_str(trimmed) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let _ = app.emit(
+                            "runtime-state-watch",
+                            json!({
+                                "watchId": watch_id,
+                                "target": target_text,
+                                "event": "runtime_state_error",
+                                "message": "Runtime state watch emitted invalid JSON.",
+                                "data": { "exception": error.to_string() }
+                            }),
+                        );
+                        continue;
+                    }
+                };
+                let event = payload.get("event").and_then(Value::as_str).unwrap_or("runtime_state_closed");
+                let _ = app.emit(
+                    "runtime-state-watch",
+                    json!({
+                        "watchId": watch_id,
+                        "target": target_text,
+                        "event": event,
+                        "runtimeEvent": payload.get("runtime_event").cloned().unwrap_or_else(|| json!({})),
+                        "afterEventId": payload.get("after_event_id").and_then(Value::as_u64).unwrap_or(0),
+                        "emittedAt": payload.get("emitted_at").and_then(Value::as_str).unwrap_or(""),
+                        "data": payload,
+                    }),
+                );
+            }
+            if let Ok(mut watches) = runtime_state_watches().lock() {
+                if let Some(mut child) = watches.remove(&watch_id) {
+                    let _ = child.wait();
+                }
+            }
+            let _ = app.emit(
+                "runtime-state-watch",
+                json!({
+                    "watchId": watch_id,
+                    "target": target_text,
+                    "event": "runtime_state_closed",
+                    "message": "Runtime state watch stopped."
+                }),
+            );
+        });
+        Ok(())
+    })
+    .await
+    .map_err(|error| {
+        CommandError::new(
+            "watch_task_failed",
+            "Could not join the runtime state watch task.",
+            json!({ "exception": error.to_string() }),
+        )
+    })?
+}
+
+#[tauri::command]
+fn stop_runtime_state_watch(watch_id: String) -> Result<(), CommandError> {
+    stop_runtime_state_watch_inner(&watch_id)
+}
+
 #[tauri::command]
 fn open_observatory_file(path: String) -> Result<(), CommandError> {
     let resolved = validate_observatory_html_path(&path)?;
@@ -1715,6 +1883,8 @@ pub fn run() {
             update_advanced_settings,
             run_backend_command_streamed,
             run_backend_command,
+            start_runtime_state_watch,
+            stop_runtime_state_watch,
             open_observatory_file,
             open_review_artifact,
             reveal_review_artifact,
@@ -1846,6 +2016,11 @@ mod tests {
     }
 
     #[test]
+    fn allows_setup_bootstrap_command() {
+        assert!(backend_command_allowed("brief.run_bootstrap"));
+    }
+
+    #[test]
     fn allows_parallel_backend_commands_without_opening_shell_access() {
         assert!(backend_command_allowed("execution_group.load"));
         assert!(backend_command_allowed("execution_group.start"));
@@ -1854,6 +2029,7 @@ mod tests {
         assert!(backend_command_allowed("execution_group.export_debug_bundle"));
         assert!(backend_command_allowed("validation_jobs.load"));
         assert!(backend_command_allowed("lease.release_stale"));
+        assert!(backend_command_allowed("state.watch"));
         assert!(!backend_command_allowed("shell.exec"));
     }
 

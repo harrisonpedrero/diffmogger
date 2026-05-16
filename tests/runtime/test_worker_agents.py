@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -26,6 +27,7 @@ from diffmogger.runtime.state_store import (
     record_candidate_lane_conn,
     record_worker_report_disposition_conn,
     select_candidate_lane_conn,
+    scope_evidence_records_conn,
     state_snapshot,
     worker_agents_conn,
     worker_contracts_conn,
@@ -117,6 +119,81 @@ class ReadOnlyWorkerFanoutTests(unittest.TestCase):
     def fake_unavailable_runner(self, command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(command, 127, stdout="", stderr="codex command not found\n")
 
+    def fake_scope_evidence_runner(self, command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+        run_id = command[command.index("--run-id") + 1]
+        role = command[command.index("--role") + 1]
+        report = target_path(cwd, "target/agent_runs") / run_id / f"worker_{role}.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            "\n".join(
+                [
+                    f"# Worker Report: {role}",
+                    "",
+                    "## Scope Evidence",
+                    "",
+                    "```json",
+                    json.dumps(
+                        {
+                            "scope_evidence_records": [
+                                {
+                                    "candidate_path": "src/auth.py",
+                                    "confidence": 0.91,
+                                    "likely_tests": [],
+                                    "reasons": ["read-only inspection confirmed this path owns the requested behavior"],
+                                }
+                            ]
+                        },
+                        sort_keys=True,
+                    ),
+                    "```",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=f"WORKER_REPORT path={report}\n", stderr="")
+
+    def fake_legacy_path_runner(self, command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+        run_id = command[command.index("--run-id") + 1]
+        role = command[command.index("--role") + 1]
+        legacy_role = "".join(char if char.isalnum() else "_" for char in role.lower()).strip("_")
+        report = cwd / "target" / "agent_runs" / run_id / f"worker_{legacy_role}.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            "\n".join(
+                [
+                    f"# Worker Report: {legacy_role}",
+                    "",
+                    "- status: PASS",
+                    "",
+                    "## Findings",
+                    "",
+                    "- Legacy helper path was reported on stdout.",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=f"WORKER_REPORT path={report} run_id={run_id} role={legacy_role} mode=read-only\n", stderr="")
+
+    def write_sidecar_manifest(self, target: Path) -> None:
+        manifest = target / ".diffmogger" / "manifest.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "layout": "sidecar_v1",
+                    "path_aliases": {
+                        ".agentic/project_intake.json": ".diffmogger/agentic/project_intake.json",
+                        "target/agent_runs": ".diffmogger/runtime/agent_runs",
+                        "target/orchestration.sqlite3": ".diffmogger/runtime/orchestration.sqlite3",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def setup_target(self, target: Path) -> str:
         intake = target / ".agentic" / "project_intake.json"
         intake.parent.mkdir(parents=True, exist_ok=True)
@@ -138,6 +215,27 @@ class ReadOnlyWorkerFanoutTests(unittest.TestCase):
         self.write_read_only_tickets(target)
         return self.proposed_read_only_group_id(target)
 
+    def setup_sidecar_target(self, target: Path) -> str:
+        self.write_sidecar_manifest(target)
+        intake = target / ".diffmogger" / "agentic" / "project_intake.json"
+        intake.parent.mkdir(parents=True, exist_ok=True)
+        intake.write_text(
+            json.dumps(
+                {
+                    "project_name": "Sidecar Worker Fanout Demo",
+                    "product_goal": "Exercise sidecar-aware read-only worker fanout.",
+                    "target_user": "Automation maintainers",
+                    "desired_first_demo": "Typed worker records exist.",
+                    "worker_agents_allowed": True,
+                    "write_worker_agents_allowed": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        write_text(target, "src/auth.py", "AUTH = True\n")
+        self.write_read_only_tickets(target)
+        return self.proposed_read_only_group_id(target)
+
     def test_read_only_group_creates_worker_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -156,6 +254,188 @@ class ReadOnlyWorkerFanoutTests(unittest.TestCase):
             self.assertEqual(2, result["worker_count"])
             self.assertEqual(2, len([worker for worker in workers if worker["execution_group_id"] == group_id]))
             self.assertTrue(all(worker["report_artifact_id"] for worker in workers))
+
+    def test_read_only_worker_report_records_structured_scope_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            group_id = self.setup_target(target)
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = launch_read_only_execution_group_conn(
+                    conn,
+                    target,
+                    execution_group_id=group_id,
+                    max_workers=1,
+                    command_runner=self.fake_scope_evidence_runner,
+                )
+                records = scope_evidence_records_conn(conn)
+                workers = worker_agents_conn(conn, mode="read_only")
+
+            self.assertEqual("completed", result["status"])
+            self.assertEqual(1, len(records))
+            self.assertEqual("accepted", records[0]["status"])
+            self.assertEqual("src/auth.py", records[0]["candidate_path"])
+            self.assertEqual(1, workers[0]["payload"]["scope_evidence_ingest"]["accepted_count"])
+
+    def test_sidecar_launch_accepts_reported_legacy_worker_report_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            group_id = self.setup_sidecar_target(target)
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = launch_read_only_execution_group_conn(
+                    conn,
+                    target,
+                    execution_group_id=group_id,
+                    max_workers=1,
+                    command_runner=self.fake_legacy_path_runner,
+                )
+                workers = worker_agents_conn(conn, mode="read_only")
+
+            self.assertEqual("completed", result["status"])
+            self.assertEqual(1, result["worker_count"])
+            worker = workers[0]
+            report_path = Path(str(worker["payload"]["report_path"]))
+            self.assertEqual((target / "target" / "agent_runs").resolve(), report_path.parents[1].resolve())
+            self.assertTrue(report_path.exists())
+            self.assertIn("_", report_path.name)
+            self.assertFalse((target_path(target, "target/agent_runs") / result["run_id"] / report_path.name).exists())
+            self.assertEqual("completed", worker["status"])
+
+    def test_hyphenated_runtime_role_slug_is_passed_as_canonical_report_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            group_id = self.setup_sidecar_target(target)
+            commands: list[list[str]] = []
+
+            def capture_runner(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+                commands.append(command)
+                report = Path(command[command.index("--report-path") + 1])
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text("- status: PASS\n\n## Findings\n\n- Canonical path honored.\n", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, stdout=f"WORKER_REPORT path={report}\n", stderr="")
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = launch_read_only_execution_group_conn(
+                    conn,
+                    target,
+                    execution_group_id=group_id,
+                    max_workers=1,
+                    command_runner=capture_runner,
+                )
+                workers = worker_agents_conn(conn, mode="read_only")
+
+            self.assertEqual("completed", result["status"])
+            self.assertTrue(commands)
+            report_path = Path(commands[0][commands[0].index("--report-path") + 1])
+            role = commands[0][commands[0].index("--role") + 1]
+            self.assertIn("-", role)
+            self.assertIn("-", report_path.name)
+            self.assertNotIn("_", report_path.name.removeprefix("worker_").removesuffix(".md"))
+            self.assertEqual(report_path, Path(str(workers[0]["payload"]["report_path"])))
+
+    def test_dependent_read_only_tickets_do_not_share_parallel_wave(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            intake = target / ".agentic" / "project_intake.json"
+            intake.parent.mkdir(parents=True, exist_ok=True)
+            intake.write_text(
+                json.dumps(
+                    {
+                        "project_name": "Worker Dependency Demo",
+                        "product_goal": "Exercise dependent ticket parallel guards.",
+                        "target_user": "Automation maintainers",
+                        "desired_first_demo": "Dependent tickets are not launched together.",
+                        "worker_agents_allowed": True,
+                        "write_worker_agents_allowed": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            write_text(target, "src/auth.py", "AUTH = True\n")
+            write_text(target, "src/billing.py", "BILLING = True\n")
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "ticket-run",
+                    "campaign_mode": "bounded",
+                    "tickets": [
+                        {
+                            "id": "T1",
+                            "summary": "Inspect src/auth.py first",
+                            "status": "pending",
+                            "action_kind": "read_only_analysis",
+                            "execution_mode": "read_only",
+                        },
+                        {
+                            "id": "T2",
+                            "summary": "Inspect src/billing.py after auth context",
+                            "status": "pending",
+                            "action_kind": "read_only_context_review",
+                            "execution_mode": "read_only",
+                            "depends_on": ["T1"],
+                        },
+                    ],
+                },
+                actor_role="test",
+                event_type="ticket.run_test",
+            )
+
+            snapshot = state_snapshot(target)
+            dependency_edges = [
+                edge
+                for edge in snapshot["execution_dag"]["edges"]
+                if edge["dependency_kind"] == "depends_on"
+                and edge["dependency_mode"] == "hard"
+                and "T2 waits for dependency T1" in edge["reason"]
+            ]
+            self.assertTrue(dependency_edges)
+            groups = snapshot.get("proposed_execution_groups") if isinstance(snapshot.get("proposed_execution_groups"), list) else []
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                item_task_ids = {
+                    str(item.get("task_id") or "")
+                    for item in group.get("items", [])
+                    if isinstance(item, dict)
+                }
+                self.assertFalse({"T1", "T2"}.issubset(item_task_ids), json.dumps(group, sort_keys=True))
+
+    def test_read_only_workers_launch_concurrently(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            group_id = self.setup_target(target)
+            lock = threading.Lock()
+            all_started = threading.Event()
+            started = 0
+            active = 0
+            max_active = 0
+
+            def concurrent_runner(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+                nonlocal active, max_active, started
+                with lock:
+                    active += 1
+                    started += 1
+                    max_active = max(max_active, active)
+                    if started == 2:
+                        all_started.set()
+                try:
+                    all_started.wait(1.0)
+                    return self.fake_success_runner(command, cwd=cwd, timeout=timeout)
+                finally:
+                    with lock:
+                        active -= 1
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = launch_read_only_execution_group_conn(
+                    conn,
+                    target,
+                    execution_group_id=group_id,
+                    command_runner=concurrent_runner,
+                )
+
+            self.assertEqual("completed", result["status"])
+            self.assertGreaterEqual(max_active, 2)
 
     def test_codex_unavailable_creates_failure_report_but_does_not_crash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -200,6 +480,62 @@ class ReadOnlyWorkerFanoutTests(unittest.TestCase):
             self.assertTrue(contract["no_network"])
             self.assertTrue(contract["no_credentials"])
             self.assertTrue(any("modify source" in action for action in contract["denied_actions"]))
+
+    def test_read_only_worker_prompt_uses_symbol_context_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            intake = target / ".agentic" / "project_intake.json"
+            intake.parent.mkdir(parents=True, exist_ok=True)
+            intake.write_text(
+                json.dumps({"worker_agents_allowed": True, "write_worker_agents_allowed": False}),
+                encoding="utf-8",
+            )
+            write_text(target, "src/__init__.py", "")
+            write_text(target, "src/auth.py", "class AuthService:\n    def refresh(self):\n        return True\n")
+            write_text(target, "tests/test_auth.py", "from src.auth import AuthService\ndef test_auth():\n    assert AuthService()\n")
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "ticket-run",
+                    "tickets": [
+                        {
+                            "id": "T1",
+                            "summary": "Review AuthService context",
+                            "status": "pending",
+                            "action_kind": "read_only_analysis",
+                            "execution_mode": "read_only",
+                        }
+                    ],
+                },
+                actor_role="test",
+                event_type="ticket.run_test",
+            )
+            group_id = self.proposed_read_only_group_id(target)
+            prompts: list[str] = []
+
+            def capture_runner(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+                prompts.append(command[command.index("--prompt") + 1])
+                return self.fake_success_runner(command, cwd=cwd, timeout=timeout)
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = launch_read_only_execution_group_conn(
+                    conn,
+                    target,
+                    execution_group_id=group_id,
+                    max_workers=1,
+                    command_runner=capture_runner,
+                )
+                workers = worker_agents_conn(conn, mode="read_only")
+                contracts = worker_contracts_conn(conn)
+
+            self.assertEqual("completed", result["status"])
+            self.assertTrue(prompts)
+            self.assertIn("Symbol-aware context:", prompts[0])
+            self.assertIn("Direct symbols:", prompts[0])
+            self.assertIn("AuthService", prompts[0])
+            self.assertIn("Likely tests:", prompts[0])
+            self.assertTrue(workers[0]["payload"]["symbol_context_available"])
+            self.assertTrue(contracts[0]["payload"]["symbol_context_available"])
 
     def test_summary_is_generated_from_multiple_worker_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -335,7 +671,7 @@ class WriteWorkerFanoutTests(unittest.TestCase):
             target_file.write_text(current + "# worker change\n", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="worker complete\n", stderr="")
 
-    def test_write_worker_cannot_start_unless_enabled(self) -> None:
+    def test_write_worker_ignores_disabled_legacy_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             group_id = self.setup_target(target, write_enabled=False)
@@ -348,8 +684,8 @@ class WriteWorkerFanoutTests(unittest.TestCase):
                     command_runner=self.fake_write_runner,
                 )
 
-            self.assertEqual("blocked", result["status"])
-            self.assertEqual("write_workers_disabled", result["reason_kind"])
+            self.assertEqual("completed", result["status"])
+            self.assertEqual(2, result["queued_patch_count"])
 
     def test_write_worker_cannot_start_without_ownership_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -434,6 +770,98 @@ class WriteWorkerFanoutTests(unittest.TestCase):
             self.assertEqual(2, len([patch for patch in patches if patch["status"] == "queued"]))
             self.assertTrue(all(contract["ownership_scope"] for contract in contracts))
             self.assertTrue(all(contract["integration_notes_required"] for contract in contracts))
+
+    def test_write_workers_launch_concurrently(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            group_id = self.setup_target(target)
+            lock = threading.Lock()
+            all_started = threading.Event()
+            started = 0
+            active = 0
+            max_active = 0
+
+            def concurrent_runner(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+                nonlocal active, max_active, started
+                with lock:
+                    active += 1
+                    started += 1
+                    max_active = max(max_active, active)
+                    if started == 2:
+                        all_started.set()
+                try:
+                    all_started.wait(1.0)
+                    return self.fake_write_runner(command, cwd=cwd, timeout=timeout)
+                finally:
+                    with lock:
+                        active -= 1
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = launch_write_execution_group_conn(
+                    conn,
+                    target,
+                    execution_group_id=group_id,
+                    command_runner=concurrent_runner,
+                )
+
+            self.assertEqual("completed", result["status"])
+            self.assertEqual(2, result["queued_patch_count"])
+            self.assertGreaterEqual(max_active, 2)
+
+    def test_write_worker_prompt_uses_symbol_context_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.write_intake(target, write_enabled=True, max_write_workers=1)
+            write_text(target, "src/__init__.py", "")
+            write_text(target, "src/auth.py", "class AuthService:\n    pass\n")
+            subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+            subprocess.run(["git", "add", "."], cwd=target, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "chore: base",
+                ],
+                cwd=target,
+                check=True,
+            )
+            write_ticket_run_state(
+                target,
+                {"run_id": "ticket-run", "tickets": [{"id": "T1", "summary": "Update AuthService behavior", "status": "pending"}]},
+                actor_role="test",
+                event_type="ticket.run_test",
+            )
+            group_id = self.proposed_write_group_id(target)
+            prompts: list[str] = []
+
+            def capture_runner(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+                prompts.append(command[command.index("--prompt") + 1])
+                return self.fake_write_runner(command, cwd=cwd, timeout=timeout)
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = launch_write_execution_group_conn(
+                    conn,
+                    target,
+                    execution_group_id=group_id,
+                    max_workers=1,
+                    command_runner=capture_runner,
+                )
+                workers = worker_agents_conn(conn, mode="write")
+                contracts = worker_contracts_conn(conn)
+
+            self.assertEqual("completed", result["status"])
+            self.assertTrue(prompts)
+            self.assertIn("Symbol-aware context:", prompts[0])
+            self.assertIn("Direct symbols:", prompts[0])
+            self.assertIn("AuthService", prompts[0])
+            self.assertTrue(workers[0]["payload"]["symbol_context_available"])
+            self.assertTrue(contracts[0]["payload"]["symbol_context_available"])
 
     def test_worker_patch_is_queued_not_directly_committed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

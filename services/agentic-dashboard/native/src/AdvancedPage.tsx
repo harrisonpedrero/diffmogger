@@ -51,7 +51,7 @@ const fileCategories = [
   "Inbox",
   "Review",
   "Context",
-  "Roles / conveyor",
+  "Roles / scheduler",
 ];
 
 const defaultSettings: AdvancedSettings = {
@@ -186,7 +186,7 @@ function RuntimeEnvironmentCard(props: {
 
 function categoryOf(file: RegisteredFile): string {
   if (file.category === "Human bridge") return "Inbox";
-  if (file.category === "Multi-role / conveyor") return "Roles / conveyor";
+  if (file.category === "Multi-role / conveyor") return "Roles / scheduler";
   return file.category || "Core state";
 }
 

@@ -19,6 +19,7 @@ from .commands.advanced import (
 from .commands.brief import (
     command_brief_generate_intake,
     command_brief_load,
+    command_brief_run_bootstrap,
     command_brief_save_draft,
     command_brief_scaffold_bootstrap,
     command_brief_scaffold_preview,
@@ -37,7 +38,7 @@ from .commands.run_control import (
     command_run_load_log,
     command_run_once,
 )
-from .commands.state import command_state_brief, command_state_snapshot, command_state_validate
+from .commands.state import command_state_brief, command_state_snapshot, command_state_validate, command_state_watch
 from .commands.tickets import (
     command_ticket_accept_draft,
     command_ticket_accept_split,
@@ -82,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
         "brief.save_draft": command_brief_save_draft,
         "brief.scaffold_preview": command_brief_scaffold_preview,
         "brief.scaffold_bootstrap": command_brief_scaffold_bootstrap,
+        "brief.run_bootstrap": command_brief_run_bootstrap,
         "context.import": command_context_import,
         "inbox.load": command_inbox_load,
         "inbox.send_note": command_inbox_send_note,
@@ -123,6 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
         "state.snapshot": command_state_snapshot,
         "state.brief": command_state_brief,
         "state.validate": command_state_validate,
+        "state.watch": command_state_watch,
         "diagnostics.environment": command_diagnostics_environment,
         "diagnostics.run_checks": command_diagnostics_run_checks,
         "advanced.list_files": command_advanced_list_files,
@@ -144,6 +147,12 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument("--content", required=True, help="Replacement UTF-8 file content")
         if name == "advanced.export_debug_bundle":
             subparser.add_argument("--output-dir", required=True, help="Directory for the generated debug bundle")
+        if name == "state.watch":
+            subparser.add_argument("--after-event-id", type=int, default=0, help="Only emit runtime events after this event id")
+            subparser.add_argument("--poll-interval", type=float, default=0.75, help=argparse.SUPPRESS)
+            subparser.add_argument("--heartbeat-seconds", type=float, default=5.0, help=argparse.SUPPRESS)
+            subparser.add_argument("--max-events", type=int, default=0, help=argparse.SUPPRESS)
+            subparser.add_argument("--max-heartbeats", type=int, default=0, help=argparse.SUPPRESS)
         if name in {"brief.save_draft", "brief.scaffold_preview", "brief.scaffold_bootstrap"}:
             subparser.add_argument("--intake-json", required=True, help="JSON object with intake fields")
         if name == "brief.generate_intake":

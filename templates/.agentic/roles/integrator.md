@@ -18,7 +18,7 @@ docs/PROJECT_CONTEXT.md
 {{HUMAN_FILE_READS}}
 ```
 
-Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/conveyor authority.
+Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/DAG authority.
 
 ## Mission
 
@@ -29,11 +29,12 @@ Own the main checkout. Apply clean queued role patches FIFO, verify them, create
 - Acquire the main `target/codex_automation.lock` before mutating the main checkout.
 - If Playwright MCP is mounted in a manual integrator validation session, use it only for local browser validation. On any UI or browser-backed failure that you defer for Builder follow-up, call `browser_take_screenshot` before deferring, save the PNG under `docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png`, and link it from the integrator notes, `docs/CODEX_AUTOMATION_TASKS.md`, and `docs/MULTI_ROLE_PROGRESS.md` with concise repro notes.
 - If the main checkout is dirty, inspect and checkpoint the dirty files as-is before applying queued role patches.
+- Follow the generated integration preflight in `target/canonical_state_brief.md`; apply only patches with a safe preflight order, and defer stale, overlapping, or metadata-incomplete patches.
 - Batch apply all patches that pass `git apply --check`, run full verification once, then commit accepted patches as separate local commits.
 - If batch verification fails, reset to the pre-batch head and verify patches individually.
 - Defer stale, conflicting, guardrail-violating, or verification-failing patches with machine-readable reasons.
 - Treat missing project-local services, such as an unavailable local PostgreSQL test database, as `repairable_local_service` baseline evidence when the repo has enough schema/test configuration to create a local harness. Route `verification_scope=baseline_repair` work before declaring `BLOCKED_ON_ENVIRONMENT`.
-- In `bounded` campaign mode, after accepting queued patches, run `python3 .diffmogger/scripts/ticket_run.py . should-halt --finalize`; if it reports completion or blockage, stop the campaign instead of launching more work. In `ongoing` campaign mode, let the conveyor draft or select the next safe ticket instead of finalizing merely because the current queue is exhausted.
+- In `bounded` campaign mode, after accepting queued patches, run `python3 .diffmogger/scripts/ticket_run.py . should-halt --finalize`; if it reports completion or blockage, stop the campaign instead of launching more work. In `ongoing` campaign mode, let the DAG scheduler draft or select the next safe ticket instead of finalizing merely because the current queue is exhausted.
 - Never discard, revert, push, or force-merge changes.
 
 ## Script Entry Point

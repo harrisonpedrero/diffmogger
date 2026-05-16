@@ -43,10 +43,10 @@ The packaged app is source-checkout-backed. Set `DIFFMOGGER_KIT_ROOT=/path/to/Di
 The dashboard frontend should call backend commands instead of reading arbitrary files or recreating scaffold logic in TypeScript. Important command groups:
 
 - Project: `project.load_snapshot`, `project.list_recent`.
-- Brief: `brief.load`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`.
+- Brief: `brief.load`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`, `brief.run_bootstrap`.
 - Context: `context.import`.
 - Run and automation: `run.load`, `run.load_log`, `automation.start`, `automation.stop`.
-- State: `state.snapshot`, `state.validate`; these expose the SQLite-backed conveyor work item, current stage, stage contract, capability manifest, graph summaries, context-pack previews, leases, scheduler candidates, next actions, validation receipts, and event history.
+- State: `state.snapshot`, `state.validate`; these expose SQLite-backed execution DAG progress, capability manifest, graph summaries, context-pack previews, leases, scheduler candidates, next actions, validation receipts, event history, and narrow compatibility projections for older helpers.
 - Tickets: `ticket.load`, `ticket.add`, `ticket.update`, `ticket.delete`, `ticket.import`, `ticket.draft_from_intake`, `ticket.accept_draft`.
 - Safety: `safety.run_check`.
 - Workers and parallel execution: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`, `execution_group.load`, `execution_group.start`, `execution_group.cancel`, `execution_group.retry_failed`, `execution_group.export_debug_bundle`, `validation_jobs.load`, `lease.release_stale`.
@@ -68,7 +68,8 @@ The dashboard wizard collects the same intake fields supported by `schemas/proje
 - optional context files
 - optional worker settings
 - bounded or ongoing campaign mode with seed-ticket entry, bulk import, and review-only Codex follow-up candidates
-- continuous role conveyor automation
+- continuous execution DAG scheduler automation
+- DAG scheduler config: `parallel_execution_mode`, `symbol_graph_languages`, `parallel_write_min_confidence`, `parallel_write_direct_confidence`, `max_parallel_write_workers`, and `max_parallel_scope_workers`
 - optional Context7 and Playwright MCP setup
 - deliverable definition and long-run direction
 
@@ -76,16 +77,20 @@ For existing repos, Diffmogger writes sidecar state under `.diffmogger/` and onl
 
 When a bounded campaign is selected, the wizard shows a **Ticket Queue** panel before review. Low-cortisol generation should decompose the full described scope into reviewable local patches with no fixed ticket-count ceiling. Seed tickets are saved in the intake as `ticket_run_seed_tickets`; scaffold seeds them into the target-local SQLite ticket queue. If no seed tickets are provided, scaffold keeps a placeholder ticket in SQLite.
 
-## Scaffold And Bootstrap
+## Scaffold And First Run
 
-**Scaffold & Bootstrap** runs this source-kit pipeline:
+Manual setup writes target files; the first Run prepares the target if needed. **Scaffold** runs this source-kit pipeline:
 
 1. write `.diffmogger/agentic/project_intake.json`
 2. copy context files into `.diffmogger/context/`
 3. scaffold target docs, shell scripts, Python wrappers, `.diffmogger/lib/diffmogger/`, and the exported state schema
 4. update the target `.git/info/exclude`
 5. run `scripts/check_required_files.py`
-6. optionally start the first Codex bootstrap run
+6. leaves first-run preparation for the Run page
+
+When the user clicks **Start** for a scaffolded target whose first-run preparation is still pending, the Run page runs the guarded `brief.run_bootstrap` phase first, records completion in target-local state, refuses a second successful bootstrap, and starts automation only if preparation succeeds.
+
+The legacy **Scaffold & Bootstrap** wording refers to this guarded scaffold plus first-run preparation flow.
 
 `diffmogger.kit.scaffold_project_docs` is the source of truth for generated files. The dashboard is a UI over that contract.
 
@@ -106,12 +111,12 @@ Before automation starts, the dashboard checks:
 
 ## Continuous Automation
 
-After scaffold/bootstrap and required-file validation, the Run page can start or stop a detached target-scoped conveyor runner.
+After scaffold/bootstrap and required-file validation, the Run page can start or stop a detached target-scoped DAG scheduler runner.
 
-- **Start** launches `.diffmogger/scripts/run_conveyor_automation.sh` in a detached local process.
+- **Start** launches `.diffmogger/scripts/run_conveyor_automation.sh` in a detached local process. On the first start, it runs guarded target preparation first and launches automation only after that phase passes. The script keeps its historical filename, but the runtime model is the execution DAG.
 - **Stop** terminates the recorded runner process group.
 
-Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Runner and conveyor state are canonical in `.diffmogger/runtime/orchestration.sqlite3`; the Run page surfaces the typed state machine current stage, owner, validation status, capability manifest, continuation token, and queued next actions. It also shows the graph-derived Codebase Graph summary, Task Graph summary, Impact View, context-pack reasons, active leases, lease conflicts, stale graph warnings, scheduler candidates, proposed execution groups, validation jobs, worker contracts, and integration backlog from allowlisted backend commands over typed state. `.diffmogger/runtime/canonical_state_brief.md` is the generated agent-facing view, and `.diffmogger/runtime/automation_runner.json` plus `.diffmogger/runtime/automation_conveyor_state.json` are generated compatibility projections.
+Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Execution DAG state is canonical in `.diffmogger/runtime/orchestration.sqlite3`; the Run page surfaces DAG Progress, owner role, validation receipts, blockers, capability manifest, and queued next actions as the primary progress model. It also shows the graph-derived Codebase Graph summary, Task Graph summary, Impact View, context-pack reasons, active leases, lease conflicts, stale graph warnings, scheduler candidates, proposed execution groups, validation jobs, worker contracts, and integration backlog from allowlisted backend commands over typed state. `.diffmogger/runtime/canonical_state_brief.md` is the generated agent-facing view, and `.diffmogger/runtime/automation_runner.json` plus `.diffmogger/runtime/automation_conveyor_state.json` are generated compatibility projections.
 
 For scaffolded ticket-campaign targets, the Run page exposes the ticket authoring file through a structured **Ticket Queue** panel. It shows status counts, the next selected ticket, placeholder/dependency validation, and lets users inspect, edit, delete, add, preview/apply Markdown/CSV/JSON imports, draft from intake with Codex, and accept candidates. Draft candidates are stored under `.diffmogger/runtime/ticket_drafts/` and are not applied until accepted.
 
@@ -126,7 +131,7 @@ For scaffolded ticket-campaign targets, the Run page exposes the ticket authorin
 /tmp/Diffmogger-review/Diffmogger-self-review.md
 ```
 
-The native Observatory view and exported HTML show run state, queue/deferred patches, canonical state health, conveyor state, validation, safety, recent outcomes, and next-run worker strategy.
+The native Observatory view and exported HTML show run state, DAG progress, queue/deferred patches, canonical state health, validation, safety, recent outcomes, and next-run worker strategy.
 
 ## First Review Checklist
 
@@ -158,10 +163,10 @@ Dashboard controls stay narrow and typed:
 - **Release** releases an explicit stale lease by lease id.
 - **Export Debug Bundle** writes a compact parallel-state bundle without source contents, environment values, credentials, or arbitrary file reads.
 
-Write-worker fanout remains gated by target worker settings, lease ownership, and serialized integrator handoff. Dashboard controls observe and route typed runtime state; they do not bypass the conveyor or apply worker patches directly.
+Write-worker fanout remains gated by target worker settings, DAG scheduler confidence, lease ownership, and serialized integrator handoff. Dashboard controls observe and route typed runtime state; they do not bypass the DAG scheduler or apply worker patches directly.
 
 ## Inbox And Advanced Files
 
 The Inbox page writes structured notes and replies into typed human-message state in SQLite. Notifier credentials stay in `services/agentic-notifier/.env`; target projects only use the dashboard-backed queue or the loopback notifier API.
 
-The Advanced page can read, write, validate, open, or reveal only allowlisted managed files. Ticket and human-message state are edited through structured dashboard commands, while the **Canonical state** tab reads SQLite health, event counts, stage contracts, work item state, capability manifests, checkpoints, next actions, and recent event hashes through the backend API. It is for inspection and careful repair, not broad filesystem access.
+The Advanced page can read, write, validate, open, or reveal only allowlisted managed files. Ticket and human-message state are edited through structured dashboard commands, while the **Canonical state** tab reads SQLite health, event counts, execution DAG state, capability manifests, checkpoints, next actions, and recent event hashes through the backend API. It is for inspection and careful repair, not broad filesystem access.

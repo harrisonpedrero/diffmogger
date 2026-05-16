@@ -104,15 +104,15 @@
     },
     "write_worker_agents_allowed": {
       "type": "boolean",
-      "description": "Whether the main automation agent may optionally spawn bounded write-capable worker agents for large, well-planned changes with disjoint ownership.",
-      "default": false
+      "description": "Deprecated compatibility field. Diffmogger always allows bounded write-capable worker agents; the main agent still decides per run whether to use zero or more workers.",
+      "default": true
     },
     "max_write_worker_count": {
       "type": "integer",
       "description": "Maximum number of write-capable worker agents the main agent may spawn in one run. Values are capped at 10 by the scaffold.",
-      "minimum": 0,
+      "minimum": 1,
       "maximum": 10,
-      "default": 0
+      "default": 3
     },
     "write_worker_guidance": {
       "type": "string",
@@ -133,14 +133,58 @@
       },
       "default": {}
     },
+    "parallel_execution_mode": {
+      "type": "string",
+      "description": "Execution DAG scheduler policy for automatic ready-wave planning. Aggressive mode may launch compatible cross-ticket scope, write, review, and validation waves while keeping integration serialized.",
+      "enum": ["conservative", "aggressive"],
+      "default": "aggressive"
+    },
+    "symbol_graph_languages": {
+      "type": "array",
+      "description": "Languages used for symbol-level graph extraction. File-level graphing remains the fallback signal when parsing is unavailable or a language is omitted.",
+      "items": {
+        "type": "string",
+        "enum": ["python", "typescript", "javascript"]
+      },
+      "uniqueItems": true,
+      "default": ["python", "typescript", "javascript"]
+    },
+    "parallel_write_min_confidence": {
+      "type": "number",
+      "description": "Minimum confidence for a DAG write node to enter a parallel write wave.",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.75
+    },
+    "parallel_write_direct_confidence": {
+      "type": "number",
+      "description": "Confidence expected from direct file/path mentions or exact symbol-owner matches before a DAG node is treated as a direct write candidate.",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.75
+    },
+    "max_parallel_write_workers": {
+      "type": "integer",
+      "description": "Maximum write DAG nodes the scheduler should include in one compatible write wave.",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 3
+    },
+    "max_parallel_scope_workers": {
+      "type": "integer",
+      "description": "Maximum scoping/read-only DAG nodes the scheduler should include in one compatible scope wave.",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 2
+    },
     "multi_role_automations_allowed": {
       "type": "boolean",
-      "description": "Legacy compatibility mirror. Diffmogger now always scaffolds the multi-role conveyor; new intakes should omit this flag.",
+      "description": "Legacy compatibility mirror. Diffmogger now always scaffolds the multi-role DAG scheduler; new intakes should omit this flag.",
       "default": true
     },
     "automation_role_profile": {
       "type": "string",
-      "description": "Canonical automation profile. Diffmogger now always uses the planner/builder/hardener/integrator conveyor.",
+      "description": "Canonical owner-role profile for the execution DAG scheduler.",
       "enum": ["planner_builder_hardener_integrator"],
       "default": "planner_builder_hardener_integrator"
     },
@@ -151,7 +195,7 @@
     },
     "campaign_mode": {
       "type": "string",
-      "description": "Whether the conveyor should run a bounded seeded/imported ticket queue or continue drafting/enqueuing new generic tickets as an ongoing campaign.",
+      "description": "Whether the DAG scheduler should run a bounded seeded/imported ticket queue or continue drafting/enqueuing new generic tickets as an ongoing campaign.",
       "enum": ["bounded", "ongoing"],
       "default": "ongoing"
     },
@@ -234,7 +278,7 @@
     },
     "multi_role_allow_remotes": {
       "type": "boolean",
-      "description": "Whether dashboard-managed local-only multi-role or conveyor jobs may set MULTI_ROLE_ALLOW_REMOTES=1 when the repo has configured git remotes. This does not permit pushes, fetches, pulls, or remote configuration.",
+      "description": "Whether dashboard-managed local-only multi-role DAG jobs may set MULTI_ROLE_ALLOW_REMOTES=1 when the repo has configured git remotes. This does not permit pushes, fetches, pulls, or remote configuration.",
       "default": false
     },
     "optional_mcp_servers": {

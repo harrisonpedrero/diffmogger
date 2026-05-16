@@ -1,4 +1,5 @@
 import {
+  Activity,
   AlertTriangle,
   Ban,
   CheckCircle2,
@@ -16,17 +17,20 @@ import {
   Users,
   WandSparkles,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Component, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { BackendEnvelope, BackendLogEvent, ProjectSnapshot } from "./api/backend";
+import type { BackendEnvelope, BackendLogEvent, ProjectSnapshot, RuntimeStateEvent } from "./api/backend";
 import {
   listenBackendLogs,
+  listenRuntimeStateEvents,
   runBackendCommand,
   runBackendCommandStreamed,
   selectTicketImportFile,
+  startRuntimeStateWatch,
+  stopRuntimeStateWatch,
 } from "./api/backend";
 import { GraphInsightsPanel } from "./GraphInsights";
-import { buildRunModel, type RunAction, type RunRoute, type RunSafetyRow } from "./runModel";
+import { buildRunModel, type RunAction, type RunDagCluster, type RunDagClusterEdge, type RunDagEdge, type RunDagNode, type RunRoute, type RunSafetyRow } from "./runModel";
 import { TicketFields } from "./TicketFields";
 import {
   canSplitTicket,
@@ -88,6 +92,12 @@ function asRecords(value: unknown): Array<Record<string, unknown>> {
     ? value
         .map((item) => asRecord(item))
         .filter((item) => Object.keys(item).length > 0)
+    : [];
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((item) => String(item ?? "").trim()).filter(Boolean)
     : [];
 }
 
@@ -265,38 +275,537 @@ function RunSafetyMatrix(props: { rows: RunSafetyRow[]; busy: boolean; onRun: (a
   );
 }
 
-function RunStateMachinePanel(props: {
-  model: ReturnType<typeof buildRunModel>;
+function svgText(value: string, limit: number): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length > limit ? `${compact.slice(0, Math.max(0, limit - 1)).trim()}...` : compact;
+}
+
+function dagNodeLabel(node: RunDagNode): string {
+  const action = (node.canonicalActionType || node.actionType).replace(/_/g, " ");
+  return action.charAt(0).toUpperCase() + action.slice(1);
+}
+
+function dagNodeMeta(node: RunDagNode): string {
+  return `${node.ticketId || "system"} / ${node.ownerRole} / ${node.confidenceLabel}`;
+}
+
+function dagStreamTone(state: string): string {
+  if (state === "live") return "good";
+  if (state === "connecting") return "info";
+  if (state === "disconnected") return "warn";
+  return "quiet";
+}
+
+function liveNodeIds(events: RuntimeStateEvent[], nodes: RunDagNode[]): Set<string> {
+  const keys = new Set<string>();
+  for (const event of events.slice(-80)) {
+    const runtimeEvent = asRecord(event.runtimeEvent);
+    const taskId = textValue(runtimeEvent.task_id);
+    const phase = textValue(runtimeEvent.phase || runtimeEvent.event_type).toLowerCase();
+    for (const node of nodes) {
+      if ((taskId && node.ticketId === taskId) || (phase && [node.actionType, node.canonicalActionType, node.phase].some((value) => value.toLowerCase().includes(phase)))) {
+        keys.add(node.id);
+      }
+    }
+  }
+  return keys;
+}
+
+type DagLayout = {
+  width: number;
+  height: number;
+  nodeWidth: number;
+  nodeHeight: number;
+  positions: Map<string, { x: number; y: number }>;
+  groupBounds: Array<{ id: string; label: string; kind: string; detail: string; x: number; y: number; width: number; height: number }>;
+};
+
+function buildDagLayout(dag: ReturnType<typeof buildRunModel>["executionDag"], selectedNodeId: string): DagLayout {
+  const nodeWidth = 158;
+  const nodeHeight = 72;
+  const columnGap = 30;
+  const rowGap = 16;
+  const marginX = 24;
+  const firstNodeY = 68;
+  const columns = dag.columns;
+  const rowIds = Array.from(new Set(dag.visibleNodes.map((node) => node.ticketId || node.id))).sort((first, second) => {
+    const firstActive = dag.visibleNodes.some((node) => (node.ticketId || node.id) === first && ["running", "ready", "blocked", "failed"].includes(node.statusKind));
+    const secondActive = dag.visibleNodes.some((node) => (node.ticketId || node.id) === second && ["running", "ready", "blocked", "failed"].includes(node.statusKind));
+    return Number(secondActive) - Number(firstActive) || first.localeCompare(second);
+  });
+  if (selectedNodeId) {
+    const selected = dag.visibleNodes.find((node) => node.id === selectedNodeId);
+    const selectedRow = selected ? selected.ticketId || selected.id : "";
+    if (selectedRow) {
+      rowIds.sort((first, second) => Number(second === selectedRow) - Number(first === selectedRow));
+    }
+  }
+  const rowIndex = new Map(rowIds.map((id, index) => [id, index]));
+  const columnIndex = new Map(columns.map((column, index) => [column.id, index]));
+  const positions = new Map<string, { x: number; y: number }>();
+  for (const node of dag.visibleNodes) {
+    positions.set(node.id, {
+      x: marginX + (columnIndex.get(node.phase) ?? columns.length - 1) * (nodeWidth + columnGap),
+      y: firstNodeY + (rowIndex.get(node.ticketId || node.id) ?? 0) * (nodeHeight + rowGap),
+    });
+  }
+  const groupBounds: DagLayout["groupBounds"] = [];
+  for (const group of dag.groups) {
+    const points = group.nodeIds.map((id) => positions.get(id)).filter((point): point is { x: number; y: number } => Boolean(point));
+    if (!points.length) continue;
+    const minX = Math.min(...points.map((point) => point.x)) - 10;
+    const minY = Math.min(...points.map((point) => point.y)) - 10;
+    const maxX = Math.max(...points.map((point) => point.x)) + nodeWidth + 10;
+    const maxY = Math.max(...points.map((point) => point.y)) + nodeHeight + 10;
+    groupBounds.push({ id: group.id, label: group.label, kind: group.kind, detail: group.detail, x: minX, y: minY, width: maxX - minX, height: maxY - minY });
+  }
+  return {
+    width: marginX * 2 + columns.length * nodeWidth + (columns.length - 1) * columnGap,
+    height: firstNodeY + Math.max(1, rowIds.length) * (nodeHeight + rowGap) + 28,
+    nodeWidth,
+    nodeHeight,
+    positions,
+    groupBounds,
+  };
+}
+
+function DagLiveSvg(props: {
+  dag: ReturnType<typeof buildRunModel>["executionDag"];
+  layout: DagLayout;
+  selectedNodeId: string;
+  liveIds: Set<string>;
+  onSelect: (nodeId: string) => void;
 }) {
+  const connected = useMemo(() => {
+    const ids = new Set<string>();
+    if (!props.selectedNodeId) return ids;
+    ids.add(props.selectedNodeId);
+    for (const edge of props.dag.visibleEdges) {
+      if (edge.source === props.selectedNodeId || edge.target === props.selectedNodeId) {
+        ids.add(edge.source);
+        ids.add(edge.target);
+      }
+    }
+    return ids;
+  }, [props.dag.visibleEdges, props.selectedNodeId]);
+
+  function edgePath(edge: RunDagEdge): string {
+    const source = props.layout.positions.get(edge.source);
+    const target = props.layout.positions.get(edge.target);
+    if (!source || !target) return "";
+    const startX = source.x + props.layout.nodeWidth;
+    const startY = source.y + props.layout.nodeHeight / 2;
+    const endX = target.x;
+    const endY = target.y + props.layout.nodeHeight / 2;
+    const curve = Math.max(28, Math.abs(endX - startX) * 0.42);
+    return `M ${startX} ${startY} C ${startX + curve} ${startY}, ${endX - curve} ${endY}, ${endX} ${endY}`;
+  }
+
   return (
-    <article className="panel run-state-machine-panel" aria-label="Typed conveyor state machine">
-      <div className="panel-heading-row">
-        <div>
-          <h2>State Machine</h2>
-          <p>{props.model.stateMachine.continuationToken || "No continuation token recorded yet."}</p>
+    <svg className="dag-live-svg" viewBox={`0 0 ${props.layout.width} ${props.layout.height}`} role="img" aria-label="Live Execution Graph">
+      <defs>
+        <marker id="dag-live-arrow" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L0,7 L8,3.5 z" />
+        </marker>
+      </defs>
+      {props.dag.columns.map((column, index) => {
+        const x = 24 + index * (props.layout.nodeWidth + 30);
+        return (
+          <g className="dag-phase-heading" key={column.id}>
+            <text x={x} y="28">{column.label}</text>
+            <line x1={x} y1="39" x2={x + props.layout.nodeWidth} y2="39" />
+          </g>
+        );
+      })}
+      <g className="dag-group-layer">
+        {props.layout.groupBounds.map((group) => (
+          <g className={`dag-wave dag-wave-${group.kind}`} key={group.id}>
+            <rect x={group.x} y={group.y} width={group.width} height={group.height} rx="10" />
+            <text x={group.x + 10} y={group.y + 16}>{group.label}</text>
+            <title>{group.detail}</title>
+          </g>
+        ))}
+      </g>
+      <g className="dag-edge-layer">
+        {props.dag.visibleEdges.map((edge) => {
+          const path = edgePath(edge);
+          if (!path) return null;
+          const dimmed = connected.size > 0 && !connected.has(edge.source) && !connected.has(edge.target);
+          return (
+            <path
+              className={`dag-edge ${edge.presentationKind} ${dimmed ? "is-dimmed" : ""}`}
+              d={path}
+              key={edge.id || `${edge.source}-${edge.target}-${edge.dependencyKind}`}
+              markerEnd="url(#dag-live-arrow)"
+            >
+              <title>{edge.detail}</title>
+            </path>
+          );
+        })}
+      </g>
+      <g className="dag-node-layer">
+        {props.dag.visibleNodes.map((node) => {
+          const position = props.layout.positions.get(node.id);
+          if (!position) return null;
+          const selected = props.selectedNodeId === node.id;
+          const dimmed = connected.size > 0 && !connected.has(node.id);
+          const live = props.liveIds.has(node.id);
+          return (
+            <g
+              className={`dag-node status-${node.statusKind} ${selected ? "is-selected" : ""} ${dimmed ? "is-dimmed" : ""} ${live ? "is-live" : ""}`}
+              key={node.id}
+              transform={`translate(${position.x} ${position.y})`}
+              tabIndex={0}
+              role="button"
+              aria-label={node.detail}
+              onClick={() => props.onSelect(node.id)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  props.onSelect(node.id);
+                }
+              }}
+            >
+              <title>{node.detail}</title>
+              <rect width={props.layout.nodeWidth} height={props.layout.nodeHeight} rx="7" />
+              <circle className="dag-node-pulse" cx="14" cy="16" r="5" />
+              <text className="dag-node-action" x="28" y="19">{svgText(dagNodeLabel(node), 18)}</text>
+              <text className="dag-node-ticket" x="12" y="39">{svgText(dagNodeMeta(node), 24)}</text>
+              <text className="dag-node-owner" x="12" y="58">{svgText(node.ownershipScope, 28)}</text>
+              <text className="dag-node-status" x={props.layout.nodeWidth - 10} y="58" textAnchor="end">{node.statusKind}</text>
+              {node.badges.slice(0, 3).map((badge, index) => (
+                <g className={`dag-node-badge tone-${badge.tone}`} key={`${node.id}-${badge.kind}`} transform={`translate(${12 + index * 42} 63)`}>
+                  <rect width="36" height="13" rx="6" />
+                  <text x="18" y="10" textAnchor="middle">{svgText(badge.label, 5)}</text>
+                </g>
+              ))}
+            </g>
+          );
+        })}
+      </g>
+    </svg>
+  );
+}
+
+type DagClusterLayout = {
+  width: number;
+  height: number;
+  clusterWidth: number;
+  clusterHeight: number;
+  positions: Map<string, { x: number; y: number }>;
+};
+
+const CLUSTER_STATUS_ORDER = ["running", "ready", "blocked", "failed", "pending", "completed", "skipped"];
+
+function buildDagClusterLayout(dag: ReturnType<typeof buildRunModel>["executionDag"], selectedClusterId: string): DagClusterLayout {
+  const clusterWidth = 172;
+  const clusterHeight = 88;
+  const columnGap = 24;
+  const rowGap = 16;
+  const marginX = 24;
+  const firstClusterY = 68;
+  const positions = new Map<string, { x: number; y: number }>();
+  let maxRows = 1;
+  for (const [columnIndex, column] of dag.columns.entries()) {
+    const clusters = dag.clusters
+      .filter((cluster) => cluster.phase === column.id)
+      .sort((first, second) => {
+        if (first.id === selectedClusterId) return -1;
+        if (second.id === selectedClusterId) return 1;
+        return CLUSTER_STATUS_ORDER.indexOf(first.statusKind) - CLUSTER_STATUS_ORDER.indexOf(second.statusKind) || second.nodeCount - first.nodeCount;
+      });
+    maxRows = Math.max(maxRows, clusters.length);
+    clusters.forEach((cluster, rowIndex) => {
+      positions.set(cluster.id, {
+        x: marginX + columnIndex * (clusterWidth + columnGap),
+        y: firstClusterY + rowIndex * (clusterHeight + rowGap),
+      });
+    });
+  }
+  return {
+    width: marginX * 2 + dag.columns.length * clusterWidth + (dag.columns.length - 1) * columnGap,
+    height: firstClusterY + maxRows * (clusterHeight + rowGap) + 28,
+    clusterWidth,
+    clusterHeight,
+    positions,
+  };
+}
+
+function clusterLiveIds(liveIds: Set<string>, clusters: RunDagCluster[]): Set<string> {
+  const ids = new Set<string>();
+  for (const cluster of clusters) {
+    if (cluster.nodeIds.some((nodeId) => liveIds.has(nodeId))) ids.add(cluster.id);
+  }
+  return ids;
+}
+
+function clusterEdgePath(edge: RunDagClusterEdge, layout: DagClusterLayout): string {
+  const source = layout.positions.get(edge.source);
+  const target = layout.positions.get(edge.target);
+  if (!source || !target) return "";
+  const startX = source.x + layout.clusterWidth;
+  const startY = source.y + layout.clusterHeight / 2;
+  const endX = target.x;
+  const endY = target.y + layout.clusterHeight / 2;
+  const curve = Math.max(30, Math.abs(endX - startX) * 0.42);
+  return `M ${startX} ${startY} C ${startX + curve} ${startY}, ${endX - curve} ${endY}, ${endX} ${endY}`;
+}
+
+function DagClusterSvg(props: {
+  dag: ReturnType<typeof buildRunModel>["executionDag"];
+  layout: DagClusterLayout;
+  selectedClusterId: string;
+  liveClusterIds: Set<string>;
+  onSelect: (clusterId: string) => void;
+}) {
+  const connected = useMemo(() => {
+    const ids = new Set<string>();
+    if (!props.selectedClusterId) return ids;
+    ids.add(props.selectedClusterId);
+    for (const edge of props.dag.clusterEdges) {
+      if (edge.source === props.selectedClusterId || edge.target === props.selectedClusterId) {
+        ids.add(edge.source);
+        ids.add(edge.target);
+      }
+    }
+    return ids;
+  }, [props.dag.clusterEdges, props.selectedClusterId]);
+
+  return (
+    <svg className="dag-live-svg dag-cluster-svg" viewBox={`0 0 ${props.layout.width} ${props.layout.height}`} role="img" aria-label="Multi-resolution Execution Graph">
+      <defs>
+        <marker id="dag-cluster-arrow" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L0,7 L8,3.5 z" />
+        </marker>
+      </defs>
+      {props.dag.columns.map((column, index) => {
+        const x = 24 + index * (props.layout.clusterWidth + 24);
+        return (
+          <g className="dag-phase-heading" key={column.id}>
+            <text x={x} y="28">{column.label}</text>
+            <line x1={x} y1="39" x2={x + props.layout.clusterWidth} y2="39" />
+          </g>
+        );
+      })}
+      <g className="dag-edge-layer">
+        {props.dag.clusterEdges.map((edge) => {
+          const path = clusterEdgePath(edge, props.layout);
+          if (!path) return null;
+          const dimmed = connected.size > 0 && !connected.has(edge.source) && !connected.has(edge.target);
+          return (
+            <path
+              className={`dag-edge ${edge.presentationKind} ${dimmed ? "is-dimmed" : ""}`}
+              d={path}
+              key={edge.id}
+              markerEnd="url(#dag-cluster-arrow)"
+              strokeWidth={Math.min(5, 1.2 + edge.count / 16)}
+            >
+              <title>{edge.detail}</title>
+            </path>
+          );
+        })}
+      </g>
+      <g className="dag-node-layer">
+        {props.dag.clusters.map((cluster) => {
+          const position = props.layout.positions.get(cluster.id);
+          if (!position) return null;
+          const selected = props.selectedClusterId === cluster.id;
+          const dimmed = connected.size > 0 && !connected.has(cluster.id);
+          const live = props.liveClusterIds.has(cluster.id);
+          const heatStatuses = CLUSTER_STATUS_ORDER.filter((status) => cluster.statusCounts[status as keyof typeof cluster.statusCounts] > 0);
+          let heatX = 10;
+          return (
+            <g
+              className={`dag-cluster status-${cluster.statusKind} ${selected ? "is-selected" : ""} ${dimmed ? "is-dimmed" : ""} ${live ? "is-live" : ""}`}
+              key={cluster.id}
+              transform={`translate(${position.x} ${position.y})`}
+              tabIndex={0}
+              role="button"
+              aria-label={cluster.detail}
+              onClick={() => props.onSelect(cluster.id)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  props.onSelect(cluster.id);
+                }
+              }}
+            >
+              <title>{cluster.detail}</title>
+              <rect className="dag-cluster-shell" width={props.layout.clusterWidth} height={props.layout.clusterHeight} rx="8" />
+              <circle className="dag-node-pulse" cx="14" cy="16" r="5" />
+              <text className="dag-node-action" x="28" y="19">{svgText(cluster.label, 20)}</text>
+              <text className="dag-node-ticket" x="10" y="40">{cluster.nodeCount} nodes / {svgText(cluster.ownerSamples.join(", ") || "mixed owners", 20)}</text>
+              <text className="dag-node-owner" x="10" y="59">{svgText(cluster.ticketSamples.join(", ") || "system", 28)}</text>
+              <g className="dag-cluster-heat" transform="translate(0 70)">
+                {heatStatuses.map((status) => {
+                  const count = cluster.statusCounts[status as keyof typeof cluster.statusCounts];
+                  const width = Math.max(8, Math.round((count / Math.max(1, cluster.nodeCount)) * 148));
+                  const x = heatX;
+                  heatX += width + 2;
+                  return <rect className={`status-${status}`} x={x} y="0" width={width} height="8" rx="4" key={`${cluster.id}-${status}`} />;
+                })}
+              </g>
+              {(cluster.activeGroupNodeCount > 0 || cluster.plannedGroupNodeCount > 0) && (
+                <text className="dag-cluster-wave-count" x={props.layout.clusterWidth - 10} y="59" textAnchor="end">
+                  {cluster.activeGroupNodeCount ? `${cluster.activeGroupNodeCount} live` : `${cluster.plannedGroupNodeCount} wave`}
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </g>
+    </svg>
+  );
+}
+
+class LiveGraphErrorBoundary extends Component<{ resetKey: string; children: ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidUpdate(previous: { resetKey: string }) {
+    if (previous.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <article className="panel run-dag-panel" aria-label="Live Execution Graph">
+          <div className="dag-empty-state critical" role="alert">
+            <AlertTriangle size={18} />
+            <strong>Live Execution Graph could not render</strong>
+            <p>The rest of the dashboard is still available. Refreshing the snapshot will retry the graph renderer.</p>
+          </div>
+        </article>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function LiveExecutionGraphPanel(props: {
+  model: ReturnType<typeof buildRunModel>;
+  liveEvents: RuntimeStateEvent[];
+  streamState: "snapshot" | "connecting" | "live" | "disconnected";
+  eventCount: number;
+}) {
+  const dag = props.model.executionDag;
+  const [selectedNodeId, setSelectedNodeId] = useState("");
+  const abstracted = dag.abstraction.enabled;
+  const selectedNode = abstracted ? undefined : dag.nodes.find((node) => node.id === selectedNodeId) ?? dag.visibleNodes[0];
+  const selectedCluster = abstracted ? dag.clusters.find((cluster) => cluster.id === selectedNodeId) ?? dag.clusters[0] : undefined;
+  const layout = useMemo(() => buildDagLayout(dag, selectedNodeId), [dag.digest, dag.renderMode, dag.renderLimit.visibleNodeCount, dag.renderLimit.visibleEdgeCount, selectedNodeId]);
+  const clusterLayout = useMemo(() => buildDagClusterLayout(dag, selectedNodeId), [dag.digest, dag.abstraction.clusterCount, dag.abstraction.bundledEdgeCount, selectedNodeId]);
+  const liveIds = useMemo(() => liveNodeIds(props.liveEvents, abstracted ? dag.nodes : dag.visibleNodes), [props.liveEvents, abstracted, dag.nodes, dag.visibleNodes]);
+  const liveClusterIdSet = useMemo(() => clusterLiveIds(liveIds, dag.clusters), [liveIds, dag.clusters]);
+  const streamLabel = props.streamState === "live" ? "Live stream" : props.streamState === "connecting" ? "Connecting" : props.streamState === "disconnected" ? "Snapshot mode" : "Snapshot";
+  const graphTone = dag.summary.blocked || dag.summary.failed ? "warn" : dag.summary.running ? "info" : dag.summary.ready ? "good" : "quiet";
+
+  return (
+    <LiveGraphErrorBoundary resetKey={`${dag.digest}-${dag.renderMode}`}>
+      <article className="panel run-dag-panel live-dag-panel" aria-label="Live Execution Graph">
+        <div className="panel-heading-row">
+          <div>
+            <h2>Live Execution Graph</h2>
+            <p>{dag.hasData ? `${dag.authority || "runtime"} / ${dag.digest || "digest pending"}` : "No DAG data for this run"}</p>
+          </div>
+          <div className="dag-heading-pills">
+            <RunTonePill tone={dagStreamTone(props.streamState)}><Activity size={12} />{streamLabel}</RunTonePill>
+            <RunTonePill tone={graphTone}>{dag.summary.total} nodes</RunTonePill>
+          </div>
         </div>
-        <RunTonePill tone={props.model.banner.tone}>{props.model.stateMachine.stageStatus}</RunTonePill>
-      </div>
-      <div className="state-machine-grid">
-        <DetailRow label="Stage" value={props.model.stateMachine.stage} />
-        <DetailRow label="Owner" value={props.model.stateMachine.ownerRole} />
-        <DetailRow label="Validation" value={props.model.stateMachine.validationStatus} />
-        <DetailRow label="Capabilities" value={props.model.stateMachine.capability} />
-      </div>
-      <div className="state-machine-next">
-        {props.model.stateMachine.nextActions.length ? (
-          props.model.stateMachine.nextActions.map((item, index) => (
-            <div className="state-machine-action" key={`${item.role}-${index}`}>
-              <strong>{item.role}</strong>
-              <span>{item.state}</span>
-              <p>{item.reason}</p>
+        <div className="dag-summary-strip" aria-label="DAG status summary">
+          <DetailRow label="Ready" value={dag.summary.ready} />
+          <DetailRow label="Running" value={dag.summary.running} />
+          <DetailRow label="Blocked" value={dag.summary.blocked + dag.summary.failed} />
+          <DetailRow label="Completed" value={dag.summary.completed + dag.summary.skipped} />
+          <DetailRow label="Planned waves" value={dag.parallel.proposedGroups} />
+          <DetailRow label="Active groups" value={dag.parallel.activeGroups} />
+          <DetailRow label={abstracted ? "Clusters" : "Visible"} value={abstracted ? dag.abstraction.clusterCount : dag.renderLimit.visibleNodeCount} />
+          <DetailRow label={abstracted ? "Bundled edges" : "Edges"} value={abstracted ? dag.abstraction.bundledEdgeCount : dag.renderLimit.visibleEdgeCount} />
+        </div>
+        {dag.hasData && abstracted ? (
+          <div className="dag-live-layout">
+            <div className="dag-scroll-frame">
+              <DagClusterSvg
+                dag={dag}
+                layout={clusterLayout}
+                selectedClusterId={selectedCluster?.id ?? ""}
+                liveClusterIds={liveClusterIdSet}
+                onSelect={setSelectedNodeId}
+              />
             </div>
-          ))
+            <aside className="dag-detail-rail" aria-label="Selected DAG cluster details">
+              {selectedCluster ? (
+                <>
+                  <div className={`dag-detail-card status-${selectedCluster.statusKind}`}>
+                    <strong>{selectedCluster.label}</strong>
+                    <span>{selectedCluster.nodeCount} nodes / {selectedCluster.actionSamples.join(", ") || "mixed actions"}</span>
+                    <p>{selectedCluster.detail}</p>
+                  </div>
+                  <div className="dag-badge-list">
+                    {CLUSTER_STATUS_ORDER.filter((status) => selectedCluster.statusCounts[status as keyof typeof selectedCluster.statusCounts] > 0).map((status) => (
+                      <span className={`dag-badge tone-${toneForStatus(status)}`} key={`${selectedCluster.id}-${status}`}>
+                        {status}: {selectedCluster.statusCounts[status as keyof typeof selectedCluster.statusCounts]}
+                      </span>
+                    ))}
+                    {selectedCluster.activeGroupNodeCount > 0 && <span className="dag-badge tone-good">{selectedCluster.activeGroupNodeCount} active group nodes</span>}
+                    {selectedCluster.plannedGroupNodeCount > 0 && <span className="dag-badge tone-info">{selectedCluster.plannedGroupNodeCount} planned wave nodes</span>}
+                  </div>
+                </>
+              ) : (
+                <p className="empty-copy">Select a cluster to inspect its aggregate runtime evidence.</p>
+              )}
+            </aside>
+          </div>
+        ) : dag.hasData ? (
+          <div className="dag-live-layout">
+            <div className="dag-scroll-frame">
+              <DagLiveSvg dag={dag} layout={layout} selectedNodeId={selectedNode?.id ?? ""} liveIds={liveIds} onSelect={setSelectedNodeId} />
+            </div>
+            <aside className="dag-detail-rail" aria-label="Selected DAG node details">
+              {selectedNode ? (
+                <>
+                  <div className={`dag-detail-card status-${selectedNode.statusKind}`}>
+                    <strong>{selectedNode.ticketId || selectedNode.id}</strong>
+                    <span>{dagNodeLabel(selectedNode)} / {selectedNode.ownerRole}</span>
+                    <p>{selectedNode.detail}</p>
+                  </div>
+                  <div className="dag-badge-list">
+                    {selectedNode.badges.length ? selectedNode.badges.map((badge) => (
+                      <span className={`dag-badge tone-${badge.tone}`} key={`${selectedNode.id}-${badge.kind}`}>{badge.label}</span>
+                    )) : <span className="dag-badge tone-quiet">no badges</span>}
+                  </div>
+                </>
+              ) : (
+                <p className="empty-copy">Select a node to inspect its runtime evidence.</p>
+              )}
+            </aside>
+          </div>
         ) : (
-          <p className="empty-copy">No typed next action is queued yet.</p>
+          <div className="dag-empty-state">
+            <Activity size={18} />
+            <strong>No DAG data for this run</strong>
+            <p>Fresh snapshots will show execution DAG nodes and edges here once the runtime has materialized scheduler state.</p>
+          </div>
         )}
-      </div>
-    </article>
+        {dag.hasData && (
+          <div className="dag-legend" aria-label="DAG status legend">
+            {["pending", "ready", "running", "completed", "blocked", "failed", "skipped"].map((status) => (
+              <span className={`dag-legend-item status-${status}`} key={status}>
+                <i />
+                {status}
+              </span>
+            ))}
+            <span className="dag-legend-item"><i />{dag.renderMode} mode</span>
+            {abstracted && <span className="dag-legend-item"><i />{dag.abstraction.level} lens</span>}
+            <span className="dag-legend-item"><i />{props.eventCount} live events</span>
+            {dag.renderLimit.hiddenNodeCount > 0 && <span className="dag-legend-item"><i />{dag.renderLimit.hiddenNodeCount} hidden nodes</span>}
+          </div>
+        )}
+      </article>
+    </LiveGraphErrorBoundary>
   );
 }
 
@@ -353,6 +862,13 @@ function ParallelExecutionPanel(props: {
     ...asRecords(details.blocked_parallel_candidates),
     ...asRecords(state.blocked_parallel_candidates),
   ].slice(0, 6);
+  const whyNotParallel = asRecord(
+    details.why_not_parallel ||
+    state.why_not_parallel ||
+    asRecord(state.scheduler_parallel_dry_run).why_not_parallel,
+  );
+  const whyReasonGroups = asRecords(whyNotParallel.reason_groups).slice(0, 5);
+  const whyNextImprovements = asRecords(whyNotParallel.next_improvements).slice(0, 3);
   const activeLeases = [
     ...asRecords(details.active_leases),
     ...asRecords(state.active_leases),
@@ -373,6 +889,11 @@ function ParallelExecutionPanel(props: {
     ...asRecords(details.integration_backlog_from_parallel_workers),
     ...asRecords(state.integration_backlog_from_parallel_workers),
   ].slice(0, 6);
+  const integrationPreflight = asRecord(
+    details.worker_patch_integration_preflight || state.worker_patch_integration_preflight,
+  );
+  const integrationPreflightOrder = asRecords(integrationPreflight.safe_order).slice(0, 5);
+  const integrationPreflightConflicts = asRecords(integrationPreflight.likely_conflicts).slice(0, 4);
   const staleLeaseWarnings = activeLeases
     .filter(leaseLooksStale)
     .map((lease) => ({
@@ -441,6 +962,38 @@ function ParallelExecutionPanel(props: {
           Start Validation Group
         </button>
       </div>
+
+      <section className="parallel-section">
+        <h3>Why Not Parallel?</h3>
+        <div className="parallel-row-list">
+          {whyReasonGroups.length ? whyReasonGroups.map((group, index) => (
+            <div className="parallel-row compact" key={`${group.reason_kind ?? "reason"}-${index}`}>
+              <div>
+                <strong>{compactValue(group.label || group.reason_kind)}</strong>
+                <span>{numberValue(group.count)} candidate(s) · {compactValue(group.next_action)}</span>
+              </div>
+              <RunTonePill tone="warn">{compactValue(group.reason_kind, "blocked")}</RunTonePill>
+            </div>
+          )) : (
+            <div className="parallel-row compact">
+              <div>
+                <strong>{compactValue(whyNotParallel.status, "clear")}</strong>
+                <span>{compactValue(whyNotParallel.summary, "No blocked parallel candidates recorded.")}</span>
+              </div>
+              <RunTonePill tone="good">clear</RunTonePill>
+            </div>
+          )}
+          {whyNextImprovements.map((item, index) => (
+            <div className="parallel-row compact" key={`next-improvement-${index}`}>
+              <div>
+                <strong>{compactValue(item.improvement_kind || item.reason_kind, "next improvement")}</strong>
+                <span>{compactValue(item.next_action)}</span>
+              </div>
+              <RunTonePill tone="info">{numberValue(item.count)} candidate(s)</RunTonePill>
+            </div>
+          ))}
+        </div>
+      </section>
 
       <section className="parallel-section">
         <h3>Proposed groups</h3>
@@ -556,6 +1109,28 @@ function ParallelExecutionPanel(props: {
       <section className="parallel-section">
         <h3>Integration backlog</h3>
         <div className="parallel-row-list">
+          <div className="parallel-row compact">
+            <div>
+              <strong>{numberValue(integrationPreflight.safe_count)} safe patch(es)</strong>
+              <span>{numberValue(integrationPreflight.likely_conflict_count)} conflict risk · {numberValue(integrationPreflight.stale_base_count)} stale base · {numberValue(integrationPreflight.missing_metadata_count)} missing metadata</span>
+            </div>
+            <RunTonePill tone={numberValue(integrationPreflight.likely_conflict_count) > 0 ? "warn" : "good"}>preflight</RunTonePill>
+          </div>
+          {integrationPreflightOrder.map((item, index) => (
+            <div className="parallel-row compact" key={`preflight-order-${textValue(item.patch_id, String(index))}`}>
+              <div>
+                <strong>{compactValue(item.patch_id)}</strong>
+                <span>order {numberValue(item.safe_order)} · {compactValue(item.reason_kind || item.status)}</span>
+              </div>
+              <RunTonePill tone={toneForStatus(item.status)}>{compactValue(item.status)}</RunTonePill>
+            </div>
+          ))}
+          {integrationPreflightConflicts.map((item, index) => (
+            <div className="parallel-warning" key={`preflight-conflict-${textValue(item.patch_id, String(index))}`}>
+              <AlertTriangle size={14} />
+              <span>{compactValue(item.patch_id)} overlaps {stringList(item.conflict_patch_ids).join(", ") || compactValue(item.reason_kind, "another patch")}</span>
+            </div>
+          ))}
           {integrationBacklog.length ? integrationBacklog.map((patch, index) => (
             <div className="parallel-row compact" key={textValue(patch.patch_id, `patch-${index}`)}>
               <div>
@@ -634,6 +1209,9 @@ export function RunPage(props: {
   const [ticketDraft, setTicketDraft] = useState<TicketDraftState | null>(null);
   const [ticketDraftLogs, setTicketDraftLogs] = useState<RunLogEvent[]>([]);
   const [parallelDetails, setParallelDetails] = useState<Record<string, unknown> | null>(null);
+  const [dagLiveEvents, setDagLiveEvents] = useState<RuntimeStateEvent[]>([]);
+  const [dagStreamState, setDagStreamState] = useState<"snapshot" | "connecting" | "live" | "disconnected">("snapshot");
+  const [dagEventCount, setDagEventCount] = useState(0);
   const [ticketPendingAction, setTicketPendingAction] = useState<
     | { kind: "delete"; ticketId: string }
     | { kind: "import"; mode: "append" | "replace-placeholder" | "replace-all" }
@@ -698,6 +1276,81 @@ export function RunPage(props: {
   }, [busyCommand]);
 
   useEffect(() => {
+    if (!target || !model.isScaffolded) {
+      setDagStreamState("snapshot");
+      setDagLiveEvents([]);
+      setDagEventCount(0);
+      return;
+    }
+    const state = asRecord(props.snapshot?.run.state);
+    const lastEvent = asRecord(state.last_event);
+    const afterEventId = numberValue(lastEvent.event_id);
+    const watchId = `run-dag-${Math.abs(target.split("").reduce((total, char) => total + char.charCodeAt(0), 0))}-${Date.now()}`;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    let pending: RuntimeStateEvent[] = [];
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function flushEvents() {
+      flushTimer = null;
+      if (!pending.length || disposed) return;
+      const batch = pending;
+      pending = [];
+      setDagLiveEvents((current) => [...current, ...batch].slice(-160));
+      setDagEventCount((count) => count + batch.filter((event) => event.event === "runtime_state").length);
+    }
+
+    function scheduleFlush(event: RuntimeStateEvent) {
+      pending.push(event);
+      if (pending.length >= 100) {
+        if (flushTimer) clearTimeout(flushTimer);
+        flushEvents();
+        return;
+      }
+      if (!flushTimer) flushTimer = setTimeout(flushEvents, 250);
+    }
+
+    function scheduleRefresh() {
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        if (!disposed) props.onRefresh();
+      }, 2000);
+    }
+
+    setDagStreamState("connecting");
+    void listenRuntimeStateEvents(watchId, (event) => {
+      if (event.event === "runtime_state_error" || event.event === "runtime_state_closed") {
+        setDagStreamState("disconnected");
+        return;
+      }
+      if (event.event === "runtime_state_heartbeat") {
+        setDagStreamState("live");
+        return;
+      }
+      if (event.event === "runtime_state") {
+        setDagStreamState("live");
+        scheduleFlush(event);
+        scheduleRefresh();
+      }
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    });
+    void startRuntimeStateWatch({ watchId, target, afterEventId }).catch(() => {
+      if (!disposed) setDagStreamState("disconnected");
+    });
+    return () => {
+      disposed = true;
+      if (flushTimer) clearTimeout(flushTimer);
+      if (refreshTimer) clearTimeout(refreshTimer);
+      unlisten?.();
+      void stopRuntimeStateWatch(watchId);
+    };
+  }, [target, model.isScaffolded]);
+
+  useEffect(() => {
     if (!routeDirtyMessage) return;
     function onBeforeUnload(event: BeforeUnloadEvent) {
       event.preventDefault();
@@ -742,6 +1395,49 @@ export function RunPage(props: {
     });
   }
 
+  async function runBootstrapThenStart(action: RunAction) {
+    if (!target) return;
+    const command = "automation.bootstrap_start";
+    const runId = `${command}-${Date.now()}`;
+    setBusyCommand(command);
+    setCommandMessage("Preparing target before start.");
+    setLogs([]);
+    let unlisten: (() => void) | null = null;
+    try {
+      unlisten = await listenBackendLogs(runId, (event) => {
+        setLogs((current) => [...current, { ...event, capturedAt: new Date().toISOString() }]);
+      });
+      const bootstrapPayload: BackendEnvelope<Record<string, unknown>> = await runBackendCommandStreamed({
+        runId,
+        command: "brief.run_bootstrap",
+        target,
+      });
+      const bootstrapAlreadyCompleted = bootstrapPayload.error?.type === "bootstrap_already_completed";
+      if (!bootstrapPayload.ok && !bootstrapAlreadyCompleted) {
+        setCommandError(bootstrapPayload.message ?? "First-run preparation failed.");
+        props.onRefresh();
+        return;
+      }
+      setCommandMessage("Preparation completed. Starting automation.");
+      const startPayload: BackendEnvelope<Record<string, unknown>> = await runBackendCommandStreamed({
+        runId,
+        command: "automation.start",
+        target,
+      });
+      if (!startPayload.ok) {
+        setCommandError(startPayload.message ?? "Automation start failed.");
+      } else {
+        setCommandMessage(`${action.label} completed.`);
+      }
+      props.onRefresh();
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error));
+    } finally {
+      unlisten?.();
+      setBusyCommand(null);
+    }
+  }
+
   async function runAction(action: RunAction) {
     setCommandError(null);
     setCommandMessage(null);
@@ -756,6 +1452,10 @@ export function RunPage(props: {
     }
     if (!action.command || !target || !action.enabled) return;
     const command = action.command;
+    if (command === "automation.bootstrap_start") {
+      await runBootstrapThenStart(action);
+      return;
+    }
     if (command === "worker.run_write" && !writeOwnership.trim()) {
       setCommandError("Enter a disjoint ownership scope before launching a write worker.");
       return;
@@ -1234,9 +1934,14 @@ export function RunPage(props: {
           <p className="empty-copy">{model.automation.message}</p>
         </article>
 
-        <RunSafetyMatrix rows={model.safety} busy={isBusy} onRun={runAction} />
+        <LiveExecutionGraphPanel
+          model={model}
+          liveEvents={dagLiveEvents}
+          streamState={dagStreamState}
+          eventCount={dagEventCount}
+        />
 
-        <RunStateMachinePanel model={model} />
+        <RunSafetyMatrix rows={model.safety} busy={isBusy} onRun={runAction} />
 
         <GraphInsightsPanel snapshot={props.snapshot} />
 

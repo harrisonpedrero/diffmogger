@@ -24,7 +24,7 @@ The native dashboard opens a local window and calls the Diffmogger backend comma
 - optional local notifier health when using `local_notifier`
 - optional macOS desktop notification command when ticket completion notifications are enabled
 
-Fill in the wizard, choose the target directory, optionally add context files such as PDFs or research notes, then click **Scaffold & Bootstrap**. Choose fresh-project mode for a new target directory. Choose existing-project mode when the target already has project files and describe the first integrated change in the intake. The dashboard writes `.diffmogger/agentic/project_intake.json`, copies context files into `.diffmogger/context/`, creates `.diffmogger/state/PROJECT_CONTEXT.md`, scaffolds required files, validates them, starts the initial Codex bootstrap run when requested, and ensures the target has a local git repo with an initial `chore: initial commit` when `HEAD` does not exist.
+Fill in the wizard, choose the target directory, optionally add context files such as PDFs or research notes, then click **Scaffold**. Choose fresh-project mode for a new target directory. Choose existing-project mode when the target already has project files and describe the first integrated change in the intake. The dashboard writes `.diffmogger/agentic/project_intake.json`, copies context files into `.diffmogger/context/`, creates `.diffmogger/state/PROJECT_CONTEXT.md`, scaffolds required files, validates them, and ensures the target has a local git repo with an initial `chore: initial commit` when `HEAD` does not exist. Then open **Run** and click **Start**. On the first start, the dashboard runs the generated initial Codex bootstrap prompt once as guarded target preparation; the backend refuses a second successful bootstrap for the same target.
 
 When integrating into an existing repo, Diffmogger preserves project-owned files by keeping Diffmogger state under `.diffmogger/`. If root `AGENTS.md` exists, Diffmogger adds or updates a managed block that points Codex at the sidecar prompt. Keep repo-owned instructions outside that managed block.
 
@@ -42,29 +42,36 @@ Use `human_bridge_mode: file_only` when you want manual Markdown communication, 
 
 Use `project_mode: existing_project` when scaffolding into a repo that already has app code, docs, or project-specific instructions.
 
-Write-capable worker agents are disabled unless the intake explicitly enables them. CLI intakes can use:
+Write-capable worker agents are always available and optional per run. CLI intakes can tune the cap and guidance with:
 
 ```json
 {
-  "write_worker_agents_allowed": true,
   "max_write_worker_count": 10,
   "write_worker_guidance": "Use the most parallelism the task can safely absorb while keeping ownership reviewable."
 }
 ```
 
-The scaffold caps `max_write_worker_count` at 10. Read-only worker reports remain available separately through `worker_agents_allowed`.
+The scaffold caps `max_write_worker_count` at 10 and defaults it to 3. `write_worker_agents_allowed` is a deprecated compatibility field and no longer disables write workers when false.
 
-Multi-role conveyor automation is the standard mode. CLI intakes can use:
+DAG scheduler automation is the standard mode. CLI intakes can use:
 
 ```json
 {
   "automation_role_profile": "planner_builder_hardener_integrator",
+  "parallel_execution_mode": "aggressive",
+  "symbol_graph_languages": ["python", "typescript", "javascript"],
+  "parallel_write_min_confidence": 0.75,
+  "parallel_write_direct_confidence": 0.75,
+  "max_parallel_write_workers": 3,
+  "max_parallel_scope_workers": 2,
   "automation_checkpoint_commits": true,
   "multi_role_allow_remotes": false
 }
 ```
 
-Diffmogger always scaffolds the `planner_builder_hardener_integrator` conveyor. Legacy intakes may still include `multi_role_automations_allowed`, but new intakes should use `campaign_mode` for the setup choice.
+Diffmogger always scaffolds the `planner_builder_hardener_integrator` role profile on top of the execution DAG scheduler. Legacy intakes may still include `multi_role_automations_allowed`; new intakes should use `campaign_mode` for campaign scope and the `parallel_*`, `symbol_graph_languages`, and `max_parallel_*` fields for scheduler policy.
+
+`parallel_execution_mode` defaults to `aggressive` for automatic ready-wave planning. `symbol_graph_languages` controls symbol extraction for Python and TypeScript/JavaScript while preserving file-level graph fallback. `parallel_write_min_confidence` is the write-wave threshold, `parallel_write_direct_confidence` is the confidence expected from direct path or exact-symbol ownership signals, `max_parallel_write_workers` caps same-wave write launches, and `max_parallel_scope_workers` caps scoping/read-only fanout. Scoping/read-only candidates use a lower default confidence threshold of `0.55`; when direct write confidence is missing, bounded read-only scope workers gather ownership evidence, likely paths, likely symbols, validation hints, and risk notes before serial builder fallback. Structured scope evidence is normalized into SQLite before it can raise later write confidence; stale, ambiguous, unresolved, unsafe, or low-confidence records stay advisory.
 
 Scaffold creates a local git repo and initial `chore: initial commit` automatically when the selected target does not already have `HEAD`. Continuous automation still checks this before the runner starts.
 
@@ -80,7 +87,7 @@ For bounded ticket work, choose **Bounded campaign** in the dashboard run config
 
 The native dashboard provides a **Ticket Queue** panel before scaffold when bounded campaign is selected. Low-cortisol generation creates a full-scope seed queue by splitting the described project into reviewable local patches with no fixed ticket-count ceiling. Use the queue panel to add/edit/delete seed tickets, paste Markdown/CSV/JSON imports, or ask Codex to draft review-only follow-up candidates from current project state. CLI intakes can also include `ticket_run_seed_tickets`; scaffold writes those into the target-local SQLite ticket queue.
 
-After scaffold, the Run page has the same Ticket Queue controls: inspect, add, edit, delete, preview/apply imports transactionally, draft from intake, and accept selected draft candidates. Runtime decisions, typed conveyor stage, repo capability manifest, events, blockers, and next actions remain canonical in `.diffmogger/runtime/orchestration.sqlite3`. Bootstrap is readiness-only in bounded campaign mode: it should confirm setup, ticket parsing, and verification, not implement the tickets. Normal campaign runs use `python3 .diffmogger/scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run. Ongoing campaigns draft/enqueue safe follow-up tickets from typed runtime context when no dependency-ready tickets remain. Completion notifications use the laptop's native desktop notification system when enabled; failures are recorded in typed human-message state.
+After scaffold, the Run page has the same Ticket Queue controls: inspect, add, edit, delete, preview/apply imports transactionally, draft from intake, and accept selected draft candidates. Runtime decisions, execution DAG progress, repo capability manifest, events, blockers, and next actions remain canonical in `.diffmogger/runtime/orchestration.sqlite3`. Bootstrap is readiness-only in bounded campaign mode: it should confirm setup, ticket parsing, and verification, not implement the tickets. Normal campaign runs use `python3 .diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket context; the DAG scheduler may launch compatible ready nodes across tickets when dependencies, confidence, and ownership scopes allow. Ongoing campaigns draft/enqueue safe follow-up tickets from typed runtime context when no dependency-ready tickets remain. Completion notifications use the laptop's native desktop notification system when enabled; failures are recorded in typed human-message state.
 
 For CLI validation of a ticket-campaign target, add `--ticket-campaign-enabled` to `scripts/check_required_files.py`.
 
@@ -120,7 +127,7 @@ Generated target repos include local runtime helpers:
 .diffmogger/scripts/compact_agent_state.py
 ```
 
-Generated targets also include the conveyor role prompts and progress projection:
+Generated targets also include the DAG scheduler role prompts and progress projection:
 
 ```text
 .diffmogger/agentic/verification_commands.txt
@@ -137,9 +144,9 @@ The integrator records clean-HEAD full-suite baseline verification in `.diffmogg
 
 Target-project automation runs should use those local scripts, not scripts from the Diffmogger starter repo.
 
-## 3. Bootstrap The Product
+## 3. First Run Preparation
 
-From the target repo:
+The dashboard normally handles this from **Run** when the user clicks **Start** for the first time. For debugging, the same generated prompt can be run manually from the target repo:
 
 ```bash
 codex exec --full-auto --skip-git-repo-check "$(cat .diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md)"
@@ -149,13 +156,13 @@ Review the first run closely. Confirm the app or workflow is runnable and that `
 
 ## 4. Start Continuous Automation
 
-Recommended path: use the dashboard's **Start** button after bootstrap completes. Start launches one detached target-scoped runner for:
+Recommended path: use the dashboard's **Start** button. If first-run preparation is still pending, Start runs that guarded phase first, stops on preparation failure, and only then launches one detached target-scoped runner for:
 
 ```bash
 bash .diffmogger/scripts/run_conveyor_automation.sh
 ```
 
-The conveyor keeps running locally, chooses the next runnable lane from canonical SQLite state, and records events, typed stage contracts, the current work item, repo capability manifests, checkpoints, blockers, validations, and next actions in `.diffmogger/runtime/orchestration.sqlite3`. `.diffmogger/runtime/canonical_state_brief.md` is regenerated before role Codex runs; `.diffmogger/runtime/automation_conveyor_state.json` and `.diffmogger/runtime/automation_runner.json` are regenerated as compatibility projections. It prioritizes queued integration first, baseline verification preflight or repair routing when needed, fast-follow replanning after a planner patch is newly deferred or a planner deferral is resolved, planner-needed transitions, builder momentum by default, and one hardener pass after integrated builder work. Role Codex subprocesses run under `.diffmogger/scripts/run_process_watchdog.py`; the conveyor also clears orphaned or over-time `active_role_run` state when restarted.
+The DAG scheduler runner keeps running locally, chooses the next runnable node or compatible wave from canonical SQLite execution DAG state, and records events, DAG nodes/edges, repo capability manifests, checkpoints, blockers, validations, and next actions in `.diffmogger/runtime/orchestration.sqlite3`. `.diffmogger/runtime/canonical_state_brief.md` is regenerated before role Codex runs; `.diffmogger/runtime/automation_conveyor_state.json` and `.diffmogger/runtime/automation_runner.json` are regenerated as compatibility projections. The scheduler prioritizes queued integration, baseline verification preflight or repair routing when needed, fast-follow replanning after planner deferral changes, review/hardening, validation, targeted repairs, and compatible build waves. Role Codex subprocesses run under `.diffmogger/scripts/run_process_watchdog.py`; the scheduler also clears orphaned or over-time `active_role_run` state when restarted.
 
 The target wrapper can still be run manually for debugging:
 
@@ -170,8 +177,8 @@ canonical state from `.diffmogger/runtime/orchestration.sqlite3` plus generated 
 then shows runner state, the latest recorded integration-safety check result,
 accepted/deferred patch scorecard metrics, deferred-patch triage reasons with local next
 actions, an explicit next-lane action plan, action-plan
-follow-through status from recent conveyor or queue outcomes, bounded recommendation-history
-records, a next-run worker strategy recommendation, the active conveyor role, upcoming lanes,
+follow-through status from recent DAG scheduler or queue outcomes, bounded recommendation-history
+records, a next-run worker strategy recommendation, the active role, upcoming DAG lanes,
 queued/deferred patches, no-progress circuit breaker state, recent outcomes, and timeline
 events without requiring external services.
 
@@ -184,7 +191,7 @@ python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diff
 This writes `/tmp/Diffmogger-review/Diffmogger-observatory.html` and
 `/tmp/Diffmogger-review/Diffmogger-self-review.md`. Markdown review exports update
 `.diffmogger/runtime/action_plan_history.json` so repeated recommendations and follow-through outcomes
-remain visible across local conveyor cycles.
+remain visible across local DAG scheduler cycles.
 
 ### First Review Checklist
 
@@ -252,7 +259,7 @@ codex exec --disable plugins \
 
 The parent automation wrapper must also allow `$HOME/.codex` with `--add-dir`. `--ephemeral` reduces child session persistence, but the nested CLI may still touch Codex state and shell snapshot files during startup.
 
-Read-only worker reports are the default for exploration and review. When write workers are explicitly enabled in the intake, generated prompts allow bounded write mode as acceleration for work that can split into reviewable lanes:
+Read-only worker reports are the default for exploration and review. Generated prompts also allow bounded write mode as acceleration for work that can split into reviewable lanes:
 
 ```bash
 bash .diffmogger/scripts/spawn_worker_agent.sh \

@@ -29,7 +29,7 @@ A readiness-only bootstrap followed by one dependency-aware ticket run, with evi
 
 - Local-only work.
 - Bootstrap must not implement tickets.
-- Normal campaign runs should act on one dependency-ready ticket at a time.
+- Normal campaign runs should respect ticket dependencies; the DAG scheduler may group disjoint ready work when ownership and confidence allow.
 - Do not create new tickets after the listed queue is complete.
 
 ## Safety Rules
@@ -57,7 +57,16 @@ project_commands_only
 
 ## Automation Mode
 
-Continuous planner/builder/hardener/integrator conveyor until the ticket run is complete or blocked.
+Continuous execution DAG scheduler with planner/builder/hardener/integrator roles until the ticket run is complete or blocked.
+
+## DAG Scheduler Config
+
+parallel_execution_mode: aggressive
+symbol_graph_languages: python, typescript, javascript
+parallel_write_min_confidence: 0.75
+parallel_write_direct_confidence: 0.75
+max_parallel_write_workers: 3
+max_parallel_scope_workers: 2
 
 ## Human Bridge
 

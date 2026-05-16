@@ -5,6 +5,7 @@ import {
   automationScopeForDraft,
   lowCortisolDraftFromGeneratedIntake,
   lowCortisolProgressLabel,
+  setupRunState,
   visibleScaffoldPreviewFiles,
 } from "./BriefWizard";
 
@@ -28,9 +29,15 @@ function draft(overrides: Partial<IntakeDraft> = {}): IntakeDraft {
     local_notifications_enabled: true,
     worker_agents_allowed: true,
     codex_cli_workers_expected_on_broad_runs: true,
-    write_worker_agents_allowed: false,
-    max_write_worker_count: 0,
+    write_worker_agents_allowed: true,
+    max_write_worker_count: 3,
     write_worker_guidance: "",
+    parallel_execution_mode: "aggressive",
+    symbol_graph_languages: ["python", "typescript", "javascript"],
+    parallel_write_min_confidence: 0.75,
+    parallel_write_direct_confidence: 0.75,
+    max_parallel_write_workers: 3,
+    max_parallel_scope_workers: 2,
     multi_role_automations_allowed: true,
     automation_role_profile: "planner_builder_hardener_integrator",
     automation_checkpoint_commits: true,
@@ -50,14 +57,14 @@ function draft(overrides: Partial<IntakeDraft> = {}): IntakeDraft {
 }
 
 describe("Brief automation mode mapping", () => {
-  it("defaults to the continuous role conveyor", () => {
+  it("defaults to the continuous DAG scheduler role profile", () => {
     const next = draft();
 
     expect(next.multi_role_automations_allowed).toBe(true);
     expect(next.automation_role_profile).toBe("planner_builder_hardener_integrator");
   });
 
-  it("maps legacy single-lane drafts back to the conveyor", () => {
+  it("maps legacy single-lane drafts back to the DAG scheduler role profile", () => {
     const next = draft({
       multi_role_automations_allowed: false,
     });
@@ -163,5 +170,39 @@ describe("Brief automation mode mapping", () => {
     ]);
 
     expect(visible.map((file) => file.rel_path)).toEqual([".diffmogger/state/AGENTS.md"]);
+  });
+
+  it("enables Run after scaffold and treats pending bootstrap as a first-run phase", () => {
+    const unscaffolded = setupRunState({
+      target: { path: "/tmp/app", name: "app", is_diffmogger_project: false, project_intake_exists: false, dashboard_state_exists: false, automation_task_exists: false },
+      brief: {},
+      run: { task: {} },
+      files: [],
+      home: { title: "app", automation_status: "UNKNOWN", current_horizon: "", next_action: "", pending_human_requests: 0, unhandled_inbox: 0, queued_patches: 0, deferred_patches: 0 },
+    });
+    expect(unscaffolded.enabled).toBe(false);
+    expect(unscaffolded.reason).toContain("Scaffold");
+
+    const pending = setupRunState({
+      target: { path: "/tmp/app", name: "app", is_diffmogger_project: true, project_intake_exists: true, dashboard_state_exists: true, automation_task_exists: true },
+      brief: { dashboard_state: {} },
+      run: { task: { bootstrap_status: "pending" } },
+      files: [],
+      home: { title: "app", automation_status: "ACTIVE", current_horizon: "", next_action: "", pending_human_requests: 0, unhandled_inbox: 0, queued_patches: 0, deferred_patches: 0 },
+    });
+    expect(pending.enabled).toBe(true);
+    expect(pending.status).toBe("First run will prepare target");
+    expect(pending.reason).toContain("first Start");
+
+    const completed = setupRunState({
+      target: { path: "/tmp/app", name: "app", is_diffmogger_project: true, project_intake_exists: true, dashboard_state_exists: true, automation_task_exists: true },
+      brief: { dashboard_state: { initial_bootstrap_status: "pass" } },
+      run: { task: { bootstrap_status: "bootstrapped" } },
+      files: [],
+      home: { title: "app", automation_status: "ACTIVE", current_horizon: "", next_action: "", pending_human_requests: 0, unhandled_inbox: 0, queued_patches: 0, deferred_patches: 0 },
+    });
+    expect(completed.enabled).toBe(true);
+    expect(completed.bootstrapCompleted).toBe(true);
+    expect(completed.status).toBe("Ready");
   });
 });

@@ -52,6 +52,15 @@ VALID_PROJECT_MODES = {"fresh_project", "existing_project"}
 VALID_ENV_ACCESS_POLICIES = {"project_commands_only", "direct_env_files_allowed"}
 MAX_WRITE_WORKER_COUNT = 10
 DEFAULT_MAX_WRITE_WORKER_COUNT = 3
+MAX_PARALLEL_WORKER_COUNT = 10
+DEFAULT_PARALLEL_EXECUTION_MODE = "aggressive"
+VALID_PARALLEL_EXECUTION_MODES = {"conservative", "aggressive"}
+DEFAULT_SYMBOL_GRAPH_LANGUAGES = ["python", "typescript", "javascript"]
+VALID_SYMBOL_GRAPH_LANGUAGES = set(DEFAULT_SYMBOL_GRAPH_LANGUAGES)
+DEFAULT_PARALLEL_WRITE_MIN_CONFIDENCE = 0.75
+DEFAULT_PARALLEL_WRITE_DIRECT_CONFIDENCE = 0.75
+DEFAULT_MAX_PARALLEL_WRITE_WORKERS = 3
+DEFAULT_MAX_PARALLEL_SCOPE_WORKERS = 2
 CONVEYOR_ROLE_PROFILE = "planner_builder_hardener_integrator"
 VALID_ROLE_PROFILES = {CONVEYOR_ROLE_PROFILE}
 VALID_CAMPAIGN_MODES = {"bounded", "ongoing"}
@@ -155,6 +164,20 @@ HEADING_TO_KEY = {
     "maximum write worker count": "max_write_worker_count",
     "write worker guidance": "write_worker_guidance",
     "write-worker guidance": "write_worker_guidance",
+    "dag scheduler config": "dag_scheduler_config",
+    "dag scheduling config": "dag_scheduler_config",
+    "parallel execution mode": "parallel_execution_mode",
+    "parallel_execution_mode": "parallel_execution_mode",
+    "symbol graph languages": "symbol_graph_languages",
+    "symbol_graph_languages": "symbol_graph_languages",
+    "parallel write min confidence": "parallel_write_min_confidence",
+    "parallel_write_min_confidence": "parallel_write_min_confidence",
+    "parallel write direct confidence": "parallel_write_direct_confidence",
+    "parallel_write_direct_confidence": "parallel_write_direct_confidence",
+    "max parallel write workers": "max_parallel_write_workers",
+    "max_parallel_write_workers": "max_parallel_write_workers",
+    "max parallel scope workers": "max_parallel_scope_workers",
+    "max_parallel_scope_workers": "max_parallel_scope_workers",
     "multi-role automations": "multi_role_automations_allowed",
     "multi role automations": "multi_role_automations_allowed",
     "multi-role automation": "multi_role_automations_allowed",
@@ -311,11 +334,103 @@ def normalize_int(value: Any, default: int) -> int:
     return int(match.group(0))
 
 
-def normalize_write_worker_count(value: Any, enabled: bool) -> int:
-    if not enabled:
-        return 0
+def normalize_write_worker_count(value: Any) -> int:
     count = normalize_int(value, DEFAULT_MAX_WRITE_WORKER_COUNT)
     return max(1, min(MAX_WRITE_WORKER_COUNT, count))
+
+
+def normalize_parallel_worker_count(value: Any, default: int) -> int:
+    count = normalize_int(value, default)
+    return max(1, min(MAX_PARALLEL_WORKER_COUNT, count))
+
+
+def normalize_confidence(value: Any, default: float) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return max(0.0, min(1.0, float(value)))
+    if value is None:
+        return default
+    match = re.search(r"0(?:\.\d+)?|1(?:\.0+)?|\.\d+", str(value))
+    if not match:
+        return default
+    try:
+        number = float(match.group(0))
+    except ValueError:
+        return default
+    return max(0.0, min(1.0, number))
+
+
+def normalize_parallel_execution_mode(value: Any) -> str:
+    text = str(value or DEFAULT_PARALLEL_EXECUTION_MODE).strip().lower()
+    text = text.replace("-", "_").replace(" ", "_")
+    if text in VALID_PARALLEL_EXECUTION_MODES:
+        return text
+    return DEFAULT_PARALLEL_EXECUTION_MODE
+
+
+def normalize_symbol_graph_languages(value: Any) -> list[str]:
+    if value is None:
+        return list(DEFAULT_SYMBOL_GRAPH_LANGUAGES)
+    raw_items = value if isinstance(value, list) else re.split(r"[\n,]+", str(value))
+    normalized: list[str] = []
+    seen: set[str] = set()
+    aliases = {
+        "py": "python",
+        "python3": "python",
+        "ts": "typescript",
+        "tsx": "typescript",
+        "js": "javascript",
+        "jsx": "javascript",
+    }
+    for item in raw_items:
+        text = re.sub(r"^[-*]\s+", "", str(item).strip().lower())
+        if not text:
+            continue
+        name = aliases.get(text.replace("-", "_").replace(" ", "_"), text)
+        if name in VALID_SYMBOL_GRAPH_LANGUAGES and name not in seen:
+            seen.add(name)
+            normalized.append(name)
+    return normalized or list(DEFAULT_SYMBOL_GRAPH_LANGUAGES)
+
+
+def dag_scheduler_values(data: dict[str, Any]) -> dict[str, str]:
+    mode = normalize_parallel_execution_mode(data.get("parallel_execution_mode"))
+    languages = normalize_symbol_graph_languages(data.get("symbol_graph_languages"))
+    write_min_confidence = normalize_confidence(
+        data.get("parallel_write_min_confidence"),
+        DEFAULT_PARALLEL_WRITE_MIN_CONFIDENCE,
+    )
+    write_direct_confidence = normalize_confidence(
+        data.get("parallel_write_direct_confidence"),
+        DEFAULT_PARALLEL_WRITE_DIRECT_CONFIDENCE,
+    )
+    max_write_workers = normalize_parallel_worker_count(
+        data.get("max_parallel_write_workers"),
+        DEFAULT_MAX_PARALLEL_WRITE_WORKERS,
+    )
+    max_scope_workers = normalize_parallel_worker_count(
+        data.get("max_parallel_scope_workers"),
+        DEFAULT_MAX_PARALLEL_SCOPE_WORKERS,
+    )
+    config_section = f"""DAG scheduler config:
+
+- `parallel_execution_mode`: `{mode}`
+- `symbol_graph_languages`: {", ".join(f"`{language}`" for language in languages)}
+- `parallel_write_min_confidence`: `{write_min_confidence:.2f}`
+- `parallel_write_direct_confidence`: `{write_direct_confidence:.2f}`
+- `max_parallel_write_workers`: `{max_write_workers}`
+- `max_parallel_scope_workers`: `{max_scope_workers}`
+
+The execution DAG is the scheduler authority. Direct file/path mentions and exact symbol-owner matches can enter write waves at the configured confidence threshold. Scoping/read-only candidates use a lower default confidence threshold of `0.55`. When a ready ticket lacks enough direct write confidence, bounded read-only scope workers gather ownership evidence, likely paths, likely symbols, validation hints, and risk notes before serial builder fallback. Structured scope evidence is normalized into SQLite before it can raise later write confidence; stale, ambiguous, unresolved, unsafe, or low-confidence records stay advisory. Import/test adjacency stays reduced-confidence, keyword-only impact remains advisory, integration is serialized, blocked human/environment nodes are not parallelized, and overlapping write ownership prevents same-wave write execution."""
+    return {
+        "PARALLEL_EXECUTION_MODE": mode,
+        "SYMBOL_GRAPH_LANGUAGES_INLINE": ",".join(languages),
+        "SYMBOL_GRAPH_LANGUAGES_MARKDOWN": "\n".join(f"- {language}" for language in languages),
+        "PARALLEL_WRITE_MIN_CONFIDENCE": f"{write_min_confidence:.2f}",
+        "PARALLEL_WRITE_DIRECT_CONFIDENCE": f"{write_direct_confidence:.2f}",
+        "MAX_PARALLEL_WRITE_WORKERS": str(max_write_workers),
+        "MAX_PARALLEL_SCOPE_WORKERS": str(max_scope_workers),
+        "DAG_SCHEDULER_CONFIG_SECTION": config_section.strip(),
+    }
 
 
 def normalize_role_profile(value: Any, legacy_multi_role_enabled: Any = None) -> str:
@@ -549,7 +664,7 @@ Before choosing ticket work in any normal campaign run, run:
 python3 scripts/ticket_run.py . next --json
 ```
 
-Use that dependency-aware selection as the only ticket scope for the run. Act on at most one selected ticket per run, preserving file order as the human's priority order when dependencies allow. A conveyor role may implement, verify, or integrate the selected ticket, but must not expand the campaign after it is completed, blocked, or marked `candidate_done`.
+Use that dependency-aware selection as the only ticket scope for the run. The DAG scheduler may plan compatible nodes across ready tickets when ownership is disjoint, preserving file order as the human's priority order when dependencies require it. Roles may implement, verify, or integrate selected ticket work, but must not expand the campaign after it is completed, blocked, or marked `candidate_done`.
 
 If `next --json` reports placeholder tickets, missing dependencies, duplicate ticket IDs, dependency cycles, blocked dependencies, or no actionable ticket, record the structured blocker in typed runtime state and refresh generated handoff projections instead of guessing or reordering the campaign by hand.
 
@@ -564,7 +679,8 @@ Then stop launching new work. Diffmogger writes a local report, sends a native d
 
 - Ticket authoring surface: dashboard-backed SQLite ticket queue
 - Bootstrap boundary: readiness-only; do not implement tickets during bootstrap.
-- Normal campaign runs select one dependency-ready ticket with `python3 scripts/ticket_run.py . next --json`.
+- Normal campaign runs use `python3 scripts/ticket_run.py . next --json` for dependency-aware ticket context.
+- The DAG scheduler may group compatible ready nodes across tickets when dependencies, confidence, and ownership scopes allow.
 - Optional dependencies: use `depends_on` arrays in the dashboard ticket queue when one ticket must wait for another.
 - Halt when every ticket is done or all remaining tickets are blocked.
 - Completion report is written under `target/ticket_run_reports/`.
@@ -578,21 +694,22 @@ python3 scripts/ticket_run.py . next --json
 python3 scripts/ticket_run.py . should-halt --finalize
 ```
 
-Bootstrap is readiness-only in bounded campaign mode: it should confirm setup, ticket shape, and verification commands, but it must not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, or finalize the campaign. Normal campaign runs should act on at most one `next --json` selection. The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in typed human-message state."""
+Bootstrap is readiness-only in bounded campaign mode: it should confirm setup, ticket shape, and verification commands, but it must not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, or finalize the campaign. Normal campaign runs should use `next --json` for dependency-aware context and let the DAG scheduler group only compatible ready nodes. The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in typed human-message state."""
     else:
         section = """Campaign mode: `ongoing`
 
-Use the dashboard-backed SQLite ticket queue as an ongoing campaign surface. When no dependency-ready tickets remain, Diffmogger may draft and enqueue the next generic project-agnostic ticket from intake, runtime state, current repo context, blockers, validation receipts, and completed work. Newly drafted tickets do not require human approval before the conveyor continues.
+Use the dashboard-backed SQLite ticket queue as an ongoing campaign surface. When no dependency-ready tickets remain, Diffmogger may draft and enqueue the next generic project-agnostic ticket from intake, runtime state, current repo context, blockers, validation receipts, and completed work. Newly drafted tickets do not require human approval before the DAG scheduler continues.
 
-Agents should still use dependency-aware ticket selection and act on at most one selected ticket per normal run. If all existing tickets are done or blocked, the conveyor may draft a safe next ticket instead of stopping."""
+Agents should still use dependency-aware ticket selection and respect DAG ownership/confidence policy. If all existing tickets are done or blocked, the scheduler may draft a safe next ticket instead of stopping."""
         task_notes = """Campaign mode: `ongoing`
 
 - Ticket authoring surface: dashboard-backed SQLite ticket queue plus automatic generic drafting.
-- Normal campaign runs select one dependency-ready ticket with `python3 scripts/ticket_run.py . next --json`.
-- When no dependency-ready tickets remain, the conveyor can draft/enqueue the next safe project-agnostic ticket from typed runtime context.
+- Normal campaign runs use `python3 scripts/ticket_run.py . next --json` for dependency-aware ticket context.
+- The DAG scheduler may group compatible ready nodes when confidence and ownership scopes allow.
+- When no dependency-ready tickets remain, the DAG scheduler can draft/enqueue the next safe project-agnostic ticket from typed runtime context.
 - Drafted tickets do not require human approval before work continues.
 - Remote push/PR creation is manual."""
-        development = """Ongoing campaign mode is enabled. Seed tickets may provide the first scope, and the conveyor can draft/enqueue the next safe generic ticket when no dependency-ready ticket remains.
+        development = """Ongoing campaign mode is enabled. Seed tickets may provide the first scope, and the DAG scheduler can draft/enqueue the next safe generic ticket when no dependency-ready ticket remains.
 
 ```bash
 python3 scripts/ticket_run.py . status --json
@@ -654,7 +771,7 @@ def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str
             ),
             (
                 "T2 Ticket implementation",
-                "Use `scripts/ticket_run.py . next --json` to implement one dependency-ready ticket per run.",
+                "Use `scripts/ticket_run.py . next --json` to select dependency-aware ticket context, then let DAG readiness and ownership policy shape execution waves.",
                 "The selected ticket has implementation notes, changed files, evidence, `candidate_done`, or a recorded blocker.",
             ),
             (
@@ -668,7 +785,7 @@ def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str
                 "`scripts/ticket_run.py . should-halt --finalize` writes the report and completion state, then automation stops launching new work.",
             ),
         ]
-        guidance = f"""Progression is campaign-aware for this target. Because `campaign_mode` is `bounded`, use the bounded ticket-run phases below instead of an open-ended roadmap. The {ticket_file} is the ticket-scope authoring surface; runtime decisions and blockers remain canonical in SQLite. Do not invent new roadmap work after listed tickets are done or blocked. After T1 readiness, select ticket work with `python3 scripts/ticket_run.py . next --json` and act on at most one dependency-ready ticket per run.
+        guidance = f"""Progression is campaign-aware for this target. Because `campaign_mode` is `bounded`, use the bounded ticket-run phases below instead of an open-ended roadmap. The {ticket_file} is the ticket-scope authoring surface; runtime decisions and blockers remain canonical in SQLite. Do not invent new roadmap work after listed tickets are done or blocked. After T1 readiness, use `python3 scripts/ticket_run.py . next --json` for dependency-aware ticket context and let DAG readiness, confidence, and ownership policy shape execution waves.
 
 {markdown_table(rows)}
 
@@ -720,7 +837,7 @@ If the phase criteria are met, update the current horizon to the next ticket-run
                 ]
             ),
             "CONTINUE_RATIONALE": "Continue. The bounded campaign has local ticket scope and no active blocker.",
-            "AGENTS_PROGRESS_RULE": "Treat the ticket queue as a bounded, dependency-aware execution queue; after readiness, act on at most one `scripts/ticket_run.py . next --json` selection per run.",
+            "AGENTS_PROGRESS_RULE": "Treat the ticket queue as a bounded, dependency-aware execution queue; after readiness, use `scripts/ticket_run.py . next --json` for ticket context and let DAG readiness, confidence, and ownership policy shape execution waves.",
             "INITIAL_PROGRESS_EVIDENCE_LABEL": "ticket-readiness evidence",
             "BOOTSTRAP_SCOPE_BOUNDARY": "Bounded campaign bootstrap is readiness-only: inspect the repo, confirm the dashboard ticket queue parses, run `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` when possible, configure docs/checks, and update typed automation control state plus generated projections. If the ticket queue is empty, placeholder-only, malformed, or ambiguous, record `ACTIVE_WITH_PENDING_USER_INPUT` or an honest blocker instead of solving tickets. Do not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, finalize the campaign, or continue into the first ticket.",
             "BOOTSTRAP_END_NOTE": "Use the ticket queue as the first bounded readiness phase. Do not implement tickets during bootstrap, and do not create extra roadmap work after every ticket is done or blocked.",
@@ -982,14 +1099,8 @@ def worker_values(data: dict[str, Any]) -> dict[str, str]:
         data.get("codex_cli_workers_expected_on_broad_runs"),
         True,
     )
-    write_workers_enabled = workers_allowed and normalize_bool(
-        data.get("write_worker_agents_allowed"),
-        False,
-    )
-    max_write_workers = normalize_write_worker_count(
-        data.get("max_write_worker_count"),
-        write_workers_enabled,
-    )
+    write_workers_enabled = True
+    max_write_workers = normalize_write_worker_count(data.get("max_write_worker_count"))
     guidance = normalize_lines(
         data.get("write_worker_guidance"),
         (
@@ -999,8 +1110,7 @@ def worker_values(data: dict[str, Any]) -> dict[str, str]:
         ),
     )
 
-    if write_workers_enabled:
-        orchestration = f"""Write-worker guidance:
+    orchestration = f"""Write-worker guidance:
 
 {guidance}
 
@@ -1065,14 +1175,14 @@ After write workers finish, the main agent must:
 - integrate the slices into one coherent change
 - run relevant verification
 - update typed runtime state and generated task projections with worker strategy, workers used, changed files, checks, accepted/rejected/deferred outputs, and final status"""
-        guardrails = f"""- Write-capable workers are enabled but optional; use them as bounded acceleration when work can split into reviewable lanes.
+    guardrails = f"""- Write-capable workers are always available but optional per run; use them as bounded acceleration when work can split into reviewable lanes.
 - Spawn at most {max_write_workers} write workers in one run, and use the most parallelism the task can safely absorb.
 - Define enough contracts/interfaces and file/module ownership for workers to avoid chaotic overlap, without turning planning into ceremony.
 - Do not allow overlapping write ownership unless an explicit coordination protocol is documented first.
 - Do not create unbounded recursive agent loops. Workers must not spawn workers.
 - Do not blindly accept worker changes; the main agent must review, integrate, resolve conflicts, and verify.
 - Do not use destructive cleanup, history rewrites, mass deletion, or broad formatting as a worker cleanup shortcut."""
-        task_notes = f"""Write-capable worker agents allowed: true
+    task_notes = f"""Write-capable worker agents allowed: true
 
 - Max write worker count: {max_write_workers}
 - Parallelism budget: choose 0-{max_write_workers} workers based on how much useful parallelism the task can absorb.
@@ -1080,38 +1190,18 @@ After write workers finish, the main agent must:
 - Read-only workers remain the default for exploration and review.
 - Integration-only runs with no workers are valid when faster or safer.
 - The main agent must assign ownership, reject weak output, integrate strong output, verify, update typed runtime state, and refresh generated projections."""
-        development = f"""Write-capable worker agents allowed: true
+    development = f"""Write-capable worker agents allowed: true
 
 Max write worker count: {max_write_workers}
 
 Write workers are optional acceleration. Use the most parallelism the task can safely absorb while keeping ownership reviewable and the main agent responsible for integration. The helper supports `--mode write`, but it does not replace code review or conflict resolution."""
-        bootstrap = f"""Worker agents allowed: {str(workers_allowed).lower()}
+    bootstrap = f"""Worker agents allowed: {str(workers_allowed).lower()}
 
 Write-capable worker agents allowed: true
 
 Max write worker count: {max_write_workers}
 
 Recurring automation should use read-only worker reports for exploration and use bounded write workers as acceleration when work can split into useful parallel lanes. Keep planning lightweight, but make ownership, verification, and integration responsibilities clear."""
-    else:
-        orchestration = """Write workers are disabled for this project. Do not spawn nested workers that modify source files or docs. Use read-only worker reports when useful, and let the main agent implement, integrate, verify, update typed runtime state, and refresh generated projections directly.
-
-Integration-only runs with no workers are valid."""
-        guardrails = """- Write-capable workers are disabled unless the project intake is explicitly updated to enable them.
-- Use read-only worker reports when workers are useful.
-- Do not spawn nested workers that modify source files or docs."""
-        task_notes = """Write-capable worker agents allowed: false
-
-- Max write worker count: 0
-- Read-only worker reports remain available when worker agents are allowed.
-- The main agent performs implementation, integration, verification, and task-state updates."""
-        development = """Write-capable worker agents allowed: false
-
-Use read-only worker reports first. The main agent owns implementation and integration unless the project intake is explicitly updated to enable bounded write workers."""
-        bootstrap = f"""Worker agents allowed: {str(workers_allowed).lower()}
-
-Write-capable worker agents allowed: false
-
-Generated automation should preserve read-only worker-report behavior and keep implementation responsibility with the main agent unless the intake is explicitly updated later."""
 
     return {
         "WORKER_AGENTS_ALLOWED": str(workers_allowed).lower(),
@@ -1132,17 +1222,20 @@ def multi_role_values(data: dict[str, Any]) -> dict[str, str]:
     enabled = True
     checkpoint_commits = normalize_bool(data.get("automation_checkpoint_commits"), True)
     allow_remotes = normalize_bool(data.get("multi_role_allow_remotes"), False)
+    scheduler_config = dag_scheduler_values(data)["DAG_SCHEDULER_CONFIG_SECTION"]
 
     automation_section = f"""Role profile: `{profile}`
 
-Diffmogger uses a continuous local state-machine conveyor. Role prompts live under `.agentic/roles/`, isolated git worktrees live under `target/automation_worktrees/`, queued patches live under `target/automation_queue/`, canonical runtime state lives in `target/orchestration.sqlite3`, and agents read the generated `target/canonical_state_brief.md` view. `docs/MULTI_ROLE_PROGRESS.md` is a human-readable projection/export.
+Diffmogger uses a continuous local execution DAG scheduler. Role prompts live under `.agentic/roles/`, isolated git worktrees live under `target/automation_worktrees/`, queued patches live under `target/automation_queue/`, canonical runtime state lives in `target/orchestration.sqlite3`, and agents read the generated `target/canonical_state_brief.md` view. `docs/MULTI_ROLE_PROGRESS.md` is a human-readable projection/export.
 
-The dashboard Start button launches `scripts/run_conveyor_automation.sh` as a detached local runner. The conveyor chooses the next runnable lane from current state, prioritizing queued integration first, baseline repair, typed human-message triage, fast-follow replanning after planner deferral changes, post-builder hardening, candidate verification, and then planner/builder/hardener state transitions.
+The dashboard Start button launches `scripts/run_conveyor_automation.sh` as a detached local runner. That filename is retained as a compatibility wrapper; the scheduler chooses ready nodes and compatible waves from execution DAG state, prioritizing queued integration, baseline repair, typed human-message triage, fast-follow replanning after planner deferral changes, review/hardening, validation, targeted repairs, and compatible build waves.
+
+{scheduler_config}
 
 Multi-role mode is local-only. Roles must never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run any git command that touches a remote. Local commits, local branches, local tags, and local worktrees are allowed. Any remote-touching attempt is a `CRITICAL_STOP`.
 
 Planner, builder, and hardener start from the latest main `HEAD` at run start. They may see partially integrated state from earlier patches in the same cycle; this is accepted. The integrator owns the main checkout, applies queued patches FIFO, verifies, creates local checkpoint commits, updates typed state, refreshes `docs/CODEX_AUTOMATION_TASKS.md` and `docs/MULTI_ROLE_PROGRESS.md` as projections, and enforces retention."""
-    guardrails = """- Multi-role automation is enabled by default and runs through the continuous conveyor.
+    guardrails = """- Multi-role automation is enabled by default and runs through the continuous execution DAG scheduler.
 - Multi-role role runs require an initialized local git repo.
 - Multi-role mode is local-only: never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run git commands that touch a remote.
 - Role scripts must refuse to run when `git remote -v` is non-empty unless `MULTI_ROLE_ALLOW_REMOTES=1`.
@@ -1151,14 +1244,15 @@ Planner, builder, and hardener start from the latest main `HEAD` at run start. T
 - Integrator must checkpoint dirty main changes as-is before applying queued patches; do not revert or discard human changes.
 - Integrator must defer conflicting, stale, guardrail-violating, or verification-failing patches with machine-readable deferral reasons."""
     task_notes = f"""- Role profile: `{profile}`
-- Continuous conveyor: `scripts/run_conveyor_automation.sh`.
-- The conveyor prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning, post-builder hardening, candidate verification, and then planner/builder/hardener state transitions.
+- Continuous DAG scheduler: `scripts/run_conveyor_automation.sh`.
+- The scheduler prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning, review/hardening, validation, targeted repairs, and compatible build waves.
+- DAG scheduler config: `parallel_execution_mode={dag_scheduler_values(data)["PARALLEL_EXECUTION_MODE"]}`, `symbol_graph_languages={dag_scheduler_values(data)["SYMBOL_GRAPH_LANGUAGES_INLINE"]}`, `parallel_write_min_confidence={dag_scheduler_values(data)["PARALLEL_WRITE_MIN_CONFIDENCE"]}`, `parallel_write_direct_confidence={dag_scheduler_values(data)["PARALLEL_WRITE_DIRECT_CONFIDENCE"]}`, `max_parallel_write_workers={dag_scheduler_values(data)["MAX_PARALLEL_WRITE_WORKERS"]}`, `max_parallel_scope_workers={dag_scheduler_values(data)["MAX_PARALLEL_SCOPE_WORKERS"]}`.
 - Integrator refreshes `docs/MULTI_ROLE_PROGRESS.md` as a projection and creates local checkpoint commits.
 - Deferred patches remain visible through `scripts/list_deferred_patches.py`; use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local triage or add `--decision-template` for a per-manifest cleanup worksheet.
 - Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""
     development = f"""Role profile: `{profile}`
 
-Use the dashboard Start/Stop buttons or the continuous conveyor directly. The conveyor keeps work moving by running the next useful lane as soon as the previous lane finishes:
+Use the dashboard Start/Stop buttons or the continuous DAG scheduler directly. The scheduler keeps work moving by running the next useful node or compatible wave as soon as dependencies allow:
 
 ```bash
 bash scripts/run_conveyor_automation.sh --dry-run
@@ -1183,10 +1277,14 @@ python3 scripts/list_deferred_patches.py . --decision-template
 
 The Markdown view groups the backlog by reason and recommended local action. The decision template adds per-manifest fields for archive, replace-from-current-HEAD, repair-and-retry, retry-as-is, or keep-deferred choices during integrator cleanup.
 
+{scheduler_config}
+
 The target must have a local git repo with an initial commit. Diffmogger scaffold creates both automatically when `HEAD` is missing. Multi-role mode creates local worktrees, local queue artifacts, and local commits only. It never pushes."""
     bootstrap = f"""Role profile: `{profile}`
 
-After bootstrap, the scaffold step ensures this target has a local git repo and initial commit before continuous automation starts. The role prompts, conveyor, and helpers are generated locally; no remote git operations are allowed."""
+{scheduler_config}
+
+After bootstrap, the scaffold step ensures this target has a local git repo and initial commit before continuous automation starts. The role prompts, DAG scheduler, and helpers are generated locally; no remote git operations are allowed."""
 
     return {
         "MULTI_ROLE_AUTOMATIONS_ALLOWED": str(enabled).lower(),
@@ -1217,6 +1315,23 @@ def parse_markdown_intake(path: Path) -> dict[str, Any]:
         key = HEADING_TO_KEY.get(heading)
         if key:
             data[key] = text[start:end].strip()
+    config_text = str(data.pop("dag_scheduler_config", "") or "")
+    if config_text:
+        for raw_line in config_text.splitlines():
+            line = re.sub(r"^[-*]\s+", "", raw_line.strip())
+            if not line or ":" not in line:
+                continue
+            key_text, value = line.split(":", 1)
+            normalized_key = key_text.strip().lower().replace("-", "_").replace(" ", "_")
+            if normalized_key in {
+                "parallel_execution_mode",
+                "symbol_graph_languages",
+                "parallel_write_min_confidence",
+                "parallel_write_direct_confidence",
+                "max_parallel_write_workers",
+                "max_parallel_scope_workers",
+            }:
+                data[normalized_key] = value.strip().strip("`")
     return data
 
 
@@ -1491,6 +1606,7 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
     }
     values.update(progression_values(data, project_name))
     values.update(worker_values(data))
+    values.update(dag_scheduler_values(data))
     values.update(env_values)
     values.update(mcp_values(data))
     values.update(multi_role_values(data))
@@ -1686,11 +1802,11 @@ def diffmogger_human_state_paths(values: dict[str, str]) -> list[str]:
 
 
 def seed_runtime_state(target: Path, values: dict[str, str]) -> None:
-    write_workers_allowed = values.get("WRITE_WORKER_AGENTS_ALLOWED") == "true"
     try:
-        max_write_workers = int(values.get("MAX_WRITE_WORKER_COUNT") or "0")
+        max_write_workers = int(values.get("MAX_WRITE_WORKER_COUNT") or str(DEFAULT_MAX_WRITE_WORKER_COUNT))
     except ValueError:
-        max_write_workers = 0
+        max_write_workers = DEFAULT_MAX_WRITE_WORKER_COUNT
+    max_write_workers = max(1, min(MAX_WRITE_WORKER_COUNT, max_write_workers))
     try:
         budget_overrides = json.loads(values.get("PARALLELISM_BUDGET_OVERRIDES_JSON") or "{}")
     except json.JSONDecodeError:
@@ -1712,14 +1828,24 @@ def seed_runtime_state(target: Path, values: dict[str, str]) -> None:
             "bootstrap_status": "pending",
             "worker": {
                 "agents_allowed": values.get("WORKER_AGENTS_ALLOWED") == "true",
-                "write_workers_allowed": write_workers_allowed,
-                "max_write_worker_count": max_write_workers if write_workers_allowed else 0,
+                "write_workers_allowed": True,
+                "max_write_worker_count": max_write_workers,
             },
             "payload": {
                 "project_name": values.get("PROJECT_NAME") or target.name,
                 "campaign_mode": values.get("CAMPAIGN_MODE") or "ongoing",
                 "role_profile": values.get("AUTOMATION_ROLE_PROFILE") or "",
                 "parallelism_budget_overrides": budget_overrides,
+                "parallel_execution_mode": values.get("PARALLEL_EXECUTION_MODE") or DEFAULT_PARALLEL_EXECUTION_MODE,
+                "symbol_graph_languages": [
+                    language
+                    for language in (values.get("SYMBOL_GRAPH_LANGUAGES_INLINE") or "").split(",")
+                    if language
+                ],
+                "parallel_write_min_confidence": values.get("PARALLEL_WRITE_MIN_CONFIDENCE") or f"{DEFAULT_PARALLEL_WRITE_MIN_CONFIDENCE:.2f}",
+                "parallel_write_direct_confidence": values.get("PARALLEL_WRITE_DIRECT_CONFIDENCE") or f"{DEFAULT_PARALLEL_WRITE_DIRECT_CONFIDENCE:.2f}",
+                "max_parallel_write_workers": values.get("MAX_PARALLEL_WRITE_WORKERS") or str(DEFAULT_MAX_PARALLEL_WRITE_WORKERS),
+                "max_parallel_scope_workers": values.get("MAX_PARALLEL_SCOPE_WORKERS") or str(DEFAULT_MAX_PARALLEL_SCOPE_WORKERS),
             },
         },
         actor_role="scaffold",
@@ -1772,6 +1898,12 @@ def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -
             "human_bridge_mode": values.get("HUMAN_BRIDGE_MODE", "file_only"),
             "campaign_mode": values.get("CAMPAIGN_MODE", "ongoing"),
             "automation_role_profile": values.get("AUTOMATION_ROLE_PROFILE", CONVEYOR_ROLE_PROFILE),
+            "parallel_execution_mode": values.get("PARALLEL_EXECUTION_MODE", DEFAULT_PARALLEL_EXECUTION_MODE),
+            "symbol_graph_languages": [
+                language
+                for language in (values.get("SYMBOL_GRAPH_LANGUAGES_INLINE") or "").split(",")
+                if language
+            ],
             "multi_role": True,
             "optional_mcp": values.get("MCP_ENABLED") == "true",
             "playwright_mcp": values.get("PLAYWRIGHT_MCP_ENABLED") == "true",

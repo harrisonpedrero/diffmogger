@@ -133,6 +133,26 @@ describe("command palette model", () => {
     expect(commands.find((command) => command.id === "stop-automation")?.disabledReason).toBe("No automation is running.");
   });
 
+  it("keeps Start enabled when initial bootstrap can run as first-run preparation", () => {
+    const start = buildCommandPaletteModel({
+      snapshot: snapshot({
+        run: {
+          controls: {
+            is_scaffolded: true,
+            can_start_automation: false,
+            start_automation_reason: "Bootstrap has not completed yet.",
+            can_bootstrap_and_start: true,
+            bootstrap_start_reason: "Ready to run initial bootstrap before starting automation.",
+          },
+        },
+      }),
+    }).find((command) => command.id === "start-automation");
+
+    expect(start?.title).toBe("Start");
+    expect(start?.disabledReason).toBeUndefined();
+    expect(start?.description).toContain("first start prepares");
+  });
+
   it("searches command title, section, description, and keywords", () => {
     const commands = buildCommandPaletteModel({ snapshot: snapshot() });
 

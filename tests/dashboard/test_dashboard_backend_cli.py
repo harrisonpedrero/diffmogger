@@ -20,7 +20,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 from diffmogger.dashboard.shared import PrerequisiteItem as SharedPrerequisiteItem
 from diffmogger.runtime.paths import sidecar_rel
-from diffmogger.runtime.state_store import connect, database_path_for_target, load_ticket_run_state, write_ticket_run_state
+from diffmogger.runtime.state_store import automation_control_state, connect, database_path_for_target, load_ticket_run_state, write_ticket_run_state
 
 CLI = ROOT / "scripts" / "dashboard_backend_cli.py"
 CLI_MODULE = ROOT / "src" / "diffmogger" / "dashboard" / "backend_cli.py"
@@ -54,6 +54,21 @@ class DashboardBackendCliTests(unittest.TestCase):
         self.assertIn("ok", payload)
         self.assertEqual(1, payload.get("schema_version"))
         return result, payload
+
+    def run_jsonl_cli(self, *args: str) -> list[dict[str, object]]:
+        result = subprocess.run(
+            [sys.executable, str(CLI), "--stream-jsonl", *args],
+            cwd=ROOT,
+            env=os.environ,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout)
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        self.assertGreater(len(lines), 0)
+        return [json.loads(line) for line in lines]
 
     def scaffold_target(self, target: Path) -> None:
         subprocess.run(
@@ -89,10 +104,12 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual("ok", state["status"])
             self.assertGreaterEqual(state["counts"]["events"], 1)
             self.assertTrue(Path(state["database"]["path"]).exists())
-            self.assertEqual("sqlite", state["conveyor_machine"]["authority"])
-            self.assertEqual("intake", state["conveyor_machine"]["current_stage"])
+            self.assertEqual("sqlite", state["execution_dag"]["authority"])
+            self.assertGreater(state["execution_dag"]["node_count"], 0)
+            self.assertEqual(state["execution_dag"], state["progress_model"])
             self.assertTrue(state["capability_manifest"]["digest"])
             for key in [
+                "execution_dag",
                 "codebase_graph_summary",
                 "task_graph_summary",
                 "active_task_code_impacts",
@@ -100,6 +117,7 @@ class DashboardBackendCliTests(unittest.TestCase):
                 "active_leases",
                 "conflicting_leases",
                 "stale_graph_warnings",
+                "runtime_performance",
                 "scheduling_candidates",
                 "active_read_only_workers",
                 "pending_worker_reports",
@@ -115,6 +133,46 @@ class DashboardBackendCliTests(unittest.TestCase):
         self.assertIn('"state.snapshot"', native_lib)
         self.assertNotIn('"graph.snapshot"', native_lib)
 
+    def test_state_watch_streams_events_after_event_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+            self.run_cli("state.snapshot", "--target", str(target))
+
+            lines = self.run_jsonl_cli("state.watch", "--target", str(target), "--after-event-id", "0", "--max-events", "1")
+
+            self.assertEqual("runtime_state", lines[0]["event"])
+            runtime_event = lines[0]["runtime_event"]
+            assert isinstance(runtime_event, dict)
+            self.assertGreater(int(runtime_event["event_id"]), 0)
+            self.assertEqual("state.watch", lines[-1]["command"])
+            self.assertTrue(lines[-1]["ok"])
+
+    def test_state_watch_emits_bounded_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+            self.run_cli("state.snapshot", "--target", str(target))
+
+            lines = self.run_jsonl_cli(
+                "state.watch",
+                "--target",
+                str(target),
+                "--after-event-id",
+                "999999",
+                "--heartbeat-seconds",
+                "0",
+                "--poll-interval",
+                "0.05",
+                "--max-heartbeats",
+                "1",
+            )
+
+            self.assertEqual("runtime_state_heartbeat", lines[0]["event"])
+            self.assertEqual(999999, lines[0]["after_event_id"])
+            self.assertEqual("state.watch", lines[-1]["command"])
+            self.assertEqual(1, lines[-1]["data"]["heartbeat_count"])
+
     def test_parallel_dashboard_commands_are_allowlisted_but_shell_is_not(self) -> None:
         native_lib = (ROOT / "services/agentic-dashboard/native/src-tauri/src/lib.rs").read_text(encoding="utf-8")
         allowlist_region = native_lib.split("fn backend_command_allowed", 1)[0]
@@ -127,6 +185,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             "execution_group.export_debug_bundle",
             "validation_jobs.load",
             "lease.release_stale",
+            "state.watch",
         ]:
             self.assertIn(f'"{command}"', allowlist_region)
         self.assertNotIn('"shell.exec"', allowlist_region)
@@ -149,6 +208,7 @@ class DashboardBackendCliTests(unittest.TestCase):
                 "conflicting_leases",
                 "validation_jobs",
                 "integration_backlog_from_parallel_workers",
+                "worker_patch_integration_preflight",
                 "blocked_parallel_candidates",
                 "warnings",
             ]:
@@ -436,7 +496,7 @@ class DashboardBackendCliTests(unittest.TestCase):
 
         return module, FakeDashboard()
 
-    def test_populated_ticket_campaign_can_start_initial_bootstrap(self) -> None:
+    def test_populated_ticket_campaign_uses_explicit_bootstrap_start_gate(self) -> None:
         from diffmogger.observatory.snapshots import build_snapshot
 
         module, fake_dashboard = self.fake_dashboard_for_automation()
@@ -446,10 +506,16 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.write_populated_ticket_campaign_target(target)
 
             ready, reason = module.automation_ready(target, fake_dashboard)
+            bootstrap_ready, bootstrap_reason = module.automation_ready(target, fake_dashboard, allow_bootstrap_pending=True)
             snapshot = build_snapshot(target)
+            controls = module.run_controls_snapshot(target, fake_dashboard, snapshot)
 
-            self.assertTrue(ready)
-            self.assertIn("TICKET-001", reason)
+            self.assertFalse(ready)
+            self.assertIn("Bootstrap has not completed yet", reason)
+            self.assertTrue(bootstrap_ready)
+            self.assertIn("TICKET-001", bootstrap_reason)
+            self.assertFalse(controls["can_start_automation"])
+            self.assertTrue(controls["can_bootstrap_and_start"])
             self.assertNotIn("Ticket queue still needs to be populated or confirmed.", snapshot["task"]["known_issues"])
             self.assertEqual("Verification commands may need adjustment after bootstrap.", snapshot["task"]["known_issue"])
 
@@ -1333,6 +1399,47 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertTrue(dashboard_state["multi_role_automations_allowed"])
             _run_result, run_payload = self.run_cli("run.load", "--target", tmp)
             self.assertNotIn("can_run_now", run_payload["data"]["controls"])
+
+    def test_brief_run_bootstrap_runs_once_and_records_completion(self) -> None:
+        from diffmogger.dashboard.commands import brief as brief_commands
+        from diffmogger.dashboard.errors import BackendError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.scaffold_target(target)
+            generated_path(target, ".agentic/project_intake.json").write_text(
+                json.dumps({"project_name": "Bootstrap Test", "campaign_mode": "ongoing"}) + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(target=str(target), stream_jsonl=False)
+
+            def fake_bootstrap(*_args: object, **_kwargs: object) -> dict[str, object]:
+                return {"command": "codex exec", "exit_code": 0, "stdout": "ok", "stderr": ""}
+
+            with (
+                mock.patch.object(brief_commands, "run_subprocess_streamed", side_effect=fake_bootstrap),
+                mock.patch.object(
+                    brief_commands,
+                    "prereq_snapshot",
+                    return_value={"status": "pass", "required_failures": [], "advisory_warnings": [], "items": []},
+                ),
+                mock.patch.object(
+                    brief_commands,
+                    "run_required_file_check_for_intake",
+                    return_value={"status": "pass", "exit_code": 0, "stdout": "", "stderr": "", "command": "check"},
+                ),
+            ):
+                payload = brief_commands.command_brief_run_bootstrap(args)
+
+                self.assertEqual("pass", payload["status"])
+                dashboard_state = json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
+                self.assertEqual("initial_bootstrap_completed", dashboard_state["last_action"])
+                self.assertEqual("pass", dashboard_state["initial_bootstrap_status"])
+                self.assertEqual("bootstrapped", automation_control_state(target)["bootstrap_status"])
+
+                with self.assertRaises(BackendError) as raised:
+                    brief_commands.command_brief_run_bootstrap(args)
+                self.assertEqual("bootstrap_already_completed", raised.exception.error_type)
 
     def test_brief_scaffold_bootstrap_commits_existing_unborn_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

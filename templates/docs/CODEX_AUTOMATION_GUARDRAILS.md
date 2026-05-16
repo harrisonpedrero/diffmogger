@@ -40,7 +40,7 @@ Do not build unrelated apps or large unrelated systems.
 - For browser-backed smoke checks, visual QA, or documentation research, prefer `.diffmogger/scripts/diffmogger_browser.py` and the exported `DIFFMOGGER_BROWSER_PATH`/`CHROME_PATH` over ambient system Chrome.
 - If Playwright MCP is enabled, use it only for local browser validation and save deferred UI failure screenshots under `docs/backlog/ui_artifacts/<run_id>/` with Markdown links in task/progress state.
 - If repeated browser launches fail before DevTools is ready, record `BLOCKED_ON_ENVIRONMENT` with diagnostics and use an equivalent manual or managed-browser QA path instead of looping on the same launch command.
-- In `bounded` campaign mode, do not implement tickets during bootstrap, use `.diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket selection, act on at most one selected ticket per normal run, and do not expand scope after the listed tickets are done or blocked; run `.diffmogger/scripts/ticket_run.py` finalization and leave push/PR creation to the human.
+- In `bounded` campaign mode, do not implement tickets during bootstrap, use `.diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket context, let the DAG scheduler group only compatible ready nodes, and do not expand scope after the listed tickets are done or blocked; run `.diffmogger/scripts/ticket_run.py` finalization and leave push/PR creation to the human.
 - In `ongoing` campaign mode, continue by drafting/enqueuing safe project-agnostic follow-up tickets from typed runtime context when no dependency-ready tickets remain; do not pause for approval merely because a ticket was drafted.
 - Do not delete tests just to pass checks.
 - Do not hide broad classes of errors with blanket suppressions.
@@ -54,6 +54,9 @@ Do not build unrelated apps or large unrelated systems.
 - Choose and record a parallelism budget every run.
 - Check `command -v codex` before using Codex CLI workers.
 - Prefer read-only worker reports.
+- Write workers are opt-in only and require typed, non-overlapping ownership leases. Valid write lease shapes include file, directory, tests-only, docs-only, symbol, module, and package scopes when confidence is high enough and conflicts can be detected safely.
+- Keep integration serialized. Overlapping write ownership blocks same-wave execution unless the parent run records an explicit coordination protocol.
+- Before applying queued worker patches, use the SQLite-backed integration preflight and generated brief to identify safe order, stale bases, missing metadata, and likely conflicts.
 - Main agent owns integration.
 - Record worker outputs under `target/agent_runs/<run_id>/`.
 - Use local `.diffmogger/scripts/spawn_worker_agent.sh` and `.diffmogger/scripts/summarize_worker_outputs.py` helpers when available; otherwise use equivalent bounded nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` commands from inside the parent automation run.
@@ -69,7 +72,7 @@ Do not build unrelated apps or large unrelated systems.
 ## Lock-File Policy
 
 - Acquire `target/codex_automation.lock` before mutating code in automation runs.
-- Scheduled runs should use local `.diffmogger/scripts/run_conveyor_automation.sh`, which delegates to role wrappers that own lock acquire/release for mutating runs.
+- Scheduled runs should use local `.diffmogger/scripts/run_conveyor_automation.sh`, the legacy-named DAG scheduler wrapper that delegates to role wrappers owning lock acquire/release for mutating runs.
 - If `CODEX_LOCK_ALREADY_ACQUIRED=true`, do not acquire, overwrite, manually create, or release the lock inside the Codex run.
 - Manual runs should use local `.diffmogger/scripts/acquire_codex_lock.sh` and `.diffmogger/scripts/release_codex_lock.sh`.
 - Set `CODEX_RUN_ID` before acquire/release so the lock can identify the current run.
@@ -100,10 +103,10 @@ Use `CRITICAL_STOP` only when continuing autonomously is unsafe.
 ## Context-Bloat Policy
 
 - Keep active files short.
-- Canonical runtime/task state is typed SQLite in `target/orchestration.sqlite3`, including automation control, conveyor stage contracts, the current work item, repository capability manifest, validation receipts, blockers, human messages, and next actions. Agents should read `target/canonical_state_brief.md`, the generated bounded view, instead of inspecting SQLite manually.
+- Canonical runtime/task state is typed SQLite in `target/orchestration.sqlite3`, including automation control, execution DAG nodes/edges, repository capability manifest, validation receipts, blockers, human messages, and next actions. Conveyor stage fields are compatibility projections only. Agents should read `target/canonical_state_brief.md`, the generated bounded view, instead of inspecting SQLite manually.
 - Markdown and JSON state files are prompt inputs, handoff surfaces, authored import/export surfaces, compatibility projections, exports, or migration aids.
 - If a Markdown or JSON projection is stale or contradictory, regenerate it or reconcile through the target-local Diffmogger typed state APIs.
-- Do not edit `target/automation_conveyor_state.json` as a source of truth; the conveyor regenerates it from SQLite.
+- Do not edit `target/automation_conveyor_state.json` as a source of truth; the DAG scheduler regenerates it from SQLite as a compatibility projection.
 - Record handled human messages and concise resolution notes through typed human-message state.
 - Prune stale task text from generated projections after reconciling the typed state.
 - Use local `.diffmogger/scripts/compact_agent_state.py --dry-run .` before compacting long-running Markdown state.

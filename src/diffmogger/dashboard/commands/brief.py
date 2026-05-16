@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import signal
 import tempfile
 
@@ -9,6 +10,7 @@ from ..target import *
 
 from .context import merge_context_files
 from .diagnostics import run_subprocess
+from .run_control import run_subprocess_streamed
 from ..ticket_generation import (
     build_ticket_generation_snapshot,
     normalize_ticket_complexity,
@@ -20,11 +22,13 @@ from ..ticket_generation import (
     ticket_scope_groups_from_intake,
 )
 from diffmogger.runtime import ticket_run
+from diffmogger.runtime.state_store import automation_control_state, write_automation_control_state
 
 DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS = 180
 DEFAULT_TICKET_CODEX_TIMEOUT_SECONDS = 420
 DEFAULT_TICKET_REFINEMENT_CODEX_TIMEOUT_SECONDS = 420
 LOW_CORTISOL_FALLBACK_MAX_TICKETS = 120
+BOOTSTRAP_PENDING_STATUSES = {"", "unknown", "pending", "not_bootstrapped", "not bootstrapped"}
 
 LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "project_name": "New Project",
@@ -45,9 +49,15 @@ LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "local_notifications_enabled": True,
     "worker_agents_allowed": True,
     "codex_cli_workers_expected_on_broad_runs": True,
-    "write_worker_agents_allowed": False,
-    "max_write_worker_count": 0,
-    "write_worker_guidance": "Keep write workers disabled unless a later human-approved plan splits work into disjoint ownership scopes.",
+    "write_worker_agents_allowed": True,
+    "max_write_worker_count": 3,
+    "write_worker_guidance": "Use write workers as optional bounded acceleration when work splits into reviewable ownership scopes.",
+    "parallel_execution_mode": "aggressive",
+    "symbol_graph_languages": ["python", "typescript", "javascript"],
+    "parallel_write_min_confidence": 0.75,
+    "parallel_write_direct_confidence": 0.75,
+    "max_parallel_write_workers": 3,
+    "max_parallel_scope_workers": 2,
     "multi_role_automations_allowed": True,
     "automation_role_profile": "planner_builder_hardener_integrator",
     "automation_checkpoint_commits": True,
@@ -138,6 +148,14 @@ def _int_value(value: Any, fallback: int) -> int:
     return parsed if parsed >= 0 else fallback
 
 
+def _float_value(value: Any, fallback: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed
+
+
 def _compact_ticket_text(value: Any, fallback: str) -> str:
     text = str(value or "").strip()
     text = re.sub(r"\s+(?:and|plus|with)\s+", " / ", text, flags=re.I)
@@ -224,10 +242,26 @@ def _normalize_low_cortisol_intake(
     payload["local_notifications_enabled"] = _bool_value(payload.get("local_notifications_enabled"), True)
     payload["worker_agents_allowed"] = _bool_value(payload.get("worker_agents_allowed"), True)
     payload["codex_cli_workers_expected_on_broad_runs"] = _bool_value(payload.get("codex_cli_workers_expected_on_broad_runs"), True)
-    payload["write_worker_agents_allowed"] = _bool_value(payload.get("write_worker_agents_allowed"), False)
-    payload["max_write_worker_count"] = min(10, _int_value(payload.get("max_write_worker_count"), 0))
-    if not payload["write_worker_agents_allowed"]:
-        payload["max_write_worker_count"] = 0
+    payload["write_worker_agents_allowed"] = True
+    payload["max_write_worker_count"] = max(1, min(10, _int_value(payload.get("max_write_worker_count"), 3)))
+    payload["parallel_execution_mode"] = (
+        "conservative" if str(payload.get("parallel_execution_mode") or "").strip().lower() == "conservative" else "aggressive"
+    )
+    languages = payload.get("symbol_graph_languages")
+    if not isinstance(languages, list):
+        languages = ["python", "typescript", "javascript"]
+    payload["symbol_graph_languages"] = [
+        item
+        for item in [str(language).strip().lower() for language in languages]
+        if item in {"python", "typescript", "javascript"}
+    ] or ["python", "typescript", "javascript"]
+    payload["parallel_write_min_confidence"] = max(0.0, min(1.0, _float_value(payload.get("parallel_write_min_confidence"), 0.75)))
+    payload["parallel_write_direct_confidence"] = max(
+        0.0,
+        min(1.0, _float_value(payload.get("parallel_write_direct_confidence"), 0.75)),
+    )
+    payload["max_parallel_write_workers"] = max(1, min(10, _int_value(payload.get("max_parallel_write_workers"), 3)))
+    payload["max_parallel_scope_workers"] = max(1, min(10, _int_value(payload.get("max_parallel_scope_workers"), 2)))
     payload["automation_checkpoint_commits"] = _bool_value(payload.get("automation_checkpoint_commits"), True)
     payload["multi_role_allow_remotes"] = False
     payload["optional_mcp_servers"] = []
@@ -393,7 +427,8 @@ def _low_cortisol_intake_prompt(target: Path, description: str) -> str:
             "- Add ticket_generation_decomposition_brief with a concise full-scope decomposition plan, not ticket objects.",
             "- Add ticket_generation_scope_groups as a compact array of scope groups. Each group should have name, description, and surfaces.",
             "- Decompose the full requested project scope, not just an initial demo path.",
-            "- Set automation_role_profile to planner_builder_hardener_integrator. Diffmogger always uses the multi-role conveyor.",
+            "- Set automation_role_profile to planner_builder_hardener_integrator. Diffmogger uses a typed execution DAG scheduler.",
+            "- Set parallel_execution_mode to aggressive, symbol_graph_languages to python/typescript/javascript, parallel_write_min_confidence and parallel_write_direct_confidence to 0.75, max_parallel_write_workers to 3, and max_parallel_scope_workers to 2 unless the request clearly needs stricter local limits.",
             "- Set optional_mcp_servers to an empty array. Context7 and Playwright MCPs are disabled by default.",
             "- Set human_bridge_enabled true and human_bridge_mode to file_only.",
             "- Keep the intake reusable and target-project agnostic. Do not include secrets.",
@@ -836,8 +871,7 @@ def run_required_file_check_for_intake(target: Path, intake: dict[str, Any]) -> 
         "--human-bridge-mode",
         str(intake.get("human_bridge_mode") or "file_only"),
     ]
-    if intake.get("write_worker_agents_allowed"):
-        command.append("--write-workers-enabled")
+    command.append("--write-workers-enabled")
     command.append("--multi-role-enabled")
     campaign = str(intake.get("campaign_mode") or intake.get("automation_run_mode") or "").strip().lower()
     campaign = campaign.replace("-", "_").replace(" ", "_")
@@ -849,6 +883,193 @@ def run_required_file_check_for_intake(target: Path, intake: dict[str, Any]) -> 
     result = run_subprocess(command)
     result["status"] = "pass" if result["exit_code"] == 0 else "fail"
     return result
+
+def bootstrap_status_pending(control: dict[str, Any]) -> bool:
+    status = str(control.get("bootstrap_status") or "").strip().lower()
+    return status in BOOTSTRAP_PENDING_STATUSES
+
+def initial_bootstrap_completed(target: Path, control: dict[str, Any] | None = None) -> bool:
+    dashboard_state = load_dashboard_state(target)
+    dashboard_status = str(dashboard_state.get("initial_bootstrap_status") or "").strip().lower()
+    if dashboard_status == "pass" or str(dashboard_state.get("initial_bootstrap_completed_at") or "").strip():
+        return True
+    control = control or automation_control_state(target)
+    return not bootstrap_status_pending(control)
+
+def bootstrap_lock_path(target: Path) -> Path:
+    return target_path(target.expanduser().resolve(), "target/automation_logs/initial_bootstrap.lock")
+
+@contextlib.contextmanager
+def acquire_initial_bootstrap_lock(target: Path):
+    path = bootstrap_lock_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        raise BackendError(
+            "Initial bootstrap is already running for this target.",
+            error_type="bootstrap_already_running",
+            details={"lock_path": str(path)},
+        ) from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        yield path
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+def ensure_bootstrap_control_completed(target: Path) -> dict[str, Any]:
+    control = automation_control_state(target)
+    if not bootstrap_status_pending(control):
+        return control
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    current_assessment = str(control.get("current_assessment") or "").strip()
+    if not current_assessment or "not bootstrapped" in current_assessment.lower():
+        current_assessment = "Initial bootstrap completed from the dashboard."
+    return write_automation_control_state(
+        target,
+        {
+            "last_updated": now,
+            "current_assessment": current_assessment,
+            "bootstrap_status": "bootstrapped",
+        },
+        actor_role="dashboard",
+        event_type="automation.initial_bootstrap_completed",
+    )
+
+def run_initial_bootstrap(
+    args: argparse.Namespace,
+    target: Path,
+    *,
+    log: Callable[[str, str], None] | None = None,
+) -> dict[str, Any]:
+    def note(stage: str, message: str) -> None:
+        if log is not None:
+            log(stage, message)
+        else:
+            stream_event(args, stage, message)
+
+    intake = load_intake(target)
+    if not intake:
+        raise BackendError(
+            "Setup must be scaffolded before initial bootstrap can run.",
+            error_type="bootstrap_not_scaffolded",
+            details={"target": str(target)},
+        )
+    prompt_path = preferred_target_path(target, "docs/INITIAL_BOOTSTRAP_PROMPT.md")
+    if not prompt_path.exists():
+        raise BackendError(
+            "Could not read the initial bootstrap prompt.",
+            error_type="bootstrap_prompt_missing",
+            details={"path": str(prompt_path)},
+        )
+    control = automation_control_state(target)
+    if initial_bootstrap_completed(target, control):
+        raise BackendError(
+            "Initial bootstrap has already completed for this target.",
+            error_type="bootstrap_already_completed",
+            details={
+                "bootstrap_status": str(control.get("bootstrap_status") or ""),
+                "dashboard_state": {
+                    "initial_bootstrap_status": str(load_dashboard_state(target).get("initial_bootstrap_status") or ""),
+                    "initial_bootstrap_completed_at": str(load_dashboard_state(target).get("initial_bootstrap_completed_at") or ""),
+                },
+            },
+        )
+
+    prerequisites = prereq_snapshot(target, intake)
+    required_failures = list(prerequisites.get("required_failures") or [])
+    if required_failures:
+        raise BackendError(
+            "Required prerequisites are missing before initial bootstrap.",
+            error_type="prerequisites_failed",
+            details={"required_failures": required_failures, "prerequisites": prerequisites},
+        )
+    required_files = run_required_file_check_for_intake(target, intake)
+    if required_files.get("exit_code") != 0:
+        raise BackendError(
+            "Required-file validation failed before initial bootstrap.",
+            error_type="required_files_failed",
+            details=required_files,
+        )
+
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    write_dashboard_action_state(
+        target,
+        last_action="initial_bootstrap_started",
+        updates={
+            "initial_bootstrap_status": "running",
+            "last_initial_bootstrap_started_at": started_at,
+        },
+    )
+    note("bootstrap", "Starting Codex initial bootstrap run.")
+    prompt = prompt_path.read_text(encoding="utf-8")
+    dashboard_app = load_dashboard_module()
+    env = {**os.environ, **dashboard_app.automation_environment(target)}
+    result = run_subprocess_streamed(
+        args,
+        ["codex", "exec", "--full-auto", "--skip-git-repo-check", prompt],
+        cwd=target,
+        stage="bootstrap",
+        env=env,
+    )
+    finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    exit_code = int(result.get("exit_code") if result.get("exit_code") is not None else 1)
+    status = "pass" if exit_code == 0 else "fail"
+    if status != "pass":
+        write_dashboard_action_state(
+            target,
+            last_action="initial_bootstrap_failed",
+            updates={
+                "initial_bootstrap_status": status,
+                "last_initial_bootstrap_started_at": started_at,
+                "last_initial_bootstrap_finished_at": finished_at,
+                "last_initial_bootstrap_exit_code": result.get("exit_code"),
+            },
+        )
+        raise BackendError(
+            "Codex bootstrap failed.",
+            error_type="codex_bootstrap_failed",
+            details={**result, "started_at": started_at, "finished_at": finished_at},
+        )
+
+    control = ensure_bootstrap_control_completed(target)
+    state_path = write_dashboard_action_state(
+        target,
+        last_action="initial_bootstrap_completed",
+        updates={
+            "initial_bootstrap_status": status,
+            "initial_bootstrap_completed_at": finished_at,
+            "last_initial_bootstrap_started_at": started_at,
+            "last_initial_bootstrap_finished_at": finished_at,
+            "last_initial_bootstrap_exit_code": result.get("exit_code"),
+        },
+    )
+    note("bootstrap", "Initial bootstrap completed.")
+    return {
+        "target": target_metadata(target),
+        "dashboard_state_path": str(state_path),
+        "status": status,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "result": result,
+        "required_files": required_files,
+        "prerequisites": prerequisites,
+        "automation_control": control,
+    }
 
 def scaffold_template_included(scaffold_module: Any, rel_path: str, values: dict[str, str]) -> bool:
     if hasattr(scaffold_module, "template_included"):
@@ -1033,6 +1254,18 @@ def command_brief_scaffold_preview(args: argparse.Namespace) -> dict[str, Any]:
         )
     return build_scaffold_preview(target, intake, force=bool(args.force))
 
+def command_brief_run_bootstrap(args: argparse.Namespace) -> dict[str, Any]:
+    target = resolve_target(args.target)
+    if target == KIT_ROOT:
+        raise BackendError(
+            "Refusing to bootstrap the Diffmogger source checkout.",
+            exit_code=2,
+            error_type="invalid_target",
+            details={"target": str(target)},
+        )
+    with acquire_initial_bootstrap_lock(target):
+        return run_initial_bootstrap(args, target)
+
 def native_next_state_from_target(target: Path) -> dict[str, Any]:
     try:
         snapshot = build_observatory_snapshot(target)
@@ -1158,34 +1391,10 @@ def command_brief_scaffold_bootstrap(args: argparse.Namespace) -> dict[str, Any]
         "reason": "Codex bootstrap was not requested by this backend command.",
     }
     if bool(args.run_codex):
-        log("bootstrap", "Starting Codex initial bootstrap run.")
-        prompt_path = preferred_target_path(target, "docs/INITIAL_BOOTSTRAP_PROMPT.md")
-        try:
-            prompt = prompt_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise BackendError(
-                "Could not read the initial bootstrap prompt.",
-                error_type="bootstrap_prompt_missing",
-                details={"path": str(prompt_path), "exception": str(exc)},
-            ) from exc
-        codex_result = run_subprocess(
-            ["codex", "exec", "--full-auto", "--skip-git-repo-check", prompt],
-            cwd=target,
-        )
-        codex_result["status"] = "pass" if codex_result["exit_code"] == 0 else "fail"
-        if codex_result.get("stdout"):
-            log("bootstrap", str(codex_result.get("stdout"))[-1200:])
-        if codex_result.get("stderr"):
-            log("bootstrap", str(codex_result.get("stderr"))[-1200:], level="warning")
-        if codex_result["exit_code"] != 0:
-            log("bootstrap", "Codex bootstrap failed.", level="error", data={"exit_code": codex_result.get("exit_code")})
-            raise BackendError(
-                "Codex bootstrap failed.",
-                error_type="codex_bootstrap_failed",
-                details={**codex_result, "log": log_lines[-24:]},
-            )
+        with acquire_initial_bootstrap_lock(target):
+            codex_result = run_initial_bootstrap(args, target, log=log)
     else:
-        log("bootstrap", "Skipped Codex initial bootstrap; Run controls can start automation after scaffold validation.")
+        log("bootstrap", "Skipped Codex initial bootstrap; use the Setup bootstrap control before starting ongoing automation.")
 
     git_bootstrap: dict[str, Any] = {}
     try:
@@ -1213,7 +1422,11 @@ def command_brief_scaffold_bootstrap(args: argparse.Namespace) -> dict[str, Any]
             details={"target": str(target), "exception": str(exc), "log": log_lines[-20:]},
         ) from exc
 
-    write_dashboard_state_from_intake(target, intake, last_action="bootstrap_completed")
+    write_dashboard_state_from_intake(
+        target,
+        intake,
+        last_action="scaffold_bootstrap_completed" if bool(args.run_codex) else "scaffold_completed",
+    )
     next_state = native_next_state_from_target(target)
     log("done", f"Scaffold pipeline completed: {next_state['state']}.", data=next_state)
     return {

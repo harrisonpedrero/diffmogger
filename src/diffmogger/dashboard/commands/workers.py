@@ -318,6 +318,7 @@ def _dashboard_parallel_read_model(target: Path) -> dict[str, Any]:
             "active_execution_groups": active,
             "recent_execution_groups": recent,
             "blocked_parallel_candidates": snapshot.get("blocked_parallel_candidates", []),
+            "why_not_parallel": snapshot.get("why_not_parallel", {}),
             "parallelization_summary": snapshot.get("parallelization_summary", {}),
             "parallelism_budgets": snapshot.get("parallelism_budgets", []),
             "active_parallel_counts": snapshot.get("active_parallel_counts", {}),
@@ -328,6 +329,7 @@ def _dashboard_parallel_read_model(target: Path) -> dict[str, Any]:
             "conflicting_leases": current_conflicting_resource_leases_conn(conn),
             "validation_jobs": validation_jobs,
             "integration_backlog_from_parallel_workers": snapshot.get("integration_backlog_from_parallel_workers", []),
+            "worker_patch_integration_preflight": snapshot.get("worker_patch_integration_preflight", {}),
             "queued_worker_patches": snapshot.get("queued_worker_patches", []),
             "write_worker_conflicts": snapshot.get("write_worker_conflicts", []),
             "warnings": _parallel_warnings(snapshot),
@@ -337,9 +339,6 @@ def _dashboard_parallel_read_model(target: Path) -> dict[str, Any]:
 def _parallel_warnings(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     warnings: list[dict[str, Any]] = []
     control = snapshot.get("automation_control") if isinstance(snapshot.get("automation_control"), dict) else {}
-    worker = control.get("worker") if isinstance(control.get("worker"), dict) else {}
-    if not bool(worker.get("write_workers_allowed")):
-        warnings.append({"kind": "write_workers_disabled", "severity": "info", "message": "Write workers are disabled for this target."})
     for item in snapshot.get("stale_graph_warnings", []) if isinstance(snapshot.get("stale_graph_warnings"), list) else []:
         if isinstance(item, dict):
             warnings.append({"kind": item.get("kind") or "graph_stale", "severity": item.get("severity") or "warn", "message": item.get("message") or "Graph context may be stale."})

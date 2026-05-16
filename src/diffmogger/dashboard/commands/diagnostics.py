@@ -20,8 +20,7 @@ def required_file_flags(target: Path) -> list[str]:
     flags: list[str] = []
     bridge_mode = human_bridge_mode_from_state(target)
     flags.extend(["--human-bridge-mode", bridge_mode])
-    if bool(intake.get("write_worker_agents_allowed", False)):
-        flags.append("--write-workers-enabled")
+    flags.append("--write-workers-enabled")
     flags.append("--multi-role-enabled")
     campaign = str(intake.get("campaign_mode") or intake.get("automation_run_mode") or "").strip().lower()
     campaign = campaign.replace("-", "_").replace(" ", "_")

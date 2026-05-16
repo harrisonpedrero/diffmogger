@@ -20,7 +20,7 @@ docs/AUTONOMY_EXPERIMENT_LOG.md
 
 Also inspect relevant source files, tests, scripts, and recent worker reports under `target/agent_runs/` as needed.
 
-The task file is dynamic, but it is a generated human/prompt projection. Canonical runtime and task-control state lives in `target/orchestration.sqlite3`; the typed state stores automation status, product horizon, validation receipts, blockers, next actions, stage contracts, the current work item, and repo capability manifest. `target/canonical_state_brief.md` is the generated, bounded agent-readable view. Read the brief instead of inspecting SQLite manually. Use `.diffmogger/scripts/state_brief.py` to update typed status/horizon/task summary fields and regenerate the brief. `target/automation_conveyor_state.json` is generated from SQLite for compatibility and dashboard inspection. Do not hand-edit generated runtime JSON as authoritative state. The guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
+The task file is dynamic, but it is a generated human/prompt projection. Canonical runtime and task-control state lives in `target/orchestration.sqlite3`; the typed state stores automation status, product horizon, execution DAG nodes/edges, validation receipts, blockers, next actions, and repo capability manifest. `target/canonical_state_brief.md` is the generated, bounded agent-readable view. Read the brief instead of inspecting SQLite manually. Use `.diffmogger/scripts/state_brief.py` to update typed status/horizon/task summary fields and regenerate the brief. `target/automation_conveyor_state.json` is generated from SQLite for compatibility and dashboard inspection. Do not hand-edit generated runtime JSON as authoritative state. The guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
 
 ## Mission
 
@@ -42,15 +42,15 @@ A strong run usually combines implementation, tests or fixtures, integration int
 
 A weak run is one that only reads files and summarizes, makes a tiny doc-only change when implementation work is available, adds a placeholder without wiring it into the product, avoids Codex CLI worker usage on a broad task without explaining why, or updates the task file without improving the app, tests, reports, or automation process.
 
-Exception: in `bounded` campaign mode, the listed tickets are the bounded scope. Use `python3 .diffmogger/scripts/ticket_run.py . next --json` to select one dependency-ready ticket, treat that single selection as the run's implementation scope, and do not continue into another ticket after it is completed, blocked, or marked `candidate_done`. Use `.diffmogger/scripts/ticket_run.py update` to record ticket status and evidence; planner/builder/hardener role worktrees stage that as a typed action for integrator reconciliation after patch acceptance. If the command reports placeholder tickets, missing dependencies, duplicate ticket IDs, cycles, blocked dependencies, or no actionable ticket, record that structured blocker instead of guessing. Do not invent new backlog after every ticket is `done` or `blocked`; finalize the bounded campaign and stop only after remaining blockers are not repairable baseline/service setup work. In `ongoing` campaign mode, do not pause for approval just because a new ticket was drafted; use typed runtime context to continue with the next safe project-agnostic ticket.
+Exception: in `bounded` campaign mode, the listed tickets are the bounded scope. Use `python3 .diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket context, then let execution DAG dependencies, confidence, and ownership scopes determine whether a single node or compatible wave can run. Use `.diffmogger/scripts/ticket_run.py update` to record ticket status and evidence; planner/builder/hardener role worktrees stage that as a typed action for integrator reconciliation after patch acceptance. If the command reports placeholder tickets, missing dependencies, duplicate ticket IDs, cycles, blocked dependencies, or no actionable ticket, record that structured blocker instead of guessing. Do not invent new backlog after every ticket is `done` or `blocked`; finalize the bounded campaign and stop only after remaining blockers are not repairable baseline/service setup work. In `ongoing` campaign mode, do not pause for approval just because a new ticket was drafted; use typed runtime context to continue with the next safe project-agnostic ticket.
 
 ## Run Structure
 
-1. Check lock context before mutating code. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, treat the conveyor role wrapper as the lock owner and do not acquire, overwrite, manually create, or release `target/codex_automation.lock` inside the Codex run. If no wrapper-owned lock is present, acquire the lock before mutating code using the target repo's local `.diffmogger/scripts/acquire_codex_lock.sh`.
+1. Check lock context before mutating code. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, treat the DAG scheduler role wrapper as the lock owner and do not acquire, overwrite, manually create, or release `target/codex_automation.lock` inside the Codex run. If no wrapper-owned lock is present, acquire the lock before mutating code using the target repo's local `.diffmogger/scripts/acquire_codex_lock.sh`.
 1. Read `target/canonical_state_brief.md` and the required files above. If Markdown or JSON projections contradict the brief, regenerate or reconcile through the target-local Diffmogger typed state APIs.
 {{HUMAN_RUN_STEPS}}
 1. Inspect the repo enough to understand current state.
-1. Treat the dashboard/conveyor SQLite state as canonical for automation status, product horizon, run, event, stage, capability-manifest, checkpoint, blocker, validation, and next-action state.
+1. Treat the dashboard/SQLite execution DAG state as canonical for automation status, product horizon, run, event, DAG node, capability-manifest, checkpoint, blocker, validation, and next-action state.
 1. Read the current product horizon and next task from `target/canonical_state_brief.md`.
 1. Identify the highest-leverage milestone for this run within the current product horizon.
 1. Decide whether Codex CLI worker agents would materially improve speed, coverage, or quality.
@@ -58,7 +58,7 @@ Exception: in `bounded` campaign mode, the listed tickets are the bounded scope.
 1. Implement it and adjacent safe work.
 1. Run relevant verification.
 1. Update typed runtime state, artifacts, docs, worker activity, human request state when enabled, generated projections, checks run, and next sprint.
-1. If this Codex run acquired the lock itself, release it with the target repo's local `.diffmogger/scripts/release_codex_lock.sh` when possible. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, leave lock release to the conveyor role wrapper. Summarize results.
+1. If this Codex run acquired the lock itself, release it with the target repo's local `.diffmogger/scripts/release_codex_lock.sh` when possible. If `CODEX_LOCK_ALREADY_ACQUIRED=true`, leave lock release to the DAG scheduler role wrapper. Summarize results.
 
 ## Sprint Sizing
 
@@ -200,11 +200,11 @@ Link screenshot-backed bugs in `docs/CODEX_AUTOMATION_TASKS.md` and, when multi-
 
 ## Lock-File Behavior
 
-Continuous conveyor automation uses `.diffmogger/scripts/run_conveyor_automation.sh`, which chooses the next runnable lane and delegates to target-local role wrappers. The wrapper for a mutating Codex run still owns lock acquisition and release.
+Continuous DAG scheduler automation uses `.diffmogger/scripts/run_conveyor_automation.sh`, the legacy-named wrapper that chooses the next runnable execution DAG node or compatible wave and delegates to target-local role wrappers. The wrapper for a mutating Codex run still owns lock acquisition and release.
 
 This target project must keep relevant automation runtime scripts in its own `.diffmogger/scripts/` directory. During normal automation runs, do not import, call, or depend on scripts from the Diffmogger starter repo.
 
-If `CODEX_LOCK_ALREADY_ACQUIRED=true`, the lock is already held by the conveyor role wrapper. In that case:
+If `CODEX_LOCK_ALREADY_ACQUIRED=true`, the lock is already held by the DAG scheduler role wrapper. In that case:
 
 - Do not run an additional acquire command.
 - Do not overwrite `target/codex_automation.lock`.
@@ -302,7 +302,7 @@ Then refresh `docs/CODEX_AUTOMATION_TASKS.md` as a generated prompt/handoff proj
 - ambitious ideas backlog
 - continue/block/critical-stop rationale
 
-Keep the projection headings from the scaffolded task file for human continuity. Do not treat those headings as live dashboard or conveyor state.
+Keep the projection headings from the scaffolded task file for human continuity. Do not treat those headings as live dashboard or DAG scheduler state.
 
 Update `docs/AUTONOMY_EXPERIMENT_LOG.md` when the workflow itself teaches something useful.
 
