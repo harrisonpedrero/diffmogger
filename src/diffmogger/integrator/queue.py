@@ -39,8 +39,38 @@ def parse_created_at(manifest: dict[str, Any], fallback: float) -> float:
             pass
     return fallback
 
-def load_queued_manifests(target: Path) -> list[tuple[Path, dict[str, Any]]]:
+def _target_relative_manifest_path(target: Path, path: Path) -> str:
+    try:
+        return path.expanduser().resolve().relative_to(target.expanduser().resolve()).as_posix()
+    except (OSError, ValueError):
+        return path.as_posix()
+
+def manifest_patch_id(target: Path, path: Path, manifest: dict[str, Any]) -> str:
+    patch_id = str(manifest.get("patch_id") or "").strip()
+    if patch_id:
+        return patch_id
+    run_id = str(manifest.get("run_id") or path.parent.name).strip()
+    worker_id = str(manifest.get("worker_id") or "").strip()
+    if worker_id:
+        return f"worker-patch:{hashlib.sha256((worker_id + ':' + run_id).encode('utf-8')).hexdigest()[:20]}"
+    rel = _target_relative_manifest_path(target, path)
+    return f"role-patch:{hashlib.sha256(rel.encode('utf-8')).hexdigest()[:20]}"
+
+def selected_patch_id_set(values: list[str] | None = None) -> set[str]:
+    selected: set[str] = set()
+    raw_values = list(values or [])
+    env_value = os.environ.get("DIFFMOGGER_SELECTED_PATCH_IDS", "")
+    if env_value:
+        raw_values.extend(re.split(r"[,\s]+", env_value))
+    for value in raw_values:
+        text = str(value or "").strip()
+        if text:
+            selected.add(text)
+    return selected
+
+def load_queued_manifests(target: Path, *, patch_ids: list[str] | set[str] | None = None) -> list[tuple[Path, dict[str, Any]]]:
     queue_root = runtime_path(target, "target/automation_queue")
+    selected = selected_patch_id_set([str(item) for item in patch_ids or []])
     items: list[tuple[Path, dict[str, Any]]] = []
     for role in QUEUE_ROLES:
         role_root = queue_root / role
@@ -52,6 +82,11 @@ def load_queued_manifests(target: Path) -> list[tuple[Path, dict[str, Any]]]:
             except (OSError, json.JSONDecodeError):
                 continue
             if manifest.get("status") == "queued":
+                manifest_id = manifest_patch_id(target, path, manifest)
+                if selected and manifest_id not in selected:
+                    continue
+                if not str(manifest.get("patch_id") or "").strip():
+                    manifest = {**manifest, "patch_id": manifest_id}
                 items.append((path, manifest))
     items.sort(key=lambda item: (parse_created_at(item[1], item[0].stat().st_mtime), str(item[0])))
     return items

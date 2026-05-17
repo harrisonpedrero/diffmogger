@@ -374,6 +374,146 @@ describe("RunPage", () => {
     expect(html).not.toContain("State Machine");
   });
 
+  it("renders the operations cockpit before the topology graph", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            conveyor: {
+              active_role_run: {
+                role: "builder",
+                action_kind: "run_serial_role",
+                run_id: "run:builder",
+                status: "running",
+                reason: "dependency-ready ticket needs serialized builder work",
+              },
+            },
+            state: {
+              execution_dag: executionDag(),
+              selected_candidate: {
+                role: "integrator",
+                action_kind: "run_serial_integration",
+                task_id: "TICKET-001",
+                state: "selected",
+                reasons: ["queued worker patch passed integration preflight"],
+              },
+              queued_worker_patches: [{ patch_id: "patch:worker-1", status: "queued" }],
+              worker_patch_integration_preflight: { safe_count: 1, safe_patch_ids: ["patch:worker-1"] },
+            },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Operations Cockpit");
+    expect(html).toContain("Running Now");
+    expect(html).toContain("run serial role");
+    expect(html).toContain("Next Unlock");
+    expect(html).toContain("run serial integration");
+    expect(html).toContain("Integration Backlog");
+    expect(html).toContain("patch:worker-1");
+    expect(html.indexOf("Operations Cockpit")).toBeLessThan(html.indexOf("Execution DAG Topology"));
+  });
+
+  it("renders the progress matrix from per-ticket DAG action states", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            state: {
+              execution_dag: executionDag({
+                nodes: [
+                  { node_id: "dag-node:T1:scope", task_id: "T1", action_type: "scope", status: "completed", owner_role: "planner" },
+                  { node_id: "dag-node:T1:build", task_id: "T1", action_type: "build", status: "running", owner_role: "builder" },
+                  { node_id: "dag-node:compat:build", task_id: "task:automation", action_type: "build", status: "ready", owner_role: "builder" },
+                ],
+                edges: [],
+              }),
+            },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Progress Matrix");
+    expect(html).toContain("T1");
+    expect(html).toContain("Compatibility fallback");
+    expect(html).toContain("compatibility fallback");
+    expect(html).toContain("status-running");
+    expect(html).toContain("status-ready");
+  });
+
+  it("renders concurrency waves with active and proposed states", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({
+          run: {
+            state: {
+              proposed_execution_groups: [
+                {
+                  execution_group_id: "group:planned",
+                  status: "proposed",
+                  mode: "dry_run",
+                  payload: { execution_mode: "write_workers", why_together: "write candidates have disjoint likely_touches" },
+                  items: [
+                    {
+                      task_id: "T1",
+                      owner_role: "builder",
+                      action_kind: "build",
+                      required_leases: [{ path: "src/a.ts", scope_node_id: "file:src/a.ts" }],
+                    },
+                  ],
+                },
+              ],
+              active_write_workers: [
+                { worker_id: "worker:1", execution_group_id: "group:active", task_id: "T2", role: "builder", status: "running" },
+              ],
+              blocked_parallel_candidates: [
+                { candidate_id: "candidate:T3", task_id: "T3", execution_mode: "write_workers", reason: "missing direct write signal" },
+              ],
+            },
+          },
+        })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Concurrency Strip");
+    expect(html).toContain("group:planned");
+    expect(html).toContain("group:active");
+    expect(html).toContain("candidate:T3");
+    expect(html).toContain("write candidates have disjoint likely_touches");
+    expect(html).toContain("missing direct write signal");
+    expect(html).toContain("src/a.ts");
+  });
+
+  it("renders operator empty states for empty runtime snapshots", () => {
+    const html = renderToStaticMarkup(
+      <RunPage
+        snapshot={snapshot({ run: { state: { execution_dag: { nodes: [], edges: [] } } } })}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("No active role, worker, validation job, or selected scheduler candidate is recorded.");
+    expect(html).toContain("No progress rows yet");
+    expect(html).toContain("No concurrency waves recorded");
+  });
+
   it("renders blocked and failed DAG details", () => {
     const html = renderToStaticMarkup(
       <RunPage
@@ -445,7 +585,7 @@ describe("RunPage", () => {
       />,
     );
 
-    expect(html).toContain("No DAG data for this run");
+    expect(html).toContain("No topology data for this run");
     expect(html).not.toContain("Execution DAG progress graph");
     expect(html).not.toContain("State Machine");
   });
@@ -499,7 +639,7 @@ describe("RunPage", () => {
       />,
     );
 
-    expect(html).toContain("DAG status summary");
+    expect(html).toContain("Topology status summary");
     expect(html).toContain("<span>Ready</span><strong>1</strong>");
     expect(html).toContain("<span>Running</span><strong>1</strong>");
     expect(html).toContain("<span>Blocked</span><strong>0</strong>");

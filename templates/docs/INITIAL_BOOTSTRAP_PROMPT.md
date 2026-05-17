@@ -21,7 +21,7 @@ Read first:
 7. `docs/PROJECT_CONTEXT.md` if present.
 8. `.agentic/automation_prompt.md` if present.
 
-Canonical runtime/task state belongs in `target/orchestration.sqlite3`; typed execution DAG nodes/edges, repository capability manifest, validation receipts, blockers, and next actions live there. Conveyor stage fields are compatibility projections only. `target/canonical_state_brief.md` is the generated agent-readable view. Markdown and JSON files are prompt inputs, handoff surfaces, authored import/export surfaces, projections, exports, or migration aids.
+Canonical runtime/task state belongs in `target/orchestration.sqlite3`; typed activity graph nodes/edges, repository capability manifest, validation receipts, blockers, and next actions live there. Generated views are compatibility projections only. `target/canonical_state_brief.md` is the agent-readable view. Markdown and JSON files are prompt inputs, handoff surfaces, authored import/export surfaces, projections, exports, or migration aids.
 
 ## Goal
 

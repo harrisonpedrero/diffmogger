@@ -310,6 +310,7 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                 "run_serial_integration",
                 "reconcile_worker_results",
                 "create_repair_nodes",
+                "refresh_index",
                 "run_serial_role",
             }.issubset(DAG_RUNNER_ACTIONS)
         )
@@ -774,20 +775,21 @@ class DagSchedulerRunnerTests(unittest.TestCase):
 
                     with closing(connect(database_path_for_target(target))) as conn:
                         model = execution_dag_read_model(conn)
+                    compatibility_task_ids = {"task:conveyor", "task:automation"}
                     review_nodes = [
                         item
                         for item in model["nodes"]
-                        if item["action_type"] == "review" and item["task_id"] != "task:conveyor"
+                        if item["action_type"] == "review" and item["task_id"] not in compatibility_task_ids
                     ]
                     validation_nodes = [
                         item
                         for item in model["nodes"]
-                        if item["action_type"] == "validate" and item["task_id"] != "task:conveyor"
+                        if item["action_type"] == "validate" and item["task_id"] not in compatibility_task_ids
                     ]
                     integration_nodes = [
                         item
                         for item in model["nodes"]
-                        if item["action_type"] == "integrate" and item["task_id"] != "task:conveyor"
+                        if item["action_type"] == "integrate" and item["task_id"] not in compatibility_task_ids
                     ]
                     self.assertEqual(1, len(review_nodes))
                     self.assertEqual(1, len(validation_nodes))

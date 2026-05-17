@@ -310,7 +310,7 @@ def self_review_snapshot(
             reason = clean_text(first.get("reason") or "no reason recorded", limit=160).rstrip(".")
             conveyor_summary = f"Next lane: {first.get('role', 'idle')} ({first.get('state', 'planned')}) - {reason}."
         else:
-            conveyor_summary = "No conveyor decision recorded yet."
+            conveyor_summary = "No runtime decision recorded yet."
     if no_progress_note:
         conveyor_summary = f"{conveyor_summary} {no_progress_note}."
 
@@ -358,7 +358,7 @@ def self_review_snapshot(
             {"label": "First review", "body": first_review.get("summary") or "No first-review readiness state recorded yet."},
             {"label": "Validation", "body": validation.get("summary") or "No validation results recorded yet."},
             {"label": "Integration safety", "body": integration_safety.get("summary") or "Integration-safety check has not run yet."},
-            {"label": "Queue and conveyor", "body": f"{queue_summary} {conveyor_summary}"},
+            {"label": "Queue and activity", "body": f"{queue_summary} {conveyor_summary}"},
             {"label": "Human bridge", "body": human_summary},
             {"label": "Action plan", "body": f"{action_plan['recommendation']} {action_plan['why']}"},
             {"label": "Action follow-through", "body": follow_through_summary(follow_through or {})},

@@ -68,6 +68,7 @@ export type CanonicalStateSnapshot = {
   open_blockers: Array<Record<string, unknown>>;
   next_actions: Array<Record<string, unknown>>;
   validations: Record<string, unknown>;
+  automation_activity?: Record<string, unknown>;
   conveyor_state?: Record<string, unknown>;
   conveyor_machine?: ConveyorMachineSnapshot | Record<string, unknown>;
   execution_dag?: Record<string, unknown>;
@@ -246,6 +247,7 @@ export type ObservatorySnapshot = {
     health?: Record<string, unknown>;
     no_progress?: Record<string, unknown>;
   };
+  automation_activity?: Record<string, unknown>;
   progress: {
     story: string;
     latest_landed_work?: ObservatoryCommit;

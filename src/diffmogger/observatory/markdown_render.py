@@ -222,7 +222,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
         for action in missing_actions[:MAX_REVIEW_ITEMS]:
             lines.append(f"  - {clean_text(action, limit=420)}")
 
-    lines.extend(["", "## Queue And Conveyor", ""])
+    lines.extend(["", "## Queue And Activity", ""])
     lines.append(f"- queued_patches: {int(totals.get('queued', 0) or 0)}")
     lines.append(f"- deferred_patches: {int(totals.get('deferred', 0) or 0)}")
     lines.append(f"- applied_patches: {int(totals.get('applied', 0) or 0)}")
@@ -232,7 +232,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
             f"- first_run_queue_state: {clean_text(empty_states.get('patch_queue') or EMPTY_STATES['patch_queue'], limit=420)}"
         )
     health = conveyor.get("health") if isinstance(conveyor.get("health"), dict) else {}
-    lines.append(f"- conveyor_health: {clean_text(health.get('summary') or 'No conveyor health recorded.', limit=420)}")
+    lines.append(f"- runtime_health: {clean_text(health.get('summary') or 'No runtime health recorded.', limit=420)}")
     if no_progress.get("active"):
         streak = int(no_progress.get("streak", 0) or 0)
         threshold = int(no_progress.get("threshold", 0) or 0)
@@ -254,7 +254,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
         reason = clean_text(first.get("reason") or "No reason recorded.", limit=300)
         lines.append(f"- next_lane: `{role}` ({state}) - {reason}")
     else:
-        lines.append("- next_lane: No conveyor decision recorded yet.")
+        lines.append("- next_lane: No activity decision recorded yet.")
 
     lines.extend(["", "## Deferred Patch Triage", ""])
     lines.append(

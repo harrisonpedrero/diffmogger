@@ -35,11 +35,15 @@ STATE_APPLICATION_ID = 0x444D4752  # DMGR
 CANONICAL_DB_RELATIVE = "target/orchestration.sqlite3"
 CONVEYOR_PROJECTION_RELATIVE = "target/automation_conveyor_state.json"
 CONVEYOR_STREAM_ID = "stream:conveyor"
-CONVEYOR_TASK_ID = "task:conveyor"
+DEFAULT_AUTOMATION_TASK_ID = "task:automation"
+LEGACY_CONVEYOR_TASK_ID = "task:conveyor"
+CONVEYOR_TASK_ID = DEFAULT_AUTOMATION_TASK_ID
+COMPATIBILITY_CONVEYOR_TASK_IDS = frozenset({LEGACY_CONVEYOR_TASK_ID, DEFAULT_AUTOMATION_TASK_ID})
 CONVEYOR_WORK_ITEM_ID = "workitem:default"
 CONVEYOR_PROJECTION_NAME = "conveyor.state"
 CONVEYOR_MACHINE_PROJECTION_NAME = "conveyor.machine"
 EXECUTION_DAG_PROJECTION_NAME = "execution_dag"
+AUTOMATION_ACTIVITY_PROJECTION_NAME = "automation_activity"
 BLOCKER_REVIEW_PROJECTION_NAME = "blocker.review"
 CAPABILITY_PROJECTION_NAME = "repo.capability_manifest"
 CAPABILITY_MANIFEST_ID = "capability:repo"
@@ -76,6 +80,7 @@ EXECUTION_DAG_CANONICAL_ACTION_TYPES = (
     "review",
     "validate",
     "repair",
+    "refresh_index",
     "integrate",
     "audit",
     "calibrate",
@@ -174,6 +179,20 @@ EXECUTION_DAG_ACTION_CAPABILITIES = {
         "optional_by_default": False,
         "parallelizable": True,
         "serialized": False,
+    },
+    "refresh_index": {
+        "role_family": "planner",
+        "prompt_base": "planner",
+        "permissions": ["read_files", "write_codebase_index"],
+        "required_inputs": ["stale_symbol_or_context_evidence", "repo_capability_manifest"],
+        "outputs": ["refreshed_codebase_index", "scheduler_recheck_hint"],
+        "lease_behavior": "read_only",
+        "execution_mode": "read_only",
+        "required_by_default": False,
+        "optional_by_default": False,
+        "required_when": ["stale_symbol_evidence_blocks_scheduling"],
+        "parallelizable": False,
+        "serialized": True,
     },
     "repair": {
         "role_family": "builder",
@@ -463,6 +482,7 @@ WHY_NOT_PARALLEL_REASON_ORDER = (
     "insufficient_scoping_confidence",
     "scope_fanout_exhausted",
     "stale_symbol",
+    "validation_backpressure",
     "write_surface_overlap",
     "lease_conflict",
     "budget_blocked",
@@ -494,6 +514,11 @@ WHY_NOT_PARALLEL_REASON_GUIDANCE = {
         "label": "Stale symbol evidence",
         "next_action": "Refresh the codebase index, then re-run scope or impact scoring.",
         "improvement_kind": "refresh_index",
+    },
+    "validation_backpressure": {
+        "label": "Validation backpressure",
+        "next_action": "Repair or reconcile the failed validation on the same ownership surface before launching more writes there.",
+        "improvement_kind": "repair_validation_surface",
     },
     "budget_blocked": {
         "label": "Budget blocked",
@@ -1105,6 +1130,86 @@ def _line_commands(path: Path) -> list[str]:
     return commands
 
 
+def _command_record(
+    *,
+    kind: str,
+    command: str,
+    source: str,
+    required: bool,
+    source_authority: str,
+) -> dict[str, Any]:
+    command = str(command or "").strip()
+    source_authority = str(source_authority or "").strip().lower() or ("configured" if required else "advisory")
+    return {
+        "kind": str(kind or classify_validation_command(command) or "validation"),
+        "command": command,
+        "source": str(source or ""),
+        "required": bool(required),
+        "source_authority": source_authority,
+        "advisory": not bool(required) or source_authority in {"advisory", "speculative", "discovered"},
+    }
+
+
+def _dedupe_command_records(commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_command: dict[str, dict[str, Any]] = {}
+    for item in commands:
+        command = str(item.get("command") or "").strip()
+        if not command:
+            continue
+        current = by_command.get(command)
+        if current is None:
+            by_command[command] = dict(item)
+            continue
+        current["required"] = bool(current.get("required")) or bool(item.get("required"))
+        current["advisory"] = not bool(current.get("required"))
+        kinds = {part for part in str(current.get("kind") or "").split(",") if part}
+        kinds.update(part for part in str(item.get("kind") or "").split(",") if part)
+        current["kind"] = ",".join(sorted(kinds)) if kinds else str(item.get("kind") or current.get("kind") or "")
+        sources = {part for part in str(current.get("source") or "").split(",") if part}
+        sources.update(part for part in str(item.get("source") or "").split(",") if part)
+        current["source"] = ",".join(sorted(sources))
+        authorities = {part for part in str(current.get("source_authority") or "").split(",") if part}
+        authorities.update(part for part in str(item.get("source_authority") or "").split(",") if part)
+        if "configured" in authorities:
+            current["source_authority"] = "configured"
+        elif "confirmed" in authorities:
+            current["source_authority"] = "confirmed"
+        elif authorities:
+            current["source_authority"] = ",".join(sorted(authorities))
+    return list(by_command.values())
+
+
+def _pyproject_declares_pytest(target: Path) -> bool:
+    text = read_optional_text(target / "pyproject.toml", limit=80_000).lower()
+    if not text:
+        return False
+    if "[tool.pytest" in text:
+        return True
+    return bool(re.search(r"(?m)^\s*(?:dependencies|optional-dependencies)\b[\s\S]{0,12000}\bpytest(?:[<>=~!\[]|[\"'])", text))
+
+
+def _setup_cfg_declares_pytest(target: Path) -> bool:
+    return "[tool:pytest]" in read_optional_text(target / "setup.cfg", limit=40_000).lower()
+
+
+def _python_tests_look_unittest_compatible(target: Path) -> bool:
+    tests_dir = target / "tests"
+    if not tests_dir.exists() or not tests_dir.is_dir():
+        return False
+    for path in sorted(tests_dir.rglob("test*.py"))[:40]:
+        text = read_optional_text(path, limit=20_000)
+        if "unittest" in text or "TestCase" in text:
+            return True
+    return False
+
+
+def _makefile_has_target(target: Path, name: str) -> bool:
+    text = read_optional_text(target / "Makefile", limit=80_000)
+    if not text:
+        return False
+    return bool(re.search(rf"(?m)^[A-Za-z0-9_.-]*{re.escape(name)}\s*:", text))
+
+
 def discover_repo_capabilities(target: Path) -> dict[str, Any]:
     """Infer reusable repository capabilities without product-specific assumptions."""
 
@@ -1136,28 +1241,91 @@ def discover_repo_capabilities(target: Path) -> dict[str, Any]:
         if Path(rel).name in {"AGENTS.md", "README.md", "CONTRIBUTING.md", "DEVELOPMENT.md", "CLAUDE.md"}
     ][:20]
 
-    commands: list[dict[str, str]] = []
+    commands: list[dict[str, Any]] = []
     verification_path = existing_or_target_path(target, ".agentic/verification_commands.txt")
     smoke_path = existing_or_target_path(target, ".agentic/smoke_commands.txt")
     for command in _line_commands(verification_path):
-        commands.append({"kind": "verification", "command": command, "source": target_rel(target, ".agentic/verification_commands.txt")})
+        commands.append(
+            _command_record(
+                kind="verification",
+                command=command,
+                source=target_rel(target, ".agentic/verification_commands.txt"),
+                required=True,
+                source_authority="configured",
+            )
+        )
     for command in _line_commands(smoke_path):
-        commands.append({"kind": "smoke", "command": command, "source": target_rel(target, ".agentic/smoke_commands.txt")})
+        commands.append(
+            _command_record(
+                kind="smoke",
+                command=command,
+                source=target_rel(target, ".agentic/smoke_commands.txt"),
+                required=False,
+                source_authority="configured",
+            )
+        )
 
     package_json = _json_file(target / "package.json")
     scripts = package_json.get("scripts") if isinstance(package_json.get("scripts"), dict) else {}
     for name in ("test", "lint", "typecheck", "build", "check"):
         if name in scripts:
-            commands.append({"kind": name, "command": f"npm run {name}", "source": "package.json"})
-    if (target / "pyproject.toml").exists() or (target / "pytest.ini").exists() or (target / "setup.cfg").exists():
-        commands.append({"kind": "test", "command": "python3 -m pytest", "source": "python project metadata"})
+            commands.append(
+                _command_record(
+                    kind=name,
+                    command=f"npm run {name}",
+                    source="package.json",
+                    required=True,
+                    source_authority="confirmed",
+                )
+            )
+    if _python_tests_look_unittest_compatible(target):
+        commands.append(
+            _command_record(
+                kind="test",
+                command="python3 -m unittest discover -s tests",
+                source="tests/",
+                required=True,
+                source_authority="confirmed",
+            )
+        )
+    if (target / "pytest.ini").exists() or _pyproject_declares_pytest(target) or _setup_cfg_declares_pytest(target):
+        commands.append(
+            _command_record(
+                kind="test",
+                command="python3 -m pytest",
+                source="pytest project metadata",
+                required=True,
+                source_authority="confirmed",
+            )
+        )
+    elif ((target / "pyproject.toml").exists() or (target / "setup.cfg").exists()) and not any(
+        str(item.get("source") or "").endswith("verification_commands.txt") or str(item.get("command") or "").startswith("python3 -m unittest")
+        for item in commands
+    ):
+        commands.append(
+            _command_record(
+                kind="test",
+                command="python3 -m pytest",
+                source="python project metadata",
+                required=False,
+                source_authority="speculative",
+            )
+        )
     if (target / "Cargo.toml").exists():
-        commands.append({"kind": "test", "command": "cargo test", "source": "Cargo.toml"})
-        commands.append({"kind": "lint", "command": "cargo clippy --all-targets --all-features", "source": "Cargo.toml"})
+        commands.append(_command_record(kind="test", command="cargo test", source="Cargo.toml", required=True, source_authority="confirmed"))
+        commands.append(
+            _command_record(
+                kind="lint",
+                command="cargo clippy --all-targets --all-features",
+                source="Cargo.toml",
+                required=True,
+                source_authority="confirmed",
+            )
+        )
     if (target / "go.mod").exists():
-        commands.append({"kind": "test", "command": "go test ./...", "source": "go.mod"})
-    if (target / "Makefile").exists():
-        commands.append({"kind": "make", "command": "make test", "source": "Makefile"})
+        commands.append(_command_record(kind="test", command="go test ./...", source="go.mod", required=True, source_authority="confirmed"))
+    if _makefile_has_target(target, "test"):
+        commands.append(_command_record(kind="make", command="make test", source="Makefile", required=True, source_authority="confirmed"))
 
     analyzers: list[str] = []
     joined_ci = "\n".join(read_optional_text(target / rel, limit=20_000) for rel in ci_files).lower()
@@ -1201,7 +1369,7 @@ def discover_repo_capabilities(target: Path) -> dict[str, Any]:
             "ci": ci_files[:40],
             "lockfiles": lockfiles,
         },
-        "commands": commands,
+        "commands": _dedupe_command_records(commands),
         "analyzers": sorted(set(analyzers)),
         "code_intelligence": code_intelligence_manifest,
         "policy": {
@@ -6028,6 +6196,344 @@ def execution_dag_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _activity_status_kind(status: Any) -> str:
+    normalized = _execution_dag_status(status, "pending")
+    if normalized in EXECUTION_DAG_ACTIVE_STATUSES:
+        return "running"
+    if normalized in EXECUTION_DAG_READY_STATUSES:
+        return "ready"
+    if normalized in EXECUTION_DAG_BLOCKED_STATUSES or normalized in {"blocked_on_user", "blocked_on_environment", "critical_stop"}:
+        return "blocked"
+    if normalized in {"failed", "cancelled"}:
+        return "failed"
+    if _execution_dag_terminal(normalized):
+        return "completed"
+    return "pending"
+
+
+def _activity_lane_id(owner_role: str, action_type: str, source_type: str = "") -> str:
+    role = re.sub(r"[^a-z0-9]+", "_", str(owner_role or "").strip().lower()).strip("_")
+    action = re.sub(r"[^a-z0-9]+", "_", str(action_type or source_type or "runtime").strip().lower()).strip("_")
+    if role:
+        return f"lane:{role}"
+    return f"lane:{action or 'runtime'}"
+
+
+def _activity_count_statuses(nodes: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"pending": 0, "ready": 0, "running": 0, "completed": 0, "blocked": 0, "failed": 0, "skipped": 0}
+    for node in nodes:
+        status_kind = str(node.get("status_kind") or _activity_status_kind(node.get("status")))
+        if status_kind not in counts:
+            status_kind = "pending"
+        counts[status_kind] += 1
+    counts["total"] = len(nodes)
+    return counts
+
+
+def automation_activity_model_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    execution_dag: Mapping[str, Any],
+    runner_state: Mapping[str, Any] | None = None,
+    human_state: Mapping[str, Any] | None = None,
+    scheduler_decision: Mapping[str, Any] | None = None,
+    parallel_dry_run: Mapping[str, Any] | None = None,
+    worker_reports: Mapping[str, Any] | None = None,
+    worker_patches: Mapping[str, Any] | None = None,
+    validation_jobs: Mapping[str, Any] | None = None,
+    stale_graph_warnings: list[dict[str, Any]] | None = None,
+    event_limit: int = DEFAULT_EVENT_LIMIT,
+) -> dict[str, Any]:
+    """Build the public automation activity graph from typed SQLite state."""
+
+    del target
+    runner_state = runner_state if isinstance(runner_state, Mapping) else {}
+    human_state = human_state if isinstance(human_state, Mapping) else {}
+    scheduler_decision = scheduler_decision if isinstance(scheduler_decision, Mapping) else {}
+    parallel_dry_run = parallel_dry_run if isinstance(parallel_dry_run, Mapping) else {}
+    worker_reports = worker_reports if isinstance(worker_reports, Mapping) else {}
+    worker_patches = worker_patches if isinstance(worker_patches, Mapping) else {}
+    validation_jobs = validation_jobs if isinstance(validation_jobs, Mapping) else {}
+
+    dag_nodes = [
+        dict(item)
+        for item in (execution_dag.get("nodes") if isinstance(execution_dag.get("nodes"), list) else [])
+        if isinstance(item, Mapping)
+    ]
+    dag_edges = [
+        dict(item)
+        for item in (execution_dag.get("edges") if isinstance(execution_dag.get("edges"), list) else [])
+        if isinstance(item, Mapping)
+    ]
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    for node in dag_nodes:
+        node_id = str(node.get("node_id") or node.get("id") or "")
+        if not node_id:
+            continue
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+        owner_role = str(node.get("owner_role") or metadata.get("owner_role") or "")
+        action_type = str(node.get("action_type") or "")
+        status_kind = _activity_status_kind(node.get("status"))
+        nodes.append(
+            {
+                **node,
+                "id": node_id,
+                "node_id": node_id,
+                "source_type": "execution",
+                "lane_id": _activity_lane_id(owner_role, action_type, "execution"),
+                "status_kind": status_kind,
+                "summary": _brief_text(metadata.get("summary") or metadata.get("title") or node.get("blocker_reason") or action_type, limit=220),
+            }
+        )
+    node_ids = {str(node.get("node_id") or "") for node in nodes}
+    for edge in dag_edges:
+        source = str(edge.get("source") or edge.get("source_node_id") or "")
+        target_id = str(edge.get("target") or edge.get("target_node_id") or "")
+        if not source or not target_id:
+            continue
+        edges.append(
+            {
+                **edge,
+                "id": str(edge.get("edge_id") or edge.get("id") or f"activity-edge:{sha256_text(source + '>' + target_id)[:20]}"),
+                "edge_id": str(edge.get("edge_id") or edge.get("id") or f"activity-edge:{sha256_text(source + '>' + target_id)[:20]}"),
+                "source": source,
+                "target": target_id,
+                "source_type": "execution",
+            }
+        )
+
+    queued_activity_patches = (
+        worker_patches.get("queued_worker_patches")
+        if isinstance(worker_patches.get("queued_worker_patches"), list)
+        else []
+    )
+    for patch in queued_activity_patches:
+        if not isinstance(patch, Mapping):
+            continue
+        patch_id = str(patch.get("patch_id") or "")
+        if not patch_id:
+            continue
+        node_id = f"activity-patch:{patch_id}"
+        source_node_id = str((patch.get("payload") if isinstance(patch.get("payload"), Mapping) else {}).get("dag_node_id") or "")
+        nodes.append(
+            {
+                "id": node_id,
+                "node_id": node_id,
+                "task_id": str((patch.get("payload") if isinstance(patch.get("payload"), Mapping) else {}).get("task_id") or ""),
+                "action_type": "patch",
+                "owner_role": "integrator",
+                "status": str(patch.get("status") or "queued"),
+                "status_kind": _activity_status_kind(patch.get("status") or "queued"),
+                "source_type": "patch",
+                "lane_id": "lane:integrator",
+                "summary": f"Queued patch {patch_id}",
+                "patch_id": patch_id,
+                "patch_path": str(patch.get("patch_path") or ""),
+                "metadata": {
+                    "changed_files": patch.get("changed_files") if isinstance(patch.get("changed_files"), list) else [],
+                    "manifest_path": str(patch.get("manifest_path") or ""),
+                    "worker_id": str(patch.get("worker_id") or ""),
+                    "execution_group_id": str(patch.get("execution_group_id") or ""),
+                },
+            }
+        )
+        if source_node_id and source_node_id in node_ids:
+            edges.append(
+                {
+                    "id": f"activity-edge:{sha256_text(source_node_id + '>' + node_id)[:20]}",
+                    "edge_id": f"activity-edge:{sha256_text(source_node_id + '>' + node_id)[:20]}",
+                    "source": source_node_id,
+                    "target": node_id,
+                    "dependency_kind": "produces_patch",
+                    "dependency_mode": "advisory",
+                    "reason": "worker output queued for serialized integration",
+                    "confidence": 1.0,
+                    "source_type": "patch",
+                }
+            )
+
+    validation_job_summary = validation_jobs.get("validation_job_summary") if isinstance(validation_jobs.get("validation_job_summary"), Mapping) else {}
+    latest_validation_jobs = validation_job_summary.get("latest") if isinstance(validation_job_summary.get("latest"), list) else []
+    for job in latest_validation_jobs:
+        if not isinstance(job, Mapping):
+            continue
+        job_id = str(job.get("job_id") or "")
+        if not job_id:
+            continue
+        node_id = f"activity-validation:{job_id}"
+        nodes.append(
+            {
+                "id": node_id,
+                "node_id": node_id,
+                "task_id": str(job.get("plan_id") or job.get("gate_id") or ""),
+                "action_type": "validate",
+                "owner_role": "hardener",
+                "status": str(job.get("status") or "queued"),
+                "status_kind": _activity_status_kind(job.get("status") or "queued"),
+                "source_type": "validation",
+                "lane_id": "lane:hardener",
+                "summary": _brief_text(job.get("command") or job_id, limit=220),
+                "metadata": {
+                    "job_id": job_id,
+                    "execution_group_id": str(job.get("execution_group_id") or ""),
+                    "classification": str((job.get("payload") if isinstance(job.get("payload"), Mapping) else {}).get("classification") or ""),
+                },
+            }
+        )
+
+    human_counts = human_state.get("counts") if isinstance(human_state.get("counts"), Mapping) else {}
+    pending_human = int(human_counts.get("pending_requests") or 0) + int(human_counts.get("queued_notes") or 0)
+    if pending_human:
+        nodes.append(
+            {
+                "id": "activity-human:pending",
+                "node_id": "activity-human:pending",
+                "task_id": "",
+                "action_type": "human_message",
+                "owner_role": "human",
+                "status": "blocked_on_user",
+                "status_kind": "blocked",
+                "source_type": "human_message",
+                "lane_id": "lane:human",
+                "summary": f"{pending_human} pending human message(s)",
+                "metadata": dict(human_counts),
+            }
+        )
+
+    lane_rows: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        lane_id = str(node.get("lane_id") or _activity_lane_id(node.get("owner_role", ""), node.get("action_type", "")))
+        lane = lane_rows.setdefault(
+            lane_id,
+            {
+                "lane_id": lane_id,
+                "label": str(node.get("owner_role") or node.get("action_type") or "runtime").replace("_", " ").title(),
+                "owner_role": str(node.get("owner_role") or ""),
+                "node_ids": [],
+                "status_counts": {"pending": 0, "ready": 0, "running": 0, "completed": 0, "blocked": 0, "failed": 0, "skipped": 0},
+            },
+        )
+        lane["node_ids"].append(str(node.get("node_id") or ""))
+        status_kind = str(node.get("status_kind") or "pending")
+        lane_counts = lane["status_counts"]
+        if status_kind not in lane_counts:
+            status_kind = "pending"
+        lane_counts[status_kind] += 1
+    lanes = sorted(lane_rows.values(), key=lambda item: (str(item.get("owner_role") or ""), str(item.get("lane_id") or "")))
+
+    proposed_groups = [
+        dict(item)
+        for item in (parallel_dry_run.get("proposed_execution_groups") if isinstance(parallel_dry_run.get("proposed_execution_groups"), list) else [])
+        if isinstance(item, Mapping)
+    ]
+    active_group_ids = sorted(
+        {
+            str(item.get("execution_group_id") or "")
+            for source in (
+                worker_reports.get("active_read_only_workers") if isinstance(worker_reports.get("active_read_only_workers"), list) else [],
+                worker_patches.get("active_write_workers") if isinstance(worker_patches.get("active_write_workers"), list) else [],
+                validation_jobs.get("active_validation_jobs") if isinstance(validation_jobs.get("active_validation_jobs"), list) else [],
+            )
+            for item in source
+            if isinstance(item, Mapping) and str(item.get("execution_group_id") or "")
+        }
+    )
+    waves = [
+        {
+            "wave_id": str(group.get("execution_group_id") or f"wave:{index + 1}"),
+            "status": str(group.get("status") or "proposed"),
+            "mode": str(group.get("mode") or (group.get("payload") if isinstance(group.get("payload"), Mapping) else {}).get("execution_mode") or ""),
+            "node_ids": [
+                str((item.get("payload") if isinstance(item, Mapping) and isinstance(item.get("payload"), Mapping) else {}).get("dag_node_id") or item.get("dag_node_id") or "")
+                for item in (group.get("items") if isinstance(group.get("items"), list) else [])
+                if isinstance(item, Mapping)
+            ],
+            "reason": _brief_text(group.get("reason") or (group.get("payload") if isinstance(group.get("payload"), Mapping) else {}).get("why_together") or "", limit=220),
+        }
+        for index, group in enumerate(proposed_groups)
+    ]
+
+    why_not = parallel_dry_run.get("why_not_parallel") if isinstance(parallel_dry_run.get("why_not_parallel"), Mapping) else {}
+    next_unlocks = []
+    for item in why_not.get("next_improvements") if isinstance(why_not.get("next_improvements"), list) else []:
+        if isinstance(item, Mapping):
+            next_unlocks.append(dict(item))
+    selected_candidate = scheduler_decision.get("selected_scheduler_candidate") or scheduler_decision.get("selected_candidate") or {}
+    candidate_hints = selected_candidate.get("next_evidence_hints") if isinstance(selected_candidate, Mapping) and isinstance(selected_candidate.get("next_evidence_hints"), list) else []
+    status_counts = _activity_count_statuses(nodes)
+    active_focus = {
+        "selected_scheduler_candidate": dict(selected_candidate) if isinstance(selected_candidate, Mapping) else {},
+        "runner": runner_state.get("active") if isinstance(runner_state.get("active"), Mapping) else runner_state.get("active_role_run", {}),
+        "active_node_ids": [str(node.get("node_id") or "") for node in nodes if str(node.get("status_kind") or "") == "running"][:12],
+        "next_evidence_hints": [dict(item) for item in candidate_hints if isinstance(item, Mapping)][:8],
+    }
+    health = {
+        "status": "blocked" if status_counts.get("blocked") or status_counts.get("failed") else "active" if status_counts.get("running") else "ready" if status_counts.get("ready") else "idle",
+        "status_counts": status_counts,
+        "stale_graph_warnings": list(stale_graph_warnings or [])[:12],
+        "validation": validation_jobs.get("validation_job_summary") if isinstance(validation_jobs.get("validation_job_summary"), Mapping) else {},
+        "worker_patch_preflight": worker_patches.get("worker_patch_integration_preflight") if isinstance(worker_patches.get("worker_patch_integration_preflight"), Mapping) else {},
+        "why_not_parallel": why_not,
+    }
+    event_rows = recent_events(conn, limit=event_limit)
+    summary = {
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "lane_count": len(lanes),
+        "wave_count": len(waves),
+        "active_group_count": len(active_group_ids),
+        "status_counts": status_counts,
+        "queued_patch_count": len(worker_patches.get("queued_worker_patches") if isinstance(worker_patches.get("queued_worker_patches"), list) else []),
+        "active_validation_count": len(validation_jobs.get("active_validation_jobs") if isinstance(validation_jobs.get("active_validation_jobs"), list) else []),
+        "blocked_candidate_count": int(why_not.get("blocked_candidate_count") or 0) if isinstance(why_not, Mapping) else 0,
+    }
+    digest = sha256_text(
+        stable_json(
+            {
+                "nodes": nodes,
+                "edges": edges,
+                "waves": waves,
+                "active_group_ids": active_group_ids,
+                "summary": summary,
+                "last_event": event_rows[0] if event_rows else {},
+            }
+        )
+    )
+    return {
+        "schema_version": 1,
+        "authority": "sqlite",
+        "projection": AUTOMATION_ACTIVITY_PROJECTION_NAME,
+        "digest": digest,
+        "summary": summary,
+        "active_focus": active_focus,
+        "lanes": lanes,
+        "nodes": nodes,
+        "edges": edges,
+        "waves": waves,
+        "next_unlocks": next_unlocks[:12],
+        "health": health,
+        "events": event_rows,
+        "selected_scheduler_candidate": dict(selected_candidate) if isinstance(selected_candidate, Mapping) else {},
+        "execution_groups": proposed_groups[:12],
+        "active_group_ids": active_group_ids,
+        "worker_reports": {
+            "active_read_only_workers": worker_reports.get("active_read_only_workers", []),
+            "pending_worker_reports": worker_reports.get("pending_worker_reports", []),
+            "completed_worker_reports": worker_reports.get("completed_worker_reports", []),
+        },
+        "patches": {
+            "queued_worker_patches": worker_patches.get("queued_worker_patches", []),
+            "write_worker_conflicts": worker_patches.get("write_worker_conflicts", []),
+            "integration_preflight": worker_patches.get("worker_patch_integration_preflight", {}),
+        },
+        "validations": validation_jobs,
+        "blockers": open_blockers(conn),
+        "human_messages": human_state,
+    }
+
+
 def _dag_edge(
     conn: sqlite3.Connection,
     source: str,
@@ -6126,6 +6632,43 @@ def _runtime_action_statuses_from_conveyor(state: Mapping[str, Any]) -> dict[str
     else:
         statuses[current] = "ready"
     return statuses
+
+
+def _record_scope_evidence_promotion_event_conn(
+    conn: sqlite3.Connection,
+    ticket_id: str,
+    policy: Mapping[str, Any],
+    *,
+    evidence_confidence: float,
+) -> None:
+    if not ticket_id or not policy:
+        return
+    digest = sha256_text(stable_json({"ticket_id": ticket_id, "policy": policy, "confidence": round(evidence_confidence, 4)}))[:24]
+    marker = f'"promotion_digest":"{digest}"'
+    existing = conn.execute(
+        "SELECT 1 FROM events WHERE event_type = 'scope_evidence.promoted' AND payload_json LIKE ? LIMIT 1",
+        (f"%{marker}%",),
+    ).fetchone()
+    if existing is not None:
+        return
+    append_event(
+        conn,
+        StateEvent(
+            stream_id=f"stream:scope-evidence:{ticket_id}",
+            event_type="scope_evidence.promoted",
+            actor_role="scheduler",
+            phase="scheduler",
+            status="ACTIVE",
+            task_id=ticket_id,
+            payload={
+                "ticket_id": ticket_id,
+                "promotion_digest": digest,
+                "evidence_confidence": round(evidence_confidence, 4),
+                "scope_evidence": dict(policy),
+                "readiness_effect": "accepted evidence promoted this work item to direct write readiness",
+            },
+        ),
+    )
 
 
 def _validation_receipt_refs_by_task(conn: sqlite3.Connection) -> dict[str, list[str]]:
@@ -6328,7 +6871,7 @@ def materialize_execution_dag_conn(
                 "title": "Default automation task",
                 "event_id": event_id,
                 "event_type": event_type,
-                "compatibility_projection": CONVEYOR_PROJECTION_NAME,
+                "runtime_identity": DEFAULT_AUTOMATION_TASK_ID,
             },
         )
     )
@@ -6431,6 +6974,12 @@ def materialize_execution_dag_conn(
                 evidence_confidence = max(
                     float(policy.get("confidence") or 0),
                     float(scope_evidence_policy.get("max_confidence") or 0),
+                )
+                _record_scope_evidence_promotion_event_conn(
+                    conn,
+                    ticket_id,
+                    scope_evidence_policy,
+                    evidence_confidence=evidence_confidence,
                 )
                 policy = {
                     **dict(policy),
@@ -6653,7 +7202,7 @@ def materialize_execution_dag_conn(
             )
         )
         target_node_id = _execution_dag_node_id(task_id, "build")
-        if task_id == CONVEYOR_TASK_ID:
+        if task_id in COMPATIBILITY_CONVEYOR_TASK_IDS:
             target_node_id = _execution_dag_node_id(CONVEYOR_TASK_ID, "decompose")
         if conn.execute("SELECT 1 FROM execution_dag_nodes WHERE node_id = ?", (target_node_id,)).fetchone():
             keep_edge(_dag_edge(conn, str(blocker_node["node_id"]), target_node_id, "blocks", summary or str(row["kind"] or "blocker")))
@@ -11807,6 +12356,17 @@ def _validation_local_cache_probe(target: Path, cwd: Path, command: str, classif
     }
 
 
+def _validation_command_default_required(data: Mapping[str, Any]) -> bool:
+    if "required" in data:
+        return bool(data.get("required"))
+    authority = str(data.get("source_authority") or data.get("authority") or "").strip().lower()
+    if authority in {"advisory", "speculative", "discovered"}:
+        return False
+    if bool(data.get("advisory")):
+        return False
+    return True
+
+
 def _validation_command_spec(raw: Any, *, index: int, target: Path, default_plan_id: str) -> dict[str, Any]:
     if isinstance(raw, Mapping):
         data = dict(raw)
@@ -11822,7 +12382,10 @@ def _validation_command_spec(raw: Any, *, index: int, target: Path, default_plan
     cwd = Path(cwd_text)
     if not cwd.is_absolute():
         cwd = target / cwd
-    required = bool(data.get("required", True))
+    required = _validation_command_default_required(data)
+    source_authority = str(data.get("source_authority") or data.get("authority") or "").strip().lower()
+    if not source_authority:
+        source_authority = "explicit" if not bool(data.get("advisory")) else "advisory"
     gate_id = str(data.get("gate_id") or f"gate:{index}:{sha256_text(command)[:12]}")
     plan_id = str(data.get("plan_id") or default_plan_id)
     command_family = _validation_command_family(command, classification)
@@ -11850,6 +12413,9 @@ def _validation_command_spec(raw: Any, *, index: int, target: Path, default_plan
         "command": command,
         "cwd": str(cwd),
         "required": required,
+        "source": str(data.get("source") or ""),
+        "source_authority": source_authority,
+        "advisory": bool(data.get("advisory")) or not required or source_authority in {"advisory", "speculative", "discovered"},
         "classification": classification,
         "plan_id": plan_id,
         "gate_id": gate_id,
@@ -11945,11 +12511,21 @@ def _validation_plan_command_candidates(
 ) -> list[dict[str, Any]]:
     candidates_by_command: dict[str, dict[str, Any]] = {}
 
-    def add_candidate(command: str, *, kind: str = "", source: str = "", confidence: float = 0.75) -> None:
+    def add_candidate(
+        command: str,
+        *,
+        kind: str = "",
+        source: str = "",
+        confidence: float = 0.75,
+        required: bool = True,
+        source_authority: str = "",
+        advisory: bool = False,
+    ) -> None:
         command_text = str(command or "").strip()
         if not command_text:
             return
         classification = classify_validation_command(command_text)
+        source_authority = str(source_authority or ("confirmed" if required else "advisory")).strip().lower()
         current = candidates_by_command.get(command_text)
         if current is None:
             candidates_by_command[command_text] = {
@@ -11957,9 +12533,23 @@ def _validation_plan_command_candidates(
                 "kind": kind or classification,
                 "source": source,
                 "classification": classification,
+                "required": bool(required),
+                "source_authority": source_authority,
+                "advisory": bool(advisory) or not bool(required) or source_authority in {"advisory", "speculative", "discovered"},
                 "confidence": round(float(confidence or 0.75), 4),
             }
             return
+        current["required"] = bool(current.get("required")) or bool(required)
+        current["advisory"] = not bool(current.get("required"))
+        authorities = {part for part in str(current.get("source_authority") or "").split(",") if part}
+        if source_authority:
+            authorities.add(source_authority)
+        if "configured" in authorities:
+            current["source_authority"] = "configured"
+        elif "confirmed" in authorities:
+            current["source_authority"] = "confirmed"
+        elif authorities:
+            current["source_authority"] = ",".join(sorted(authorities))
         kinds = {part for part in str(current.get("kind") or "").split(",") if part}
         if kind:
             kinds.add(kind)
@@ -11983,6 +12573,9 @@ def _validation_plan_command_candidates(
                     str(item.get("command") or ""),
                     kind=str(item.get("kind") or ""),
                     source=str(item.get("source") or "capability_manifest"),
+                    required=_validation_command_default_required(item),
+                    source_authority=str(item.get("source_authority") or ""),
+                    advisory=bool(item.get("advisory")),
                     confidence=0.86,
                 )
 
@@ -12002,6 +12595,9 @@ def _validation_plan_command_candidates(
             str(item.get("name") or item.get("command") or ""),
             kind=str(item.get("kind") or ""),
             source=str(item.get("source") or "context_pack"),
+            required=bool(item.get("required", True)),
+            source_authority=str(item.get("source_authority") or item.get("authority") or ""),
+            advisory=bool(item.get("advisory")),
             confidence=float(item.get("confidence") or 0.72),
         )
 
@@ -12335,6 +12931,7 @@ def build_symbol_aware_validation_plan_conn(
                 impacted_paths=impacted_paths,
                 escalation_reasons=escalation_reasons,
                 confidence=max(float(base.get("confidence") or 0.75), float(test.get("confidence") or 0.6)),
+                required=_validation_command_default_required(base),
             )
 
     if strategy == "broader" and test_commands:
@@ -12349,6 +12946,7 @@ def build_symbol_aware_validation_plan_conn(
                 impacted_paths=impacted_paths,
                 escalation_reasons=escalation_reasons,
                 confidence=float(command.get("confidence") or 0.78),
+                required=_validation_command_default_required(command),
             )
 
     if read_only_commands and (strategy == "broader" or symbol_context.get("direct_symbols") or impacted_paths):
@@ -12363,6 +12961,7 @@ def build_symbol_aware_validation_plan_conn(
                 impacted_paths=impacted_paths,
                 escalation_reasons=escalation_reasons,
                 confidence=float(command.get("confidence") or 0.78),
+                required=_validation_command_default_required(command),
             )
 
     if interface_paths or interface_edges:
@@ -12383,6 +12982,7 @@ def build_symbol_aware_validation_plan_conn(
                 impacted_paths=impacted_paths,
                 escalation_reasons=escalation_reasons,
                 confidence=max(float(command.get("confidence") or 0.78), 0.82),
+                required=_validation_command_default_required(command),
             )
 
     if build_commands and strategy == "broader":
@@ -12397,6 +12997,7 @@ def build_symbol_aware_validation_plan_conn(
                 impacted_paths=impacted_paths,
                 escalation_reasons=escalation_reasons,
                 confidence=float(command.get("confidence") or 0.78),
+                required=_validation_command_default_required(command),
             )
 
     if not selected_by_command and commands:
@@ -12413,6 +13014,7 @@ def build_symbol_aware_validation_plan_conn(
                 impacted_paths=impacted_paths,
                 escalation_reasons=escalation_reasons,
                 confidence=float(command.get("confidence") or 0.72),
+                required=_validation_command_default_required(command),
             )
 
     selected_commands = _validation_plan_sort_commands(list(selected_by_command.values()))
@@ -12524,25 +13126,91 @@ def _validation_failure_signature(command: str, reason: str, category: str, root
     return f"{reason}:{category}:{digest}"
 
 
+def _validation_control_plane_classification(spec: Mapping[str, Any], result: Mapping[str, Any]) -> str:
+    category = str(result.get("failure_category") or "")
+    reason = str(result.get("failure_reason") or "")
+    required = bool(spec.get("required", True))
+    advisory = bool(spec.get("advisory")) or not required
+    if reason != "verification_environment_failure":
+        return "source_test_failure"
+    if category in {"missing_env_var", "missing_local_database", "missing_verification_config", "db_schema_drift"}:
+        return "missing_local_service_or_config"
+    if category in {"missing_pytest", "missing_package_executable", "missing_python_module", "missing_command", "missing_node_module", "missing_node_dependencies"}:
+        source_authority = str(spec.get("source_authority") or "").strip().lower()
+        if advisory and source_authority in {"advisory", "speculative", "discovered"}:
+            return "invalid_discovered_command"
+        if advisory:
+            return "missing_optional_tool"
+        return "missing_declared_dependency"
+    if advisory:
+        return "invalid_discovered_command"
+    return "true_blocker_requiring_human_or_environment"
+
+
+def _invalid_discovered_command_disposition(spec: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
+    classification = _validation_control_plane_classification(spec, result)
+    if classification != "invalid_discovered_command":
+        return {}
+    category = str(result.get("failure_category") or "environment")
+    return {
+        "schema_version": 1,
+        "status": "invalid_discovered_command",
+        "action": "downgraded_to_advisory",
+        "reason": "A non-required discovered validation command failed because an undeclared local tool or dependency is unavailable.",
+        "failure_category": category,
+        "source": str(spec.get("source") or ""),
+        "source_authority": str(spec.get("source_authority") or ""),
+        "required_before": bool(spec.get("required", True)),
+        "required_after": False,
+    }
+
+
+def _validation_result_with_failure_classification(spec: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
+    if int(result.get("exit_code") or 0) == 0:
+        return dict(result)
+    command = str(spec.get("command") or "")
+    output = (str(result.get("stdout") or "") + "\n" + str(result.get("stderr") or "")).strip()
+    reason = str(result.get("failure_reason") or "")
+    category = str(result.get("failure_category") or "")
+    root_cause = str(result.get("failure_root_cause") or "")
+    if not reason or not category:
+        reason, category, root_cause = _validation_failure_root_cause(command, output, [])
+    merged = dict(result)
+    merged["failure_reason"] = reason
+    merged["failure_category"] = category
+    merged["failure_root_cause"] = root_cause
+    merged["validation_failure_signature"] = str(result.get("validation_failure_signature") or _validation_failure_signature(command, reason, category, root_cause))
+    merged["control_plane_classification"] = _validation_control_plane_classification(spec, merged)
+    if "environment_failure" not in merged:
+        merged["environment_failure"] = reason == "verification_environment_failure"
+    if "repair_performed" not in merged:
+        merged["repair_performed"] = False
+    disposition = _invalid_discovered_command_disposition(spec, merged)
+    if disposition:
+        merged["invalid_command_disposition"] = disposition
+        merged["environment_failure"] = False
+    return merged
+
+
 def _validation_result_with_environment_repair(spec: Mapping[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     if int(result.get("exit_code") or 0) == 0:
         return result
     target_text = str(spec.get("target") or "")
     command = str(spec.get("command") or "")
     if not target_text or not command:
-        return result
+        return _validation_result_with_failure_classification(spec, result)
     target = Path(target_text).expanduser().resolve()
     cwd = Path(str(spec.get("cwd") or ".")).expanduser().resolve()
     if cwd != target:
-        return result
+        return _validation_result_with_failure_classification(spec, result)
     output = (str(result.get("stdout") or "") + "\n" + str(result.get("stderr") or "")).strip()
     try:
         from diffmogger.runtime import repair_environment
     except Exception:  # pragma: no cover - defensive import fallback.
-        return result
+        return _validation_result_with_failure_classification(spec, result)
     diagnostics = repair_environment.diagnose_failure(command, int(result.get("exit_code") or 0), output)
     if not diagnostics:
-        return result
+        return _validation_result_with_failure_classification(spec, result)
     repaired = repair_environment.diagnose_and_repair(
         target,
         command,
@@ -12574,6 +13242,11 @@ def _validation_result_with_environment_repair(spec: Mapping[str, Any], result: 
     merged["failure_category"] = category
     merged["failure_root_cause"] = root_cause
     merged["validation_failure_signature"] = _validation_failure_signature(command, reason, category, root_cause)
+    merged["control_plane_classification"] = _validation_control_plane_classification(spec, merged)
+    disposition = _invalid_discovered_command_disposition(spec, merged)
+    if disposition:
+        merged["invalid_command_disposition"] = disposition
+        merged["environment_failure"] = False
     if repaired.final_exit_code is not None:
         merged["exit_code"] = int(repaired.final_exit_code)
         merged["stdout"] = ""
@@ -12812,6 +13485,9 @@ def _persist_validation_job_result_conn(
                 f"final_command={repair.get('final_command') or ''}",
                 f"final_exit={repair.get('final_exit_code')}",
                 f"failure_signature={result.get('validation_failure_signature') or ''}",
+                f"control_plane_classification={result.get('control_plane_classification') or ''}",
+                "invalid_command_disposition="
+                + stable_json(result.get("invalid_command_disposition") if isinstance(result.get("invalid_command_disposition"), Mapping) else {}),
                 "diagnostics=" + stable_json(repair.get("diagnostics") or []),
                 "repairs=" + stable_json(repair.get("repairs") or []),
                 "blocked_reason=" + str(repair.get("blocked_reason") or ""),
@@ -12821,6 +13497,19 @@ def _persist_validation_job_result_conn(
                 "",
                 "### initial stderr",
                 initial_stderr,
+            ]
+        )
+    elif exit_code != 0:
+        log_lines.extend(
+            [
+                "",
+                "## failure classification",
+                f"failure_reason={result.get('failure_reason') or ''}",
+                f"failure_category={result.get('failure_category') or ''}",
+                f"failure_signature={result.get('validation_failure_signature') or ''}",
+                f"control_plane_classification={result.get('control_plane_classification') or ''}",
+                "invalid_command_disposition="
+                + stable_json(result.get("invalid_command_disposition") if isinstance(result.get("invalid_command_disposition"), Mapping) else {}),
             ]
         )
     log_text = "\n".join(log_lines).rstrip() + "\n"
@@ -12855,6 +13544,9 @@ def _persist_validation_job_result_conn(
     payload = {
         "schema_version": 1,
         "required": required,
+        "source": str(spec.get("source") or ""),
+        "source_authority": str(spec.get("source_authority") or ""),
+        "advisory": bool(spec.get("advisory")) or not required,
         "classification": str(spec.get("classification") or "unknown"),
         "exclusive": bool(spec.get("exclusive")),
         "run_lane": str(spec.get("run_lane") or ("serial" if spec.get("exclusive") else "parallel")),
@@ -12869,12 +13561,17 @@ def _persist_validation_job_result_conn(
     if repair:
         payload["environment_repair"] = dict(repair)
         payload["initial_exit_code"] = int(result.get("initial_exit_code") or 0)
+    if repair or exit_code != 0:
+        payload["initial_exit_code"] = int(result.get("initial_exit_code") or exit_code)
         payload["environment_failure"] = bool(result.get("environment_failure"))
         payload["repair_performed"] = bool(result.get("repair_performed"))
         payload["failure_reason"] = str(result.get("failure_reason") or "")
         payload["failure_category"] = str(result.get("failure_category") or "")
         payload["failure_root_cause"] = str(result.get("failure_root_cause") or "")
         payload["validation_failure_signature"] = str(result.get("validation_failure_signature") or "")
+        payload["control_plane_classification"] = str(result.get("control_plane_classification") or "")
+        if isinstance(result.get("invalid_command_disposition"), Mapping):
+            payload["invalid_command_disposition"] = dict(result.get("invalid_command_disposition") or {})
     spec_payload = spec.get("payload") if isinstance(spec.get("payload"), Mapping) else {}
     if spec_payload:
         payload["selection"] = dict(spec_payload)
@@ -12982,7 +13679,14 @@ def run_parallel_validation_conn(
         if commands is None:
             capability = latest_capability_manifest(conn) or refresh_capability_manifest_conn(conn, target)
             commands = [
-                {"command": item.get("command"), "required": True, "classification": classify_validation_command(str(item.get("command") or ""))}
+                {
+                    "command": item.get("command"),
+                    "required": _validation_command_default_required(item),
+                    "source": item.get("source"),
+                    "source_authority": item.get("source_authority"),
+                    "advisory": item.get("advisory"),
+                    "classification": classify_validation_command(str(item.get("command") or "")),
+                }
                 for item in capability.get("commands", [])
                 if isinstance(item, Mapping) and str(item.get("command") or "").strip()
             ]
@@ -13091,6 +13795,9 @@ def run_parallel_validation_conn(
                         {
                             "job_id": job_id,
                             "classification": spec.get("classification"),
+                            "source": spec.get("source"),
+                            "source_authority": spec.get("source_authority"),
+                            "advisory": spec.get("advisory"),
                             "run_lane": spec.get("run_lane"),
                             "command_family": spec.get("command_family"),
                             "resource_profile": spec.get("resource_profile"),
@@ -13134,6 +13841,9 @@ def run_parallel_validation_conn(
                             "schema_version": 1,
                             "required": bool(spec.get("required", True)),
                             "classification": spec.get("classification"),
+                            "source": spec.get("source"),
+                            "source_authority": spec.get("source_authority"),
+                            "advisory": spec.get("advisory"),
                             "exclusive": bool(spec.get("exclusive")),
                             "run_lane": spec.get("run_lane"),
                             "command_family": spec.get("command_family"),
@@ -15773,6 +16483,8 @@ def sync_queued_role_manifests_into_worker_patches_conn(
                     patch_id = f"worker-patch:{sha256_text(worker_id + ':' + run_id)[:20]}"
                 else:
                     patch_id = f"role-patch:{sha256_text(manifest_rel)[:20]}"
+                manifest = {**dict(manifest), "patch_id": patch_id}
+                write_json_projection(manifest_path, manifest)
             existing = conn.execute("SELECT status FROM worker_patches WHERE patch_id = ?", (patch_id,)).fetchone()
             if existing is not None and str(existing["status"] or "") != "queued":
                 skipped.append({"manifest_path": manifest_rel, "patch_id": patch_id, "reason": f"already_{existing['status']}"})
@@ -17730,6 +18442,148 @@ def create_repair_nodes_for_failed_validation_conn(
     }
 
 
+def _stale_record_refresh_paths(records: list[Mapping[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    for record in records:
+        record_touches = record.get("likely_touches") if isinstance(record.get("likely_touches"), list) else []
+        for touch in record_touches:
+            if not isinstance(touch, Mapping):
+                continue
+            path = normalize_path_for_brief(str(touch.get("path") or touch.get("owner_file_path") or ""))
+            if path:
+                paths.append(path)
+        record_paths = record.get("likely_touch_paths") if isinstance(record.get("likely_touch_paths"), list) else []
+        for path_value in record_paths:
+            path = normalize_path_for_brief(str(path_value or ""))
+            if path:
+                paths.append(path)
+    return sorted(dict.fromkeys(paths))[:24]
+
+
+def create_refresh_index_nodes_for_stale_evidence_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    stale_records: list[Mapping[str, Any]],
+    *,
+    selected_by: str = "dag_scheduler",
+    limit: int = 3,
+) -> dict[str, Any]:
+    records = [record for record in stale_records if isinstance(record, Mapping)][: max(1, int(limit or 3))]
+    if not records:
+        return {"status": "skipped", "reason_kind": "no_stale_records", "nodes": []}
+    paths = _stale_record_refresh_paths(records)
+    digest = sha256_text(stable_json({"paths": paths, "records": records}))[:24]
+    node_id = f"dag-node:refresh-index:{digest}"
+    existing = conn.execute("SELECT * FROM execution_dag_nodes WHERE node_id = ?", (node_id,)).fetchone()
+    if existing is not None:
+        node = execution_dag_node_row_to_dict(existing)
+        if not _execution_dag_terminal(str(node.get("status") or "")):
+            return {"status": "existing", "nodes": [node], "paths": paths}
+    with conn:
+        node = upsert_execution_dag_node(
+            conn,
+            node_id=node_id,
+            task_id=CONVEYOR_TASK_ID,
+            action_type="refresh_index",
+            status="ready",
+            owner_role="planner",
+            confidence=0.9,
+            blocker_reason="stale symbol or context evidence blocks scheduling",
+            metadata={
+                "source": "why_not_parallel",
+                "scheduler_action": "refresh_index",
+                "selected_by": selected_by,
+                "summary": "Refresh stale codebase index evidence",
+                "paths": paths,
+                "stale_records": [dict(record) for record in records],
+                "targeted": bool(paths),
+                "next_scheduler_pass": "re-evaluate readiness after index refresh",
+            },
+        )
+        append_event(
+            conn,
+            StateEvent(
+                stream_id="stream:execution-dag:refresh-index",
+                event_type="execution_dag.refresh_index_node_created",
+                actor_role=selected_by,
+                phase="scheduler",
+                status="ACTIVE",
+                task_id=CONVEYOR_TASK_ID,
+                payload={"node_id": node_id, "paths": paths, "stale_record_count": len(records)},
+            ),
+        )
+    return {"status": "created", "nodes": [node], "paths": paths}
+
+
+def run_refresh_index_node_conn(
+    conn: sqlite3.Connection,
+    target: Path,
+    *,
+    dag_node_id: str = "",
+    selected_by: str = "dag_scheduler.refresh_index",
+) -> dict[str, Any]:
+    row = None
+    if dag_node_id:
+        row = conn.execute("SELECT * FROM execution_dag_nodes WHERE node_id = ?", (dag_node_id,)).fetchone()
+    if row is None:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM execution_dag_nodes
+            WHERE action_type = 'refresh_index'
+              AND status IN ('ready', 'pending', 'planned', 'queued')
+            ORDER BY created_at DESC, node_id
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
+        return {"status": "skipped", "reason_kind": "no_refresh_index_node"}
+    node = execution_dag_node_row_to_dict(row)
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+    paths = [
+        normalize_path_for_brief(str(path))
+        for path in (metadata.get("paths") if isinstance(metadata.get("paths"), list) else [])
+        if normalize_path_for_brief(str(path))
+    ][:24]
+    started_at = utc_now()
+    capability = refresh_capability_manifest_conn(conn, target, actor_role=selected_by, append_event_first=True)
+    results: list[dict[str, Any]] = []
+    if paths:
+        for path in paths:
+            results.append(refresh_codebase_graph_changed_file_conn(conn, target, path, capability=capability))
+    else:
+        results.append(refresh_codebase_graph_conn(conn, target, capability=capability))
+    finished_at = utc_now()
+    with conn:
+        updated = upsert_execution_dag_node(
+            conn,
+            node_id=str(node.get("node_id") or ""),
+            task_id=str(node.get("task_id") or CONVEYOR_TASK_ID),
+            action_type="refresh_index",
+            status="completed",
+            owner_role=str(node.get("owner_role") or "planner"),
+            confidence=float(node.get("confidence") or 0.9),
+            attempt_count=int(node.get("attempt_count") or 0) + 1,
+            started_at=started_at,
+            finished_at=finished_at,
+            blocker_reason="",
+            metadata={**dict(metadata), "refresh_results": results, "refreshed_at": finished_at, "selected_by": selected_by},
+        )
+        append_event(
+            conn,
+            StateEvent(
+                stream_id="stream:execution-dag:refresh-index",
+                event_type="execution_dag.refresh_index_completed",
+                actor_role=selected_by,
+                phase="scheduler",
+                status="ACTIVE",
+                task_id=str(node.get("task_id") or CONVEYOR_TASK_ID),
+                payload={"node_id": str(node.get("node_id") or ""), "paths": paths, "result_count": len(results)},
+            ),
+        )
+    return {"status": "completed", "node": updated, "paths": paths, "results": results}
+
+
 def update_execution_group_dag_nodes_conn(
     conn: sqlite3.Connection,
     execution_group_id: str,
@@ -18680,6 +19534,7 @@ def launch_write_execution_group_conn(
             patch_status = "failed"
             status = "failed"
             failure_reason = "write worker produced no changed files"
+        patch_id = f"worker-patch:{sha256_text(worker_id + ':' + worker_run_id)[:20]}"
         summary_path.write_text(
             "\n".join(
                 [
@@ -18710,6 +19565,7 @@ def launch_write_execution_group_conn(
             "schema_version": 1,
             "role": "builder",
             "run_id": worker_run_id,
+            "patch_id": patch_id,
             "status": "queued" if patch_status == "queued" else "deferred" if patch_status == "conflict" else "failed",
             "source": "parallel_write_worker",
             "worker_id": worker_id,
@@ -18738,7 +19594,6 @@ def launch_write_execution_group_conn(
             "integration_notes_required": True,
         }
         manifest_path.write_text(pretty_json(manifest), encoding="utf-8")
-        patch_id = f"worker-patch:{sha256_text(worker_id + ':' + worker_run_id)[:20]}"
         created_at = utc_now()
         with conn:
             conn.execute(
@@ -20390,6 +21245,85 @@ def why_not_parallel_read_model(
     }
 
 
+def _candidate_touch_paths(candidate: Mapping[str, Any]) -> list[str]:
+    paths: list[str] = []
+    candidate_touches = candidate.get("likely_touches") if isinstance(candidate.get("likely_touches"), list) else []
+    for touch in candidate_touches:
+        if not isinstance(touch, Mapping):
+            continue
+        path = normalize_path_for_brief(str(touch.get("path") or touch.get("owner_file_path") or ""))
+        if path:
+            paths.append(path)
+    candidate_leases = candidate.get("required_leases") if isinstance(candidate.get("required_leases"), list) else []
+    for lease in candidate_leases:
+        if not isinstance(lease, Mapping):
+            continue
+        for key in ("path", "owner_file_path", "scope_path"):
+            path = normalize_path_for_brief(str(lease.get(key) or ""))
+            if path:
+                paths.append(path)
+    return sorted(dict.fromkeys(paths))
+
+
+def _validation_job_backpressure_paths_conn(conn: sqlite3.Connection, job: Mapping[str, Any]) -> list[str]:
+    paths: list[str] = []
+    payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
+    planning = payload.get("planning_evidence") if isinstance(payload.get("planning_evidence"), Mapping) else {}
+    for value in [
+        *(payload.get("selected_paths") if isinstance(payload.get("selected_paths"), list) else []),
+        *(payload.get("impacted_paths") if isinstance(payload.get("impacted_paths"), list) else []),
+        *(planning.get("selected_paths") if isinstance(planning.get("selected_paths"), list) else []),
+        *(planning.get("impacted_paths") if isinstance(planning.get("impacted_paths"), list) else []),
+    ]:
+        path = normalize_path_for_brief(str(value or ""))
+        if path:
+            paths.append(path)
+    for node in _validation_dag_nodes_for_job_conn(conn, job):
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+        metadata_paths = metadata.get("paths") if isinstance(metadata.get("paths"), list) else []
+        for value in metadata_paths:
+            path = normalize_path_for_brief(str(value or ""))
+            if path:
+                paths.append(path)
+    return sorted(dict.fromkeys(paths))
+
+
+def _validation_backpressure_for_candidate_conn(conn: sqlite3.Connection, candidate: Mapping[str, Any]) -> dict[str, Any]:
+    if str(candidate.get("execution_mode") or "") != "write_workers":
+        return {}
+    candidate_paths = _candidate_touch_paths(candidate)
+    if not candidate_paths:
+        return {}
+    blocked_jobs: list[dict[str, Any]] = []
+    blocked_paths: list[str] = []
+    for job in validation_jobs_conn(conn, statuses={"failed"}, limit=50):
+        payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
+        if not bool(payload.get("required", True)):
+            continue
+        job_paths = _validation_job_backpressure_paths_conn(conn, job)
+        if not job_paths:
+            continue
+        if _dag_patch_paths_overlap(candidate_paths, job_paths):
+            blocked_jobs.append(
+                {
+                    "job_id": str(job.get("job_id") or ""),
+                    "command": _brief_text(job.get("command"), limit=160),
+                    "paths": job_paths[:8],
+                    "status": str(job.get("status") or ""),
+                }
+            )
+            blocked_paths.extend(job_paths)
+    if not blocked_jobs:
+        return {}
+    return {
+        "reason_kind": "validation_backpressure",
+        "reason": "required validation is failed on the same ownership surface; repair/reconcile it before launching more writes there",
+        "candidate_paths": candidate_paths[:8],
+        "failed_validation_jobs": blocked_jobs[:6],
+        "blocked_paths": sorted(dict.fromkeys(blocked_paths))[:12],
+    }
+
+
 def _parallel_candidate_for_task_conn(
     conn: sqlite3.Connection,
     target: Path,
@@ -20527,6 +21461,14 @@ def _parallel_candidate_for_task_conn(
         for conflict in (lease.get("conflicts") if isinstance(lease.get("conflicts"), list) else [])
         if isinstance(conflict, Mapping)
     ]
+    backpressure = _validation_backpressure_for_candidate_conn(conn, candidate)
+    if backpressure:
+        candidate["validation_backpressure"] = backpressure
+        return None, _parallel_blocked_candidate(
+            candidate,
+            reason_kind="validation_backpressure",
+            reason=str(backpressure.get("reason") or "validation backpressure blocks this write surface"),
+        )
     if lease_conflicts:
         return None, _parallel_blocked_candidate(
             candidate,
@@ -20713,6 +21655,14 @@ def _parallel_candidate_for_dag_node_conn(
         for conflict in (lease.get("conflicts") if isinstance(lease.get("conflicts"), list) else [])
         if isinstance(conflict, Mapping)
     ]
+    backpressure = _validation_backpressure_for_candidate_conn(conn, candidate)
+    if backpressure:
+        candidate["validation_backpressure"] = backpressure
+        return None, _parallel_blocked_candidate(
+            candidate,
+            reason_kind="validation_backpressure",
+            reason=str(backpressure.get("reason") or "validation backpressure blocks this write surface"),
+        )
     if lease_conflicts:
         return None, _parallel_blocked_candidate(
             candidate,
@@ -21779,7 +22729,7 @@ def apply_conveyor_machine_read_models(
             """,
             (
                 CONVEYOR_WORK_ITEM_ID,
-                "Default conveyor work item",
+                "Default automation work item",
                 status,
                 stage,
                 stage_status,
@@ -21920,13 +22870,13 @@ def apply_conveyor_read_models(conn: sqlite3.Connection, state: Mapping[str, Any
             """,
             (
                 CONVEYOR_TASK_ID,
-                "Automation conveyor",
+                "Automation activity",
                 "ACTIVE",
                 phase,
                 str(active.get("role") or ""),
                 now,
                 now,
-                stable_json({"projection": CONVEYOR_PROJECTION_NAME, "last_event_id": event_id}),
+                stable_json({"runtime_model": AUTOMATION_ACTIVITY_PROJECTION_NAME, "last_event_id": event_id}),
             ),
         )
         for run_key in ("active_role_run", "last_active_role_run"):
@@ -21960,8 +22910,8 @@ def apply_conveyor_read_models(conn: sqlite3.Connection, state: Mapping[str, Any
                 ),
             )
         conn.execute(
-            "DELETE FROM next_actions WHERE source_projection = ?",
-            (CONVEYOR_PROJECTION_NAME,),
+            "DELETE FROM next_actions WHERE source_projection IN (?, ?)",
+            (CONVEYOR_PROJECTION_NAME, AUTOMATION_ACTIVITY_PROJECTION_NAME),
         )
         decision_queue = state.get("decision_queue") if isinstance(state.get("decision_queue"), list) else []
         for index, item in enumerate(decision_queue[:12]):
@@ -21970,7 +22920,7 @@ def apply_conveyor_read_models(conn: sqlite3.Connection, state: Mapping[str, Any
             role = str(item.get("role") or "idle")
             state_name = str(item.get("state") or "planned")
             reason = str(item.get("reason") or "")
-            action_id = f"next:conveyor:{index}:{sha256_text(role + state_name + reason)[:12]}"
+            action_id = f"next:automation:{index}:{sha256_text(role + state_name + reason)[:12]}"
             conn.execute(
                 """
                 INSERT INTO next_actions(action_id, task_id, owner_role, kind, status, reason, priority, created_at, updated_at, source_projection, payload_json)
@@ -21980,13 +22930,13 @@ def apply_conveyor_read_models(conn: sqlite3.Connection, state: Mapping[str, Any
                     action_id,
                     CONVEYOR_TASK_ID,
                     role,
-                    "conveyor_lane",
+                    "activity_lane",
                     state_name,
                     reason,
                     index,
                     now,
                     now,
-                    CONVEYOR_PROJECTION_NAME,
+                    AUTOMATION_ACTIVITY_PROJECTION_NAME,
                     stable_json(item),
                 ),
             )
@@ -22011,6 +22961,26 @@ def annotate_projection_state(
     if machine:
         annotated["state_machine"] = dict(machine)
     return annotated
+
+
+def _latest_conveyor_event_state_conn(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT payload_json
+        FROM events
+        WHERE stream_id = ?
+        ORDER BY event_id DESC
+        LIMIT 1
+        """,
+        (CONVEYOR_STREAM_ID,),
+    ).fetchone()
+    if row is None:
+        return {}
+    payload = _json_cell(row["payload_json"], {})
+    if not isinstance(payload, Mapping):
+        return {}
+    state = payload.get("state") if isinstance(payload.get("state"), Mapping) else {}
+    return normalize_conveyor_state(state) if state else {}
 
 
 def write_conveyor_state(
@@ -22065,18 +23035,15 @@ def write_conveyor_state(
             event_type=event_type,
         )
         annotated = annotate_projection_state(base_state, db_path, event_id, machine=machine)
-        replace_projection(conn, name=CONVEYOR_PROJECTION_NAME, payload=annotated, event_id=event_id)
         apply_conveyor_read_models(conn, annotated, event_id=event_id)
-        replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=event_id)
         replace_projection(conn, name=EXECUTION_DAG_PROJECTION_NAME, payload=execution_dag, event_id=event_id)
         checkpoint_stream(
             conn,
             stream_id=CONVEYOR_STREAM_ID,
-            kind="conveyor_projection",
+            kind="automation_activity",
             state=annotated,
             event_id=event_id,
         )
-    write_json_projection(projection_path, annotated)
     return annotated
 
 
@@ -22091,9 +23058,9 @@ def import_legacy_conveyor_json(projection_path: Path, db_path: Path) -> dict[st
             (str(projection_path), source_hash),
         ).fetchone()
         if existing is not None:
-            projected = load_projection(conn, CONVEYOR_PROJECTION_NAME)
-            if projected:
-                return normalize_conveyor_state(projected)
+            state = _latest_conveyor_event_state_conn(conn)
+            if state:
+                return state
         refresh_capability_manifest_conn(conn, target, actor_role="migration", append_event_first=True)
         event_id = append_event(
             conn,
@@ -22122,9 +23089,7 @@ def import_legacy_conveyor_json(projection_path: Path, db_path: Path) -> dict[st
             event_type="compatibility.legacy_conveyor_json_imported",
         )
         annotated = annotate_projection_state(legacy, db_path, event_id, machine=machine)
-        replace_projection(conn, name=CONVEYOR_PROJECTION_NAME, payload=annotated, event_id=event_id)
         apply_conveyor_read_models(conn, annotated, event_id=event_id)
-        replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=event_id)
         replace_projection(conn, name=EXECUTION_DAG_PROJECTION_NAME, payload=execution_dag, event_id=event_id)
         checkpoint_stream(
             conn,
@@ -22141,7 +23106,6 @@ def import_legacy_conveyor_json(projection_path: Path, db_path: Path) -> dict[st
                 "imported_at=excluded.imported_at, event_id=excluded.event_id",
                 (str(projection_path), source_hash, utc_now(), event_id),
             )
-    write_json_projection(projection_path, annotated)
     return annotated
 
 
@@ -22161,33 +23125,13 @@ def load_conveyor_state(projection_path: Path) -> dict[str, Any]:
     db_path = database_path_for_projection(projection_path)
     if db_path.exists():
         with closing(connect(db_path)) as conn:
-            projected = load_projection(conn, CONVEYOR_PROJECTION_NAME)
-            if projected:
-                normalized = normalize_conveyor_state(projected)
-                if isinstance(normalized.get("state_machine"), dict):
-                    return normalized
-                target = target_from_projection_path(projection_path)
-                refresh_capability_manifest_conn(conn, target, actor_role="runtime", append_event_first=True)
-                machine = apply_conveyor_machine_read_models(
-                    conn,
-                    target,
-                    normalized,
-                    event_id=None,
-                    event_type="conveyor.state_machine_backfilled",
-                )
-                execution_dag = materialize_execution_dag_conn(
-                    conn,
-                    target,
-                    normalized,
-                    event_id=None,
-                    event_type="execution_dag.backfilled_from_conveyor_projection",
-                )
-                annotated = annotate_projection_state(normalized, db_path, None, machine=machine)
-                replace_projection(conn, name=CONVEYOR_PROJECTION_NAME, payload=annotated, event_id=None)
-                replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=None)
-                replace_projection(conn, name=EXECUTION_DAG_PROJECTION_NAME, payload=execution_dag, event_id=None)
-                write_json_projection(projection_path, annotated)
-                return normalize_conveyor_state(annotated)
+            state = _latest_conveyor_event_state_conn(conn)
+            if state:
+                return state
+            event_count = int(conn.execute("SELECT COUNT(*) AS count FROM events").fetchone()["count"] or 0)
+            if event_count == 0 and projection_path.exists():
+                return import_legacy_conveyor_json(projection_path, db_path)
+            return normalize_conveyor_state(default_conveyor_state())
     if projection_path.exists():
         return import_legacy_conveyor_json(projection_path, db_path)
     return initialize_conveyor_state(projection_path, db_path)
@@ -23570,7 +24514,7 @@ def write_ticket_run_state(
                 actor_role=actor_role,
                 causation_id=event_id,
             )
-            conveyor_state = load_projection(conn, CONVEYOR_PROJECTION_NAME)
+            conveyor_state = _latest_conveyor_event_state_conn(conn)
             materialize_execution_dag_conn(
                 conn,
                 target,
@@ -23863,9 +24807,9 @@ def _validate_current_work_item_owner(conn: sqlite3.Connection) -> dict[str, Any
     ).fetchone()
     if row is None:
         return _invariant_result(
-            "conveyor.current_stage_owner",
+            "activity.current_owner",
             False,
-            "Default conveyor work item is missing.",
+            "Default automation work item is missing.",
             failures=[{"work_item_id": CONVEYOR_WORK_ITEM_ID}],
         )
     stage = str(row["current_stage"] or "")
@@ -23873,11 +24817,11 @@ def _validate_current_work_item_owner(conn: sqlite3.Connection) -> dict[str, Any
     expected_roles = _expected_owner_roles_for_stage(stage)
     ok = bool(expected_roles) and owner_role in expected_roles
     return _invariant_result(
-        "conveyor.current_stage_owner",
+        "activity.current_owner",
         ok,
-        f"Current conveyor stage {stage} is owned by {owner_role}."
+        f"Current activity phase {stage} is owned by {owner_role}."
         if ok
-        else f"Current conveyor stage {stage} has owner {owner_role}; expected one of {sorted(expected_roles)}.",
+        else f"Current activity phase {stage} has owner {owner_role}; expected one of {sorted(expected_roles)}.",
         failures=[]
         if ok
         else [
@@ -24160,7 +25104,6 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             event_type="state.snapshot",
         )
         state = normalize_conveyor_state({**state, "state_machine": machine})
-        replace_projection(conn, name=CONVEYOR_MACHINE_PROJECTION_NAME, payload=machine, event_id=None)
         execution_dag = materialize_execution_dag_conn(
             conn,
             target,
@@ -24228,17 +25171,9 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "SELECT checkpoint_id, stream_id, sequence, kind, created_at, state_sha256 "
             "FROM checkpoints ORDER BY rowid DESC LIMIT 1"
         ).fetchone()
-        projection_row = conn.execute(
-            "SELECT name, updated_at, payload_sha256, event_id FROM projections WHERE name = ?",
-            (CONVEYOR_PROJECTION_NAME,),
-        ).fetchone()
         runner_projection_row = conn.execute(
             "SELECT name, updated_at, payload_sha256, event_id FROM projections WHERE name = ?",
             (RUNNER_PROJECTION_NAME,),
-        ).fetchone()
-        machine_projection_row = conn.execute(
-            "SELECT name, updated_at, payload_sha256, event_id FROM projections WHERE name = ?",
-            (CONVEYOR_MACHINE_PROJECTION_NAME,),
         ).fetchone()
         capability_projection_row = conn.execute(
             "SELECT name, updated_at, payload_sha256, event_id FROM projections WHERE name = ?",
@@ -24253,14 +25188,6 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             (EXECUTION_DAG_PROJECTION_NAME,),
         ).fetchone()
         counts = table_counts(conn)
-        projection_payload = {
-            "name": CONVEYOR_PROJECTION_NAME,
-            "path": str(projection_path),
-            "exists": projection_path.exists(),
-            "updated_at": projection_row["updated_at"] if projection_row else "",
-            "payload_sha256": projection_row["payload_sha256"] if projection_row else "",
-            "event_id": projection_row["event_id"] if projection_row else None,
-        }
         runner_projection_payload = {
             "name": RUNNER_PROJECTION_NAME,
             "path": str(runner_projection_path),
@@ -24268,14 +25195,6 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "updated_at": runner_projection_row["updated_at"] if runner_projection_row else "",
             "payload_sha256": runner_projection_row["payload_sha256"] if runner_projection_row else "",
             "event_id": runner_projection_row["event_id"] if runner_projection_row else None,
-        }
-        machine_projection_payload = {
-            "name": CONVEYOR_MACHINE_PROJECTION_NAME,
-            "path": str(db_path),
-            "exists": bool(machine_projection_row),
-            "updated_at": machine_projection_row["updated_at"] if machine_projection_row else "",
-            "payload_sha256": machine_projection_row["payload_sha256"] if machine_projection_row else "",
-            "event_id": machine_projection_row["event_id"] if machine_projection_row else None,
         }
         capability_projection_payload = {
             "name": CAPABILITY_PROJECTION_NAME,
@@ -24304,7 +25223,6 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         schema_migrations = schema_migration_rows(conn)
         invariant_results = state_invariant_results(conn)
         health_summary = state_health_summary(invariant_results)
-        base_ready = counts.get("events", 0) >= 1 and bool(projection_row)
         stale_context_warning = str(impact_read_model.get("stale_context_warning") or "")
         stale_graph_warnings: list[dict[str, Any]] = []
         stale_node_count = int(codebase_graph.get("stale_node_count") or 0) if isinstance(codebase_graph, dict) else 0
@@ -24340,6 +25258,29 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
                     "message": stale_context_warning,
                 }
             )
+        automation_activity = automation_activity_model_conn(
+            conn,
+            target,
+            execution_dag=execution_dag,
+            runner_state=runner_state,
+            human_state=human_state,
+            scheduler_decision=scheduler_decision,
+            parallel_dry_run=parallel_dry_run,
+            worker_reports=worker_reports,
+            worker_patches=worker_patches,
+            validation_jobs=validation_jobs,
+            stale_graph_warnings=stale_graph_warnings,
+            event_limit=event_limit,
+        )
+        activity_projection_payload = {
+            "name": AUTOMATION_ACTIVITY_PROJECTION_NAME,
+            "path": str(db_path),
+            "exists": True,
+            "updated_at": snapshot_started_at,
+            "payload_sha256": str(automation_activity.get("digest") or ""),
+            "event_id": last_event["event_id"] if last_event else None,
+        }
+        base_ready = counts.get("events", 0) >= 1 and bool(execution_dag_projection_row)
         record_runtime_phase_timing_conn(
             conn,
             phase="dashboard_rendering",
@@ -24368,11 +25309,10 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
                 "integrity_check": sqlite_integrity(conn),
                 "application_id": STATE_APPLICATION_ID,
             },
-            "projection": projection_payload,
+            "projection": activity_projection_payload,
             "projections": {
-                "conveyor": projection_payload,
+                "automation_activity": activity_projection_payload,
                 "runner": runner_projection_payload,
-                "machine": machine_projection_payload,
                 "execution_dag": execution_dag_projection_payload,
                 "capabilities": capability_projection_payload,
                 "automation_control": automation_projection_payload,
@@ -24380,16 +25320,15 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "contract": {
                 "tables": list(ORCHESTRATION_TABLES),
                 "status_model": list(STATUS_MODEL),
-                "conveyor_stages": list(CONVEYOR_STAGES),
                 "execution_dag_action_types": list(EXECUTION_DAG_NODE_ACTION_TYPES),
                 "execution_dag_canonical_action_types": list(EXECUTION_DAG_CANONICAL_ACTION_TYPES),
                 "execution_dag_action_capabilities": execution_dag_action_capabilities(),
                 "execution_dag_legacy_action_aliases": dict(EXECUTION_DAG_LEGACY_ACTION_ALIASES),
                 "execution_dag_dependency_kinds": list(EXECUTION_DAG_DEPENDENCY_KINDS),
-                "canonical_runtime_state": "SQLite append-only events + typed execution_dag nodes/edges; conveyor state is a compatibility projection",
+                "canonical_runtime_state": "SQLite append-only events + typed automation_activity and execution DAG read models",
                 "compatibility_surfaces": [
                     "canonical Markdown state brief",
-                    "conveyor/runner JSON projections",
+                    "runner JSON projection",
                     "Markdown handoffs",
                     "JSON Schema exports",
                 ],
@@ -24404,14 +25343,12 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "open_blockers": open_blockers(conn),
             "next_actions": pending_next_actions(conn),
             "validations": validation_summary(conn),
+            "automation_activity": automation_activity,
             "execution_dag": execution_dag,
-            "progress_model": execution_dag,
             "ready_dag_nodes": execution_dag.get("ready_nodes", []),
             "blocked_dag_nodes": execution_dag.get("blocked_nodes", []),
             "active_dag_nodes": execution_dag.get("active_nodes", []),
             "terminal_dag_nodes": execution_dag.get("terminal_nodes", []),
-            "conveyor_state": state,
-            "conveyor_machine": machine,
             "automation_control": automation_control,
             "capability_manifest": capability,
             "code_intelligence": code_intel,
@@ -24553,9 +25490,10 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
     dag_ready = execution_dag.get("ready_nodes") if isinstance(execution_dag.get("ready_nodes"), list) else []
     dag_blocked = execution_dag.get("blocked_nodes") if isinstance(execution_dag.get("blocked_nodes"), list) else []
     dag_active = execution_dag.get("active_nodes") if isinstance(execution_dag.get("active_nodes"), list) else []
-    conveyor_state = snapshot.get("conveyor_state") if isinstance(snapshot.get("conveyor_state"), dict) else {}
-    conveyor_machine = snapshot.get("conveyor_machine") if isinstance(snapshot.get("conveyor_machine"), dict) else {}
-    machine_work_item = conveyor_machine.get("work_item") if isinstance(conveyor_machine.get("work_item"), dict) else {}
+    automation_activity = snapshot.get("automation_activity") if isinstance(snapshot.get("automation_activity"), dict) else {}
+    activity_summary = automation_activity.get("summary") if isinstance(automation_activity.get("summary"), dict) else {}
+    activity_focus = automation_activity.get("active_focus") if isinstance(automation_activity.get("active_focus"), dict) else {}
+    activity_health = automation_activity.get("health") if isinstance(automation_activity.get("health"), dict) else {}
     capability_manifest = snapshot.get("capability_manifest") if isinstance(snapshot.get("capability_manifest"), dict) else {}
     capability_languages = capability_manifest.get("languages") if isinstance(capability_manifest.get("languages"), dict) else {}
     graph_summary = snapshot.get("codebase_graph_summary") if isinstance(snapshot.get("codebase_graph_summary"), dict) else {}
@@ -24724,18 +25662,28 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
     validations = snapshot.get("validations") if isinstance(snapshot.get("validations"), dict) else {}
     validation_counts = validations.get("counts") if isinstance(validations.get("counts"), dict) else {}
     validation_latest = validations.get("latest") if isinstance(validations.get("latest"), list) else []
-    active_role = conveyor_state.get("active_role_run") if isinstance(conveyor_state.get("active_role_run"), dict) else {}
-    last_role = conveyor_state.get("last_active_role_run") if isinstance(conveyor_state.get("last_active_role_run"), dict) else {}
-    last_decision = conveyor_state.get("last_decision") if isinstance(conveyor_state.get("last_decision"), dict) else {}
-    decision_queue = conveyor_state.get("decision_queue") if isinstance(conveyor_state.get("decision_queue"), list) else []
+    active_role = activity_focus.get("runner") if isinstance(activity_focus.get("runner"), dict) else {}
+    selected_activity_candidate = (
+        activity_focus.get("selected_scheduler_candidate")
+        if isinstance(activity_focus.get("selected_scheduler_candidate"), dict)
+        else {}
+    )
+    activity_next_unlocks = (
+        automation_activity.get("next_unlocks")
+        if isinstance(automation_activity.get("next_unlocks"), list)
+        else []
+    )
+    queued_decisions = activity_next_unlocks or (
+        snapshot.get("next_actions") if isinstance(snapshot.get("next_actions"), list) else []
+    )
     projections = snapshot.get("projections") if isinstance(snapshot.get("projections"), dict) else {}
     projection_items = [
+        ("automation_activity", projections.get("automation_activity") if isinstance(projections.get("automation_activity"), dict) else snapshot.get("projection")),
         ("execution_dag", projections.get("execution_dag") if isinstance(projections.get("execution_dag"), dict) else {}),
-        ("conveyor", projections.get("conveyor") if isinstance(projections.get("conveyor"), dict) else snapshot.get("projection")),
         ("runner", projections.get("runner") if isinstance(projections.get("runner"), dict) else {}),
     ]
 
-    status = str(automation_control.get("status") or last_event.get("status") or conveyor_state.get("status") or "ACTIVE")
+    status = str(automation_control.get("status") or last_event.get("status") or "ACTIVE")
     if status not in STATUS_MODEL:
         status = "ACTIVE" if str(snapshot.get("status") or "") == "ok" else "ACTIVE_WITH_PENDING_USER_INPUT"
 
@@ -24813,16 +25761,14 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         lines.append("- blocked_node: none")
     lines.extend([
         "",
-        "## Runner And Compatibility Conveyor",
+        "## Runtime Activity",
         "",
-        f"- conveyor_stage: {_format_key_values({'stage': machine_work_item.get('current_stage') or conveyor_machine.get('current_stage'), 'stage_status': machine_work_item.get('stage_status') or conveyor_machine.get('stage_status'), 'owner': machine_work_item.get('owner_role') or conveyor_machine.get('owner_role'), 'validation': machine_work_item.get('validation_status'), 'continuation': machine_work_item.get('continuation_token')})}",
+        f"- activity: {_format_key_values({'digest': _brief_sha(automation_activity.get('digest')), 'nodes': activity_summary.get('node_count'), 'edges': activity_summary.get('edge_count'), 'lanes': activity_summary.get('lane_count'), 'waves': activity_summary.get('wave_count'), 'health': activity_health.get('status')})}",
         f"- repo_capabilities: {_format_key_values({'primary_language': capability_languages.get('primary'), 'manifest_version': capability_manifest.get('version'), 'digest': _brief_sha(capability_manifest.get('digest')), 'commands': len(capability_manifest.get('commands') if isinstance(capability_manifest.get('commands'), list) else [])})}",
         f"- codebase_graph: {_format_key_values({'namespace': graph_summary.get('graph_namespace'), 'digest': _brief_sha(latest_graph.get('digest')), 'files': graph_summary.get('indexed_file_count'), 'symbols': (graph_summary.get('node_counts') or {}).get('symbol') if isinstance(graph_summary.get('node_counts'), dict) else 0, 'imports': (graph_summary.get('edge_counts') or {}).get('imports') if isinstance(graph_summary.get('edge_counts'), dict) else 0, 'ownership': (graph_summary.get('edge_counts') or {}).get('owns_symbol') if isinstance(graph_summary.get('edge_counts'), dict) else 0, 'commands': graph_summary.get('command_node_count'), 'tests': graph_summary.get('test_node_count'), 'stale': graph_summary.get('stale_node_count'), 'truncated': _brief_bool(graph_summary.get('storage_truncated'))})}",
         f"- impact_graph: {_format_key_values({'namespace': impact_summary.get('graph_namespace'), 'digest': _brief_sha(impact_latest.get('digest')), 'edges': impact_latest.get('edge_count'), 'stale': impact_summary.get('stale_node_count')})}",
-        f"- conveyor_cycles: {int(conveyor_state.get('cycles') or 0)}",
-        f"- last_decision: {_format_key_values({'role': last_decision.get('role') or 'idle', 'reason': last_decision.get('reason'), 'decided_at': last_decision.get('decided_at')})}",
-        f"- active_role: {_format_key_values({'role': active_role.get('role'), 'run_id': active_role.get('run_id'), 'status': active_role.get('status'), 'started_at': active_role.get('started_at'), 'reason': active_role.get('reason')})}",
-        f"- last_role_run: {_format_key_values({'role': last_role.get('role'), 'run_id': last_role.get('run_id'), 'status': last_role.get('status'), 'exit_code': last_role.get('exit_code'), 'finished_at': last_role.get('finished_at')})}",
+        f"- selected_activity: {_format_key_values({'role': selected_activity_candidate.get('role'), 'task': selected_activity_candidate.get('task_id') or selected_activity_candidate.get('public_task_id'), 'action': selected_activity_candidate.get('action_kind'), 'score': selected_activity_candidate.get('score')})}",
+        f"- active_run: {_format_key_values({'role': active_role.get('role'), 'run_id': active_role.get('run_id'), 'status': active_role.get('status'), 'started_at': active_role.get('started_at'), 'reason': active_role.get('reason')})}",
         f"- runner: {_format_key_values({'state': runner_state.get('state'), 'pid': runner_state.get('pid'), 'run_id': runner_state.get('run_id'), 'started_at': runner_state.get('started_at'), 'updated_at': runner_state.get('updated_at')})}",
         f"- human_messages: {_format_key_values({'pending_requests': human_counts.get('pending_requests'), 'queued_notes': human_counts.get('queued_notes'), 'failed_notes': human_counts.get('failed_notes'), 'outbound_records': human_counts.get('outbound_records')})}",
         f"- ticket_run: {_format_key_values({'status': ticket_state.get('status'), 'run_id': ticket_state.get('run_id'), 'total': ticket_state.get('total'), 'counts': stable_json(ticket_state.get('counts')) if isinstance(ticket_state.get('counts'), dict) else ''})}",
@@ -25027,12 +25973,14 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         "## Queued Decisions",
         "",
     ])
-    if decision_queue:
-        for item in decision_queue[:BRIEF_ITEM_LIMIT]:
+    if queued_decisions:
+        for item in queued_decisions[:BRIEF_ITEM_LIMIT]:
             if not isinstance(item, dict):
                 continue
+            role = item.get("role") or item.get("owner_role") or "idle"
+            state = item.get("state") or item.get("status") or "planned"
             lines.append(
-                f"- {str(item.get('role') or 'idle')}: {str(item.get('state') or 'planned')} - {_brief_text(item.get('reason'))}"
+                f"- {str(role)}: {str(state)} - {_brief_text(item.get('reason'))}"
             )
     else:
         lines.append("- none")
@@ -25126,15 +26074,8 @@ def validate_state_database(target: Path) -> dict[str, Any]:
     snapshot = state_snapshot(target)
     counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), dict) else {}
     missing_tables = [table for table in ORCHESTRATION_TABLES if int(counts.get(table, -1)) < 0]
-    machine = snapshot.get("conveyor_machine") if isinstance(snapshot.get("conveyor_machine"), dict) else {}
-    work_item = machine.get("work_item") if isinstance(machine.get("work_item"), dict) else {}
-    work_payload = work_item.get("payload") if isinstance(work_item.get("payload"), dict) else {}
-    active_role_run = work_payload.get("active_role_run") if isinstance(work_payload.get("active_role_run"), dict) else {}
-    decision = work_payload.get("decision") if isinstance(work_payload.get("decision"), dict) else {}
-    inferred_role = str(active_role_run.get("role") or decision.get("role") or "")
-    expected_stage = ROLE_TO_CONVEYOR_STAGE.get(inferred_role, ("", ""))[0]
-    actual_stage = str(work_item.get("current_stage") or machine.get("current_stage") or "")
-    role_stage_matches = not expected_stage or actual_stage == expected_stage
+    activity = snapshot.get("automation_activity") if isinstance(snapshot.get("automation_activity"), dict) else {}
+    activity_summary = activity.get("summary") if isinstance(activity.get("summary"), dict) else {}
     invariant_results = snapshot.get("invariant_results") if isinstance(snapshot.get("invariant_results"), list) else []
     items = [
         {
@@ -25159,21 +26100,15 @@ def validate_state_database(target: Path) -> dict[str, Any]:
         },
         {
             "ok": bool(snapshot["projection"]["exists"]),
-            "detail": "Compatibility conveyor JSON projection is generated from SQLite."
+            "detail": "Automation activity projection is generated from SQLite."
             if snapshot["projection"]["exists"]
-            else "Compatibility conveyor JSON projection is missing.",
+            else "Automation activity projection is missing.",
         },
         {
-            "ok": bool((snapshot.get("conveyor_machine") or {}).get("work_item")),
-            "detail": "Typed conveyor work item and current stage are materialized."
-            if bool((snapshot.get("conveyor_machine") or {}).get("work_item"))
-            else "Typed conveyor work item is missing.",
-        },
-        {
-            "ok": role_stage_matches,
-            "detail": f"Typed conveyor stage matches role {inferred_role}: {actual_stage}."
-            if role_stage_matches
-            else f"Typed conveyor stage mismatch for role {inferred_role}: expected {expected_stage}, got {actual_stage}.",
+            "ok": bool(activity_summary.get("node_count")),
+            "detail": "Automation activity graph has runtime nodes."
+            if bool(activity_summary.get("node_count"))
+            else "Automation activity graph has no runtime nodes.",
         },
         {
             "ok": bool((snapshot.get("capability_manifest") or {}).get("digest")),

@@ -549,9 +549,9 @@ def build_data(repo: Path) -> dict[str, Any]:
                 time=datetime.now(timezone.utc),
                 role="conveyor",
                 status="skipped",
-                title="No conveyor events recorded yet",
-                detail="Run the conveyor once to populate the replay timeline.",
-                reason="No conveyor state file was found.",
+                title="No activity events recorded yet",
+                detail="Run automation once to populate the replay timeline.",
+                reason="No legacy activity state file was found.",
             )
         ]
     commits = load_commits(repo)
@@ -712,7 +712,7 @@ def draw_mission_panel(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int]
 
 def draw_conveyor(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], state: dict[str, Any], frame: int) -> None:
     rounded(draw, box)
-    draw_panel_header(draw, box, "Conveyor Belt")
+    draw_panel_header(draw, box, "Activity Lanes")
     x1, y1, x2, y2 = box
     roles = ["planner", "builder", "hardener", "integrator"]
     current = state["current"]

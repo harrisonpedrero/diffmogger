@@ -83,10 +83,10 @@ EMPTY_DEFERRED_BACKLOG_MARKERS = {
 }
 
 EMPTY_STATES = {
-    "next_up": "No conveyor decision yet. After the first conveyor cycle, the next local role lane and reason will appear here.",
+    "next_up": "No activity decision yet. After the first automation cycle, the next local role lane and reason will appear here.",
     "patch_queue": "No queued or deferred patches yet. First role patch manifests will appear here after builder, hardener, or planner lanes write local queue outputs.",
     "recent_outcomes": "No integration outcomes yet. Applied, failed, skipped, and deferred role outputs appear here after integrator review.",
-    "timeline": "No conveyor timeline yet. Completed role runs will appear here with exit status, progress result, and integration notes.",
+    "timeline": "No activity timeline yet. Completed role runs will appear here with exit status, progress result, and integration notes.",
 }
 
 CONVENTIONAL_SUBJECT_RE = re.compile(

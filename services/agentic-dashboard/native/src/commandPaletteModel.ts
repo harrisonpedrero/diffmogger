@@ -219,7 +219,7 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       description: canBootstrapAndStart(snapshot)
         ? "Start automation; first start prepares the target if needed."
         : "Start automation.",
-      keywords: ["automation", "conveyor", "start", "bootstrap"],
+      keywords: ["automation", "run", "start", "bootstrap"],
       dangerous: true,
       disabledReason:
         busyReason ??
@@ -233,7 +233,7 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       title: "Stop",
       section: "Run",
       description: "Stop automation.",
-      keywords: ["automation", "conveyor", "stop"],
+      keywords: ["automation", "run", "stop"],
       dangerous: true,
       disabledReason:
         busyReason ??

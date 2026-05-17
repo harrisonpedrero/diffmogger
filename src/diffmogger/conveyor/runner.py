@@ -13,6 +13,7 @@ from diffmogger.runtime.state_store import (
     plan_parallel_execution_groups_conn,
     record_validation_group_result_on_execution_dag_conn,
     reconcile_worker_results_into_execution_dag_conn,
+    run_refresh_index_node_conn,
     run_parallel_validation_conn,
     sync_queued_role_manifests_into_worker_patches_conn,
     update_execution_dag_node_status_conn,
@@ -71,6 +72,7 @@ def run_role(
     state_path: Path | None = None,
     reason: str = "",
     started_at: str = "",
+    extra_env: dict[str, str] | None = None,
 ) -> int:
     global CHILD
     env = os.environ.copy()
@@ -82,6 +84,8 @@ def run_role(
         env["CONVEYOR_DECISION_REASON"] = reason
     if allow_remotes:
         env["MULTI_ROLE_ALLOW_REMOTES"] = "1"
+    if extra_env:
+        env.update({str(key): str(value) for key, value in extra_env.items()})
     command = command_for_role(target, role)
     watchdog_status_path = ""
     if role in QUEUE_ROLES:
@@ -211,6 +215,7 @@ def run_scheduler_action(
             state_path=None,
             reason=reason or "serialized integration DAG action",
             started_at=started_at,
+            extra_env={"DIFFMOGGER_SELECTED_PATCH_IDS": ",".join(patch_ids)} if patch_ids else {},
         )
         if exit_code == 0:
             with closing(connect(database_path_for_target(target))) as conn:
@@ -287,6 +292,13 @@ def run_scheduler_action(
             result = reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="dag_scheduler.reconcile_worker_results")
         elif action == "create_repair_nodes":
             result = create_repair_nodes_for_failed_validation_conn(conn, selected_by="dag_scheduler.create_repair_nodes")
+        elif action == "refresh_index":
+            result = run_refresh_index_node_conn(
+                conn,
+                target,
+                dag_node_id=str(candidate.get("dag_node_id") or ""),
+                selected_by="dag_scheduler.refresh_index",
+            )
         else:
             result = {"status": "failed", "reason": f"unsupported DAG scheduler action: {action}"}
     print(f"DAG_SCHEDULER_RESULT action={action} status={result.get('status')}", flush=True)

@@ -449,8 +449,8 @@ def file_category(rel_path: str, group: str, label: str) -> str:
         return "Review"
     if "context" in lower:
         return "Context"
-    if any(term in lower for term in ("multi-role", "multi_role", "conveyor", "automation_queue", "role")):
-        return "Multi-role / conveyor"
+    if any(term in lower for term in ("multi-role", "multi_role", "automation_queue", "role")):
+        return "Roles / scheduler"
     return "Core state"
 
 def validation_kind_for_file(rel_path: str) -> str:
@@ -460,8 +460,6 @@ def validation_kind_for_file(rel_path: str) -> str:
         return "required_files"
     if rel_path in {"target/integration_safety_check.json", sidecar_rel("target/integration_safety_check.json")}:
         return "integration_safety_record"
-    if rel_path in {"target/automation_conveyor_state.json", sidecar_rel("target/automation_conveyor_state.json")}:
-        return "conveyor_projection"
     return ""
 
 def file_registry(dashboard_app: Any) -> dict[str, dict[str, Any]]:
@@ -529,21 +527,12 @@ def file_registry(dashboard_app: Any) -> dict[str, dict[str, Any]]:
         "editable": False,
         "validation": "",
     }
-    registry["state.conveyor"] = {
-        "key": "state.conveyor",
-        "label": "Conveyor State Projection JSON",
-        "rel_path": sidecar_rel("target/automation_conveyor_state.json"),
-        "group": "state",
-        "category": "Multi-role / conveyor",
-        "editable": False,
-        "validation": "conveyor_projection",
-    }
     registry["state.canonical_brief"] = {
         "key": "state.canonical_brief",
         "label": "Canonical State Brief",
         "rel_path": sidecar_rel("target/canonical_state_brief.md"),
         "group": "state",
-        "category": "Multi-role / conveyor",
+        "category": "Roles / scheduler",
         "editable": False,
         "validation": "",
     }

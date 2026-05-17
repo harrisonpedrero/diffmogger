@@ -8,7 +8,7 @@ This repository is Diffmogger: a starter kit for high-agency Codex automations. 
 - Keep examples self-contained, fictional, and clearly reusable.
 - Prefer concise docs, concrete templates, and runnable validation.
 - Keep prompt behavior durable and project-agnostic. Put changing project state in typed SQLite runtime state; task-file Markdown is a generated prompt/handoff projection, not the authority.
-- Treat the typed conveyor state machine as the runtime control plane: stage contracts, default work item, repo capability manifest, transitions, validation receipts, blockers, and next actions live in SQLite. Markdown and JSON are projections or authored inputs.
+- Treat the typed automation activity runtime as the runtime control plane: execution DAG nodes/edges, default work item, repo capability manifest, transitions, validation receipts, blockers, and next actions live in SQLite. Markdown and JSON are projections or authored inputs.
 - In generated multi-role targets, ticket-state changes from planner/builder/hardener worktrees must be staged through typed runtime actions and reconciled by the integrator; do not make isolated worktrees hand-edit projections or directly mutate canonical ticket state.
 - Preserve the status model: `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, `CRITICAL_STOP`.
 - Keep secrets out of examples and docs. Use placeholders only.

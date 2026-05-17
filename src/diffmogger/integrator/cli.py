@@ -32,6 +32,7 @@ def integrate(
     dry_run: bool,
     force_baseline: bool = False,
     baseline_only: bool = False,
+    patch_ids: list[str] | None = None,
 ) -> int:
     if force_baseline:
         load_target_automation_env(target)
@@ -96,7 +97,7 @@ def integrate(
             if dry_run:
                 print("DRY RUN: no files were modified.")
             return 0
-        queued = load_queued_manifests(target)
+        queued = load_queued_manifests(target, patch_ids=patch_ids)
         if not queued:
             existing_baseline = read_baseline_record(target)
             if force_baseline or not baseline_record_is_current(target, existing_baseline, head_before):
@@ -259,6 +260,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Report actions without mutating files")
     parser.add_argument("--force-baseline", action="store_true", help="Rerun baseline verification even if the ledger is current")
     parser.add_argument("--baseline-only", action="store_true", help="Only refresh baseline verification; do not integrate queued patches")
+    parser.add_argument("--patch-id", action="append", default=[], help="Only integrate this queued patch id. May be repeated.")
     args = parser.parse_args()
 
     target = Path(args.target).expanduser().resolve()
@@ -268,6 +270,7 @@ def main() -> int:
         dry_run=args.dry_run,
         force_baseline=args.force_baseline,
         baseline_only=args.baseline_only,
+        patch_ids=args.patch_id,
     )
 
 

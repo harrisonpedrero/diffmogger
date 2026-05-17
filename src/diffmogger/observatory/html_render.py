@@ -353,12 +353,12 @@ HTML_TEMPLATE = r"""<!doctype html>
       </div>
       <div class="stack">
         <section>
-          <h2>Conveyor Belt</h2>
+          <h2>Activity Lanes</h2>
           <div class="belt" id="belt"></div>
           <div id="activeRun"></div>
         </section>
         <section>
-          <h2>Conveyor Health</h2>
+          <h2>Runtime Health</h2>
           <div class="content" id="health"></div>
         </section>
         <section>
@@ -467,7 +467,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     function render(data) {
       document.getElementById("generated").textContent = "Updated " + (data.generated_at || "now");
       document.getElementById("targetName").textContent = data.target_name || "target";
-      document.getElementById("subtitle").textContent = "Conveyor, queue, role, and verification state for " + (data.target_name || "the selected target") + ".";
+      document.getElementById("subtitle").textContent = "Runtime, queue, role, and verification state for " + (data.target_name || "the selected target") + ".";
 
       const mission = document.getElementById("mission");
       clear(mission);
@@ -605,7 +605,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       metrics.appendChild(renderMetric("Queued patches", data.queue.totals.queued || 0));
       metrics.appendChild(renderMetric("Deferred patches", data.queue.totals.deferred || 0));
       metrics.appendChild(renderMetric("Unhandled inbox", data.human.unhandled_inbox || 0));
-      metrics.appendChild(renderMetric("Conveyor cycles", data.conveyor.cycles || 0));
+      metrics.appendChild(renderMetric("Activity cycles", data.conveyor.cycles || 0));
 
       const active = data.conveyor.active_role_run || {};
       const visibleDecisionQueue = (data.conveyor.decision_queue || []).filter(item => !(active.status === "running" && item.role === active.role));
@@ -640,7 +640,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       const healthData = (data.conveyor || {}).health || {};
       const healthNode = el("div", "health " + (healthData.status || "ok"));
       healthNode.appendChild(el("strong", "", (healthData.status || "ok").toUpperCase()));
-      healthNode.appendChild(el("div", "", healthData.summary || "builder-first conveyor policy active."));
+      healthNode.appendChild(el("div", "", healthData.summary || "runtime policy active."));
       if ((healthData.recent_roles || []).length) healthNode.appendChild(el("div", "muted", "recent roles: " + healthData.recent_roles.join(" -> ")));
       health.appendChild(healthNode);
       const noProgress = ((data.conveyor || {}).no_progress) || {};
@@ -668,7 +668,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         nextUp.appendChild(row);
       });
       const emptyStates = data.empty_states || {};
-      if (!nextUp.children.length) nextUp.appendChild(el("div", "item muted", active.status === "running" ? "Current role is running; next decision refreshes after it exits." : (emptyStates.next_up || "No conveyor decision recorded yet.")));
+      if (!nextUp.children.length) nextUp.appendChild(el("div", "item muted", active.status === "running" ? "Current role is running; next decision refreshes after it exits." : (emptyStates.next_up || "No activity decision recorded yet.")));
 
       const patches = document.getElementById("patches");
       clear(patches);
@@ -698,7 +698,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         if (acceptedText) row.appendChild(el("div", "muted", acceptedText));
         timeline.appendChild(row);
       });
-      if (!timeline.children.length) timeline.appendChild(el("div", "item muted", emptyStates.timeline || "No conveyor history yet."));
+      if (!timeline.children.length) timeline.appendChild(el("div", "item muted", emptyStates.timeline || "No activity history yet."));
 
       const progress = document.getElementById("progress");
       progress.textContent = data.progress_recent || "No progress pulse yet.";
@@ -1007,7 +1007,7 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
     <header>
       <div>
         <h1>Diffmogger Autonomous Build Log</h1>
-        <div class="subtitle">Diffmogger Observatory view: replay-style automation progress reconstructed from conveyor events, commits, and diff stats.</div>
+        <div class="subtitle">Diffmogger Observatory view: replay-style automation progress reconstructed from runtime events, commits, and diff stats.</div>
       </div>
       <div class="clock">
         <div id="generated">Waiting for state...</div>
@@ -1033,7 +1033,7 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
       </div>
       <div class="stack">
         <section>
-          <h2>Conveyor Belt</h2>
+          <h2>Activity Lanes</h2>
           <div class="belt" id="belt"></div>
           <div id="activeRun"></div>
         </section>
@@ -1042,7 +1042,7 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
           <div class="story-body" id="progressStory"></div>
         </section>
         <section>
-          <h2>Conveyor Health</h2>
+          <h2>Runtime Health</h2>
           <div class="content support-grid" id="health"></div>
         </section>
       </div>
@@ -1200,7 +1200,7 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
       clear(metrics);
       const totals = data.queue?.totals || {};
       const progress = data.progress || {};
-      metrics.appendChild(metric("Conveyor cycles", data.conveyor?.cycles || 0, "info"));
+      metrics.appendChild(metric("Activity cycles", data.conveyor?.cycles || 0, "info"));
       metrics.appendChild(metric("Accepted patches", progress.accepted_total || totals.applied || 0, "good"));
       metrics.appendChild(metric("Deferred patches", totals.deferred || progress.deferred_queue_depth || 0, "warn"));
       metrics.appendChild(metric("Unhandled inbox", data.human?.unhandled_inbox || 0));
@@ -1238,11 +1238,11 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
       const index = events.length ? Math.min(selectedEventIndex ?? events.length - 1, events.length - 1) : -1;
       const event = index >= 0 ? events[index] : null;
       const titleRow = el("div", "story-title-row");
-      const title = el("h3", "story-title", event ? eventTitle(event) : "No conveyor timeline yet");
+      const title = el("h3", "story-title", event ? eventTitle(event) : "No activity timeline yet");
       titleRow.appendChild(title);
       if (event) titleRow.appendChild(chip(eventStatus(event), eventStatus(event)));
       story.appendChild(titleRow);
-      story.appendChild(el("div", "story-detail", event ? text(event.reason, "No reason recorded.") : text(data.empty_states?.timeline, "No conveyor timeline yet.")));
+      story.appendChild(el("div", "story-detail", event ? text(event.reason, "No reason recorded.") : text(data.empty_states?.timeline, "No activity timeline yet.")));
       const commit = event ? latestCommitFor(data, event) : commitsFor(data)[0];
       const latest = el("div", "landed-now");
       latest.appendChild(el("strong", "", "Latest landed work"));
@@ -1287,8 +1287,8 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
       clear(health);
       const healthData = data.conveyor?.health || {};
       const healthCard = el("div", "support-card");
-      healthCard.appendChild(el("strong", "", "Conveyor Health"));
-      healthCard.appendChild(el("div", "", text(healthData.summary, "No conveyor health recorded.")));
+      healthCard.appendChild(el("strong", "", "Runtime Health"));
+      healthCard.appendChild(el("div", "", text(healthData.summary, "No runtime health recorded.")));
       if (Array.isArray(healthData.recent_roles)) healthCard.appendChild(el("div", "", "recent roles: " + healthData.recent_roles.join(" -> ")));
       health.appendChild(healthCard);
       const noProgress = data.conveyor?.no_progress || {};
@@ -1331,7 +1331,7 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
       clear(timeline);
       document.getElementById("timelineCount").textContent = events.length + " event" + (events.length === 1 ? "" : "s");
       if (!events.length) {
-        timeline.appendChild(el("div", "timeline-card selected", text(data.empty_states?.timeline, "No conveyor timeline yet.")));
+        timeline.appendChild(el("div", "timeline-card selected", text(data.empty_states?.timeline, "No activity timeline yet.")));
         return;
       }
       if (selectedEventIndex === null || selectedEventIndex >= events.length) selectedEventIndex = events.length - 1;

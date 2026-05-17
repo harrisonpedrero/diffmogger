@@ -12,8 +12,8 @@
     "contract",
     "counts",
     "recent_events",
+    "automation_activity",
     "execution_dag",
-    "progress_model",
     "ready_dag_nodes",
     "blocked_dag_nodes",
     "active_dag_nodes",
@@ -170,10 +170,6 @@
           "type": "array",
           "items": {"type": "string"}
         },
-        "conveyor_stages": {
-          "type": "array",
-          "items": {"type": "string"}
-        },
         "compatibility_surfaces": {
           "type": "array",
           "items": {"type": "string"}
@@ -273,6 +269,25 @@
       "type": "object",
       "additionalProperties": true
     },
+    "automation_activity": {
+      "type": "object",
+      "required": ["schema_version", "authority", "projection", "digest", "summary", "active_focus", "lanes", "nodes", "edges", "waves", "next_unlocks", "health"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "authority": {"const": "sqlite"},
+        "projection": {"const": "automation_activity"},
+        "digest": {"type": "string"},
+        "summary": {"type": "object", "additionalProperties": true},
+        "active_focus": {"type": "object", "additionalProperties": true},
+        "lanes": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "nodes": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "edges": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "waves": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "next_unlocks": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "health": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": true
+    },
     "execution_dag": {
       "type": "object",
       "required": ["schema_version", "authority", "projection", "digest", "node_count", "edge_count", "nodes", "edges", "ready_nodes", "blocked_nodes", "active_nodes"],
@@ -336,10 +351,6 @@
       },
       "additionalProperties": true
     },
-    "progress_model": {
-      "type": "object",
-      "additionalProperties": true
-    },
     "ready_dag_nodes": {
       "type": "array",
       "items": {"type": "object", "additionalProperties": true}
@@ -351,63 +362,6 @@
     "active_dag_nodes": {
       "type": "array",
       "items": {"type": "object", "additionalProperties": true}
-    },
-    "conveyor_state": {
-      "type": "object",
-      "additionalProperties": true
-    },
-    "conveyor_machine": {
-      "type": "object",
-      "required": ["schema_version", "machine_version", "authority", "work_item", "current_stage", "stage_contract", "capability_manifest"],
-      "properties": {
-        "schema_version": {"type": "integer"},
-        "machine_version": {"type": "integer"},
-        "authority": {"const": "sqlite"},
-        "current_stage": {"type": "string"},
-        "stage_status": {"type": "string"},
-        "owner_role": {"type": "string"},
-        "work_item": {
-          "type": "object",
-          "required": ["id", "status", "current_stage", "stage_status", "owner_role", "capability_manifest_id", "validation_status", "continuation_token"],
-          "properties": {
-            "id": {"type": "string"},
-            "status": {"type": "string"},
-            "current_stage": {"type": "string"},
-            "stage_status": {"type": "string"},
-            "owner_role": {"type": "string"},
-            "capability_manifest_id": {"type": "string"},
-            "capability_manifest_version": {"type": "integer"},
-            "validation_status": {"type": "string"},
-            "continuation_token": {"type": "string"}
-          },
-          "additionalProperties": true
-        },
-        "stage_contract": {
-          "type": "object",
-          "additionalProperties": true
-        },
-        "stage_contracts": {
-          "type": "array",
-          "items": {"type": "object", "additionalProperties": true}
-        },
-        "capability_manifest": {
-          "type": "object",
-          "additionalProperties": true
-        },
-        "stage_attempts": {
-          "type": "array",
-          "items": {"type": "object", "additionalProperties": true}
-        },
-        "validation_receipts": {
-          "type": "array",
-          "items": {"type": "object", "additionalProperties": true}
-        },
-        "policy": {
-          "type": "object",
-          "additionalProperties": true
-        }
-      },
-      "additionalProperties": true
     },
     "automation_control": {
       "type": "object",

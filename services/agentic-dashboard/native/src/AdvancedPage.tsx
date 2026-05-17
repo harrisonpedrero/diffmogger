@@ -186,7 +186,7 @@ function RuntimeEnvironmentCard(props: {
 
 function categoryOf(file: RegisteredFile): string {
   if (file.category === "Human bridge") return "Inbox";
-  if (file.category === "Multi-role / conveyor") return "Roles / scheduler";
+  if (file.category === "Roles / scheduler") return "Roles / scheduler";
   return file.category || "Core state";
 }
 
@@ -780,7 +780,7 @@ export function AdvancedPage(props: {
             <DetailRow label="SQLite" value={canonicalState?.database?.sqlite_version ?? "unknown"} />
             <DetailRow label="Journal" value={canonicalState?.database?.journal_mode ?? "unknown"} />
             <DetailRow label="Integrity" value={canonicalState?.database?.integrity_check ?? "unknown"} />
-            <DetailRow label="Projection" value={canonicalState?.projection?.name ?? "conveyor.state"} />
+            <DetailRow label="Projection" value={canonicalState?.projection?.name ?? "automation_activity"} />
           </article>
 
           <article className="panel">

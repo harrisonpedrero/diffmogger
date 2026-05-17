@@ -97,7 +97,7 @@ def latest_observed_lane_result(queue: dict[str, Any], conveyor: dict[str, Any])
             "source": "decision_queue",
             "lane": role,
             "result": f"{role} {state}",
-            "detail": clean_text(first.get("reason") or "No conveyor reason recorded.", limit=360),
+            "detail": clean_text(first.get("reason") or "No runtime reason recorded.", limit=360),
             "timestamp": "",
             "completed": False,
         }
@@ -105,7 +105,7 @@ def latest_observed_lane_result(queue: dict[str, Any], conveyor: dict[str, Any])
     return {
         "source": "none",
         "lane": "none",
-        "result": "No conveyor or queue outcome recorded yet.",
+        "result": "No activity or queue outcome recorded yet.",
         "detail": "The previous recommendation is still waiting for a visible local outcome.",
         "timestamp": "",
         "completed": False,
@@ -546,7 +546,7 @@ def scorecard_action_plan(
         first = decisions[0]
         role = clean_text(first.get("role") or "builder", limit=40)
         state = clean_text(first.get("state") or "planned", limit=40)
-        reason = clean_text(first.get("reason") or "No conveyor reason recorded.", limit=260)
+        reason = clean_text(first.get("reason") or "No runtime reason recorded.", limit=260)
         if role == "idle" or state == "first-run":
             role = "builder"
             recommendation = "Continue builder momentum with the next scoped local increment."
@@ -569,7 +569,7 @@ def scorecard_action_plan(
         "lane": "builder",
         "priority": "normal",
         "recommendation": "Continue builder momentum with the next scoped local increment.",
-        "why": "No human bridge item, validation failure, queued patch, deferred backlog, or conveyor handoff currently outranks builder work.",
+        "why": "No human bridge item, validation failure, queued patch, deferred backlog, or runtime handoff currently outranks builder work.",
         "next_steps": [
             "Choose the highest-value task from the current horizon.",
             "Keep the patch generic, local-first, and reviewable.",
@@ -692,7 +692,7 @@ def scorecard_snapshot(
                 "kind": "warn" if pending_human else "good",
             },
             {
-                "label": "Conveyor cycles",
+                "label": "Activity cycles",
                 "value": int(conveyor.get("cycles", 0) or 0),
                 "detail": f"{int(progress.get('integrator_runs', 0) or 0)} integrator run(s); cumulative deferrals by role: {role_count_summary(deferred_by_role, empty='none')}.",
                 "kind": "warn" if no_progress_active else "info",

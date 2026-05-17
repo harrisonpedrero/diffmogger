@@ -4894,6 +4894,9 @@ textarea:focus-visible {
   grid-template-columns: repeat(12, minmax(0, 1fr));
   grid-template-areas:
     "controls controls controls controls readiness readiness readiness readiness process process process process"
+    "ops ops ops ops ops ops ops ops ops ops ops ops"
+    "progress progress progress progress progress progress progress progress progress progress progress progress"
+    "concurrency concurrency concurrency concurrency concurrency concurrency concurrency concurrency concurrency concurrency concurrency concurrency"
     "dag dag dag dag dag dag dag dag dag dag dag dag"
     "safety safety safety safety safety safety safety safety safety safety safety safety"
     "graph graph graph graph graph graph graph graph graph graph graph graph"
@@ -4914,6 +4917,18 @@ textarea:focus-visible {
 
 .run-process-panel {
   grid-area: process;
+}
+
+.operations-cockpit-panel {
+  grid-area: ops;
+}
+
+.progress-matrix-panel {
+  grid-area: progress;
+}
+
+.concurrency-strip-panel {
+  grid-area: concurrency;
 }
 
 .run-safety-panel {
@@ -5146,6 +5161,433 @@ textarea:focus-visible {
   padding: 5px 6px;
   background: var(--color-panel);
   color: var(--text-muted);
+}
+
+.operations-cockpit-panel .panel-heading-row,
+.progress-matrix-panel .panel-heading-row,
+.concurrency-strip-panel .panel-heading-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  margin-bottom: 10px;
+}
+
+.operations-cockpit-panel .panel-heading-row p,
+.progress-matrix-panel .panel-heading-row p,
+.concurrency-strip-panel .panel-heading-row p {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operations-cockpit-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.25fr) minmax(220px, 0.8fr) minmax(260px, 0.95fr);
+  gap: 10px;
+  min-width: 0;
+}
+
+.operations-card {
+  min-width: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.operations-card h3,
+.progress-matrix-panel h3,
+.concurrency-strip-panel h3 {
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.operations-card > strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operations-card > p,
+.integration-backlog-card > p {
+  margin: 7px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.operations-lane-list {
+  display: grid;
+  gap: 6px;
+}
+
+.operations-lane {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 8px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--text-muted);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-alt);
+}
+
+.operations-lane.info {
+  border-left-color: var(--status-info);
+}
+
+.operations-lane.good {
+  border-left-color: var(--status-good);
+}
+
+.operations-lane.warn {
+  border-left-color: var(--status-warn);
+}
+
+.operations-lane.critical {
+  border-left-color: var(--status-critical);
+}
+
+.operations-lane div {
+  min-width: 0;
+}
+
+.operations-lane strong,
+.operations-lane span,
+.operations-lane p,
+.operations-lane em,
+.operations-meta-line span,
+.operations-chip-row span,
+.operations-chip-row code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operations-lane strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.operations-lane span,
+.operations-lane em,
+.operations-meta-line span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.operations-lane p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.operations-lane em {
+  grid-column: 1 / -1;
+  color: var(--text-faint);
+  font-style: normal;
+}
+
+.operations-meta-line,
+.operations-chip-row,
+.role-action-explainer,
+.concurrency-wave-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.operations-meta-line {
+  margin-top: 8px;
+}
+
+.operations-meta-line span,
+.operations-chip-row span,
+.operations-chip-row code,
+.role-action-explainer span,
+.concurrency-wave-meta span {
+  max-width: 100%;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 4px 7px;
+  background: var(--color-panel-alt);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.operations-backlog-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.operations-backlog-counts .data-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-alt);
+}
+
+.operations-chip-row {
+  margin-top: 8px;
+}
+
+.operations-chip-row code {
+  color: var(--status-info);
+}
+
+.role-action-explainer {
+  margin-top: 11px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.role-action-explainer strong {
+  color: var(--text-primary);
+}
+
+.progress-matrix-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.progress-matrix-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+}
+
+.progress-matrix-table th,
+.progress-matrix-table td {
+  min-width: 0;
+  padding: 7px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  text-align: left;
+  vertical-align: top;
+}
+
+.progress-matrix-table thead th {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.progress-matrix-table tbody th {
+  width: 220px;
+}
+
+.progress-matrix-table tbody th strong,
+.progress-matrix-table tbody th span,
+.progress-matrix-table tbody th em {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-matrix-table tbody th strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.progress-matrix-table tbody th span,
+.progress-matrix-table tbody th em {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.progress-matrix-table tr.compatibility th strong {
+  color: var(--status-warn);
+}
+
+.progress-cell {
+  display: grid;
+  gap: 2px;
+  min-height: 38px;
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--text-muted);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-alt);
+}
+
+.progress-cell strong,
+.progress-cell em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-cell strong {
+  color: var(--text-primary);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.progress-cell em {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.progress-cell.status-ready {
+  border-left-color: var(--status-good);
+}
+
+.progress-cell.status-running {
+  border-left-color: var(--status-info);
+}
+
+.progress-cell.status-completed {
+  border-left-color: rgba(94, 214, 154, 0.68);
+}
+
+.progress-cell.status-blocked {
+  border-left-color: var(--status-warn);
+}
+
+.progress-cell.status-failed {
+  border-left-color: var(--status-critical);
+}
+
+.progress-cell.empty {
+  opacity: 0.62;
+}
+
+.matrix-empty-state {
+  display: grid;
+  gap: 4px;
+  min-height: 76px;
+  align-content: center;
+  padding: 10px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-alt);
+}
+
+.matrix-empty-state strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.matrix-empty-state p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.concurrency-wave-list {
+  display: grid;
+  gap: 7px;
+}
+
+.concurrency-wave {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px 9px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--text-muted);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-alt);
+}
+
+.concurrency-wave.active {
+  border-left-color: var(--status-info);
+}
+
+.concurrency-wave.proposed {
+  border-left-color: var(--status-good);
+}
+
+.concurrency-wave.blocked,
+.concurrency-wave.warn {
+  border-left-color: var(--status-warn);
+}
+
+.concurrency-wave.integration {
+  border-left-color: var(--status-info);
+}
+
+.concurrency-wave.critical {
+  border-left-color: var(--status-critical);
+}
+
+.concurrency-wave-main {
+  min-width: 0;
+}
+
+.concurrency-wave-main strong,
+.concurrency-wave-main span,
+.concurrency-wave p,
+.concurrency-wave code,
+.concurrency-wave-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.concurrency-wave-main strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.concurrency-wave-main span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.concurrency-wave > code {
+  justify-self: end;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  padding: 4px 6px;
+  background: var(--color-panel);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.concurrency-wave p,
+.concurrency-wave-meta {
+  grid-column: 1 / -1;
+}
+
+.concurrency-wave p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .graph-status-pill {
@@ -5884,6 +6326,25 @@ textarea:focus-visible {
 }
 
 @media (max-width: 1080px) {
+  .operations-cockpit-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .operations-cockpit-panel .panel-heading-row,
+  .progress-matrix-panel .panel-heading-row,
+  .concurrency-strip-panel .panel-heading-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .concurrency-wave {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .concurrency-wave > code {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
   .dag-live-layout {
     grid-template-columns: 1fr;
   }
@@ -9739,6 +10200,9 @@ select option {
       "controls"
       "readiness"
       "process"
+      "ops"
+      "progress"
+      "concurrency"
       "dag"
       "safety"
       "graph"
@@ -9817,6 +10281,9 @@ select option {
       "controls"
       "readiness"
       "process"
+      "ops"
+      "progress"
+      "concurrency"
       "dag"
       "safety"
       "graph"

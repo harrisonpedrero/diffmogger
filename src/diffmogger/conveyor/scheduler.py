@@ -11,8 +11,10 @@ from diffmogger.conveyor.state import ACTIVE_STATUSES, DEFAULT_NO_PROGRESS_THRES
 from diffmogger.conveyor.tickets import ticket_campaign_terminal
 from diffmogger.runtime import ticket_run as ticket_runtime
 from diffmogger.runtime.state_store import (
+    COMPATIBILITY_CONVEYOR_TASK_IDS,
     connect,
     can_start_execution_group,
+    create_refresh_index_nodes_for_stale_evidence_conn,
     database_path_for_target,
     ensure_automation_control_conn,
     ensure_codebase_graph_conn,
@@ -45,6 +47,7 @@ DAG_RUNNER_ACTIONS = {
     "run_serial_integration",
     "reconcile_worker_results",
     "create_repair_nodes",
+    "refresh_index",
 }
 
 
@@ -67,6 +70,7 @@ def _candidate(
     skipped_reason: str = "",
     patch_ids: list[str] | None = None,
     integration_preflight: Mapping[str, Any] | None = None,
+    next_evidence_hints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     group_payload = group.get("payload") if isinstance(group, Mapping) and isinstance(group.get("payload"), Mapping) else {}
     group_items = group.get("items") if isinstance(group, Mapping) and isinstance(group.get("items"), list) else []
@@ -95,6 +99,32 @@ def _candidate(
         for payload in item_payloads
         if isinstance(payload.get("scope_evidence"), Mapping)
     ]
+    evidence_hints: list[dict[str, Any]] = [dict(item) for item in (next_evidence_hints or []) if isinstance(item, Mapping)]
+    for payload in [group_payload, *item_payloads]:
+        hints = payload.get("next_evidence_hints") if isinstance(payload, Mapping) and isinstance(payload.get("next_evidence_hints"), list) else []
+        for hint in hints:
+            if isinstance(hint, Mapping):
+                evidence_hints.append(dict(hint))
+    for blocker in blockers or []:
+        if not isinstance(blocker, Mapping):
+            continue
+        reason_kind = str(blocker.get("reason_kind") or "")
+        if reason_kind:
+            evidence_hints.append(
+                {
+                    "reason_kind": reason_kind,
+                    "next_action": str(blocker.get("next_action") or blocker.get("reason") or "inspect blocked scheduler candidate"),
+                    "source": "scheduler_blocker",
+                }
+            )
+    if integration_preflight:
+        for key, next_action in (
+            ("likely_conflict_count", "review conflicting queued patch surfaces before integration"),
+            ("stale_base_count", "refresh or rebase stale queued patches before integration"),
+            ("missing_metadata_count", "reconcile patch metadata before integration"),
+        ):
+            if int(integration_preflight.get(key) or 0):
+                evidence_hints.append({"reason_kind": key, "next_action": next_action, "source": "integration_preflight"})
     first_group_task_id = next(
         (
             str(item.get("task_id") or item.get("graph_task_node_id") or "")
@@ -122,6 +152,7 @@ def _candidate(
         "scope_evidence_required": bool(group_payload.get("scope_evidence_required")),
         "patch_ids": list(patch_ids or [])[:20],
         "integration_preflight": dict(integration_preflight or {}),
+        "next_evidence_hints": evidence_hints[:12],
         "skipped_reason": skipped_reason,
         "stop": False,
         "source": "execution_dag_scheduler",
@@ -199,7 +230,7 @@ def _ready_integration_nodes(dag_model: Mapping[str, Any]) -> list[dict[str, Any
         for item in ready
         if isinstance(item, Mapping)
         and str(execution_dag_action_capability(item.get("action_type")).get("canonical_action_type") or "") == "integrate"
-        and str(item.get("task_id") or "") != "task:conveyor"
+        and str(item.get("task_id") or "") not in COMPATIBILITY_CONVEYOR_TASK_IDS
     ]
 
 
@@ -261,6 +292,33 @@ def _all_queued_patches_ready_for_integration(conn, patches: list[dict[str, Any]
     return patch_ids.issubset(ready_integration_patch_ids_conn(conn))
 
 
+def _stale_index_records(parallel_dry_run: Mapping[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    candidates = parallel_dry_run.get("blocked_parallel_candidates") if isinstance(parallel_dry_run.get("blocked_parallel_candidates"), list) else []
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        confidence_signals = {
+            str(item).strip().lower()
+            for item in (candidate.get("confidence_signals") if isinstance(candidate.get("confidence_signals"), list) else [])
+            if str(item).strip()
+        }
+        reason_kind = str(candidate.get("reason_kind") or "").strip().lower()
+        reason = str(candidate.get("reason") or "").lower()
+        if reason_kind == "stale_symbol" or "stale_symbol" in confidence_signals or ("stale" in reason and "symbol" in reason):
+            records.append(dict(candidate))
+    why_not = parallel_dry_run.get("why_not_parallel") if isinstance(parallel_dry_run.get("why_not_parallel"), Mapping) else {}
+    reason_groups = why_not.get("reason_groups") if isinstance(why_not.get("reason_groups"), list) else []
+    for group in reason_groups:
+        if not isinstance(group, Mapping) or str(group.get("reason_kind") or "") != "stale_symbol":
+            continue
+        examples = group.get("examples") if isinstance(group.get("examples"), list) else []
+        for example in examples:
+            if isinstance(example, Mapping):
+                records.append(dict(example))
+    return records[:8]
+
+
 def _node_canonical_action(node: Mapping[str, Any]) -> str:
     action_type = str(node.get("action_type") or "")
     capability = execution_dag_action_capability(action_type)
@@ -291,7 +349,7 @@ def _ready_single_action_candidates(dag_model: Mapping[str, Any]) -> list[dict[s
         capability = execution_dag_action_capability(action_type)
         canonical_action = _node_canonical_action(node)
         task_id = str(node.get("task_id") or "")
-        if not task_id or task_id == "task:conveyor" or canonical_action in {"ticket", "blocker", "build", "repair", "integrate", "completion"}:
+        if not task_id or task_id in COMPATIBILITY_CONVEYOR_TASK_IDS or canonical_action in {"ticket", "blocker", "build", "repair", "integrate", "completion"}:
             continue
         if canonical_action in {"orchestrate", "decompose", "scope", "calibrate"}:
             candidates.append(
@@ -543,6 +601,42 @@ def choose_next_graph_aware(
                     )
                 )
 
+            stale_records = _stale_index_records(parallel_dry_run)
+            refresh_index_result = (
+                create_refresh_index_nodes_for_stale_evidence_conn(
+                    conn,
+                    target,
+                    stale_records,
+                    selected_by="execution_dag_scheduler.stale_index",
+                )
+                if stale_records
+                else {"status": "skipped", "nodes": []}
+            )
+            refresh_nodes = [
+                node
+                for node in (refresh_index_result.get("nodes") if isinstance(refresh_index_result.get("nodes"), list) else [])
+                if isinstance(node, Mapping)
+            ]
+            if refresh_nodes:
+                first_refresh = refresh_nodes[0]
+                candidates.append(
+                    _candidate(
+                        action_kind="refresh_index",
+                        role="planner",
+                        score=99.0,
+                        reason=f"{len(stale_records)} stale scheduler evidence record(s) need a targeted codebase index refresh",
+                        dag_node_id=str(first_refresh.get("node_id") or ""),
+                        task_id=str(first_refresh.get("task_id") or ""),
+                        next_evidence_hints=[
+                            {
+                                "reason_kind": "stale_symbol",
+                                "next_action": "refresh affected codebase index paths, then re-run scheduler readiness",
+                                "source": "why_not_parallel",
+                            }
+                        ],
+                    )
+                )
+
             ready_integrations = _ready_integration_nodes(dag_model)
             unreconciled_patches = _unreconciled_worker_patches(conn, queued_patches)
             integration_preflight = worker_patch_integration_preflight_conn(conn, target=target, limit=20)
@@ -648,6 +742,8 @@ def choose_next_graph_aware(
                 },
                 "role_manifest_sync": role_manifest_sync,
                 "failed_validation_job_count": len(failed_validation_jobs),
+                "stale_index_record_count": len(stale_records),
+                "refresh_index_result": refresh_index_result,
             }
             runnable = [candidate for candidate in candidates if not str(candidate.get("skipped_reason") or "")]
             if runnable:

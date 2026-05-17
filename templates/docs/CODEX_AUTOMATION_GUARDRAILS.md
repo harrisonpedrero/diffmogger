@@ -72,7 +72,7 @@ Do not build unrelated apps or large unrelated systems.
 ## Lock-File Policy
 
 - Acquire `target/codex_automation.lock` before mutating code in automation runs.
-- Scheduled runs should use local `.diffmogger/scripts/run_conveyor_automation.sh`, the legacy-named DAG scheduler wrapper that delegates to role wrappers owning lock acquire/release for mutating runs.
+- Scheduled runs should use the local automation scheduler wrapper in `.diffmogger/scripts/`, which delegates to role wrappers owning lock acquire/release for mutating runs.
 - If `CODEX_LOCK_ALREADY_ACQUIRED=true`, do not acquire, overwrite, manually create, or release the lock inside the Codex run.
 - Manual runs should use local `.diffmogger/scripts/acquire_codex_lock.sh` and `.diffmogger/scripts/release_codex_lock.sh`.
 - Set `CODEX_RUN_ID` before acquire/release so the lock can identify the current run.
@@ -103,10 +103,10 @@ Use `CRITICAL_STOP` only when continuing autonomously is unsafe.
 ## Context-Bloat Policy
 
 - Keep active files short.
-- Canonical runtime/task state is typed SQLite in `target/orchestration.sqlite3`, including automation control, execution DAG nodes/edges, repository capability manifest, validation receipts, blockers, human messages, and next actions. Conveyor stage fields are compatibility projections only. Agents should read `target/canonical_state_brief.md`, the generated bounded view, instead of inspecting SQLite manually.
+- Canonical runtime/task state is typed SQLite in `target/orchestration.sqlite3`, including automation control, activity graph nodes/edges, repository capability manifest, validation receipts, blockers, human messages, and next actions. Agents should read `target/canonical_state_brief.md`, the generated bounded view, instead of inspecting SQLite manually.
 - Markdown and JSON state files are prompt inputs, handoff surfaces, authored import/export surfaces, compatibility projections, exports, or migration aids.
 - If a Markdown or JSON projection is stale or contradictory, regenerate it or reconcile through the target-local Diffmogger typed state APIs.
-- Do not edit `target/automation_conveyor_state.json` as a source of truth; the DAG scheduler regenerates it from SQLite as a compatibility projection.
+- Do not treat generated Markdown or JSON views as source of truth; reconcile runtime changes through the target-local typed state APIs.
 - Record handled human messages and concise resolution notes through typed human-message state.
 - Prune stale task text from generated projections after reconciling the typed state.
 - Use local `.diffmogger/scripts/compact_agent_state.py --dry-run .` before compacting long-running Markdown state.

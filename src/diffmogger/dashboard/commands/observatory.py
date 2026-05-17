@@ -46,12 +46,12 @@ def command_observatory_load_html(args: argparse.Namespace) -> dict[str, Any]:
                 marker in html
                 for marker in [
                     "Mission State",
-                    "Conveyor Belt",
+                    "Activity Lanes",
                     "Progress Story",
                     "Landed Work",
                     "Scorecard",
                     "Recent Outcomes",
-                    "Conveyor Health",
+                    "Runtime Health",
                 ]
             ),
         }
@@ -98,7 +98,7 @@ def observatory_native_snapshot(raw: dict[str, Any], target: Path) -> dict[str, 
     first_review = raw.get("first_review") if isinstance(raw.get("first_review"), dict) else {}
     review = raw.get("review") if isinstance(raw.get("review"), dict) else {}
     state = raw.get("state") if isinstance(raw.get("state"), dict) else {}
-    state_machine = state.get("conveyor_machine") if isinstance(state.get("conveyor_machine"), dict) else {}
+    automation_activity = raw.get("automation_activity") if isinstance(raw.get("automation_activity"), dict) else state.get("automation_activity") if isinstance(state.get("automation_activity"), dict) else {}
     totals = queue.get("totals") if isinstance(queue.get("totals"), dict) else {}
     counts_by_role = queue.get("counts_by_role") if isinstance(queue.get("counts_by_role"), dict) else {}
     active = conveyor.get("active_role_run") if isinstance(conveyor.get("active_role_run"), dict) else {}
@@ -123,7 +123,7 @@ def observatory_native_snapshot(raw: dict[str, Any], target: Path) -> dict[str, 
                 "status": state,
                 "badge": state,
                 "tone": tone,
-                "reason": reason or ("Currently running." if state == "running" else "Awaiting the next conveyor decision."),
+                "reason": reason or ("Currently running." if state == "running" else "Awaiting the next activity decision."),
                 "counts": {name: as_int(counts.get(name)) for name in ["queued", "deferred", "applied", "failed", "skipped"]},
             }
         )
@@ -175,7 +175,7 @@ def observatory_native_snapshot(raw: dict[str, Any], target: Path) -> dict[str, 
         "generated_at": raw.get("generated_at"),
         "target": target_metadata(target),
         "title": "Diffmogger Autonomous Build Log",
-        "subtitle": "Diffmogger Observatory view: replay-style automation progress reconstructed from conveyor events, commits, and diff stats.",
+        "subtitle": "Diffmogger Observatory view: replay-style automation progress reconstructed from runtime events, commits, and diff stats.",
         "mission": {
             "project_name": raw.get("target_name") or target.name,
             "automation_status": status,
@@ -194,12 +194,12 @@ def observatory_native_snapshot(raw: dict[str, Any], target: Path) -> dict[str, 
             "cycles": as_int(conveyor.get("cycles")),
             "updated_at": conveyor.get("updated_at") or "never",
             "roles": roles,
-            "state_machine": state_machine,
             "active_run": active,
             "decision_queue": decisions,
             "health": conveyor.get("health") if isinstance(conveyor.get("health"), dict) else {},
             "no_progress": conveyor.get("no_progress") if isinstance(conveyor.get("no_progress"), dict) else {},
         },
+        "automation_activity": automation_activity,
         "progress": {
             "story": raw.get("progress_recent") or progress.get("recent_activity") or "No progress pulse yet.",
             "latest_landed_work": landed_feed[0] if landed_feed else {},

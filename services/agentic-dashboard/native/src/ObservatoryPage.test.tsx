@@ -64,7 +64,7 @@ function observatorySnapshot(overrides: DeepPartial<ObservatorySnapshot> = {}): 
       ],
       active_run: {},
       decision_queue: [],
-      health: { status: "ok", summary: "builder-first conveyor policy active." },
+      health: { status: "ok", summary: "builder-first runtime policy active." },
     },
     progress: {
       story: "No progress pulse yet.",
@@ -78,6 +78,34 @@ function observatorySnapshot(overrides: DeepPartial<ObservatorySnapshot> = {}): 
       manifests: [],
       deferred_backlog: [],
       recent_outcomes: [],
+    },
+    automation_activity: {
+      authority: "sqlite",
+      digest: "activity-test",
+      summary: {
+        total: 1,
+        ready: 1,
+        running: 0,
+        completed: 0,
+        blocked: 0,
+        failed: 0,
+        pending: 0,
+        skipped: 0,
+      },
+      nodes: [
+        {
+          node_id: "node:build",
+          task_id: "T-100",
+          action_type: "build",
+          canonical_action_type: "build",
+          status: "ready",
+          owner_role: "builder",
+          confidence: 0.91,
+          metadata: { ownership_surface: "src/app.ts" },
+        },
+      ],
+      edges: [],
+      execution_groups: [],
     },
     timeline: [],
     metrics: { pending_human: 0, queued_patches: 0 },
@@ -120,8 +148,8 @@ describe("ObservatoryPage", () => {
       observatorySnapshot({ conveyor: { active_run: { role: "builder", status: "running" } } }),
     );
 
-    expect(html).toContain("Running now");
     expect(html).toContain("Running: Builder");
+    expect(html).toContain("<span>Builder</span><strong>running</strong>");
   });
 
   it("renders a queued patch", () => {
@@ -139,56 +167,39 @@ describe("ObservatoryPage", () => {
       }),
     );
 
-    expect(html).toContain("queued: 2");
+    expect(html).toContain("<span>queued</span><strong>2</strong>");
     expect(html).toContain("Patch is queued.");
   });
 
-  it("renders the DAG compatibility state projection before role lanes", () => {
+  it("renders the shared automation activity graph", () => {
     const html = render(
       observatorySnapshot({
-        conveyor: {
-          state_machine: {
-            current_stage: "validation",
-            stage_status: "ready",
-            owner_role: "hardener",
-            work_item: {
-              id: "workitem:default",
-              status: "ACTIVE",
-              current_stage: "validation",
-              stage_status: "ready",
+        automation_activity: {
+          authority: "sqlite",
+          digest: "activity-detail",
+          nodes: [
+            {
+              node_id: "node:review",
+              task_id: "T-200",
+              action_type: "review",
+              canonical_action_type: "review",
+              status: "running",
               owner_role: "hardener",
-              capability_manifest_id: "capability:repo",
-              capability_manifest_version: 4,
-              validation_status: "pending",
-              continuation_token: "workitem:default:validation:77",
+              confidence: 0.88,
+              metadata: { ownership_surface: "src/review.ts" },
             },
-            capability_manifest: {
-              languages: { primary: "TypeScript" },
-              commands: [{ kind: "test", command: "npm test" }, { kind: "build", command: "npm run build" }],
-            },
-            stage_contracts: [
-              { stage: "intake", exit_criteria: ["work item is normalized"] },
-              { stage: "validation", exit_criteria: ["required receipts pass, fail with blocker, or expire as stale"] },
-            ],
-          },
+          ],
+          edges: [],
         },
       }),
     );
 
-    expect(html).toContain("DAG Compatibility State");
-    expect(html).toContain("Intake");
-    expect(html).toContain("Discovery");
-    expect(html).toContain("Decomposition");
-    expect(html).toContain("Planning");
-    expect(html).toContain("Implementation");
+    expect(html).toContain("Execution DAG Topology");
+    expect(html).toContain("Topology status summary");
+    expect(html).toContain("T-200");
     expect(html).toContain("Review");
-    expect(html).toContain("Validation");
-    expect(html).toContain("Integration");
-    expect(html).toContain("Handoff");
-    expect(html).toContain("Continuation");
-    expect(html).toContain("workitem:default:validation:77");
-    expect(html).toContain("TypeScript / 2 commands");
-    expect(html.indexOf("Execution Lanes")).toBeLessThan(html.indexOf("DAG Compatibility State"));
+    expect(html).not.toContain("DAG Compatibility State");
+    expect(html.indexOf("Execution DAG Topology")).toBeLessThan(html.indexOf("Active run"));
   });
 
   it("renders blocked user input", () => {

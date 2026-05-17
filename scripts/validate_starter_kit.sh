@@ -381,10 +381,8 @@ conveyor_files = [
 conveyor = "\n".join(path.read_text(encoding="utf-8") for path in conveyor_files)
 for marker in [
     "automation_conveyor.lock",
-    "automation_conveyor_state.json",
     "orchestration.sqlite3",
-    "conveyor.state",
-    "conveyor.machine",
+    "automation_activity",
     "conveyor_work_items",
     "conveyor_stage_contracts",
     "conveyor_stage_attempts",
@@ -398,6 +396,9 @@ for marker in [
     "escalations",
     "task_edges",
     "repo.capability_manifest",
+    "refresh_index",
+    "DIFFMOGGER_SELECTED_PATCH_IDS",
+    "patch_id",
     "queued role patch",
     "run_role_automation.sh",
 	    "MULTI_ROLE_ALLOW_REMOTES",
@@ -411,7 +412,7 @@ for marker in [
     "builder-first policy",
 ]:
     if marker not in conveyor:
-        print(f"Conveyor runner template missing marker: {marker}", file=sys.stderr)
+        print(f"Automation runner template missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
 observatory_files = [
@@ -437,7 +438,7 @@ for marker in [
 	    "Next-Run Worker Strategy",
 	    "worker_strategy_snapshot",
 	    "no_progress_circuit",
-    "Conveyor Health",
+    "Runtime Health",
 	    "Recent Outcomes",
 	]:
 	    if marker not in observatory:
@@ -1032,7 +1033,7 @@ for marker in [
     "Human bridge",
     "Review",
     "Context",
-    "Multi-role / conveyor",
+    "Roles / scheduler",
     "advanced.list_files",
     "advanced.load_file",
     "advanced.save_file",
@@ -1066,11 +1067,10 @@ for marker in [
     "Export review",
     "Summary",
     "Events",
-    "Conveyor",
     "Queue",
     "Metrics",
     "MissionStrip",
-    "ConveyorSection",
+    "AutomationActivityGraphPanel",
     "Recent role results",
     "LandedWorkSection",
     "RecentOutcomesSection",
@@ -1220,15 +1220,16 @@ for marker in [
 
 readme = Path("README.md").read_text(encoding="utf-8")
 for marker in [
-    "Diffmogger provides local automation infrastructure for continuous Codex work.",
+    "Diffmogger is a local orchestration engine for Codex, backed by a directed execution graph.",
+    "## Execution Model",
     "## Quickstart",
     "## Source Layout",
     "src/diffmogger/kit/",
     "src/diffmogger/runtime/",
-    "src/diffmogger/conveyor/",
     "src/diffmogger/integrator/",
     "src/diffmogger/observatory/",
     "src/diffmogger/dashboard/",
+    ".diffmogger/runtime/orchestration.sqlite3",
     "## Generated Targets",
     ".diffmogger/lib/diffmogger/",
     "## Dashboard",
@@ -2297,7 +2298,7 @@ target = Path(sys.argv[1])
 )
 PY
 python3 scripts/runtime/run_observatory.py --target "$tmp_dir" --once --output "$tmp_dir/target/observatory/index.html" >/tmp/Diffmogger-observatory-render.log
-for marker in "Diffmogger Observatory" "Conveyor Belt" "First Review / Runtime State" "run-observe" "builder" "Conveyor Health" "First review" "Scorecard" "Action Plan" "Integration safety" "Run integrator triage" "Accepted patches" "Deferred triage" "Start with \`staleness\`" "Next-Run Worker Strategy" "INTEGRATION_ONLY" "NO-PROGRESS CIRCUIT" "staleness:no_detail" "Recent Outcomes" "run-skipped" "skipped" "hardener/integrator churn"; do
+for marker in "Diffmogger Observatory" "Activity Lanes" "First Review / Runtime State" "run-observe" "builder" "Runtime Health" "First review" "Scorecard" "Action Plan" "Integration safety" "Run integrator triage" "Accepted patches" "Deferred triage" "Start with \`staleness\`" "Next-Run Worker Strategy" "INTEGRATION_ONLY" "NO-PROGRESS CIRCUIT" "staleness:no_detail" "Recent Outcomes" "run-skipped" "skipped"; do
     if ! grep -q "$marker" "$tmp_dir/target/observatory/index.html"; then
         echo "Observatory render smoke missing marker: $marker" >&2
         rm -rf "$tmp_dir"

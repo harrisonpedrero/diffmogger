@@ -370,14 +370,15 @@ def _validation_readiness(snapshot: Mapping[str, Any]) -> dict[str, Any]:
 
 def _dashboard_readiness(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     execution_dag = _mapping(snapshot.get("execution_dag"))
-    progress_model = _mapping(snapshot.get("progress_model"))
+    automation_activity = _mapping(snapshot.get("automation_activity"))
     projection = _mapping(_mapping(snapshot.get("projections")).get("execution_dag"))
     node_count = _int(execution_dag.get("node_count"), 0)
-    progress_node_count = _int(progress_model.get("node_count"), 0)
+    activity_node_count = _int(_mapping(automation_activity.get("summary")).get("node_count"), 0)
     return {
-        "available": node_count > 0 and progress_node_count == node_count,
-        "progress_model": "execution_dag" if progress_node_count == node_count and node_count > 0 else "missing",
+        "available": node_count > 0 and activity_node_count > 0,
+        "activity_model": "automation_activity" if activity_node_count > 0 else "missing",
         "node_count": node_count,
+        "activity_node_count": activity_node_count,
         "edge_count": _int(execution_dag.get("edge_count"), 0),
         "projection_exists": bool(projection.get("exists")),
         "projection_updated_at": _text(projection.get("updated_at")),

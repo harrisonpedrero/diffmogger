@@ -30,7 +30,20 @@ import {
   stopRuntimeStateWatch,
 } from "./api/backend";
 import { GraphInsightsPanel } from "./GraphInsights";
-import { buildRunModel, type RunAction, type RunDagCluster, type RunDagClusterEdge, type RunDagEdge, type RunDagNode, type RunRoute, type RunSafetyRow } from "./runModel";
+import {
+  buildRunModel,
+  type RunAction,
+  type RunConcurrencyWave,
+  type RunDagCluster,
+  type RunDagClusterEdge,
+  type RunDagEdge,
+  type RunDagNode,
+  type RunOperationItem,
+  type RunProgressColumnId,
+  type RunProgressRow,
+  type RunRoute,
+  type RunSafetyRow,
+} from "./runModel";
 import { TicketFields } from "./TicketFields";
 import {
   canSplitTicket,
@@ -671,11 +684,11 @@ class LiveGraphErrorBoundary extends Component<{ resetKey: string; children: Rea
   render() {
     if (this.state.hasError) {
       return (
-        <article className="panel run-dag-panel" aria-label="Live Execution Graph">
+        <article className="panel run-dag-panel" aria-label="Execution DAG Topology">
           <div className="dag-empty-state critical" role="alert">
             <AlertTriangle size={18} />
-            <strong>Live Execution Graph could not render</strong>
-            <p>The rest of the dashboard is still available. Refreshing the snapshot will retry the graph renderer.</p>
+            <strong>Execution DAG Topology could not render</strong>
+            <p>The rest of the dashboard is still available. Refreshing the snapshot will retry the topology renderer.</p>
           </div>
         </article>
       );
@@ -684,7 +697,7 @@ class LiveGraphErrorBoundary extends Component<{ resetKey: string; children: Rea
   }
 }
 
-function LiveExecutionGraphPanel(props: {
+export function AutomationActivityGraphPanel(props: {
   model: ReturnType<typeof buildRunModel>;
   liveEvents: RuntimeStateEvent[];
   streamState: "snapshot" | "connecting" | "live" | "disconnected";
@@ -704,18 +717,18 @@ function LiveExecutionGraphPanel(props: {
 
   return (
     <LiveGraphErrorBoundary resetKey={`${dag.digest}-${dag.renderMode}`}>
-      <article className="panel run-dag-panel live-dag-panel" aria-label="Live Execution Graph">
+      <article className="panel run-dag-panel live-dag-panel" aria-label="Execution DAG Topology">
         <div className="panel-heading-row">
           <div>
-            <h2>Live Execution Graph</h2>
-            <p>{dag.hasData ? `${dag.authority || "runtime"} / ${dag.digest || "digest pending"}` : "No DAG data for this run"}</p>
+            <h2>Execution DAG Topology</h2>
+            <p>{dag.hasData ? `${dag.authority || "runtime"} / ${dag.digest || "digest pending"} · dependencies and ownership` : "No topology data for this run"}</p>
           </div>
           <div className="dag-heading-pills">
             <RunTonePill tone={dagStreamTone(props.streamState)}><Activity size={12} />{streamLabel}</RunTonePill>
             <RunTonePill tone={graphTone}>{dag.summary.total} nodes</RunTonePill>
           </div>
         </div>
-        <div className="dag-summary-strip" aria-label="DAG status summary">
+        <div className="dag-summary-strip" aria-label="Topology status summary">
           <DetailRow label="Ready" value={dag.summary.ready} />
           <DetailRow label="Running" value={dag.summary.running} />
           <DetailRow label="Blocked" value={dag.summary.blocked + dag.summary.failed} />
@@ -736,7 +749,7 @@ function LiveExecutionGraphPanel(props: {
                 onSelect={setSelectedNodeId}
               />
             </div>
-            <aside className="dag-detail-rail" aria-label="Selected DAG cluster details">
+            <aside className="dag-detail-rail" aria-label="Selected activity cluster details">
               {selectedCluster ? (
                 <>
                   <div className={`dag-detail-card status-${selectedCluster.statusKind}`}>
@@ -764,7 +777,7 @@ function LiveExecutionGraphPanel(props: {
             <div className="dag-scroll-frame">
               <DagLiveSvg dag={dag} layout={layout} selectedNodeId={selectedNode?.id ?? ""} liveIds={liveIds} onSelect={setSelectedNodeId} />
             </div>
-            <aside className="dag-detail-rail" aria-label="Selected DAG node details">
+            <aside className="dag-detail-rail" aria-label="Selected activity node details">
               {selectedNode ? (
                 <>
                   <div className={`dag-detail-card status-${selectedNode.statusKind}`}>
@@ -786,12 +799,12 @@ function LiveExecutionGraphPanel(props: {
         ) : (
           <div className="dag-empty-state">
             <Activity size={18} />
-            <strong>No DAG data for this run</strong>
+            <strong>No topology data for this run</strong>
             <p>Fresh snapshots will show execution DAG nodes and edges here once the runtime has materialized scheduler state.</p>
           </div>
         )}
         {dag.hasData && (
-          <div className="dag-legend" aria-label="DAG status legend">
+          <div className="dag-legend" aria-label="Activity status legend">
             {["pending", "ready", "running", "completed", "blocked", "failed", "skipped"].map((status) => (
               <span className={`dag-legend-item status-${status}`} key={status}>
                 <i />
@@ -806,6 +819,194 @@ function LiveExecutionGraphPanel(props: {
         )}
       </article>
     </LiveGraphErrorBoundary>
+  );
+}
+
+const PROGRESS_MATRIX_COLUMNS: Array<{ id: RunProgressColumnId; label: string }> = [
+  { id: "scope", label: "Scope" },
+  { id: "build", label: "Build" },
+  { id: "review", label: "Review" },
+  { id: "validate", label: "Validate" },
+  { id: "integrate", label: "Integrate" },
+  { id: "done", label: "Done" },
+];
+
+function operationSourceLabel(item: RunOperationItem): string {
+  return [item.source.replace(/_/g, " "), item.groupId ? `group ${item.groupId}` : ""].filter(Boolean).join(" / ");
+}
+
+function OperationsCockpitPanel(props: { model: ReturnType<typeof buildRunModel> }) {
+  const operations = props.model.operations;
+  return (
+    <article className="panel operations-cockpit-panel" aria-label="Operations cockpit">
+      <div className="panel-heading-row">
+        <div>
+          <h2>Operations Cockpit</h2>
+          <p>Live runtime lanes, next scheduler unlock, and serialized integration queue.</p>
+        </div>
+        <RunTonePill tone={operations.nextUnlock.tone}>{operations.nextUnlock.source.replace(/_/g, " ")}</RunTonePill>
+      </div>
+
+      <div className="operations-cockpit-grid">
+        <section className="operations-card running-now-card" aria-label="Running Now">
+          <h3>Running Now</h3>
+          <div className="operations-lane-list">
+            {operations.runningNow.map((item) => (
+              <div className={`operations-lane ${item.tone}`} key={item.id}>
+                <div>
+                  <strong>{item.role}</strong>
+                  <span>{item.action.replace(/_/g, " ")}{item.taskId ? ` / ${item.taskId}` : ""}</span>
+                </div>
+                <RunTonePill tone={item.tone}>{item.status}</RunTonePill>
+                <p>{item.detail}</p>
+                <em>{operationSourceLabel(item)}</em>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className={`operations-card next-unlock-card ${operations.nextUnlock.tone}`} aria-label="Next unlock">
+          <h3>Next Unlock</h3>
+          <strong>{operations.nextUnlock.title}</strong>
+          <p>{operations.nextUnlock.detail}</p>
+          <div className="operations-meta-line">
+            <span>{operations.nextUnlock.role}</span>
+            <span>{operations.nextUnlock.action || "scheduler"}</span>
+            {operations.nextUnlock.taskId && <span>{operations.nextUnlock.taskId}</span>}
+          </div>
+        </section>
+
+        <section className={`operations-card integration-backlog-card ${operations.integrationBacklog.tone}`} aria-label="Integration backlog">
+          <h3>Integration Backlog</h3>
+          <div className="operations-backlog-counts">
+            <DetailRow label="Queued" value={operations.integrationBacklog.queuedCount} />
+            <DetailRow label="Safe" value={operations.integrationBacklog.safeCount} />
+            <DetailRow label="Blocked" value={operations.integrationBacklog.blockedCount} />
+          </div>
+          <p>{operations.integrationBacklog.summary}</p>
+          <div className="operations-chip-row">
+            {operations.integrationBacklog.patchSamples.length ? operations.integrationBacklog.patchSamples.map((patch) => (
+              <code key={patch}>{patch}</code>
+            )) : <span>No queued patches</span>}
+          </div>
+        </section>
+      </div>
+
+      <div className="role-action-explainer" aria-label="Role action mapping">
+        <span><strong>planner</strong> scope/decompose</span>
+        <span><strong>builder</strong> build/repair</span>
+        <span><strong>hardener</strong> review/validate/audit</span>
+        <span><strong>integrator</strong> integrate</span>
+      </div>
+    </article>
+  );
+}
+
+function ProgressMatrixPanel(props: { rows: RunProgressRow[] }) {
+  return (
+    <article className="panel progress-matrix-panel" aria-label="Progress matrix">
+      <div className="panel-heading-row">
+        <div>
+          <h2>Progress Matrix</h2>
+          <p>Per-ticket state from execution DAG action nodes.</p>
+        </div>
+        <RunTonePill tone={props.rows.length ? "info" : "quiet"}>{props.rows.length} rows</RunTonePill>
+      </div>
+      {props.rows.length ? (
+        <div className="progress-matrix-scroll">
+          <table className="progress-matrix-table">
+            <thead>
+              <tr>
+                <th>Work item</th>
+                {PROGRESS_MATRIX_COLUMNS.map((column) => <th key={column.id}>{column.label}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {props.rows.map((row) => (
+                <tr className={row.compatibility ? "compatibility" : ""} key={row.taskId}>
+                  <th>
+                    <strong>{row.label}</strong>
+                    <span>{row.compatibility ? row.taskId : row.summary}</span>
+                    {row.compatibility && <em>compatibility fallback</em>}
+                  </th>
+                  {PROGRESS_MATRIX_COLUMNS.map((column) => {
+                    const cell = row.cells[column.id];
+                    return (
+                      <td key={`${row.taskId}-${column.id}`}>
+                        {cell ? (
+                          <span className={`progress-cell status-${cell.statusKind}`} title={cell.detail}>
+                            <strong>{cell.statusKind}</strong>
+                            <em>{cell.role}</em>
+                          </span>
+                        ) : (
+                          <span className="progress-cell empty">
+                            <strong>none</strong>
+                            <em>not planned</em>
+                          </span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="matrix-empty-state">
+          <strong>No progress rows yet</strong>
+          <p>Fresh snapshots will populate ticket/work-item progress after the execution DAG is materialized.</p>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function waveLabel(wave: RunConcurrencyWave): string {
+  const parts = [
+    wave.mode.replace(/_/g, " "),
+    `${wave.itemCount} item${wave.itemCount === 1 ? "" : "s"}`,
+    wave.owners.length ? wave.owners.join(", ") : "",
+  ].filter(Boolean);
+  return parts.join(" / ");
+}
+
+function ConcurrencyStripPanel(props: { waves: RunConcurrencyWave[] }) {
+  return (
+    <article className="panel concurrency-strip-panel" aria-label="Concurrency strip">
+      <div className="panel-heading-row">
+        <div>
+          <h2>Concurrency Strip</h2>
+          <p>Planned waves, active groups, blocked candidates, and serialized integration.</p>
+        </div>
+        <RunTonePill tone={props.waves.some((wave) => wave.kind === "active") ? "info" : props.waves.length ? "quiet" : "quiet"}>
+          {props.waves.length} waves
+        </RunTonePill>
+      </div>
+      <div className="concurrency-wave-list">
+        {props.waves.length ? props.waves.map((wave) => (
+          <div className={`concurrency-wave ${wave.kind} ${wave.tone}`} key={`${wave.kind}-${wave.id}`}>
+            <div className="concurrency-wave-main">
+              <strong>{wave.label}</strong>
+              <span>{wave.id}</span>
+            </div>
+            <RunTonePill tone={wave.tone}>{wave.status}</RunTonePill>
+            <code>{wave.kind}</code>
+            <p>{wave.detail}</p>
+            <div className="concurrency-wave-meta">
+              <span>{waveLabel(wave)}</span>
+              {wave.tasks.length > 0 && <span>tasks {wave.tasks.join(", ")}</span>}
+              {wave.leases.length > 0 && <span>leases {wave.leases.join(", ")}</span>}
+            </div>
+          </div>
+        )) : (
+          <div className="matrix-empty-state">
+            <strong>No concurrency waves recorded</strong>
+            <p>Scheduler snapshots will show proposed, active, blocked, or integration waves here.</p>
+          </div>
+        )}
+      </div>
+    </article>
   );
 }
 
@@ -1934,7 +2135,13 @@ export function RunPage(props: {
           <p className="empty-copy">{model.automation.message}</p>
         </article>
 
-        <LiveExecutionGraphPanel
+        <OperationsCockpitPanel model={model} />
+
+        <ProgressMatrixPanel rows={model.operations.progressRows} />
+
+        <ConcurrencyStripPanel waves={model.operations.concurrencyWaves} />
+
+        <AutomationActivityGraphPanel
           model={model}
           liveEvents={dagLiveEvents}
           streamState={dagStreamState}

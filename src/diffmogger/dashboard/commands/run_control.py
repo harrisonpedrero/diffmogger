@@ -16,6 +16,16 @@ from diffmogger.runtime.state_store import (
 )
 
 RUNNER_STOP_GRACE_SECONDS = 8
+CONVEYOR_PROCESS_MARKERS = (
+    "run_conveyor_automation.py",
+    "run_conveyor_automation.sh",
+)
+TARGET_OWNED_DESCENDANT_MARKERS = (
+    *CONVEYOR_PROCESS_MARKERS,
+    "run_role_automation.sh",
+    "run_process_watchdog.py",
+    "codex exec",
+)
 
 def prereq_rows(items: list[Any]) -> list[dict[str, Any]]:
     return [
@@ -313,6 +323,135 @@ def process_is_alive(pid: Any) -> bool:
             return False
     return True
 
+def automation_conveyor_lock_path(target: Path) -> Path:
+    return target_path(target.expanduser().resolve(), "target/automation_conveyor.lock")
+
+def read_process_table() -> dict[int, dict[str, Any]]:
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,pgid=,command="],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+    except OSError:
+        return {}
+    table: dict[int, dict[str, Any]] = {}
+    if result.returncode != 0:
+        return table
+    for raw in result.stdout.splitlines():
+        parts = raw.strip().split(None, 3)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+            pgid = int(parts[2])
+        except ValueError:
+            continue
+        command = parts[3] if len(parts) > 3 else ""
+        table[pid] = {"pid": pid, "ppid": ppid, "pgid": pgid, "command": command}
+    return table
+
+def read_conveyor_lock(target: Path) -> dict[str, Any]:
+    path = automation_conveyor_lock_path(target)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+def process_command_matches_target(target: Path, command: str, markers: tuple[str, ...] = CONVEYOR_PROCESS_MARKERS) -> bool:
+    if not command:
+        return False
+    target_text = str(target.expanduser().resolve())
+    return target_text in command and any(marker in command for marker in markers)
+
+def process_command_is_target_runner(command: str) -> bool:
+    return any(marker in command for marker in CONVEYOR_PROCESS_MARKERS)
+
+def descendant_pids(root_pids: set[int], table: dict[int, dict[str, Any]]) -> set[int]:
+    descendants: set[int] = set()
+    frontier = set(root_pids)
+    while frontier:
+        next_frontier: set[int] = set()
+        for pid, row in table.items():
+            if pid in root_pids or pid in descendants:
+                continue
+            if int(row.get("ppid") or 0) in frontier:
+                descendants.add(pid)
+                next_frontier.add(pid)
+        frontier = next_frontier
+    return descendants
+
+def live_target_conveyor_processes(target: Path, runner_state: dict[str, Any] | None = None) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    table = read_process_table()
+    roots: set[int] = set()
+    sources: list[str] = []
+    runner_state = runner_state or load_runner_state(target)
+    runner_pid = runner_state.get("pid")
+    if process_is_alive(runner_pid):
+        pid_int = int(runner_pid)
+        row = table.get(pid_int, {})
+        if (
+            str(runner_state.get("target") or "") == str(target)
+            or process_command_matches_target(target, str(row.get("command") or ""))
+            or process_command_is_target_runner(str(row.get("command") or ""))
+        ):
+            roots.add(pid_int)
+            sources.append("runner_projection")
+    lock = read_conveyor_lock(target)
+    lock_pid = lock.get("pid")
+    if process_is_alive(lock_pid):
+        pid_int = int(lock_pid)
+        row = table.get(pid_int, {})
+        if process_command_matches_target(target, str(row.get("command") or "")) or process_command_is_target_runner(
+            str(row.get("command") or lock.get("command") or "")
+        ):
+            roots.add(pid_int)
+            sources.append("conveyor_lock")
+    for pid, row in table.items():
+        command = str(row.get("command") or "")
+        if process_command_matches_target(target, command):
+            roots.add(pid)
+            sources.append("process_scan")
+    if not roots:
+        return {}
+    descendants = descendant_pids(roots, table)
+    owned = sorted(roots | descendants)
+    root_pid = sorted(roots)[0]
+    return {
+        "root_pid": root_pid,
+        "roots": sorted(roots),
+        "pids": owned,
+        "pgid": int(table.get(root_pid, {}).get("pgid") or root_pid),
+        "sources": sorted(set(sources)),
+        "lock": lock,
+        "processes": {str(pid): table.get(pid, {}) for pid in owned},
+    }
+
+def attach_live_runner_state(target: Path, live: dict[str, Any]) -> dict[str, Any]:
+    root_pid = int(live.get("root_pid") or 0)
+    state = {
+        "state": "running",
+        "message": "Continuous automation is already running for this target.",
+        "pid": root_pid,
+        "pgid": int(live.get("pgid") or root_pid),
+        "target": str(target.expanduser().resolve()),
+        "attached": True,
+        "process_sources": list(live.get("sources") or []),
+        "owned_pids": list(live.get("pids") or []),
+    }
+    lock = live.get("lock") if isinstance(live.get("lock"), dict) else {}
+    if lock.get("created_at"):
+        state["started_at"] = str(lock.get("created_at"))
+    write_runner_state(target, state)
+    return load_runner_state(target)
+
 def mark_stale_runner(target: Path, state: dict[str, Any]) -> dict[str, Any]:
     if state and state.get("state") == "running":
         state = dict(state)
@@ -324,9 +463,52 @@ def mark_stale_runner(target: Path, state: dict[str, Any]) -> dict[str, Any]:
 
 def running_runner_state(target: Path) -> dict[str, Any]:
     state = load_runner_state(target)
+    live = live_target_conveyor_processes(target, state)
+    if live:
+        return attach_live_runner_state(target, live)
     if state.get("state") == "running" and process_is_alive(state.get("pid")):
         return state
     return mark_stale_runner(target, state)
+
+def signal_pids(pids: list[int], sig: int) -> None:
+    for pid in sorted({int(item) for item in pids if int(item) > 0}, reverse=True):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            continue
+        except OSError:
+            continue
+
+def signal_process_group_if_safe(live: dict[str, Any], sig: int) -> None:
+    root_pid = int(live.get("root_pid") or 0)
+    pgid = int(live.get("pgid") or 0)
+    if root_pid > 0 and pgid == root_pid:
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+
+def wait_for_processes_to_exit(pids: list[int], timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not any(process_is_alive(pid) for pid in pids):
+            return True
+        time.sleep(0.2)
+    return not any(process_is_alive(pid) for pid in pids)
+
+def cleanup_conveyor_lock_if_owned(target: Path, live: dict[str, Any]) -> None:
+    path = automation_conveyor_lock_path(target)
+    if not path.exists():
+        return
+    lock_pid = str((live.get("lock") if isinstance(live.get("lock"), dict) else {}).get("pid") or "")
+    roots = {str(item) for item in live.get("roots") or []}
+    if not lock_pid or lock_pid in roots or not process_is_alive(lock_pid):
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 def automation_prerequisites(target: Path, dashboard_app: Any) -> list[Any]:
     items = native_prerequisites(target, dashboard_app)
@@ -682,6 +864,18 @@ def command_run_once(args: argparse.Namespace) -> dict[str, Any]:
 def command_automation_start(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     dashboard_app = load_dashboard_module()
+    live = live_target_conveyor_processes(target)
+    if live:
+        existing = attach_live_runner_state(target, live)
+        stream_event(args, "automation", f"Continuous automation is already running (pid {existing.get('pid')}).")
+        write_dashboard_action_state(target, last_action="automation_start_attached")
+        return {
+            "target": target_metadata(target),
+            "automation": automation_status_snapshot(target, dashboard_app),
+            "runner": existing,
+            "started": False,
+            "attached": True,
+        }
     existing = running_runner_state(target)
     if existing.get("state") == "running" and process_is_alive(existing.get("pid")):
         stream_event(args, "automation", f"Continuous automation is already running (pid {existing.get('pid')}).")
@@ -775,8 +969,8 @@ def command_automation_stop(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     dashboard_app = load_dashboard_module()
     runner = load_runner_state(target)
-    pid = runner.get("pid")
-    if not process_is_alive(pid):
+    live = live_target_conveyor_processes(target, runner)
+    if not live:
         stale = mark_stale_runner(target, runner)
         stream_event(args, "automation", "Continuous automation is not currently running.", level="warning")
         write_dashboard_action_state(target, last_action="automation_stop_noop")
@@ -788,42 +982,19 @@ def command_automation_stop(args: argparse.Namespace) -> dict[str, Any]:
             "forced": False,
         }
 
-    pid_int = int(pid)
+    pid_int = int(live.get("root_pid") or runner.get("pid") or 0)
+    owned_pids = [int(item) for item in live.get("pids") or [pid_int] if int(item) > 0]
     stopped = False
     forced = False
-    stream_event(args, "automation", f"Stopping continuous automation (pid {pid_int}).")
-    try:
-        os.killpg(pid_int, signal.SIGTERM)
-    except ProcessLookupError:
-        stopped = True
-    except OSError:
-        try:
-            os.kill(pid_int, signal.SIGTERM)
-        except ProcessLookupError:
-            stopped = True
-    deadline = time.monotonic() + RUNNER_STOP_GRACE_SECONDS
-    while not stopped and time.monotonic() < deadline:
-        if not process_is_alive(pid_int):
-            stopped = True
-            break
-        time.sleep(0.2)
-    if not stopped and process_is_alive(pid_int):
+    stream_event(args, "automation", f"Stopping continuous automation (pid {pid_int}, processes {len(owned_pids)}).")
+    signal_process_group_if_safe(live, signal.SIGTERM)
+    signal_pids(owned_pids, signal.SIGTERM)
+    stopped = wait_for_processes_to_exit(owned_pids, RUNNER_STOP_GRACE_SECONDS)
+    if not stopped:
         forced = True
-        try:
-            os.killpg(pid_int, signal.SIGKILL)
-        except ProcessLookupError:
-            stopped = True
-        except OSError:
-            try:
-                os.kill(pid_int, signal.SIGKILL)
-            except ProcessLookupError:
-                stopped = True
-        deadline = time.monotonic() + 3
-        while not stopped and time.monotonic() < deadline:
-            if not process_is_alive(pid_int):
-                stopped = True
-                break
-            time.sleep(0.1)
+        signal_process_group_if_safe(live, signal.SIGKILL)
+        signal_pids(owned_pids, signal.SIGKILL)
+        stopped = wait_for_processes_to_exit(owned_pids, 3)
 
     finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     runner = dict(runner)
@@ -831,6 +1002,10 @@ def command_automation_stop(args: argparse.Namespace) -> dict[str, Any]:
     runner["message"] = "Continuous automation stopped." if stopped else "Continuous automation did not stop cleanly."
     runner["stopped_at"] = finished_at
     runner["forced_stop"] = forced
+    runner["stopped_pids"] = owned_pids
+    runner["process_sources"] = list(live.get("sources") or [])
+    if stopped:
+        cleanup_conveyor_lock_if_owned(target, live)
     write_runner_state(target, runner)
     write_dashboard_action_state(target, last_action="automation_stopped" if stopped else "automation_stop_failed")
     return {

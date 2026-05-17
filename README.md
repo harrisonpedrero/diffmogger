@@ -2,19 +2,23 @@
   <img src="docs/assets/diffmogger-logo-cropped.png" alt="Diffmogger" width="720">
 </p>
 
-Diffmogger provides local automation infrastructure for continuous Codex work. It turns a repo into a dashboard-first automation loop with canonical typed SQLite state, durable prompts, target-local runtime wrappers, a planner/builder/hardener/integrator execution DAG scheduler, patch queues, safety checks, generated human handoff files, review exports, a native dashboard, and a CLI.
+Diffmogger is a local orchestration engine for Codex, backed by a directed execution graph.
 
-It is not a hosted agent platform or a product-specific app. Diffmogger is built for solo and small-team repos that want Codex runs to preserve context, recover from blockers, route work through specialized roles, and compound over time instead of restarting from a blank prompt.
+It scaffolds a self-contained `.diffmogger/` sidecar into a target repo, keeps live automation state in SQLite, and runs Codex work through typed graph actions such as `scope`, `build`, `review`, `validate`, `repair`, and `integrate`.
 
-## What It Provides
+Diffmogger is not a hosted agent platform or a product-specific app. It is reusable local infrastructure for repos where Codex work needs durable state, clear handoffs, inspectable progress, safe parallelism, and reviewable outcomes across repeated runs.
 
-- A native Tauri dashboard for setup, ticket-campaign queue creation/management, Start/Stop run control, safety checks, review export, inbox messages, and activity monitoring.
-- A generated sidecar layout under `.diffmogger/` so target repos keep Diffmogger-owned prompts, canonical state, runtime files, queues, worktrees, logs, and manifests out of product-owned paths.
-- Thin target-local Python wrappers under `.diffmogger/scripts/` that import the bundled `.diffmogger/lib/diffmogger/` runtime.
-- A continuous planner/builder/hardener/integrator runner backed by `.diffmogger/runtime/orchestration.sqlite3` with append-only events, typed execution DAG node/edge contracts, repo capability manifests, validation receipts, checkpoints, and generated JSON/Markdown views, including `.diffmogger/runtime/canonical_state_brief.md` for Codex agents.
-- Stable root CLI command names while implementation lives under `src/diffmogger/`.
-- An explicit status model: `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`.
-- Optional worker agents, bounded or ongoing campaigns, optional Context7/Playwright MCP setup, optional notifier integration, and deterministic DAG-backed scheduling.
+## What It Does
+
+Diffmogger gives a target repo:
+
+- a native dashboard for setup, run control, ticket queues, inbox messages, safety checks, review exports, and runtime inspection
+- a `.diffmogger/` sidecar for automation-owned prompts, runtime state, logs, queues, worktrees, schemas, manifests, and generated projections
+- a canonical SQLite state store at `.diffmogger/runtime/orchestration.sqlite3`
+- target-local wrappers under `.diffmogger/scripts/` and a bundled runtime under `.diffmogger/lib/diffmogger/`
+- optional worker fanout, notifier integration, Context7/Playwright MCP setup, and review bundle exports
+
+Generated Markdown and JSON files are projections. The SQLite graph is the runtime authority.
 
 ## Quickstart
 
@@ -31,8 +35,9 @@ In the dashboard:
 1. Pick a fresh or existing target folder.
 2. Fill in the project intake.
 3. Add optional context files.
-4. Run **Scaffold**, then open **Run** and click **Start**.
-5. Review **Run Safety Check** and **Export Review Bundle** after the first run.
+4. Run **Scaffold**.
+5. Open **Run** and click **Start**.
+6. Use **Run Safety Check** and **Export Review Bundle** after the first run.
 
 CLI scaffold path:
 
@@ -47,62 +52,38 @@ python3 scripts/check_required_files.py /tmp/Diffmogger-smoke
 
 Scaffold initializes git and creates a local `chore: initial commit` automatically when the target does not already have `HEAD`.
 
-## Source Layout
+## Execution Model
 
-```text
-src/diffmogger/                 Canonical Python source.
-src/diffmogger/kit/             Source-kit tools such as scaffold and validation.
-src/diffmogger/runtime/         Target runtime entrypoints and helpers.
-src/diffmogger/conveyor/        Legacy-named DAG scheduler package, active-role recovery, and runner logic.
-src/diffmogger/integrator/      Multi-role integration, git safety, verification, and progress logic.
-src/diffmogger/observatory/     Observatory snapshot, scoring, render, and server logic.
-src/diffmogger/dashboard/       Native dashboard backend CLI and shared helpers.
-scripts/                        Stable root command wrappers.
-scripts/runtime/                Source-checkout copies of generated runtime wrappers.
-scripts/target/                 Source-checkout copies of target shell helpers.
-scripts/validation/             Validation-only wrapper entrypoints.
-templates/                      Files rendered into generated target repos.
-validation/starter_kit_manifest.json
-                                 Source and entrypoint inventory.
-services/agentic-dashboard/     Native dashboard docs and Tauri app.
-services/agentic-notifier/      Optional local/Discord notifier service.
-docs/                           Active Diffmogger documentation.
-tests/{kit,runtime,dashboard}/  Source-kit, runtime, and dashboard test groups.
-```
+Diffmogger materializes target automation state into a directed execution graph stored in SQLite. Runtime inputs include tickets, dependencies, blockers, human messages, validation receipts, worker outputs, repository capability data, codebase graph signals, active leases, and execution budgets.
 
-Root Python commands are compatibility entrypoints. The supported public names remain:
+Those inputs become typed DAG nodes and edges. Common node types include `orchestrate`, `decompose`, `scope`, `build`, `review`, `validate`, `repair`, `integrate`, `audit`, `calibrate`, `blocker`, and `completion`.
 
-```bash
-python3 scripts/scaffold_project_docs.py
-python3 scripts/check_required_files.py
-python3 scripts/validate_starter_kit_manifest.py
-python3 scripts/check_integration_safety.py
-python3 scripts/dashboard_backend_cli.py
-```
+Hard edges block downstream work until satisfied. Advisory edges preserve context without stopping execution.
 
-Implementation belongs in `src/diffmogger/kit/`, `src/diffmogger/runtime/`, `src/diffmogger/conveyor/`, `src/diffmogger/integrator/`, `src/diffmogger/observatory/`, or `src/diffmogger/dashboard/`.
+On each scheduler cycle, Diffmogger refreshes the graph, computes runnable nodes, records scheduler candidates, and selects the next execution action. Actions can launch read-only scope work, launch write work with leases, run validation groups, review queued patches, create repair nodes, reconcile worker outputs, or integrate accepted patches.
+
+Parallel write execution is gated by typed ownership. Diffmogger only launches write groups when it can derive non-overlapping resource leases from direct paths, exact symbol ownership, or accepted scope evidence. Integration remains serialized so the main checkout stays coherent.
 
 ## Generated Targets
 
 New target repos receive a sidecar namespace:
 
 ```text
-.diffmogger/agentic/      automation prompts and intake
-.diffmogger/state/        generated Markdown prompt, handoff, bridge, and review projections
-.diffmogger/scripts/      target-local wrappers and shell helpers
-.diffmogger/lib/          bundled Python runtime from src/diffmogger/
-.diffmogger/runtime/      canonical SQLite execution DAG state, generated projections, logs, queues, locks, worker reports
-.diffmogger/schemas/      JSON Schema contracts for exported/projection state
-.diffmogger/manifest.json generated ownership and path manifest
+.diffmogger/agentic/      prompts, intake, role instructions, and dashboard preferences
+.diffmogger/context/      imported project context files
+.diffmogger/lib/          bundled Diffmogger Python runtime
+.diffmogger/runtime/      SQLite state, logs, queues, worktrees, leases, reports, review artifacts
+.diffmogger/scripts/      target-local command wrappers and shell helpers
+.diffmogger/schemas/      exported state contracts
+.diffmogger/state/        generated human and agent-facing projections
+.diffmogger/manifest.json sidecar ownership and path manifest
 ```
 
-The target repo should not need the Diffmogger checkout at runtime. The native dashboard and CLI tools are for creating, validating, and operating target sidecars.
+The generated target repo should not need the Diffmogger source checkout at runtime. The source checkout and native dashboard are used to scaffold, operate, validate, and inspect target sidecars.
 
 ## Dashboard
 
-The native dashboard is the only user-facing dashboard. It lives in `services/agentic-dashboard/native/` and calls `scripts/dashboard_backend_cli.py`, which exposes allowlisted JSON commands for scaffold, diagnostics, typed execution DAG state snapshots, Start/Stop automation, safety checks, inbox messages, Observatory snapshots, review bundles, worker controls, and debug bundles.
-
-For campaign targets, the dashboard manages a structured Ticket Queue backed by `.diffmogger/runtime/orchestration.sqlite3`. Low-cortisol generation decomposes the full described scope into as many reviewable seed tickets as needed, rather than a capped demo plan. Users can seed tickets before scaffold, inspect/edit/delete tickets after scaffold, preview/apply Markdown/CSV/JSON imports, and accept review-only Codex follow-up draft candidates stored under `.diffmogger/runtime/ticket_drafts/`.
+The native dashboard lives in `services/agentic-dashboard/native/` and calls `scripts/dashboard_backend_cli.py`. The backend exposes allowlisted JSON commands for project setup, scaffold, run control, ticket queues, inbox replies, canonical state snapshots, execution graph progress, worker controls, validation jobs, safety checks, Observatory snapshots, review bundles, and redacted debug bundles.
 
 Useful dashboard commands:
 
@@ -121,15 +102,40 @@ python3 scripts/dashboard_backend_cli.py diagnostics.environment
 python3 scripts/dashboard_backend_cli.py state.snapshot --target /path/to/target
 ```
 
-## First Review Checklist
+First Review Checklist: after scaffold, run **Run Safety Check** and export a review bundle. The bundle writes `Diffmogger-observatory.html` and `Diffmogger-self-review.md`.
 
-After scaffolding or before a demo:
+```bash
+python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review
+```
 
-1. Run `bash scripts/validate_starter_kit.sh` in the Diffmogger source checkout.
-2. Open the target in the native dashboard with **Open Diffmogger Project**.
-3. Run **Run Safety Check**.
-4. Use **Export Review Bundle** or run `python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
-5. Inspect `/tmp/Diffmogger-review/Diffmogger-observatory.html` and `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
+## Source Layout
+
+```text
+src/diffmogger/                 Canonical Python source
+src/diffmogger/kit/             Source-kit scaffold and validation tools
+src/diffmogger/runtime/         Target runtime entrypoints, state helpers, and scheduler controls
+src/diffmogger/integrator/      Serialized patch integration, git safety, verification, and progress logic
+src/diffmogger/observatory/     Snapshot, scoring, render, review, and local server logic
+src/diffmogger/dashboard/       Native dashboard backend CLI and command handlers
+scripts/                        Stable root command wrappers
+templates/                      Files rendered into generated target repos
+schemas/ and validation/starter_kit_manifest.json  Schemas and source inventory
+services/agentic-dashboard/     Native dashboard docs and Tauri app
+services/agentic-notifier/      Optional local/Discord notifier service
+docs/                           Active Diffmogger documentation
+tests/{kit,runtime,dashboard}/  Source-kit, runtime, and dashboard test groups
+```
+
+## Safety Defaults
+
+- Keep secrets out of prompts, examples, target state, inboxes, and docs.
+- Use placeholders only in public examples.
+- Keep notifier credentials inside `services/agentic-notifier/.env`.
+- Treat notifier, MCP, ticket notifications, and browser automation as optional local features.
+- Keep automation local-only unless a target explicitly opts into local runs with configured remotes.
+- Review diffs before trusting autonomous changes.
+
+Status values are `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`.
 
 ## Validation
 
@@ -147,27 +153,25 @@ python3 scripts/check_integration_safety.py
 python3 -m unittest tests.kit.test_check_required_files tests.kit.test_check_integration_safety tests.kit.test_starter_kit_manifest
 ```
 
-The manifest enforces source ownership, stable wrapper entrypoints, generated runtime wrappers, ignored build artifacts, and the absence of tracked `templates/scripts/*.py` Python wrappers.
+If scaffolding behavior changes, also run the scaffold smoke:
 
-## Safety Defaults
-
-- Keep secrets out of prompts, examples, target state, inboxes, and docs.
-- Keep notifier credentials inside `services/agentic-notifier/.env`.
-- Use file-only human bridge mode by default.
-- Treat notifier, MCP, ticket notifications, and browser automation as optional local features.
-- Keep multi-role automation local-only unless a target explicitly opts into local runs in repos with configured remotes.
-- Review diffs before trusting autonomous changes.
+```bash
+python3 scripts/scaffold_project_docs.py --intake examples/generic-web-app/project_intake.md --target /tmp/Diffmogger-smoke --force
+python3 scripts/check_required_files.py /tmp/Diffmogger-smoke
+```
 
 ## Docs
 
-Start with [docs/README.md](docs/README.md). The most-used docs are:
+Start with [docs/README.md](docs/README.md). Most-used docs:
 
-- [docs/FRESH_PROJECT_SETUP.md](docs/FRESH_PROJECT_SETUP.md)
-- [docs/DASHBOARD.md](docs/DASHBOARD.md)
-- [docs/OPERATING_MODEL.md](docs/OPERATING_MODEL.md)
-- [docs/HUMAN_BRIDGE.md](docs/HUMAN_BRIDGE.md)
-- [docs/WORKER_AGENTS.md](docs/WORKER_AGENTS.md)
-- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+- [Fresh Project Setup](docs/FRESH_PROJECT_SETUP.md)
+- [Dashboard](docs/DASHBOARD.md)
+- [Operating Model](docs/OPERATING_MODEL.md)
+- [Human Bridge](docs/HUMAN_BRIDGE.md)
+- [Worker Agents](docs/WORKER_AGENTS.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+
+Architecture notes: [Native Dashboard](docs/architecture/native-dashboard.md), [DAG Symbol Scheduler Audit](docs/architecture/dag-symbol-scheduler-audit.md), [Symbol Identity Contract](docs/architecture/symbol-identity-contract.md), and [Concurrency Readiness Audit](docs/architecture/concurrency-readiness-audit.md).
 
 ## License
 

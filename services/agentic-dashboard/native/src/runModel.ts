@@ -112,6 +112,71 @@ export type RunDagGroup = {
   detail: string;
 };
 
+export type RunOperationItem = {
+  id: string;
+  label: string;
+  role: string;
+  action: string;
+  taskId: string;
+  status: string;
+  tone: RunTone;
+  source: string;
+  groupId: string;
+  detail: string;
+};
+
+export type RunOperationCallout = {
+  title: string;
+  detail: string;
+  tone: RunTone;
+  role: string;
+  action: string;
+  taskId: string;
+  source: string;
+};
+
+export type RunProgressCell = {
+  status: string;
+  statusKind: RunDagStatusKind;
+  role: string;
+  detail: string;
+  nodeId: string;
+};
+
+export type RunProgressColumnId = "scope" | "build" | "review" | "validate" | "integrate" | "done";
+
+export type RunProgressRow = {
+  taskId: string;
+  label: string;
+  compatibility: boolean;
+  cells: Record<RunProgressColumnId, RunProgressCell | null>;
+  summary: string;
+};
+
+export type RunConcurrencyWave = {
+  id: string;
+  label: string;
+  kind: "proposed" | "active" | "completed" | "blocked" | "integration";
+  mode: string;
+  status: string;
+  tone: RunTone;
+  itemCount: number;
+  owners: string[];
+  tasks: string[];
+  leases: string[];
+  detail: string;
+};
+
+export type RunIntegrationBacklog = {
+  queuedCount: number;
+  conflictCount: number;
+  safeCount: number;
+  blockedCount: number;
+  tone: RunTone;
+  summary: string;
+  patchSamples: string[];
+};
+
 export type RunDagCluster = {
   id: string;
   label: string;
@@ -207,6 +272,13 @@ export type RunModel = {
       plannedNodeCount: number;
       activeNodeCount: number;
     };
+  };
+  operations: {
+    runningNow: RunOperationItem[];
+    nextUnlock: RunOperationCallout;
+    progressRows: RunProgressRow[];
+    concurrencyWaves: RunConcurrencyWave[];
+    integrationBacklog: RunIntegrationBacklog;
   };
   runLog: {
     exists: boolean;
@@ -431,6 +503,8 @@ const DAG_STATUS_ORDER: RunDagStatusKind[] = ["running", "ready", "blocked", "fa
 
 function executionDagSnapshot(snapshot: ProjectSnapshot | null): Record<string, unknown> {
   const state = record(snapshot?.run.state);
+  const activity = record(state.automation_activity);
+  if (Array.isArray(activity.nodes)) return activity;
   const dag = record(state.execution_dag);
   if (Object.keys(dag).length) return dag;
   const progress = record(state.progress_model);
@@ -586,7 +660,7 @@ function dagGroups(snapshot: ProjectSnapshot | null, nodes: RunDagNode[]): RunDa
         status,
         kind: "proposed" as const,
         nodeIds,
-        detail: compactText(group.reason, `${nodeIds.length} DAG node(s) are safe to consider together.`),
+        detail: compactText(group.reason, `${nodeIds.length} activity node(s) are safe to consider together.`),
       };
     })
     .filter((group) => group.nodeIds.length > 0);
@@ -735,7 +809,7 @@ function buildDagClusters(nodes: RunDagNode[], edges: RunDagEdge[], groups: RunD
         plannedGroupNodeCount,
         activeGroupNodeCount,
         detail: [
-          `${bucket.length} DAG node${bucket.length === 1 ? "" : "s"}`,
+          `${bucket.length} activity node${bucket.length === 1 ? "" : "s"}`,
           `${phaseLabel} phase`,
           `${statusKind} status`,
           ticketSamples.length ? `tickets ${ticketSamples.join(", ")}` : "",
@@ -932,6 +1006,457 @@ function executionDagModel(snapshot: ProjectSnapshot | null): RunModel["executio
   };
 }
 
+const COMPATIBILITY_TASK_IDS = new Set(["task:automation", "task:conveyor"]);
+const PROGRESS_COLUMNS: RunProgressColumnId[] = ["scope", "build", "review", "validate", "integrate", "done"];
+const PROGRESS_STATUS_PRIORITY: RunDagStatusKind[] = ["failed", "blocked", "running", "ready", "pending", "completed", "skipped"];
+
+function operationTone(status: unknown): RunTone {
+  const normalized = text(status, "").toLowerCase().replace(/[\s-]+/g, "_");
+  if (["completed", "done", "passed", "integrated", "resolved"].includes(normalized)) return "good";
+  if (["failed", "critical", "conflict", "error"].includes(normalized)) return "critical";
+  if (["blocked", "blocked_on_user", "blocked_on_environment", "warning", "warn"].includes(normalized)) return "warn";
+  if (["running", "active", "ready", "selected", "queued", "proposed", "in_progress"].includes(normalized)) return "info";
+  return "quiet";
+}
+
+function firstNonEmpty(values: unknown[], fallback = ""): string {
+  for (const value of values) {
+    const rendered = compactText(value, "");
+    if (rendered) return rendered;
+  }
+  return fallback;
+}
+
+function candidateReason(candidate: Record<string, unknown>, fallback = "No scheduler reason recorded."): string {
+  const reasons = list(candidate.reasons).map((item) => compactText(item, "")).filter(Boolean);
+  const blockers = list(candidate.blockers)
+    .map((item) => {
+      const blocker = record(item);
+      return firstNonEmpty([blocker.reason, blocker.reason_kind, item], "");
+    })
+    .filter(Boolean);
+  return firstNonEmpty([candidate.skipped_reason, reasons.join("; "), blockers.join("; ")], fallback);
+}
+
+function operationItemFromCandidate(candidate: Record<string, unknown>, fallbackId: string): RunOperationItem {
+  const role = text(candidate.role, "scheduler");
+  const action = text(candidate.action_kind, text(candidate.action_type, "selected action"));
+  const taskId = text(candidate.public_task_id || candidate.task_id || candidate.dag_node_id, "");
+  const groupId = text(candidate.execution_group_id, "");
+  return {
+    id: firstNonEmpty([candidate.candidate_id, groupId, taskId], fallbackId),
+    label: action.replace(/_/g, " "),
+    role,
+    action,
+    taskId,
+    status: text(candidate.state, "selected"),
+    tone: operationTone(candidate.state || "selected"),
+    source: "scheduler",
+    groupId,
+    detail: candidateReason(candidate),
+  };
+}
+
+function activeRoleRun(snapshot: ProjectSnapshot | null): Record<string, unknown> {
+  const state = record(snapshot?.run.state);
+  const conveyor = record(snapshot?.run.conveyor);
+  const activity = record(state.automation_activity);
+  const focus = record(activity.active_focus);
+  return record(conveyor.active_role_run || state.active_role_run || focus.runner);
+}
+
+function runningNowModel(snapshot: ProjectSnapshot | null, dag: RunModel["executionDag"]): RunOperationItem[] {
+  const state = record(snapshot?.run.state);
+  const items: RunOperationItem[] = [];
+  const seen = new Set<string>();
+  const add = (item: RunOperationItem) => {
+    const key = `${item.source}:${item.id}:${item.action}:${item.taskId}:${item.groupId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push(item);
+  };
+
+  for (const node of dag.nodes.filter((item) => item.statusKind === "running")) {
+    add({
+      id: node.id,
+      label: node.canonicalActionType.replace(/_/g, " "),
+      role: node.ownerRole,
+      action: node.canonicalActionType,
+      taskId: node.ticketId,
+      status: node.status,
+      tone: operationTone(node.statusKind),
+      source: "execution_dag",
+      groupId: "",
+      detail: node.detail,
+    });
+  }
+
+  const active = activeRoleRun(snapshot);
+  if (Object.keys(active).length) {
+    const role = text(active.role, "runtime");
+    const action = text(active.action_kind, role);
+    add({
+      id: text(active.run_id || active.pid, `active-role:${role}`),
+      label: role,
+      role,
+      action,
+      taskId: text(active.task_id || active.dag_node_id, ""),
+      status: text(active.status, "running"),
+      tone: operationTone(active.status || "running"),
+      source: "active_role_run",
+      groupId: text(active.execution_group_id, ""),
+      detail: firstNonEmpty([active.reason, active.command_display, active.started_at], "Runtime role is active."),
+    });
+  }
+
+  const workerSources: Record<string, unknown>[] = [
+    ...list(state.active_read_only_workers).map((item): Record<string, unknown> => ({
+      ...record(item),
+      mode: "read_only",
+      defaultRole: "planner",
+    })),
+    ...list(state.active_write_workers).map((item): Record<string, unknown> => ({
+      ...record(item),
+      mode: "write_workers",
+      defaultRole: "builder",
+    })),
+  ];
+  for (const worker of workerSources) {
+    const role = text(worker.role || worker.owner_role || worker.defaultRole, "worker");
+    add({
+      id: text(worker.worker_id || worker.run_id, `worker:${items.length + 1}`),
+      label: text(worker.mode, "worker").replace(/_/g, " "),
+      role,
+      action: text(worker.action_kind || worker.mode, "worker"),
+      taskId: text(worker.task_id || worker.ticket_id || worker.dag_node_id, ""),
+      status: text(worker.status, "running"),
+      tone: operationTone(worker.status || "running"),
+      source: "worker_agent",
+      groupId: text(worker.execution_group_id, ""),
+      detail: firstNonEmpty([worker.failure_reason, worker.context_pack_id, worker.report_artifact_id], "Worker is active."),
+    });
+  }
+
+  for (const job of list(state.active_validation_jobs).map(record)) {
+    add({
+      id: text(job.job_id || job.gate_id, `validation:${items.length + 1}`),
+      label: "validation",
+      role: "hardener",
+      action: "validate",
+      taskId: text(job.task_id || job.ticket_id || job.dag_node_id || job.gate_id, ""),
+      status: text(job.status, "running"),
+      tone: operationTone(job.status || "running"),
+      source: "validation_job",
+      groupId: text(job.execution_group_id || job.plan_id, ""),
+      detail: firstNonEmpty([job.command, job.summary, job.reason], "Validation job is active."),
+    });
+  }
+
+  const selectedCandidate = record(state.selected_candidate);
+  if (Object.keys(selectedCandidate).length) {
+    add(operationItemFromCandidate(selectedCandidate, "selected-scheduler-candidate"));
+  }
+
+  if (!items.length) {
+    add({
+      id: "idle-runtime",
+      label: "idle",
+      role: "scheduler",
+      action: "awaiting decision",
+      taskId: "",
+      status: "idle",
+      tone: "quiet",
+      source: "snapshot",
+      groupId: "",
+      detail: "No active role, worker, validation job, or selected scheduler candidate is recorded.",
+    });
+  }
+  return items.slice(0, 8);
+}
+
+function nextUnlockModel(snapshot: ProjectSnapshot | null, dag: RunModel["executionDag"]): RunOperationCallout {
+  const state = record(snapshot?.run.state);
+  const selected = record(state.selected_candidate);
+  if (Object.keys(selected).length) {
+    return {
+      title: firstNonEmpty([selected.action_kind, selected.action_type], "Selected scheduler action").replace(/_/g, " "),
+      detail: candidateReason(selected),
+      tone: operationTone(selected.state || "selected"),
+      role: text(selected.role, "scheduler"),
+      action: text(selected.action_kind || selected.action_type, ""),
+      taskId: text(selected.public_task_id || selected.task_id || selected.dag_node_id, ""),
+      source: "selected_candidate",
+    };
+  }
+  const why = record(state.why_not_parallel || record(state.scheduler_parallel_dry_run).why_not_parallel);
+  const whyDetail = firstNonEmpty([why.top_next_action, why.summary], "");
+  if (whyDetail) {
+    return {
+      title: text(why.top_reason_kind, "Parallel unlock").replace(/_/g, " "),
+      detail: whyDetail,
+      tone: operationTone(why.status || "blocked"),
+      role: "scheduler",
+      action: "parallel evidence",
+      taskId: "",
+      source: "why_not_parallel",
+    };
+  }
+  const blockedCandidate = list(state.blocked_parallel_candidates).map(record)[0] || list(state.skipped_scheduler_candidates || state.skipped_candidates).map(record)[0];
+  if (blockedCandidate) {
+    return {
+      title: firstNonEmpty([blockedCandidate.reason_kind, blockedCandidate.action_kind], "Blocked candidate").replace(/_/g, " "),
+      detail: firstNonEmpty([blockedCandidate.reason, blockedCandidate.skipped_reason], "Scheduler candidate needs more evidence before it can run."),
+      tone: "warn",
+      role: text(blockedCandidate.owner_role || blockedCandidate.role, "scheduler"),
+      action: text(blockedCandidate.action_kind || blockedCandidate.action_type, ""),
+      taskId: text(blockedCandidate.task_id || blockedCandidate.dag_node_id, ""),
+      source: "blocked_candidate",
+    };
+  }
+  const readyNode = dag.nodes.find((node) => node.statusKind === "ready");
+  if (readyNode) {
+    return {
+      title: `${readyNode.canonicalActionType.replace(/_/g, " ")} ready`,
+      detail: readyNode.detail,
+      tone: "info",
+      role: readyNode.ownerRole,
+      action: readyNode.canonicalActionType,
+      taskId: readyNode.ticketId,
+      source: "execution_dag",
+    };
+  }
+  return {
+    title: "No runnable unlock recorded",
+    detail: dag.hasData ? "The current DAG snapshot has no ready or selected action." : "Fresh snapshots will populate scheduler unlocks.",
+    tone: "quiet",
+    role: "scheduler",
+    action: "idle",
+    taskId: "",
+    source: "snapshot",
+  };
+}
+
+function progressColumnForNode(node: RunDagNode): RunProgressColumnId | null {
+  const rawAction = node.actionType.toLowerCase().replace(/[\s-]+/g, "_");
+  if (rawAction === "ticket" || rawAction === "blocker") return null;
+  const action = canonicalDagAction(node.canonicalActionType || node.actionType);
+  if (["orchestrate", "decompose", "scope", "refresh_index", "calibrate"].includes(action)) return "scope";
+  if (["build", "repair"].includes(action)) return "build";
+  if (["review", "audit"].includes(action)) return "review";
+  if (action === "validate") return "validate";
+  if (action === "integrate") return "integrate";
+  if (action === "done" || action === "completion") return "done";
+  return null;
+}
+
+function betterProgressCell(current: RunProgressCell | null, candidate: RunProgressCell): RunProgressCell {
+  if (!current) return candidate;
+  const currentIndex = PROGRESS_STATUS_PRIORITY.indexOf(current.statusKind);
+  const candidateIndex = PROGRESS_STATUS_PRIORITY.indexOf(candidate.statusKind);
+  return candidateIndex < currentIndex ? candidate : current;
+}
+
+function emptyProgressCells(): Record<RunProgressColumnId, RunProgressCell | null> {
+  return {
+    scope: null,
+    build: null,
+    review: null,
+    validate: null,
+    integrate: null,
+    done: null,
+  };
+}
+
+function progressRowsModel(dag: RunModel["executionDag"]): RunProgressRow[] {
+  const rows = new Map<string, RunProgressRow>();
+  for (const node of dag.nodes) {
+    const taskId = node.ticketId || node.id;
+    if (!taskId) continue;
+    if (!rows.has(taskId)) {
+      const compatibility = COMPATIBILITY_TASK_IDS.has(taskId);
+      rows.set(taskId, {
+        taskId,
+        label: compatibility ? "Compatibility fallback" : taskId,
+        compatibility,
+        cells: emptyProgressCells(),
+        summary: "",
+      });
+    }
+    const column = progressColumnForNode(node);
+    if (!column) continue;
+    const row = rows.get(taskId);
+    if (!row) continue;
+    row.cells[column] = betterProgressCell(row.cells[column], {
+      status: node.status,
+      statusKind: node.statusKind,
+      role: node.ownerRole,
+      detail: node.detail,
+      nodeId: node.id,
+    });
+  }
+  return Array.from(rows.values())
+    .map((row) => {
+      const activeCells = PROGRESS_COLUMNS.map((column) => row.cells[column]).filter((cell): cell is RunProgressCell => Boolean(cell));
+      const summary = activeCells.length
+        ? activeCells.map((cell) => `${cell.role}:${cell.statusKind}`).join(" / ")
+        : "No action cells recorded.";
+      return { ...row, summary };
+    })
+    .sort((first, second) => {
+      if (first.compatibility !== second.compatibility) return first.compatibility ? 1 : -1;
+      return first.taskId.localeCompare(second.taskId);
+    })
+    .slice(0, 10);
+}
+
+function leaseLabel(lease: Record<string, unknown>): string {
+  return firstNonEmpty([lease.path, lease.name, lease.scope_node_id, lease.lease_id], "");
+}
+
+function groupWave(
+  group: Record<string, unknown>,
+  kind: RunConcurrencyWave["kind"],
+  fallbackIndex: number,
+  sources: Record<string, unknown>[] = [],
+): RunConcurrencyWave {
+  const payload = record(group.payload);
+  const items = list(group.items).map(record);
+  const sourceItems = items.length ? items : sources;
+  const mode = text(payload.execution_mode || group.mode, kind);
+  const status = text(group.status, kind);
+  const owners = sampleUnique(sourceItems.map((item) => text(item.owner_role || item.role, "")), 3);
+  const tasks = sampleUnique(sourceItems.map((item) => text(item.task_id || item.ticket_id || item.graph_task_node_id || item.dag_node_id, "")), 4);
+  const leases = sampleUnique(
+    sourceItems.flatMap((item) => list(item.required_leases).map((lease) => leaseLabel(record(lease))).filter(Boolean)),
+    3,
+  );
+  return {
+    id: text(group.execution_group_id || group.group_id, `${kind}-wave-${fallbackIndex + 1}`),
+    label: kind === "proposed" ? `planned wave ${fallbackIndex + 1}` : `${kind} wave`,
+    kind,
+    mode,
+    status,
+    tone: operationTone(status || kind),
+    itemCount: number(group.item_count) || sourceItems.length || number(payload.candidate_count),
+    owners,
+    tasks,
+    leases,
+    detail: firstNonEmpty([group.reason, payload.why_together, payload.summary], kind === "blocked" ? "Parallel candidate is blocked." : "Execution wave is recorded."),
+  };
+}
+
+function concurrencyWavesModel(snapshot: ProjectSnapshot | null, integrationBacklog: RunIntegrationBacklog): RunConcurrencyWave[] {
+  const state = record(snapshot?.run.state);
+  const waves: RunConcurrencyWave[] = [];
+  const add = (wave: RunConcurrencyWave) => {
+    if (waves.some((item) => item.id === wave.id && item.kind === wave.kind)) return;
+    waves.push(wave);
+  };
+  list(state.proposed_execution_groups).map(record).forEach((group, index) => add(groupWave(group, "proposed", index)));
+
+  const activeGroups = list(state.active_execution_groups).map(record);
+  activeGroups.forEach((group, index) => add(groupWave(group, "active", index)));
+  const activeSources = [
+    ...list(state.active_read_only_workers).map(record),
+    ...list(state.active_write_workers).map(record),
+    ...list(state.active_validation_jobs).map(record),
+  ];
+  const sourcesByGroup = new Map<string, Record<string, unknown>[]>();
+  for (const source of activeSources) {
+    const groupId = text(source.execution_group_id || source.plan_id, "");
+    if (!groupId) continue;
+    sourcesByGroup.set(groupId, [...(sourcesByGroup.get(groupId) ?? []), source]);
+  }
+  Array.from(sourcesByGroup.entries()).forEach(([groupId, sources], index) => {
+    add(groupWave({ execution_group_id: groupId, status: "running", mode: text(sources[0]?.mode, "runtime") }, "active", index, sources));
+  });
+
+  list(state.completed_worker_reports).map(record).slice(0, 4).forEach((report, index) => {
+    add(groupWave({
+      execution_group_id: text(report.execution_group_id || report.report_id || report.worker_id, `completed:${index + 1}`),
+      status: text(report.status, "completed"),
+      mode: "worker",
+      reason: firstNonEmpty([report.summary, report.report_path], "Worker report completed."),
+      items: [report],
+    }, "completed", index));
+  });
+
+  list(state.blocked_parallel_candidates).map(record).slice(0, 4).forEach((candidate, index) => {
+    add(groupWave({
+      execution_group_id: text(candidate.candidate_id || candidate.task_id || candidate.dag_node_id, `blocked:${index + 1}`),
+      status: "blocked",
+      mode: text(candidate.execution_mode || candidate.action_kind, "parallel"),
+      reason: firstNonEmpty([candidate.reason, candidate.skipped_reason], "Candidate is blocked from parallel launch."),
+      items: [candidate],
+    }, "blocked", index));
+  });
+
+  if (integrationBacklog.queuedCount || integrationBacklog.conflictCount || integrationBacklog.safeCount) {
+    add({
+      id: "integration-backlog",
+      label: "integration backlog",
+      kind: "integration",
+      mode: "serialized_repo",
+      status: integrationBacklog.safeCount ? "ready" : integrationBacklog.queuedCount ? "queued" : "blocked",
+      tone: integrationBacklog.tone,
+      itemCount: integrationBacklog.queuedCount + integrationBacklog.conflictCount,
+      owners: ["integrator"],
+      tasks: integrationBacklog.patchSamples,
+      leases: [],
+      detail: integrationBacklog.summary,
+    });
+  }
+  return waves.slice(0, 12);
+}
+
+function integrationBacklogModel(snapshot: ProjectSnapshot | null): RunIntegrationBacklog {
+  const state = record(snapshot?.run.state);
+  const queued = [
+    ...list(state.queued_worker_patches).map(record),
+    ...list(state.integration_backlog_from_parallel_workers).map(record),
+  ];
+  const patchesById = new Map<string, Record<string, unknown>>();
+  for (const patch of queued) {
+    const id = text(patch.patch_id || patch.manifest_path || patch.patch_path, "");
+    if (id) patchesById.set(id, patch);
+  }
+  const uniquePatches = Array.from(patchesById.values());
+  const conflicts = [
+    ...list(state.write_worker_conflicts).map(record),
+    ...uniquePatches.filter((patch) => ["conflict", "deferred"].includes(text(patch.status, "").toLowerCase())),
+  ];
+  const preflight = record(state.worker_patch_integration_preflight);
+  const safeCount = number(preflight.safe_count) || list(preflight.safe_patch_ids).length;
+  const blockedCount = number(preflight.likely_conflict_count) + number(preflight.stale_base_count) + number(preflight.missing_metadata_count);
+  const queuedCount = uniquePatches.filter((patch) => text(patch.status, "queued").toLowerCase() === "queued").length || uniquePatches.length;
+  const conflictCount = conflicts.length;
+  const tone: RunTone = conflictCount ? "critical" : blockedCount ? "warn" : safeCount || queuedCount ? "info" : "quiet";
+  const patchSamples = sampleUnique(uniquePatches.map((patch) => text(patch.patch_id || patch.manifest_path || patch.patch_path, "")), 4);
+  const summary = queuedCount || conflictCount || safeCount || blockedCount
+    ? `${queuedCount} queued patch${queuedCount === 1 ? "" : "es"}; ${safeCount} safe for serialized integration; ${blockedCount + conflictCount} need attention.`
+    : "No queued worker patches are waiting for serialized integration.";
+  return {
+    queuedCount,
+    conflictCount,
+    safeCount,
+    blockedCount: blockedCount + conflictCount,
+    tone,
+    summary,
+    patchSamples,
+  };
+}
+
+function operationsModel(snapshot: ProjectSnapshot | null, dag: RunModel["executionDag"]): RunModel["operations"] {
+  const integrationBacklog = integrationBacklogModel(snapshot);
+  return {
+    runningNow: runningNowModel(snapshot, dag),
+    nextUnlock: nextUnlockModel(snapshot, dag),
+    progressRows: progressRowsModel(dag),
+    concurrencyWaves: concurrencyWavesModel(snapshot, integrationBacklog),
+    integrationBacklog,
+  };
+}
+
 function safetyRows(snapshot: ProjectSnapshot | null, scaffolded: boolean, blockers: Record<string, unknown>[]): RunSafetyRow[] {
   if (!snapshot) {
     return [
@@ -1062,6 +1587,8 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
   exportReview.kind = scaffolded ? "navigate" : "disabled";
 
   const title = stateTitle(snapshot, scaffolded, running, blockers, statusUpper);
+  const executionDag = executionDagModel(snapshot);
+  const operations = operationsModel(snapshot, executionDag);
   let headline = title;
   let subheadline = "Choose a project before running.";
   let badge = "No target";
@@ -1129,7 +1656,8 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
       lastUpdated: text(task.last_updated, text(snapshot?.run.snapshot_generated_at, "Not recorded")),
       summary: text(snapshot?.run.progress_recent, text(task.suggested_next_task, "No run has been recorded yet.")),
     },
-    executionDag: executionDagModel(snapshot),
+    executionDag,
+    operations,
     runLog: runLog(snapshot),
     worker: {
       headline: workerHeadline(workerStrategy),

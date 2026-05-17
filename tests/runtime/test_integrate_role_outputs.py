@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
+from diffmogger.integrator.queue import load_queued_manifests
 from diffmogger.runtime.paths import target_path
 from diffmogger.runtime.state_store import (
     connect,
@@ -134,6 +135,44 @@ class RuntimeStateActionTests(unittest.TestCase):
             check=True,
             stdout=subprocess.DEVNULL,
         )
+
+    def test_load_queued_manifests_filters_selected_patch_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            queue_root = target / "target" / "automation_queue" / "builder"
+            for run_id, patch_id in [("run-safe", "patch:safe"), ("run-deferred", "patch:deferred")]:
+                run_dir = queue_root / run_id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "changes.patch").write_text("", encoding="utf-8")
+                (run_dir / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "role": "builder",
+                            "run_id": run_id,
+                            "status": "queued",
+                            "patch_id": patch_id,
+                            "patch_path": str(run_dir / "changes.patch"),
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+            selected = load_queued_manifests(target, patch_ids=["patch:safe"])
+            self.assertEqual(["patch:safe"], [manifest["patch_id"] for _path, manifest in selected])
+
+            previous = os.environ.get("DIFFMOGGER_SELECTED_PATCH_IDS")
+            os.environ["DIFFMOGGER_SELECTED_PATCH_IDS"] = "patch:deferred"
+            try:
+                selected_from_env = load_queued_manifests(target)
+            finally:
+                if previous is None:
+                    os.environ.pop("DIFFMOGGER_SELECTED_PATCH_IDS", None)
+                else:
+                    os.environ["DIFFMOGGER_SELECTED_PATCH_IDS"] = previous
+            self.assertEqual(["patch:deferred"], [manifest["patch_id"] for _path, manifest in selected_from_env])
 
     def write_patch_for_file(self, target: Path, relative: str, new_content: str, patch_path: Path) -> None:
         (target / relative).write_text(new_content, encoding="utf-8")

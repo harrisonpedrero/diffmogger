@@ -17,7 +17,7 @@ Last updated: {{CREATED_AT}}
 - Project-mode guidance: {{PROJECT_MODE_GUIDANCE}}
 - Current baseline: not bootstrapped yet.
 - State authority: canonical runtime/task-control state is `target/orchestration.sqlite3`; this Markdown file is a generated prompt/handoff projection.
-- Execution DAG: tickets, planning/scoping, building, reviewing, validation, integration, blockers, completion, hard/advisory dependencies, validation receipts, and next actions are typed SQLite state. Conveyor stage fields are compatibility projections only.
+- Activity graph: tickets, planning/scoping, building, reviewing, validation, integration, blockers, completion, hard/advisory dependencies, validation receipts, and next actions are typed SQLite state. Generated views are compatibility projections only.
 
 ## Automation Must Never Do
 

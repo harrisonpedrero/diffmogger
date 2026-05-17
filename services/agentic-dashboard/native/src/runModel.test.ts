@@ -375,6 +375,206 @@ describe("buildRunModel", () => {
     expect(model.executionDag.parallel.activeGroups).toBe(1);
   });
 
+  it("surfaces an active role run when no DAG node is active", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          conveyor: {
+            active_role_run: {
+              role: "builder",
+              action_kind: "run_serial_role",
+              run_id: "run:builder",
+              status: "running",
+              reason: "dependency-ready ticket needs serialized builder work",
+            },
+          },
+          state: {
+            execution_dag: {
+              nodes: [
+                {
+                  node_id: "dag-node:T1:build",
+                  task_id: "T1",
+                  action_type: "build",
+                  status: "ready",
+                  owner_role: "builder",
+                },
+              ],
+              edges: [],
+            },
+          },
+        },
+      }),
+    );
+
+    expect(model.operations.runningNow[0]).toMatchObject({
+      role: "builder",
+      action: "run_serial_role",
+      source: "active_role_run",
+      tone: "info",
+    });
+  });
+
+  it("summarizes multiple active workers in one execution group", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          state: {
+            execution_dag: {
+              nodes: [
+                { node_id: "dag-node:T1:scope", task_id: "T1", action_type: "scope", status: "running", owner_role: "planner" },
+                { node_id: "dag-node:T2:scope", task_id: "T2", action_type: "scope", status: "running", owner_role: "planner" },
+              ],
+              edges: [],
+            },
+            active_read_only_workers: [
+              { worker_id: "worker:1", execution_group_id: "group:scope", task_id: "T1", role: "planner", status: "running" },
+              { worker_id: "worker:2", execution_group_id: "group:scope", task_id: "T2", role: "planner", status: "running" },
+            ],
+          },
+        },
+      }),
+    );
+
+    expect(model.operations.runningNow.filter((item) => item.source === "worker_agent")).toHaveLength(2);
+    expect(model.operations.concurrencyWaves.find((wave) => wave.id === "group:scope" && wave.kind === "active")).toMatchObject({
+      itemCount: 2,
+      status: "running",
+      tone: "info",
+    });
+  });
+
+  it("summarizes proposed write waves with disjoint leases", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          state: {
+            proposed_execution_groups: [
+              {
+                execution_group_id: "group:write",
+                status: "proposed",
+                mode: "dry_run",
+                payload: { execution_mode: "write_workers", why_together: "write candidates have disjoint likely_touches" },
+                items: [
+                  {
+                    task_id: "T1",
+                    owner_role: "builder",
+                    action_kind: "build",
+                    required_leases: [{ scope_node_id: "file:src/a.ts", path: "src/a.ts" }],
+                  },
+                  {
+                    task_id: "T2",
+                    owner_role: "builder",
+                    action_kind: "build",
+                    required_leases: [{ scope_node_id: "file:src/b.ts", path: "src/b.ts" }],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    expect(model.operations.concurrencyWaves[0]).toMatchObject({
+      id: "group:write",
+      kind: "proposed",
+      mode: "write_workers",
+      itemCount: 2,
+      owners: ["builder"],
+      leases: ["src/a.ts", "src/b.ts"],
+    });
+  });
+
+  it("shows queued worker patches waiting for serialized integration", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          state: {
+            queued_worker_patches: [
+              { patch_id: "patch:1", status: "queued" },
+              { patch_id: "patch:2", status: "queued" },
+            ],
+            worker_patch_integration_preflight: {
+              safe_count: 1,
+              safe_patch_ids: ["patch:1"],
+              likely_conflict_count: 1,
+            },
+          },
+        },
+      }),
+    );
+
+    expect(model.operations.integrationBacklog).toMatchObject({
+      queuedCount: 2,
+      safeCount: 1,
+      blockedCount: 1,
+      tone: "warn",
+    });
+    expect(model.operations.concurrencyWaves.some((wave) => wave.kind === "integration" && wave.id === "integration-backlog")).toBe(true);
+  });
+
+  it("uses why-not-parallel as the next unlock when no candidate is selected", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          state: {
+            why_not_parallel: {
+              status: "blocked",
+              top_reason_kind: "missing_direct_write_signal",
+              top_next_action: "Add direct path metadata.",
+            },
+            blocked_parallel_candidates: [
+              {
+                candidate_id: "candidate:T9",
+                task_id: "T9",
+                execution_mode: "write_workers",
+                reason: "write DAG node has no confident likely_touches surface",
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    expect(model.operations.nextUnlock).toMatchObject({
+      source: "why_not_parallel",
+      title: "missing direct write signal",
+      detail: "Add direct path metadata.",
+      tone: "warn",
+    });
+    expect(model.operations.concurrencyWaves.some((wave) => wave.kind === "blocked" && wave.id === "candidate:T9")).toBe(true);
+  });
+
+  it("labels default compatibility task progress as fallback", () => {
+    const model = buildRunModel(
+      snapshot({
+        run: {
+          state: {
+            execution_dag: {
+              nodes: [
+                {
+                  node_id: "dag-node:task:automation:build",
+                  task_id: "task:automation",
+                  action_type: "build",
+                  status: "running",
+                  owner_role: "builder",
+                },
+              ],
+              edges: [],
+            },
+          },
+        },
+      }),
+    );
+
+    expect(model.operations.progressRows[0]).toMatchObject({
+      taskId: "task:automation",
+      label: "Compatibility fallback",
+      compatibility: true,
+    });
+    expect(model.operations.progressRows[0].cells.build?.statusKind).toBe("running");
+  });
+
   it("bounds large and oversized DAG rendering", () => {
     const boundedNodes = Array.from({ length: 300 }, (_, index) => ({
       node_id: `dag-node:large:${index}`,

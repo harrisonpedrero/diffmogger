@@ -514,7 +514,7 @@ function HomeActionButton(props: {
 
 function MiniConveyor(props: { lanes: HomeConveyorLane[] }) {
   return (
-    <div className="mini-conveyor" aria-label="Mini DAG role lanes">
+    <div className="mini-conveyor" aria-label="Mini activity role lanes">
       {props.lanes.map((lane, index) => (
         <div className="mini-conveyor-step" key={lane.role}>
           <span className={`mini-conveyor-node ${lane.tone}`} aria-hidden="true" />

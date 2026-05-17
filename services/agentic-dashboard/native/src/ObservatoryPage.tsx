@@ -16,6 +16,8 @@ import type {
 import { runBackendCommand } from "./api/backend";
 import type { ObservatoryTab } from "./observatoryModel";
 import { useChunkedLimit } from "./performance";
+import { buildRunModel } from "./runModel";
+import { AutomationActivityGraphPanel } from "./RunPage";
 
 type ReviewExportData = {
   html_path: string;
@@ -25,30 +27,6 @@ type ReviewExportData = {
 
 const tabs: ObservatoryTab[] = ["Summary", "Events", "Queue", "Metrics"];
 const roleFilters = ["planner", "builder", "hardener", "integrator"] as const;
-const conveyorStages = [
-  "intake",
-  "discovery",
-  "decomposition",
-  "planning",
-  "implementation",
-  "review",
-  "validation",
-  "integration",
-  "handoff",
-  "continuation",
-];
-const stageOwner: Record<string, string> = {
-  intake: "planner",
-  discovery: "planner",
-  decomposition: "planner",
-  planning: "planner",
-  implementation: "builder",
-  review: "hardener",
-  validation: "hardener",
-  integration: "integrator",
-  handoff: "planner",
-  continuation: "conveyor",
-};
 
 type ActivityFilter = "all" | typeof roleFilters[number] | "system";
 
@@ -90,10 +68,6 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function list(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
-
 function tone(value: unknown): string {
   const raw = text(value, "info").toLowerCase();
   if (["good", "warn", "warning", "critical", "bad", "info", "quiet", "running", "next", "failed"].includes(raw)) return raw;
@@ -107,10 +81,6 @@ function roleLabel(value: unknown): string {
 
 function compactLabel(value: unknown, fallback: string): string {
   return roleLabel(text(value, fallback).replace(/_/g, " "));
-}
-
-function classToken(value: unknown, fallback = "info"): string {
-  return text(value, fallback).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || fallback;
 }
 
 function laneLabel(snapshot: ObservatorySnapshot | null, activeRun: Record<string, unknown>): string {
@@ -271,188 +241,6 @@ function MissionStrip(props: {
         </div>
       ))}
     </section>
-  );
-}
-
-function RoleCard(props: {
-  role: ObservatoryRoleCard;
-  selected?: boolean;
-  onSelect?: (role: ObservatoryRoleCard) => void;
-}) {
-  const counts = props.role.counts ?? {};
-  return (
-    <button
-      aria-pressed={props.selected}
-      className={`obs-role ${props.role.status} ${props.selected ? "selected" : ""}`}
-      onClick={() => props.onSelect?.(props.role)}
-      type="button"
-    >
-      <div className="obs-role-head">
-        <h3>{props.role.role}</h3>
-        <CompactBadge value={props.role.badge} tone={props.role.status} />
-      </div>
-      <p>{text(props.role.reason, "Awaiting DAG scheduler decision.")}</p>
-      <div className="obs-role-counts">
-        {["queued", "deferred", "applied", "failed", "skipped"].map((key) => (
-          <span key={key}>{key}: {number(counts[key])}</span>
-        ))}
-      </div>
-    </button>
-  );
-}
-
-function stateMachine(snapshot: ObservatorySnapshot | null): Record<string, unknown> {
-  return record(snapshot?.conveyor.state_machine);
-}
-
-function stageSummary(contract: Record<string, unknown>, stage: string): string {
-  const exit = list(contract.exit_criteria).map((item) => text(item, "")).filter(Boolean);
-  const artifacts = list(contract.required_artifacts).map((item) => text(item, "")).filter(Boolean);
-  const entry = list(contract.entry_criteria).map((item) => text(item, "")).filter(Boolean);
-  return exit[0] || artifacts[0] || entry[0] || `${compactLabel(stage, stage)} stage contract.`;
-}
-
-function machineStages(machine: Record<string, unknown>) {
-  const workItem = record(machine.work_item);
-  const currentStage = text(workItem.current_stage ?? machine.current_stage, "intake").toLowerCase();
-  const currentIndex = Math.max(0, conveyorStages.indexOf(currentStage));
-  const contracts = list(machine.stage_contracts).map(record);
-  const contractByStage = new Map(contracts.map((item) => [text(item.stage, "").toLowerCase(), item]));
-  return conveyorStages.map((stage, index) => {
-    const contract = contractByStage.get(stage) ?? {};
-    const isCurrent = stage === currentStage;
-    const status = isCurrent
-      ? text(workItem.stage_status ?? machine.stage_status, "active")
-      : index < currentIndex
-        ? "complete"
-        : "queued";
-    return {
-      stage,
-      status,
-      owner: text(isCurrent ? workItem.owner_role ?? machine.owner_role : stageOwner[stage], stageOwner[stage]),
-      summary: stageSummary(contract, stage),
-      isCurrent,
-    };
-  });
-}
-
-function capabilitySummary(machine: Record<string, unknown>): string {
-  const capability = record(machine.capability_manifest);
-  const languages = record(capability.languages);
-  const primary = text(languages.primary, "");
-  const commandCount = list(capability.commands).length;
-  if (primary && commandCount) return `${primary} / ${commandCount} command${commandCount === 1 ? "" : "s"}`;
-  if (primary) return primary;
-  if (commandCount) return `${commandCount} command${commandCount === 1 ? "" : "s"}`;
-  return "Not discovered";
-}
-
-function StateMachineBelt(props: { snapshot: ObservatorySnapshot | null }) {
-  const machine = stateMachine(props.snapshot);
-  const workItem = record(machine.work_item);
-  const stages = machineStages(machine);
-  const currentStage = text(workItem.current_stage ?? machine.current_stage, "intake");
-  return (
-    <div className="obs-machine-wrap">
-      <div className="obs-machine-header">
-        <div>
-          <h3>DAG Compatibility State</h3>
-          <p>{text(workItem.continuation_token, "No continuation token recorded yet.")}</p>
-        </div>
-        <div className="obs-machine-facts">
-          <CompactBadge label="Stage" value={currentStage} tone={text(workItem.stage_status ?? machine.stage_status, "info")} />
-          <CompactBadge label="Validation" value={workItem.validation_status ?? "not recorded"} tone={text(workItem.validation_status, "info")} />
-          <CompactBadge label="Capabilities" value={capabilitySummary(machine)} tone="good" />
-        </div>
-      </div>
-      <div className="obs-horizontal-scroll machine" aria-label="DAG compatibility state projection">
-        <div className="obs-machine-belt">
-          {stages.map((stage, index) => (
-            <div className="obs-machine-step" key={stage.stage}>
-              <div className={`obs-machine-card ${classToken(stage.status)} ${stage.isCurrent ? "current" : ""}`}>
-                <div className="obs-machine-card-head">
-                  <span>{String(index + 1).padStart(2, "0")}</span>
-                  <CompactBadge value={stage.status} tone={stage.status} />
-                </div>
-                <strong>{compactLabel(stage.stage, stage.stage)}</strong>
-                <p>{stage.summary}</p>
-                <small>{compactLabel(stage.owner, stage.owner)}</small>
-              </div>
-              {index < stages.length - 1 && <span className="obs-machine-arrow" aria-hidden="true">→</span>}
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ConveyorSection(props: {
-  snapshot: ObservatorySnapshot | null;
-  activeRun: Record<string, unknown>;
-  health: Record<string, unknown>;
-  className?: string;
-  selectedRole?: string;
-  onSelectRole?: (role: ObservatoryRoleCard) => void;
-}) {
-  const roles = props.snapshot?.conveyor.roles ?? [];
-  return (
-    <ObsSection title="Role Lanes" className={`obs-conveyor-section ${props.className ?? ""}`}>
-      <div className="obs-conveyor-layout">
-        <div className="obs-lane-heading">
-          <h3>Execution Lanes</h3>
-        </div>
-        <div className="obs-horizontal-scroll" aria-label="Roles">
-          <div className="obs-belt">
-            {roles.length ? (
-              roles.map((role, index) => (
-                <div className="obs-belt-step" key={role.role}>
-                  <RoleCard
-                    role={role}
-                    selected={props.selectedRole === role.role}
-                    onSelect={props.onSelectRole}
-                  />
-                  {index < roles.length - 1 && <span className="obs-belt-arrow" aria-hidden="true">→</span>}
-                </div>
-              ))
-            ) : (
-              <p className="obs-muted">No role state recorded.</p>
-            )}
-          </div>
-        </div>
-        <StateMachineBelt snapshot={props.snapshot} />
-        <div className="obs-conveyor-meta-row">
-          {text(props.activeRun.role, "") ? (
-            <div className="obs-running-banner">
-              <strong>
-                {text(props.activeRun.status, "running") === "running" ? "Running now" : "Last active"}:{" "}
-                {text(props.activeRun.role, "role")}
-              </strong>
-              <div>{text(props.activeRun.run_id, "unknown")} · {text(props.activeRun.reason, "No reason recorded.")}</div>
-            </div>
-          ) : (
-            <div className="obs-running-banner quiet">
-              <strong>No role running now</strong>
-              <div>Conveyor idle.</div>
-            </div>
-          )}
-          <div className={`obs-health ${tone(props.health.status)}`}>
-            <strong>{text(props.health.status, "ok").toUpperCase()}</strong>
-            <p>{text(props.health.summary, "Conveyor policy active.")}</p>
-          </div>
-          <div className="obs-conveyor-kpis">
-            <div>
-              <span>Cycles</span>
-              <strong>{number(props.snapshot?.conveyor.cycles)}</strong>
-            </div>
-            <div>
-              <span>Queued</span>
-              <strong>{number(props.snapshot?.patches.queue_totals.queued)}</strong>
-            </div>
-          </div>
-        </div>
-      </div>
-    </ObsSection>
   );
 }
 
@@ -671,12 +459,12 @@ function ActiveRunSection(props: {
         <div className={`activity-run-state ${hasActiveRun ? tone(props.activeRun.status) : "quiet"}`}>
           <span>{hasActiveRun ? compactLabel(props.activeRun.role, "Role") : "Idle"}</span>
           <strong>{hasActiveRun ? text(props.activeRun.status, "running") : "No role running now"}</strong>
-          <p>{text(props.activeRun.reason, "Conveyor idle.")}</p>
+          <p>{text(props.activeRun.reason, "Runtime idle.")}</p>
         </div>
         <div className="activity-run-facts">
           <div><span>Run</span><strong>{text(props.activeRun.run_id, "none")}</strong></div>
           <div><span>Health</span><strong>{text(props.health.status, "ok")}</strong></div>
-          <div><span>Policy</span><strong>{text(props.health.summary, "Conveyor policy active.")}</strong></div>
+          <div><span>Policy</span><strong>{text(props.health.summary, "Runtime policy active.")}</strong></div>
         </div>
       </div>
     </ObsSection>
@@ -702,7 +490,7 @@ function SelectedRoleInspector(props: {
       <div className="activity-role-inspector">
         <div className="activity-role-reason">
           <CompactBadge value={props.role.status} tone={props.role.status} />
-          <p>{text(props.role.reason, "Awaiting DAG scheduler decision.")}</p>
+          <p>{text(props.role.reason, "Awaiting activity scheduler decision.")}</p>
         </div>
         <div className="obs-compact-table">
           {["queued", "deferred", "applied", "failed", "skipped"].map((key) => (
@@ -941,6 +729,20 @@ export function ObservatoryPage(props: {
   }, [target, generatedMarker]);
 
   const activityEvents = useMemo(() => buildActivityEvents(snapshot), [snapshot]);
+  const activityProjectSnapshot = useMemo<ProjectSnapshot | null>(() => {
+    if (!props.snapshot) return null;
+    return {
+      ...props.snapshot,
+      run: {
+        ...props.snapshot.run,
+        state: {
+          ...record(props.snapshot.run.state),
+          automation_activity: snapshot?.automation_activity ?? {},
+        },
+      },
+    };
+  }, [props.snapshot, snapshot?.automation_activity]);
+  const activityGraphModel = useMemo(() => buildRunModel(activityProjectSnapshot), [activityProjectSnapshot]);
 
   useEffect(() => {
     const roles = snapshot?.conveyor.roles ?? [];
@@ -970,7 +772,16 @@ export function ObservatoryPage(props: {
   const disabled = props.loading || busy !== null;
   const activeRun = snapshot?.conveyor.active_run ?? {};
   const health = snapshot?.conveyor.health ?? {};
-  const selectedRole = snapshot?.conveyor.roles.find((role) => role.role === selectedRoleName) ?? null;
+  const roles = snapshot?.conveyor.roles ?? [];
+  const activeRoleName = text(snapshot?.conveyor.active_run?.role, "");
+  const effectiveSelectedRoleName =
+    selectedRoleName ||
+    activeRoleName ||
+    roles.find((role) => role.status === "running")?.role ||
+    roles.find((role) => role.status === "next")?.role ||
+    roles[0]?.role ||
+    "";
+  const selectedRole = roles.find((role) => role.role === effectiveSelectedRoleName) ?? null;
 
   return (
     <section className="observatory-page native">
@@ -1014,17 +825,14 @@ export function ObservatoryPage(props: {
 
       {activeTab === "Summary" && (
         <main className="obs-summary-layout activity-overview">
-          <ConveyorSection
-            snapshot={snapshot}
-            activeRun={activeRun}
-            health={health}
-            className="obs-summary-conveyor"
-            selectedRole={selectedRoleName}
-            onSelectRole={(role) => {
-              setSelectedRoleName(role.role);
-              setActivityFilter(roleFilters.includes(role.role as typeof roleFilters[number]) ? role.role as ActivityFilter : "system");
-            }}
-          />
+          <div className="obs-summary-conveyor">
+            <AutomationActivityGraphPanel
+              model={activityGraphModel}
+              liveEvents={[]}
+              streamState="snapshot"
+              eventCount={activityEvents.length}
+            />
+          </div>
           <div className="activity-side-grid">
             <ActiveRunSection activeRun={activeRun} health={health} />
             <SelectedRoleInspector role={selectedRole} events={activityEvents} />

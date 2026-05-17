@@ -672,7 +672,7 @@ function SetupPlanSummary(props: {
       <div className="setup-summary-ledger">
         <DetailMetric label="Target" value={props.targetPath ? "Selected" : "No target"} />
         <DetailMetric label="Campaign" value={scope === "bounded" ? "Bounded" : "Ongoing"} />
-        <DetailMetric label="Architecture" value="Conveyor" />
+        <DetailMetric label="Architecture" value="Activity runtime" />
         <DetailMetric label="Context" value={props.contextCount} />
         <DetailMetric label="Guardrails" value={props.draft.safety_constraints.length + props.draft.automation_must_never_do.length} />
         <DetailMetric label="Tickets" value={scope === "bounded" ? props.draft.ticket_run_seed_tickets.length : "Auto"} />
@@ -1689,7 +1689,7 @@ export function BriefWizard(props: {
   }
 
   function renderReviewStep() {
-    const modeLabel = `DAG scheduler · ${
+    const modeLabel = `Activity scheduler · ${
       automationScopeForDraft(draft) === "bounded" ? "bounded campaign" : "ongoing campaign"
     }`;
     const reviewTicketIssues = localTicketIssues(draft.ticket_run_seed_tickets);

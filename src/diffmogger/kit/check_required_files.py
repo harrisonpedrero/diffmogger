@@ -234,10 +234,8 @@ RUNNER_FORBIDDEN_STRINGS = [
 
 CONVEYOR_REQUIRED_STRINGS = [
     "automation_conveyor.lock",
-    "automation_conveyor_state.json",
     "orchestration.sqlite3",
-    "conveyor.state",
-    "conveyor.machine",
+    "automation_activity",
     "conveyor_work_items",
     "conveyor_stage_contracts",
     "conveyor_stage_attempts",

@@ -600,7 +600,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                         "previous_recommendation": "Run integrator triage for 1 deferred backlog item(s).",
                         "expected_lane": "integrator",
                         "observed_lane": "none",
-                        "observed_result": "No conveyor or queue outcome recorded yet.",
+                        "observed_result": "No activity or queue outcome recorded yet.",
                         "current_recommendation": "Run integrator triage for 1 deferred backlog item(s).",
                         "current_lane": "integrator",
                         "no_progress": "active after 2/2",
@@ -875,8 +875,8 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("check_integration_safety.py", snapshot["task"]["integration_safety"]["summary"])
                     self.assertIn("Latest recorded integration-safety check passed", review_items["Integration safety"])
                     self.assertIn("First-review setup needs", review_items["First review"])
-                    self.assertIn("1 queued", review_items["Queue and conveyor"])
-                    self.assertIn("No-progress circuit breaker active", review_items["Queue and conveyor"])
+                    self.assertIn("1 queued", review_items["Queue and activity"])
+                    self.assertIn("No-progress circuit breaker active", review_items["Queue and activity"])
                     self.assertIn("Process 1 queued dashboard human message", review_items["Action plan"])
                     self.assertIn("3 deferred backlog item", review_items["Deferred triage"])
                     self.assertIn("Start with `staleness`", review_items["Deferred triage"])
@@ -1268,12 +1268,12 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     report = module.render_review_markdown(snapshot)
 
                     self.assertIn("First role patch manifests", snapshot["empty_states"]["patch_queue"])
-                    self.assertIn("First role patch manifests", review_items["Queue and conveyor"])
+                    self.assertIn("First role patch manifests", review_items["Queue and activity"])
                     self.assertEqual(snapshot["scorecard"]["action_plan"]["lane"], "builder")
                     self.assertIn("Continue builder momentum", review_items["Action plan"])
                     self.assertEqual(decision["state"], "first-run")
-                    self.assertIn("first conveyor cycle", decision["reason"])
-                    self.assertIn("No conveyor timeline yet", html)
+                    self.assertIn("first automation cycle", decision["reason"])
+                    self.assertIn("No activity timeline yet", html)
                     self.assertIn("Scorecard", html)
                     self.assertIn("Action Plan", html)
                     self.assertIn("Continue builder momentum", html)

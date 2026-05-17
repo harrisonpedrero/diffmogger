@@ -22,13 +22,80 @@ from ..ticket_generation import (
     ticket_scope_groups_from_intake,
 )
 from diffmogger.runtime import ticket_run
-from diffmogger.runtime.state_store import automation_control_state, write_automation_control_state
+from diffmogger.runtime.state_store import (
+    connect,
+    automation_control_state,
+    database_path_for_target,
+    open_blockers,
+    upsert_blocker,
+    write_automation_control_state,
+)
 
 DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS = 180
 DEFAULT_TICKET_CODEX_TIMEOUT_SECONDS = 420
 DEFAULT_TICKET_REFINEMENT_CODEX_TIMEOUT_SECONDS = 420
 LOW_CORTISOL_FALLBACK_MAX_TICKETS = 120
-BOOTSTRAP_PENDING_STATUSES = {"", "unknown", "pending", "not_bootstrapped", "not bootstrapped"}
+BOOTSTRAP_PENDING_STATUSES = {"", "unknown", "pending", "not_bootstrapped", "not bootstrapped", "blocked"}
+BOOTSTRAP_PRODUCT_COMMIT_MESSAGE = "chore(bootstrap): checkpoint runnable baseline"
+BOOTSTRAP_SUCCESSFUL_CHECKPOINT_STATUSES = {"committed", "already_checkpointed", "already_tracked"}
+STALE_BOOTSTRAP_CHECKPOINT_BLOCKER_TERMS = (
+    ".git/index.lock",
+    "initial local commit",
+    "git metadata",
+    "write access to .git",
+)
+BOOTSTRAP_PRODUCT_EXCLUDED_PREFIXES = (
+    ".diffmogger/",
+    ".agentic/",
+    ".codex/",
+    ".git/",
+    "target/",
+    "__pycache__/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    "node_modules/",
+)
+BOOTSTRAP_PRODUCT_EXCLUDED_NAMES = {
+    "AGENTS.md",
+    ".DS_Store",
+}
+BOOTSTRAP_PRODUCT_EXCLUDED_SUFFIXES = (
+    ".pyc",
+    ".pyo",
+    ".sqlite",
+    ".sqlite3",
+    ".db",
+    ".log",
+    ".lock",
+)
+BOOTSTRAP_SCAFFOLD_INTERNALS = {
+    "docs/CODEX_AUTOMATION_TASKS.md",
+    "docs/INITIAL_BOOTSTRAP_PROMPT.md",
+    "docs/MULTI_ROLE_PROGRESS.md",
+    "docs/HUMAN_BRIDGE_SETUP.md",
+    "docs/HUMAN_INBOX.md",
+    "docs/HUMAN_OUTBOX.md",
+    "docs/HUMAN_REQUESTS.md",
+    "docs/HUMAN_RESPONSES_ARCHIVE.md",
+    "docs/TICKET_RUN.md",
+    "scripts/acquire_codex_lock.sh",
+    "scripts/compact_agent_state.py",
+    "scripts/integrate_role_outputs.py",
+    "scripts/list_deferred_patches.py",
+    "scripts/load_automation_env.py",
+    "scripts/release_codex_lock.sh",
+    "scripts/repair_environment.py",
+    "scripts/run_conveyor_automation.py",
+    "scripts/run_conveyor_automation.sh",
+    "scripts/run_observatory.py",
+    "scripts/run_process_watchdog.py",
+    "scripts/run_role_automation.sh",
+    "scripts/spawn_worker_agent.sh",
+    "scripts/state_brief.py",
+    "scripts/summarize_worker_outputs.py",
+    "scripts/ticket_run.py",
+}
 
 LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "project_name": "New Project",
@@ -931,23 +998,224 @@ def acquire_initial_bootstrap_lock(target: Path):
         except FileNotFoundError:
             pass
 
-def ensure_bootstrap_control_completed(target: Path) -> dict[str, Any]:
+def checkpoint_completed_successfully(checkpoint: Mapping[str, Any] | None) -> bool:
+    return str((checkpoint or {}).get("status") or "").strip().lower() in BOOTSTRAP_SUCCESSFUL_CHECKPOINT_STATUSES
+
+def bootstrap_checkpoint_reference(checkpoint: Mapping[str, Any] | None) -> str:
+    commit = str((checkpoint or {}).get("commit") or "").strip()
+    return commit[:12] if commit else "the recorded bootstrap checkpoint"
+
+def has_stale_bootstrap_checkpoint_blocker_text(control: Mapping[str, Any]) -> bool:
+    pieces = [
+        str(control.get("current_assessment") or ""),
+        str(control.get("best_next_milestone") or ""),
+        str(control.get("suggested_next_task") or ""),
+        str(control.get("known_issue") or ""),
+    ]
+    issues = control.get("known_issues") if isinstance(control.get("known_issues"), list) else []
+    pieces.extend(str(item) for item in issues)
+    text = "\n".join(pieces).lower()
+    return any(term in text for term in STALE_BOOTSTRAP_CHECKPOINT_BLOCKER_TERMS)
+
+def should_clear_stale_bootstrap_blocker(
+    target: Path,
+    control: Mapping[str, Any],
+    checkpoint: Mapping[str, Any] | None,
+) -> bool:
+    if not checkpoint_completed_successfully(checkpoint):
+        return False
+    if str(control.get("status") or "").strip().upper() != "BLOCKED_ON_ENVIRONMENT":
+        return False
+    if not has_stale_bootstrap_checkpoint_blocker_text(control):
+        return False
+    with connect(database_path_for_target(target)) as conn:
+        return not open_blockers(conn)
+
+def ensure_bootstrap_control_completed(target: Path, checkpoint: Mapping[str, Any] | None = None) -> dict[str, Any]:
     control = automation_control_state(target)
-    if not bootstrap_status_pending(control):
+    clear_stale_blocker = should_clear_stale_bootstrap_blocker(target, control, checkpoint)
+    if not bootstrap_status_pending(control) and not clear_stale_blocker:
         return control
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     current_assessment = str(control.get("current_assessment") or "").strip()
     if not current_assessment or "not bootstrapped" in current_assessment.lower():
         current_assessment = "Initial bootstrap completed from the dashboard."
+    updates: dict[str, Any] = {
+        "last_updated": now,
+        "current_assessment": current_assessment,
+        "bootstrap_status": "bootstrapped",
+    }
+    if clear_stale_blocker:
+        checkpoint_ref = bootstrap_checkpoint_reference(checkpoint)
+        updates.update(
+            {
+                "status": "ACTIVE",
+                "current_assessment": (
+                    f"Initial bootstrap completed and product baseline checkpoint `{checkpoint_ref}` is recorded; "
+                    "continue with the next typed ticket or DAG action."
+                ),
+                "best_next_milestone": "Continue the next dependency-ready typed ticket or DAG action from the successful bootstrap baseline.",
+                "suggested_next_task": "Use the queued ticket/DAG scheduler state to continue product work from the verified bootstrap baseline.",
+                "known_issue": "",
+                "known_issues": [],
+            }
+        )
     return write_automation_control_state(
         target,
-        {
-            "last_updated": now,
-            "current_assessment": current_assessment,
-            "bootstrap_status": "bootstrapped",
-        },
+        updates,
         actor_role="dashboard",
         event_type="automation.initial_bootstrap_completed",
+    )
+
+def run_git(target: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=target,
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+
+def git_head(target: Path) -> str:
+    result = run_git(target, "rev-parse", "--verify", "HEAD")
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+def parse_git_status_paths(output: str) -> list[str]:
+    paths: list[str] = []
+    records = [item for item in output.split("\0") if item]
+    index = 0
+    while index < len(records):
+        record = records[index]
+        if len(record) < 4:
+            index += 1
+            continue
+        status = record[:2]
+        path = record[3:]
+        if status.startswith(("R", "C")) and index + 1 < len(records):
+            path = records[index + 1]
+            index += 1
+        paths.append(path)
+        index += 1
+    return paths
+
+def bootstrap_product_path_allowed(rel_path: str) -> bool:
+    rel_path = rel_path.strip().lstrip("/")
+    if not rel_path:
+        return False
+    if rel_path in BOOTSTRAP_PRODUCT_EXCLUDED_NAMES or rel_path in BOOTSTRAP_SCAFFOLD_INTERNALS:
+        return False
+    if rel_path.startswith(BOOTSTRAP_PRODUCT_EXCLUDED_PREFIXES):
+        return False
+    name = Path(rel_path).name
+    if name.startswith(".env") or name in {"id_rsa", "id_ed25519"}:
+        return False
+    if rel_path.endswith(BOOTSTRAP_PRODUCT_EXCLUDED_SUFFIXES):
+        return False
+    parts = set(Path(rel_path).parts)
+    if parts.intersection({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules"}):
+        return False
+    return True
+
+def bootstrap_product_status_paths(target: Path) -> list[str]:
+    result = run_git(target, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "git status failed").strip())
+    return sorted({path for path in parse_git_status_paths(result.stdout) if bootstrap_product_path_allowed(path)})
+
+def tracked_product_paths(target: Path) -> list[str]:
+    result = run_git(target, "ls-files", "-z")
+    if result.returncode != 0:
+        return []
+    return sorted({path for path in result.stdout.split("\0") if bootstrap_product_path_allowed(path)})
+
+def bootstrap_git_commit_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("GIT_AUTHOR_NAME", "Diffmogger Bootstrap")
+    env.setdefault("GIT_AUTHOR_EMAIL", "diffmogger-bootstrap@example.invalid")
+    env.setdefault("GIT_COMMITTER_NAME", "Diffmogger Bootstrap")
+    env.setdefault("GIT_COMMITTER_EMAIL", "diffmogger-bootstrap@example.invalid")
+    return env
+
+def record_bootstrap_checkpoint_blocker(target: Path, *, reason: str, detail: str) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    blocker_payload = {
+        "schema_version": 1,
+        "reason": reason,
+        "detail": detail,
+        "next_action": "Inspect bootstrap output, create a safe local product checkpoint, then rerun or clear the bootstrap gate.",
+    }
+    with connect(database_path_for_target(target)) as conn:
+        with conn:
+            upsert_blocker(
+                conn,
+                blocker_id="blocker:initial_bootstrap_checkpoint",
+                task_id="task:initial_bootstrap",
+                kind="initial_bootstrap_checkpoint",
+                status="open",
+                summary=detail,
+                resume_token=reason,
+                created_at=now,
+                updated_at=now,
+                payload=blocker_payload,
+            )
+    control = write_automation_control_state(
+        target,
+        {
+            "status": "BLOCKED_ON_ENVIRONMENT",
+            "bootstrap_status": "blocked",
+            "current_assessment": detail,
+            "known_issue": detail,
+            "known_issues": [detail],
+            "last_updated": now,
+        },
+        actor_role="dashboard",
+        event_type="automation.initial_bootstrap_checkpoint_blocked",
+    )
+    return {"status": "blocked", "reason": reason, "detail": detail, "automation_control": control}
+
+def checkpoint_initial_bootstrap_baseline(target: Path, *, head_before: str) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    head_after = git_head(target)
+    changed_product_paths = bootstrap_product_status_paths(target)
+    if changed_product_paths:
+        add = run_git(target, "add", "-A", "--", *changed_product_paths)
+        if add.returncode != 0:
+            detail = (add.stderr or add.stdout or "git add failed").strip()
+            return record_bootstrap_checkpoint_blocker(target, reason="git_add_failed", detail=detail)
+        diff = run_git(target, "diff", "--cached", "--quiet", "--exit-code")
+        if diff.returncode not in {0, 1}:
+            detail = (diff.stderr or diff.stdout or "git diff failed").strip()
+            return record_bootstrap_checkpoint_blocker(target, reason="git_diff_failed", detail=detail)
+        if diff.returncode == 1:
+            commit = run_git(
+                target,
+                "commit",
+                "--no-verify",
+                "-m",
+                BOOTSTRAP_PRODUCT_COMMIT_MESSAGE,
+                env=bootstrap_git_commit_env(),
+            )
+            if commit.returncode != 0:
+                detail = (commit.stderr or commit.stdout or "git commit failed").strip()
+                return record_bootstrap_checkpoint_blocker(target, reason="git_commit_failed", detail=detail)
+            return {
+                "status": "committed",
+                "commit": git_head(target),
+                "message": BOOTSTRAP_PRODUCT_COMMIT_MESSAGE,
+                "paths": changed_product_paths,
+            }
+
+    tracked_products = tracked_product_paths(target)
+    if tracked_products and head_after and head_after != head_before:
+        return {"status": "already_checkpointed", "commit": head_after, "paths": tracked_products}
+    if tracked_products and head_after:
+        return {"status": "already_tracked", "commit": head_after, "paths": tracked_products}
+    return record_bootstrap_checkpoint_blocker(
+        target,
+        reason="no_product_checkpoint",
+        detail="Initial bootstrap finished, but no safe product baseline files were available to checkpoint.",
     )
 
 def run_initial_bootstrap(
@@ -1018,7 +1286,16 @@ def run_initial_bootstrap(
     note("bootstrap", "Starting Codex initial bootstrap run.")
     prompt = prompt_path.read_text(encoding="utf-8")
     dashboard_app = load_dashboard_module()
+    try:
+        dashboard_app.load_scaffold_module().ensure_initial_git_commit(target)
+    except Exception as exc:
+        raise BackendError(
+            "Git bootstrap failed before initial Codex bootstrap.",
+            error_type="git_bootstrap_failed",
+            details={"target": str(target), "exception": str(exc)},
+        ) from exc
     env = {**os.environ, **dashboard_app.automation_environment(target)}
+    head_before = git_head(target)
     result = run_subprocess_streamed(
         args,
         ["codex", "exec", "--full-auto", "--skip-git-repo-check", prompt],
@@ -1046,7 +1323,26 @@ def run_initial_bootstrap(
             details={**result, "started_at": started_at, "finished_at": finished_at},
         )
 
-    control = ensure_bootstrap_control_completed(target)
+    checkpoint = checkpoint_initial_bootstrap_baseline(target, head_before=head_before)
+    if checkpoint.get("status") == "blocked":
+        write_dashboard_action_state(
+            target,
+            last_action="initial_bootstrap_checkpoint_blocked",
+            updates={
+                "initial_bootstrap_status": "blocked",
+                "last_initial_bootstrap_started_at": started_at,
+                "last_initial_bootstrap_finished_at": finished_at,
+                "last_initial_bootstrap_exit_code": result.get("exit_code"),
+                "initial_bootstrap_checkpoint": checkpoint,
+            },
+        )
+        raise BackendError(
+            "Initial bootstrap completed but no safe product checkpoint could be created.",
+            error_type="bootstrap_checkpoint_failed",
+            details={**checkpoint, "started_at": started_at, "finished_at": finished_at},
+        )
+
+    control = ensure_bootstrap_control_completed(target, checkpoint=checkpoint)
     state_path = write_dashboard_action_state(
         target,
         last_action="initial_bootstrap_completed",
@@ -1056,6 +1352,7 @@ def run_initial_bootstrap(
             "last_initial_bootstrap_started_at": started_at,
             "last_initial_bootstrap_finished_at": finished_at,
             "last_initial_bootstrap_exit_code": result.get("exit_code"),
+            "initial_bootstrap_checkpoint": checkpoint,
         },
     )
     note("bootstrap", "Initial bootstrap completed.")
@@ -1066,6 +1363,7 @@ def run_initial_bootstrap(
         "started_at": started_at,
         "finished_at": finished_at,
         "result": result,
+        "checkpoint": checkpoint,
         "required_files": required_files,
         "prerequisites": prerequisites,
         "automation_control": control,

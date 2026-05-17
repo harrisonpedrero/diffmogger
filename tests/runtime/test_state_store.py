@@ -20,7 +20,7 @@ if str(ROOT / "src") not in sys.path:
 from diffmogger.conveyor.state import load_state, write_state
 from diffmogger.runtime import state_store as state_store_module
 from diffmogger.runtime.state_store import (
-    CONVEYOR_PROJECTION_NAME,
+    AUTOMATION_ACTIVITY_PROJECTION_NAME,
     RUNNER_PROJECTION_NAME,
     STATE_SCHEMA_VERSION,
     automation_control_state,
@@ -30,9 +30,11 @@ from diffmogger.runtime.state_store import (
     canonical_state_brief_path_for_target,
     connect,
     create_repair_nodes_for_failed_validation_conn,
+    create_refresh_index_nodes_for_stale_evidence_conn,
     database_path_for_target,
     ensure_codebase_graph_conn,
     compact_runtime_telemetry_conn,
+    conveyor_machine_payload,
     execution_dag_action_capabilities,
     execution_dag_edges_conn,
     execution_dag_read_model,
@@ -47,6 +49,7 @@ from diffmogger.runtime.state_store import (
     record_runtime_phase_timing_conn,
     refresh_capability_manifest_conn,
     runtime_performance_summary_conn,
+    run_refresh_index_node_conn,
     run_parallel_validation_conn,
     stable_json,
     state_snapshot,
@@ -63,6 +66,10 @@ from diffmogger.runtime.state_store import (
 
 
 class StateStoreTests(unittest.TestCase):
+    def _activity_machine(self, target: Path) -> dict:
+        with closing(connect(database_path_for_target(target))) as conn:
+            return conveyor_machine_payload(conn, target)
+
     def _write_intake(
         self,
         target: Path,
@@ -79,7 +86,7 @@ class StateStoreTests(unittest.TestCase):
                     "project_name": "Parallel Budget Demo",
                     "product_goal": "Exercise reusable automation budget state.",
                     "target_user": "A local automation maintainer.",
-                    "desired_first_demo": "Show budgeted conveyor state.",
+                    "desired_first_demo": "Show budgeted activity state.",
                     "worker_agents_allowed": worker_agents_allowed,
                     "write_worker_agents_allowed": write_worker_agents_allowed,
                     "max_write_worker_count": max_write_worker_count,
@@ -162,13 +169,12 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual("ok", snapshot["status"])
             self.assertGreaterEqual(snapshot["counts"]["events"], 1)
             self.assertTrue(Path(snapshot["database"]["path"]).exists())
-            self.assertTrue(projection_path.exists())
-            projected = json.loads(projection_path.read_text(encoding="utf-8"))
-            self.assertEqual("sqlite", projected["canonical_state"]["authority"])
-            self.assertEqual(CONVEYOR_PROJECTION_NAME, projected["canonical_state"]["projection"])
-            self.assertEqual("sqlite", projected["state_machine"]["authority"])
-            self.assertEqual("intake", projected["state_machine"]["current_stage"])
-            self.assertEqual(10, len(projected["state_machine"]["stage_contracts"]))
+            self.assertFalse(projection_path.exists())
+            self.assertIn("automation_activity", snapshot)
+            self.assertEqual("sqlite", snapshot["automation_activity"]["authority"])
+            self.assertEqual(AUTOMATION_ACTIVITY_PROJECTION_NAME, snapshot["projection"]["name"])
+            self.assertNotIn("conveyor_state", snapshot)
+            self.assertNotIn("conveyor_machine", snapshot)
             self.assertIn("capability_manifest", snapshot)
             self.assertTrue(snapshot["capability_manifest"]["digest"])
             self.assertEqual(STATE_SCHEMA_VERSION, snapshot["database"]["user_version"])
@@ -177,7 +183,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertIn("execution_dag", snapshot)
             self.assertEqual("sqlite", snapshot["execution_dag"]["authority"])
             self.assertGreater(snapshot["execution_dag"]["node_count"], 0)
-            self.assertEqual(snapshot["execution_dag"], snapshot["progress_model"])
+            self.assertNotIn("progress_model", snapshot)
             self.assertEqual("pass", snapshot["state_health_summary"]["status"])
             self.assertTrue(all(item["ok"] for item in snapshot["invariant_results"]))
 
@@ -414,6 +420,7 @@ class StateStoreTests(unittest.TestCase):
             "review",
             "validate",
             "repair",
+            "refresh_index",
             "integrate",
             "audit",
             "calibrate",
@@ -433,6 +440,40 @@ class StateStoreTests(unittest.TestCase):
 
         self.assertEqual("exclusive_write", capabilities["build"]["lease_behavior"])
         self.assertTrue(capabilities["integrate"]["serialized"])
+
+    def test_stale_symbol_evidence_creates_refresh_index_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "src").mkdir(parents=True)
+            (target / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = create_refresh_index_nodes_for_stale_evidence_conn(
+                    conn,
+                    target,
+                    [
+                        {
+                            "reason_kind": "stale_symbol",
+                            "task_id": "T-1",
+                            "likely_touches": [{"path": "src/app.py"}],
+                            "reason": "stale symbol owner evidence blocks scheduling",
+                        }
+                    ],
+                    selected_by="test.stale_index",
+                )
+
+                self.assertEqual("created", result["status"])
+                self.assertEqual(["src/app.py"], result["paths"])
+                node = result["nodes"][0]
+                self.assertEqual("refresh_index", node["action_type"])
+                self.assertEqual("ready", node["status"])
+
+                refreshed = run_refresh_index_node_conn(conn, target, dag_node_id=node["node_id"])
+                model = execution_dag_read_model(conn)
+
+            self.assertEqual("completed", refreshed["status"])
+            refreshed_node = next(item for item in model["nodes"] if item["node_id"] == node["node_id"])
+            self.assertEqual("completed", refreshed_node["status"])
+            self.assertEqual(["src/app.py"], refreshed_node["metadata"]["paths"])
 
     def test_execution_dag_snapshot_rendering_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -454,7 +495,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(first["execution_dag"]["edge_count"], second["execution_dag"]["edge_count"])
 
             def dag_section(markdown: str) -> str:
-                return markdown.split("## Execution DAG", 1)[1].split("## Runner And Compatibility Conveyor", 1)[0]
+                return markdown.split("## Execution DAG", 1)[1].split("## Runtime Activity", 1)[0]
 
             rendered_first = dag_section(render_canonical_state_brief(first, target=target))
             rendered_second = dag_section(render_canonical_state_brief(second, target=target))
@@ -917,6 +958,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual("failed", result["status"])
             self.assertEqual("failed", result["validation_job_summary"]["aggregate_status"])
             self.assertEqual("failed", result["jobs"][0]["status"])
+            self.assertEqual("source_test_failure", result["jobs"][0]["payload"]["control_plane_classification"])
             self.assertIsNotNone(receipt)
             self.assertEqual("fail", receipt["status"])
 
@@ -1089,6 +1131,65 @@ class StateStoreTests(unittest.TestCase):
                 {(edge["source"], edge["target"], edge["dependency_kind"]) for edge in edges},
             )
 
+    def test_validation_backpressure_blocks_same_ownership_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            now = "2026-05-15T00:00:00+00:00"
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO execution_groups(
+                            execution_group_id, status, mode, created_at, started_at, finished_at,
+                            selected_by, reason, payload_json
+                        )
+                        VALUES('validation-group:source', 'failed', 'validation', ?, ?, ?, 'test', 'validation failed', '{}')
+                        """,
+                        (now, now, now),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO validation_jobs(
+                            job_id, execution_group_id, plan_id, gate_id, command, cwd,
+                            status, started_at, finished_at, exit_code, log_artifact_id,
+                            resource_profile, payload_json
+                        )
+                        VALUES('validation-job:source', 'validation-group:source', 'plan:source', 'gate:unit',
+                               'python3 -m unittest', ?, 'failed', ?, ?, 1, '', 'cpu', ?)
+                        """,
+                        (
+                            str(target),
+                            now,
+                            now,
+                            stable_json(
+                                {
+                                    "required": True,
+                                    "selected_paths": ["src/app.py"],
+                                    "failure_reason": "source_test_failure",
+                                }
+                            ),
+                        ),
+                    )
+
+                blocked = state_store_module._validation_backpressure_for_candidate_conn(
+                    conn,
+                    {
+                        "execution_mode": "write_workers",
+                        "likely_touches": [{"path": "src/app.py"}],
+                    },
+                )
+                unrelated = state_store_module._validation_backpressure_for_candidate_conn(
+                    conn,
+                    {
+                        "execution_mode": "write_workers",
+                        "likely_touches": [{"path": "docs/readme.md"}],
+                    },
+                )
+
+            self.assertEqual("validation_backpressure", blocked["reason_kind"])
+            self.assertEqual(["src/app.py"], blocked["candidate_paths"])
+            self.assertEqual({}, unrelated)
+
     def test_parallel_validation_optional_failed_job_warns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -1106,6 +1207,143 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual("warning", result["status"])
             self.assertEqual("warning", result["validation_job_summary"]["aggregate_status"])
             self.assertEqual("warning", result["jobs"][0]["status"])
+            self.assertEqual("source_test_failure", result["jobs"][0]["payload"]["control_plane_classification"])
+
+    def test_configured_optional_missing_tool_is_classified_not_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = run_parallel_validation_conn(
+                    conn,
+                    target,
+                    [
+                        {
+                            "command": "definitely_missing_diffmogger_optional_tool --version",
+                            "classification": "smoke",
+                            "required": False,
+                            "source": ".agentic/smoke_commands.txt",
+                            "source_authority": "configured",
+                            "gate_id": "gate:configured-optional",
+                        }
+                    ],
+                    selected_by="test",
+                    plan_id="plan:configured-optional",
+                )
+
+            self.assertEqual("warning", result["status"])
+            payload = result["jobs"][0]["payload"]
+            self.assertEqual("missing_optional_tool", payload["control_plane_classification"])
+            self.assertNotIn("invalid_command_disposition", payload)
+
+    def test_repairable_invalid_discovered_command_is_downgraded_not_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = run_parallel_validation_conn(
+                    conn,
+                    target,
+                    [
+                        {
+                            "command": "definitely_missing_diffmogger_optional_tool --version",
+                            "classification": "test",
+                            "required": False,
+                            "source": "python project metadata",
+                            "source_authority": "speculative",
+                            "gate_id": "gate:optional-invalid",
+                        }
+                    ],
+                    selected_by="test",
+                    plan_id="plan:optional-invalid",
+                )
+                receipt = conn.execute(
+                    "SELECT status, payload_json FROM validation_receipts WHERE run_id = ?",
+                    (result["execution_group_id"],),
+                ).fetchone()
+                repair = create_repair_nodes_for_failed_validation_conn(conn, selected_by="test")
+
+            self.assertEqual("warning", result["status"])
+            self.assertEqual("warning", result["jobs"][0]["status"])
+            payload = result["jobs"][0]["payload"]
+            self.assertFalse(payload["required"])
+            self.assertEqual("invalid_discovered_command", payload["control_plane_classification"])
+            self.assertEqual("invalid_discovered_command", payload["invalid_command_disposition"]["status"])
+            self.assertIsNotNone(receipt)
+            self.assertEqual("warn", receipt["status"])
+            receipt_payload = json.loads(receipt["payload_json"])
+            self.assertEqual("invalid_discovered_command", receipt_payload["invalid_command_disposition"]["status"])
+            self.assertEqual(0, repair["repair_node_count"])
+            self.assertEqual(0, repair["blocker_node_count"])
+
+    def test_unittest_only_target_does_not_require_undeclared_pytest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / ".agentic").mkdir()
+            (target / ".agentic" / "verification_commands.txt").write_text(
+                f"{sys.executable} -m unittest discover -s tests\n",
+                encoding="utf-8",
+            )
+            (target / "pyproject.toml").write_text(
+                "[project]\nname = \"fictional-app\"\nversion = \"0.1.0\"\n",
+                encoding="utf-8",
+            )
+            (target / "tests").mkdir()
+            (target / "tests" / "test_app.py").write_text(
+                "import unittest\n\n"
+                "class AppTest(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                capability = refresh_capability_manifest_conn(conn, target)
+                result = run_parallel_validation_conn(conn, target, selected_by="test", plan_id="plan:unittest-only")
+
+            pytest_commands = [item for item in capability["commands"] if item["command"] == "python3 -m pytest"]
+            self.assertEqual([], pytest_commands)
+            self.assertTrue(any(item["command"] == f"{sys.executable} -m unittest discover -s tests" and item["required"] for item in capability["commands"]))
+            self.assertEqual("passed", result["status"])
+            required_commands = [
+                job["command"]
+                for job in result["jobs"]
+                if job["payload"].get("required")
+            ]
+            self.assertNotIn("python3 -m pytest", required_commands)
+
+    def test_required_missing_validation_tool_is_classified_for_environment_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = run_parallel_validation_conn(
+                    conn,
+                    target,
+                    [
+                        {
+                            "command": "definitely_missing_diffmogger_required_tool --version",
+                            "classification": "test",
+                            "required": True,
+                            "source": ".agentic/verification_commands.txt",
+                            "source_authority": "configured",
+                            "gate_id": "gate:required-missing-tool",
+                        }
+                    ],
+                    selected_by="test",
+                    plan_id="plan:required-missing-tool",
+                )
+                jobs = validation_jobs_conn(conn, statuses={"failed"}, limit=5)
+                repair = create_repair_nodes_for_failed_validation_conn(conn, selected_by="test")
+
+            self.assertEqual("failed", result["status"])
+            payload = result["jobs"][0]["payload"]
+            self.assertTrue(payload["required"])
+            self.assertEqual("missing_declared_dependency", payload["control_plane_classification"])
+            self.assertEqual("verification_environment_failure", payload["failure_reason"])
+            self.assertTrue(jobs)
+            self.assertEqual(0, repair["repair_node_count"])
+            self.assertEqual(1, repair["blocker_node_count"])
 
     def test_parallel_validation_records_log_artifact_and_snapshot_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1517,7 +1755,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertFalse(hash_items[0]["ok"])
             self.assertTrue(hash_items[0]["failures"])
 
-    def test_missing_required_projection_event_fails_validation(self) -> None:
+    def test_missing_required_projection_event_is_reconciled_by_snapshot_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             snapshot = state_snapshot(target)
@@ -1525,7 +1763,7 @@ class StateStoreTests(unittest.TestCase):
             try:
                 db.execute(
                     "UPDATE projections SET event_id = ? WHERE name = ?",
-                    (999999, CONVEYOR_PROJECTION_NAME),
+                    (999999, AUTOMATION_ACTIVITY_PROJECTION_NAME),
                 )
                 db.commit()
             finally:
@@ -1536,9 +1774,9 @@ class StateStoreTests(unittest.TestCase):
                 item for item in validation["items"] if item.get("invariant") == "projections.event_id_exists"
             ]
 
-            self.assertEqual("fail", validation["status"])
+            self.assertEqual("pass", validation["status"])
             self.assertEqual(1, len(projection_items))
-            self.assertFalse(projection_items[0]["ok"])
+            self.assertTrue(projection_items[0]["ok"])
 
     def test_state_snapshot_includes_invariant_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1609,7 +1847,7 @@ class StateStoreTests(unittest.TestCase):
             finally:
                 db.close()
             self.assertGreaterEqual(event_count, 2)
-            self.assertGreaterEqual(projection_count, 3)
+            self.assertGreaterEqual(projection_count, 2)
 
     def test_builder_role_owns_implementation_even_when_reason_mentions_integration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1629,7 +1867,7 @@ class StateStoreTests(unittest.TestCase):
                 actor_role="conveyor",
                 phase="decision",
             )
-            decision_machine = state_snapshot(target)["conveyor_machine"]
+            decision_machine = self._activity_machine(target)
             self.assertEqual("implementation", decision_machine["current_stage"])
             self.assertEqual("ready", decision_machine["stage_status"])
             self.assertEqual("builder", decision_machine["owner_role"])
@@ -1648,7 +1886,7 @@ class StateStoreTests(unittest.TestCase):
                 actor_role="builder",
                 phase="role_execution",
             )
-            running_machine = state_snapshot(target)["conveyor_machine"]
+            running_machine = self._activity_machine(target)
             latest_attempt = running_machine["stage_attempts"][0]
 
             self.assertEqual("implementation", running_machine["current_stage"])
@@ -1666,7 +1904,7 @@ class StateStoreTests(unittest.TestCase):
             state = load_state(projection_path)
             state["last_decision"] = {
                 "role": "planner",
-                "reason": "hardener completed; planner gets the next state-machine pass",
+                "reason": "hardener completed; planner gets the next activity pass",
                 "decided_at": "2026-05-12T23:11:51+00:00",
             }
 
@@ -1677,7 +1915,7 @@ class StateStoreTests(unittest.TestCase):
                 actor_role="conveyor",
                 phase="decision",
             )
-            machine = state_snapshot(target)["conveyor_machine"]
+            machine = self._activity_machine(target)
 
             self.assertEqual("planning", machine["current_stage"])
             self.assertEqual("ready", machine["stage_status"])
@@ -1702,7 +1940,7 @@ class StateStoreTests(unittest.TestCase):
                 actor_role="conveyor",
                 phase="decision",
             )
-            machine = state_snapshot(target)["conveyor_machine"]
+            machine = self._activity_machine(target)
 
             self.assertEqual("implementation", machine["current_stage"])
             self.assertEqual("ready", machine["stage_status"])
@@ -1738,7 +1976,7 @@ class StateStoreTests(unittest.TestCase):
             )
 
             snapshot = state_snapshot(target)
-            machine = snapshot["conveyor_machine"]
+            machine = self._activity_machine(target)
             receipts = machine["validation_receipts"]
 
             self.assertEqual("passed", machine["work_item"]["validation_status"])
@@ -1779,7 +2017,7 @@ class StateStoreTests(unittest.TestCase):
             )
 
             snapshot = state_snapshot(target)
-            machine = snapshot["conveyor_machine"]
+            machine = self._activity_machine(target)
             receipts = machine["validation_receipts"]
 
             self.assertEqual("warning", machine["work_item"]["validation_status"])
