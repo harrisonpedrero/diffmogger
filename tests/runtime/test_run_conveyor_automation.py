@@ -427,7 +427,14 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                         for group in snapshot["why_not_parallel"]["reason_groups"]
                         if isinstance(group, dict)
                     ]
-                    self.assertIn("scope_fanout_exhausted", rendered_reasons)
+                    self.assertIn("serial_fallback", rendered_reasons)
+                    raw_reason_kinds = [
+                        raw
+                        for group in snapshot["why_not_parallel"]["reason_groups"]
+                        if isinstance(group, dict)
+                        for raw in group.get("raw_reason_kinds", [])
+                    ]
+                    self.assertIn("scope_fanout_exhausted", raw_reason_kinds)
 
                     role, reason, stop = module.choose_next(target, {}, 2)
                     second = self.latest_candidate(target)
@@ -437,7 +444,8 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                     self.assertEqual("run_serial_role", second["action_kind"])
                     self.assertEqual("TICKET-001", second["task_id"])
                     self.assertEqual("scope_fanout_exhausted", second["parallel_block_reason_kind"])
-                    self.assertIn("scope_fanout_exhausted", reason)
+                    self.assertEqual("serial_fallback", second["parallel_block_display_reason_kind"])
+                    self.assertIn("serial_fallback", reason)
 
     def test_queued_serial_role_manifest_reconciles_into_dag_handoff(self) -> None:
         for path, module in self.modules:
@@ -739,7 +747,8 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                     self.assertEqual("run_serial_integration", candidate["action_kind"])
                     self.assertEqual(["patch:a-ready"], candidate["patch_ids"])
                     self.assertEqual(["patch:a-ready"], candidate["integration_preflight"]["safe_patch_ids"])
-                    self.assertEqual(1, candidate["integration_preflight"]["likely_conflict_count"])
+                    self.assertEqual(0, candidate["integration_preflight"]["likely_conflict_count"])
+                    self.assertEqual(1, candidate["integration_preflight"]["reconcilable_overlap_count"])
 
     def test_multi_builder_wave_converges_into_compatible_review_node(self) -> None:
         for path, module in self.modules:

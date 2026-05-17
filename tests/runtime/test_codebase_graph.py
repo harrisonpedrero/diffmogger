@@ -1887,6 +1887,35 @@ class ImpactGraphTests(unittest.TestCase):
             self.assertEqual([], self.read_only_scope_groups(after))
             self.assertTrue(after["accepted_scope_evidence_records"])
 
+    def test_cautious_scope_evidence_warning_does_not_block_direct_path_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_text(target, "src/workspace.js", "export function validateWorkspace() {\n  return true;\n}\n")
+            self.write_ticket_run(target, [{"id": "AUTO-1", "summary": "Implement workspace validation hardening", "status": "pending"}])
+            state_snapshot(target)
+
+            records = self.record_scope_report(
+                target,
+                "AUTO-1",
+                [
+                    {
+                        "candidate_path": "src/workspace.js",
+                        "candidate_symbol": "validateWorkspace",
+                        "confidence": 0.96,
+                        "stale_context_warning": "cautious worker note: re-read typed state before writing",
+                        "reasons": ["resolved validateWorkspace directly to src/workspace.js"],
+                    }
+                ],
+            )
+            accepted = [record for record in records if record["status"] == "accepted"]
+            self.assertEqual(1, len(accepted), records)
+
+            after = state_snapshot(target)
+            write_groups = self.write_execution_groups(after)
+            self.assertEqual(1, len(write_groups), after.get("proposed_execution_groups"))
+            touches = write_groups[0]["items"][0]["payload"]["likely_touches"]
+            self.assertTrue(any(touch["path"] == "src/workspace.js" and touch["signal_kind"] == "exact_symbol" for touch in touches))
+
     def test_ambiguous_scope_evidence_does_not_promote_write_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -1930,6 +1959,7 @@ class ImpactGraphTests(unittest.TestCase):
                         "candidate_symbol": "AuthService",
                         "confidence": 0.95,
                         "stale_context_warning": "worker inspected stale context and could not verify current ownership",
+                        "graph_state_stale": True,
                         "reasons": ["ownership may have changed since the context pack was generated"],
                     }
                 ],

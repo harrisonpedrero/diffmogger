@@ -1760,8 +1760,14 @@ cat >"$queue_root/builder/run-stale/manifest.json" <<JSON
 }
 JSON
 python3 scripts/runtime/integrate_role_outputs.py "$tmp_dir" --run-id validation-stale >/tmp/Diffmogger-stale-integrator.log
-if ! grep '"deferral_reason": "staleness"' "$queue_root/builder/run-stale/manifest.json" >/tmp/Diffmogger-stale-reason.log; then
-    echo "Integrator stale patch smoke did not classify staleness" >&2
+if ! grep '"deferral_reason": "conflict"' "$queue_root/builder/run-stale/manifest.json" >/tmp/Diffmogger-stale-reason.log; then
+    echo "Integrator stale patch smoke did not classify true add/add conflict" >&2
+    cat "$queue_root/builder/run-stale/manifest.json" >&2
+    rm -rf "$tmp_dir" "$tmp_intake"
+    exit 1
+fi
+if ! grep '"integration_resolution": "true_conflict"' "$queue_root/builder/run-stale/manifest.json" >/tmp/Diffmogger-stale-resolution.log; then
+    echo "Integrator stale patch smoke did not record true_conflict resolution" >&2
     cat "$queue_root/builder/run-stale/manifest.json" >&2
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
@@ -1769,8 +1775,8 @@ fi
 python3 scripts/runtime/list_deferred_patches.py "$tmp_dir" --pretty >/tmp/Diffmogger-deferred-list.log
 python3 scripts/runtime/list_deferred_patches.py "$tmp_dir" --markdown >/tmp/Diffmogger-deferred-list.md
 python3 scripts/runtime/list_deferred_patches.py "$tmp_dir" --decision-template >/tmp/Diffmogger-deferred-decision-template.md
-if ! grep 'recommended_next_action: Start with `staleness`' /tmp/Diffmogger-deferred-list.md >/tmp/Diffmogger-deferred-markdown.log; then
-    echo "Deferred patch Markdown triage smoke did not recommend staleness first" >&2
+if ! grep 'recommended_next_action: Start with `conflict`' /tmp/Diffmogger-deferred-list.md >/tmp/Diffmogger-deferred-markdown.log; then
+    echo "Deferred patch Markdown triage smoke did not recommend conflict first" >&2
     cat /tmp/Diffmogger-deferred-list.md >&2
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1

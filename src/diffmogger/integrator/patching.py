@@ -10,7 +10,15 @@ from .baseline import (
     write_baseline_record,
 )
 from .commits import commit_current_patch, hardener_test_change_requires_rationale
-from .git_safety import apply_check, apply_patch_file, changed_since_base, classify_apply_failure, head, reset_to
+from .git_safety import (
+    IntegrationReconciliation,
+    apply_check,
+    apply_patch_file,
+    apply_rebaseable_patch_file,
+    classify_patch_reconciliation,
+    head,
+    reset_to,
+)
 from .progress import progress_inline, scrub_local_references
 from .queue import resolve_patch_path, write_manifest
 from .runtime_state import (
@@ -68,23 +76,79 @@ def mark_applied(
     checkpoint_commit: str | None,
     checks_run: list[str],
     dry_run: bool,
+    accepted_commit_source: str | None = None,
 ) -> None:
-    manifest.update(
-        {
-            "status": "applied",
-            "deferral_reason": None,
-            "deferral_detail": "",
-            "head_before_integration": head_before_integration,
-            "integrated_at": utc_now().isoformat(timespec="seconds"),
-            "checkpoint_commit": checkpoint_commit,
-            "accepted_commit": accepted_commit,
-            "checks_run": checks_run,
-        }
-    )
+    update = {
+        "status": "applied",
+        "deferral_reason": None,
+        "deferral_detail": "",
+        "head_before_integration": head_before_integration,
+        "integrated_at": utc_now().isoformat(timespec="seconds"),
+        "checkpoint_commit": checkpoint_commit,
+        "accepted_commit": accepted_commit,
+        "checks_run": checks_run,
+    }
+    if accepted_commit_source:
+        update["accepted_commit_source"] = accepted_commit_source
+    manifest.update(update)
     write_manifest(path, manifest, dry_run=dry_run)
 
 def patch_is_empty(patch: Path) -> bool:
     return not patch.exists() or patch.stat().st_size == 0
+
+def record_integration_resolution(
+    target: Path,
+    manifest: dict[str, Any],
+    classification: IntegrationReconciliation,
+) -> None:
+    detail = scrub_local_references(classification.detail, target)
+    manifest.update(
+        {
+            "integration_resolution": classification.resolution,
+            "integration_resolution_detail": detail,
+            "integration_resolution_base_commit": classification.base_commit,
+            "integration_resolution_head": classification.head_commit,
+            "integration_apply_mode": classification.apply_mode,
+        }
+    )
+    if classification.patch_id:
+        manifest["integration_resolution_patch_id"] = classification.patch_id
+    if classification.changed_since_base:
+        manifest["integration_resolution_changed_since_base"] = classification.changed_since_base
+
+def classify_patch_for_integration(
+    target: Path,
+    manifest: dict[str, Any],
+    patch: Path,
+    *,
+    current_head: str,
+) -> IntegrationReconciliation:
+    check = apply_check(target, patch)
+    classification = classify_patch_reconciliation(
+        target,
+        patch,
+        manifest,
+        current_head=current_head,
+        apply_check_result=check,
+    )
+    record_integration_resolution(target, manifest, classification)
+    return classification
+
+def apply_patch_for_resolution(
+    target: Path,
+    patch: Path,
+    classification: IntegrationReconciliation,
+    *,
+    dry_run: bool,
+) -> subprocess.CompletedProcess[str]:
+    if classification.resolution == "rebaseable" and classification.apply_mode == "three_way":
+        return apply_rebaseable_patch_file(target, patch, dry_run=dry_run)
+    return apply_patch_file(target, patch, dry_run=dry_run)
+
+def already_applied_checks(current_head: str) -> list[str]:
+    return [
+        f"Patch content already present in HEAD {current_head}; no new code commit created.",
+    ]
 
 def batch_apply(
     target: Path,
@@ -135,35 +199,43 @@ def batch_apply(
         if patch_is_empty(patch):
             accepted.append((path, manifest))
             continue
-        check = apply_check(target, patch)
-        if check.returncode != 0:
-            reason, detail = classify_apply_failure(target, manifest, head_before, check.stderr)
+        classification = classify_patch_for_integration(target, manifest, patch, current_head=head_before)
+        if classification.is_already_applied:
+            accepted.append((path, manifest))
+            continue
+        if not classification.can_apply:
+            reason = classification.reason or ("conflict" if classification.resolution == "true_conflict" else "staleness")
             mark_deferred(
                 path,
                 manifest,
                 target=target,
                 reason=reason,
-                detail=detail,
+                detail=classification.detail,
                 head_before_integration=head_before,
                 checkpoint_commit=checkpoint_commit,
                 dry_run=dry_run,
             )
             deferred.append((path, manifest, reason))
             continue
-        apply_result = apply_patch_file(target, patch, dry_run=dry_run)
+        apply_result = apply_patch_for_resolution(target, patch, classification, dry_run=dry_run)
         if apply_result.returncode != 0:
+            manifest["integration_resolution"] = "true_conflict"
+            manifest["integration_resolution_detail"] = scrub_local_references(
+                apply_result.stderr.strip() or "git apply failed after deterministic reconciliation check",
+                target,
+            )
             mark_deferred(
                 path,
                 manifest,
                 target=target,
                 reason="conflict",
-                detail=apply_result.stderr.strip() or "git apply failed after check",
+                detail=apply_result.stderr.strip() or "git apply failed after deterministic reconciliation check",
                 head_before_integration=head_before,
                 checkpoint_commit=checkpoint_commit,
                 dry_run=dry_run,
             )
             deferred.append((path, manifest, "conflict"))
-            continue
+            return False, accepted, deferred
         accepted.append((path, manifest))
     verification = run_verification(target, [manifest for _, manifest in accepted])
     for _, manifest in accepted:
@@ -184,9 +256,53 @@ def replay_and_commit(
     for path, manifest in accepted:
         current_head = head(target) if not dry_run else head_before
         patch = resolve_patch_path(target, manifest)
+        if not patch_is_empty(patch) and manifest.get("integration_resolution") == "already_applied":
+            apply_runtime_state_actions(target, manifest, dry_run=dry_run)
+            if runtime_state_has_blocking_results(manifest):
+                reset_to(target, current_head, [manifest], dry_run=dry_run)
+                mark_deferred(
+                    path,
+                    manifest,
+                    target=target,
+                    reason=runtime_state_deferral_reason(manifest),
+                    detail=runtime_state_deferral_detail(manifest),
+                    head_before_integration=head_before,
+                    checkpoint_commit=checkpoint_commit,
+                    checks_run=checks_run,
+                    dry_run=dry_run,
+                )
+                continue
+            manifest["integration_resolution_detail"] = scrub_local_references(
+                f"Patch content already present in HEAD {current_head}; integrator applied runtime-state actions and did not create a new code commit.",
+                target,
+            )
+            mark_applied(
+                path,
+                manifest,
+                accepted_commit=current_head,
+                accepted_commit_source="head_already_contained_patch",
+                head_before_integration=head_before,
+                checkpoint_commit=checkpoint_commit,
+                checks_run=checks_run or already_applied_checks(current_head),
+                dry_run=dry_run,
+            )
+            committed.append((path, manifest, current_head))
+            continue
         if not patch_is_empty(patch):
-            result = apply_patch_file(target, patch, dry_run=dry_run)
+            resolution = str(manifest.get("integration_resolution") or "direct_apply")
+            classification = IntegrationReconciliation(
+                resolution=resolution,
+                detail=str(manifest.get("integration_resolution_detail") or ""),
+                apply_mode=str(manifest.get("integration_apply_mode") or "direct"),
+            )
+            result = apply_patch_for_resolution(target, patch, classification, dry_run=dry_run)
             if result.returncode != 0:
+                manifest["integration_resolution"] = "true_conflict"
+                manifest["integration_resolution_detail"] = scrub_local_references(
+                    result.stderr.strip() or "Patch failed while replaying accepted batch.",
+                    target,
+                )
+                reset_to(target, current_head, [manifest], dry_run=dry_run)
                 mark_deferred(
                     path,
                     manifest,
@@ -295,22 +411,59 @@ def integrate_individually(
             )
             committed.append((path, manifest, None))
             continue
-        check = apply_check(target, patch)
-        if check.returncode != 0:
-            reason, detail = classify_apply_failure(target, manifest, current_head, check.stderr)
+        classification = classify_patch_for_integration(target, manifest, patch, current_head=current_head)
+        if classification.is_already_applied:
+            apply_runtime_state_actions(target, manifest, dry_run=dry_run)
+            if runtime_state_has_blocking_results(manifest):
+                reset_to(target, current_head, [manifest], dry_run=dry_run)
+                mark_deferred(
+                    path,
+                    manifest,
+                    target=target,
+                    reason=runtime_state_deferral_reason(manifest),
+                    detail=runtime_state_deferral_detail(manifest),
+                    head_before_integration=head_before,
+                    checkpoint_commit=checkpoint_commit,
+                    checks_run=already_applied_checks(current_head),
+                    dry_run=dry_run,
+                )
+                continue
+            manifest["integration_resolution_detail"] = scrub_local_references(
+                f"Patch content already present in HEAD {current_head}; integrator applied runtime-state actions and did not create a new code commit.",
+                target,
+            )
+            mark_applied(
+                path,
+                manifest,
+                accepted_commit=current_head,
+                accepted_commit_source="head_already_contained_patch",
+                head_before_integration=head_before,
+                checkpoint_commit=checkpoint_commit,
+                checks_run=already_applied_checks(current_head),
+                dry_run=dry_run,
+            )
+            committed.append((path, manifest, current_head))
+            continue
+        if not classification.can_apply:
+            reason = classification.reason or ("conflict" if classification.resolution == "true_conflict" else "staleness")
             mark_deferred(
                 path,
                 manifest,
                 target=target,
                 reason=reason,
-                detail=detail,
+                detail=classification.detail,
                 head_before_integration=head_before,
                 checkpoint_commit=checkpoint_commit,
                 dry_run=dry_run,
             )
             continue
-        result = apply_patch_file(target, patch, dry_run=dry_run)
+        result = apply_patch_for_resolution(target, patch, classification, dry_run=dry_run)
         if result.returncode != 0:
+            manifest["integration_resolution"] = "true_conflict"
+            manifest["integration_resolution_detail"] = scrub_local_references(
+                result.stderr.strip() or "git apply failed",
+                target,
+            )
             mark_deferred(
                 path,
                 manifest,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .common import *
 from .git_safety import git
-from .queue import resolve_runtime_state_actions_path
+from .queue import resolve_runtime_state_actions_path, resolve_ticket_state_actions_path
 from diffmogger.runtime.state_store import (
     TICKET_ITEM_STATUSES,
     load_ticket_run_state,
@@ -246,51 +246,84 @@ def plan_ticket_delete_action(
     return next_tickets, True
 
 
-def apply_runtime_state_actions(target: Path, manifest: dict[str, Any], *, dry_run: bool) -> list[dict[str, Any]]:
-    actions_path = resolve_runtime_state_actions_path(target, manifest)
-    if actions_path is None:
-        set_runtime_state_results(manifest, [])
-        return []
-    try:
-        actions_path.resolve(strict=False).relative_to(target.resolve())
-    except ValueError:
-        results = [
-            {
-                "action": "load_actions",
-                "path": str(actions_path),
-                "status": "rejected",
-                "detail": "runtime_state_actions_path escapes target checkout",
-            }
-        ]
-        set_runtime_state_results(manifest, results)
-        return results
-    if not actions_path.exists():
-        results = [
-            {
-                "action": "load_actions",
-                "path": str(actions_path),
-                "status": "error",
-                "detail": "runtime_state_actions_path does not exist",
-            }
-        ]
-        set_runtime_state_results(manifest, results)
-        return results
-    try:
-        payload = json.loads(actions_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        results = [
-            {
-                "action": "load_actions",
-                "path": str(actions_path),
-                "status": "error",
-                "detail": f"could not load runtime-state actions: {exc}",
-            }
-        ]
-        set_runtime_state_results(manifest, results)
-        return results
+def runtime_state_action_paths(target: Path, manifest: dict[str, Any]) -> list[tuple[str, Path]]:
+    paths: list[tuple[str, Path]] = []
+    runtime_actions = resolve_runtime_state_actions_path(target, manifest)
+    ticket_actions = resolve_ticket_state_actions_path(target, manifest)
+    if runtime_actions is not None:
+        paths.append(("runtime_state_actions_path", runtime_actions))
+    if ticket_actions is not None:
+        paths.append(("ticket_state_actions_path", ticket_actions))
+    deduped: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for key, path in paths:
+        marker = path.expanduser().resolve(strict=False)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        deduped.append((key, path))
+    return deduped
 
-    raw_actions = payload.get("actions") if isinstance(payload, dict) else None
-    if not isinstance(raw_actions, list) or not raw_actions:
+
+def load_runtime_state_actions(target: Path, manifest: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    action_paths = runtime_state_action_paths(target, manifest)
+    if not action_paths:
+        return [], []
+    actions: list[dict[str, Any]] = []
+    load_errors: list[dict[str, Any]] = []
+    target_resolved = target.resolve()
+    for key, actions_path in action_paths:
+        try:
+            actions_path.resolve(strict=False).relative_to(target_resolved)
+        except ValueError:
+            load_errors.append(
+                {
+                    "action": "load_actions",
+                    "path": str(actions_path),
+                    "status": "rejected",
+                    "detail": f"{key} escapes target checkout",
+                }
+            )
+            continue
+        if not actions_path.exists():
+            load_errors.append(
+                {
+                    "action": "load_actions",
+                    "path": str(actions_path),
+                    "status": "error",
+                    "detail": f"{key} does not exist",
+                }
+            )
+            continue
+        try:
+            payload = json.loads(actions_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            load_errors.append(
+                {
+                    "action": "load_actions",
+                    "path": str(actions_path),
+                    "status": "error",
+                    "detail": f"could not load {key}: {exc}",
+                }
+            )
+            continue
+        raw_actions = payload.get("actions") if isinstance(payload, dict) else None
+        if not isinstance(raw_actions, list):
+            continue
+        for action in raw_actions:
+            if isinstance(action, dict):
+                actions.append(dict(action))
+            else:
+                actions.append(action)
+    return actions, load_errors
+
+
+def apply_runtime_state_actions(target: Path, manifest: dict[str, Any], *, dry_run: bool) -> list[dict[str, Any]]:
+    raw_actions, load_errors = load_runtime_state_actions(target, manifest)
+    if load_errors:
+        set_runtime_state_results(manifest, load_errors)
+        return load_errors
+    if not raw_actions:
         set_runtime_state_results(manifest, [])
         return []
 

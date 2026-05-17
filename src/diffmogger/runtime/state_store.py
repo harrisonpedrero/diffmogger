@@ -480,7 +480,10 @@ WHY_NOT_PARALLEL_EXAMPLE_LIMIT = 3
 WHY_NOT_PARALLEL_REASON_ORDER = (
     "missing_direct_write_signal",
     "insufficient_scoping_confidence",
-    "scope_fanout_exhausted",
+    "serial_fallback",
+    "awaiting_integrator_reconciliation",
+    "parallel_not_worth_it",
+    "waiting_validation",
     "stale_symbol",
     "validation_backpressure",
     "write_surface_overlap",
@@ -500,10 +503,30 @@ WHY_NOT_PARALLEL_REASON_GUIDANCE = {
         "next_action": "Run bounded read-only scope fanout or add concrete path and symbol hints.",
         "improvement_kind": "run_scope_fanout",
     },
-    "scope_fanout_exhausted": {
-        "label": "Scope fanout exhausted",
-        "next_action": "Accept serialized execution, or add stronger path and symbol hints before retrying parallel write work.",
+    "serial_fallback": {
+        "label": "Serial fallback",
+        "next_action": "No promotable ownership evidence; using serial fallback.",
         "improvement_kind": "serial_fallback_after_scope",
+    },
+    "scope_fanout_exhausted": {
+        "label": "Serial fallback",
+        "next_action": "No promotable ownership evidence; using serial fallback.",
+        "improvement_kind": "serial_fallback_after_scope",
+    },
+    "awaiting_integrator_reconciliation": {
+        "label": "Awaiting integrator reconciliation",
+        "next_action": "Let the serialized integrator reconcile the queued patch surface before launching another write wave there.",
+        "improvement_kind": "wait_for_integrator",
+    },
+    "parallel_not_worth_it": {
+        "label": "Parallel not worth it",
+        "next_action": "Use serial execution for this wave; the current candidate set has no compatible peer worth launching.",
+        "improvement_kind": "serial_fallback",
+    },
+    "waiting_validation": {
+        "label": "Waiting validation",
+        "next_action": "Wait for validation or repair the failed validation surface before launching more writes.",
+        "improvement_kind": "finish_validation",
     },
     "write_surface_overlap": {
         "label": "Write surface overlap",
@@ -14844,6 +14867,61 @@ def _scope_evidence_current_code_index_conn(conn: sqlite3.Connection, target: Pa
     return {"snapshot_id": snapshot_id, "files_by_path": files_by_path, "symbols_by_key": symbols_by_key}
 
 
+def _scope_evidence_hard_stale_context(raw: Mapping[str, Any], stale_warning: str) -> bool:
+    hard_boolean_keys = (
+        "stale_graph_state",
+        "graph_state_stale",
+        "codebase_graph_stale",
+        "runtime_state_stale",
+        "typed_state_stale",
+        "index_stale",
+        "symbol_is_stale",
+        "owner_is_stale",
+    )
+    for key in hard_boolean_keys:
+        if bool(raw.get(key)):
+            return True
+    text = " ".join(
+        str(value or "")
+        for value in (
+            stale_warning,
+            raw.get("stale_context_detail"),
+            raw.get("stale_state_detail"),
+            raw.get("graph_state_detail"),
+        )
+        if str(value or "").strip()
+    ).lower()
+    if not text:
+        return False
+    hard_phrases = (
+        "codebase graph is stale",
+        "codebase graph stale",
+        "graph state is stale",
+        "graph state stale",
+        "graph nodes are stale",
+        "runtime state is stale",
+        "typed runtime state is stale",
+        "index is stale",
+        "stale symbol",
+        "stale owner",
+    )
+    if any(phrase in text for phrase in hard_phrases):
+        return True
+    caution_phrases = (
+        "re-read typed state",
+        "reread typed state",
+        "recheck typed state",
+        "verify current state",
+        "please verify",
+        "cautious",
+        "may have changed",
+        "could not verify",
+    )
+    if any(phrase in text for phrase in caution_phrases):
+        return False
+    return False
+
+
 def _normalize_scope_evidence_record(
     raw: Mapping[str, Any],
     *,
@@ -14869,6 +14947,7 @@ def _normalize_scope_evidence_record(
     stale_warning = _brief_text(raw.get("stale_context_warning") or raw.get("stale_warning") or "", limit=240)
     if isinstance(raw.get("stale_context"), bool) and bool(raw.get("stale_context")) and not stale_warning:
         stale_warning = "worker reported stale context"
+    hard_stale_warning = _scope_evidence_hard_stale_context(raw, stale_warning)
     reasons = _scope_evidence_string_list(raw, ("reasons", "reason", "evidence", "notes"))
     likely_tests = _scope_evidence_string_list(raw, ("likely_tests", "tests", "validation_hints", "test_paths"))
     files_by_path = code_index.get("files_by_path") if isinstance(code_index.get("files_by_path"), Mapping) else {}
@@ -14928,7 +15007,7 @@ def _normalize_scope_evidence_record(
             rejection_reason = rejection_reason or "stale_context"
     if symbol_rejection_reason and not creation_allowed:
         rejection_reason = rejection_reason or symbol_rejection_reason
-    if stale_warning:
+    if hard_stale_warning:
         rejection_reason = rejection_reason or "stale_context"
     status = "accepted"
     if rejection_reason:
@@ -14969,6 +15048,7 @@ def _normalize_scope_evidence_record(
         "creation_requested": bool(creation_requested),
         "creation_path_allowed": bool(creation_allowed),
         "symbol_rejection_reason": symbol_rejection_reason,
+        "stale_context_warning_hard": bool(hard_stale_warning),
         "raw_record": {str(key): value for key, value in raw.items()},
         "symbol_metadata": dict(symbol_metadata),
         "write_promotion_eligible": status == "accepted",
@@ -17048,6 +17128,98 @@ def _preflight_path_overlap(first: list[str], second: list[str]) -> bool:
     return False
 
 
+def _worker_patch_preflight_patch_path(target: Path | None, patch_path: str) -> Path | None:
+    if target is None or not str(patch_path or "").strip():
+        return None
+    raw = Path(str(patch_path))
+    return raw if raw.is_absolute() else target_path(target, str(patch_path))
+
+
+def _worker_patch_preflight_protected_paths(changed_files: list[str]) -> list[str]:
+    protected: list[str] = []
+    for value in changed_files:
+        path = normalize_path_for_brief(str(value or "")).strip("/")
+        if not path:
+            continue
+        parts = tuple(part for part in Path(path).parts if part and part != ".")
+        lowered = path.lower()
+        if not _impact_context_path_allowed(path):
+            protected.append(path)
+            continue
+        if parts and parts[0] in {".git", ".hg", ".svn", ".diffmogger", ".agentic"}:
+            protected.append(path)
+            continue
+        if lowered in {"target/orchestration.sqlite3", "target/automation_conveyor_state.json", "target/automation_runner.json"}:
+            protected.append(path)
+            continue
+        if lowered.startswith(("target/automation_queue/", "target/automation_worktrees/", "target/automation_logs/")):
+            protected.append(path)
+            continue
+    return sorted(dict.fromkeys(protected))
+
+
+def _worker_patch_preflight_limited_overlap(record: Mapping[str, Any], prior_records: list[Mapping[str, Any]], conflict_patch_ids: list[str]) -> bool:
+    changed_files = [normalize_path_for_brief(str(path)) for path in record.get("changed_files", []) if str(path or "")]
+    if not changed_files or len(changed_files) > 3:
+        return False
+    if _worker_patch_preflight_protected_paths(changed_files):
+        return False
+    prior_by_id = {str(item.get("patch_id") or ""): item for item in prior_records}
+    for patch_id in conflict_patch_ids:
+        prior = prior_by_id.get(patch_id)
+        if not isinstance(prior, Mapping):
+            return False
+        prior_files = [normalize_path_for_brief(str(path)) for path in prior.get("changed_files", []) if str(path or "")]
+        if not prior_files or len(prior_files) > 3:
+            return False
+        if _worker_patch_preflight_protected_paths(prior_files):
+            return False
+    return True
+
+
+def _worker_patch_preflight_reconciliation(
+    target: Path | None,
+    patch: Mapping[str, Any],
+    *,
+    changed_files: list[str],
+    head_commit: str,
+) -> dict[str, Any]:
+    patch_path = str(patch.get("patch_path") or "").strip()
+    patch_file = _worker_patch_preflight_patch_path(target, patch_path)
+    if target is None or not head_commit or patch_file is None or not patch_file.exists():
+        return {}
+    manifest = {
+        "base_commit": str(patch.get("base_commit") or "").strip(),
+        "changed_files": changed_files,
+    }
+    try:
+        from diffmogger.integrator.git_safety import classify_patch_reconciliation
+
+        classification = classify_patch_reconciliation(
+            target,
+            patch_file,
+            manifest,
+            current_head=head_commit,
+        )
+    except Exception as exc:  # pragma: no cover - defensive preflight probe fallback.
+        return {
+            "resolution": "needs_reconciliation",
+            "reason": "staleness",
+            "detail": _brief_text(f"{exc.__class__.__name__}: {exc}", limit=420),
+            "apply_mode": "none",
+            "patch_id": "",
+            "changed_since_base": [],
+        }
+    return {
+        "resolution": classification.resolution,
+        "reason": classification.reason,
+        "detail": classification.detail,
+        "apply_mode": classification.apply_mode,
+        "patch_id": classification.patch_id,
+        "changed_since_base": list(classification.changed_since_base or []),
+    }
+
+
 def _worker_patch_integration_nodes_conn(conn: sqlite3.Connection, patch_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
     if not patch_ids:
         return {}
@@ -17122,6 +17294,11 @@ def _worker_patch_preflight_payload(record: Mapping[str, Any]) -> dict[str, Any]
         "created_at": str(record.get("created_at") or ""),
         "safe_to_integrate": bool(record.get("safe_to_integrate")),
         "safe_to_order": bool(record.get("safe_to_order")),
+        "integration_resolution": str(record.get("integration_resolution") or ""),
+        "integration_resolution_detail": str(record.get("integration_resolution_detail") or ""),
+        "integration_apply_mode": str(record.get("integration_apply_mode") or ""),
+        "changed_since_base": list(record.get("changed_since_base") or []),
+        "protected_paths": list(record.get("protected_paths") or []),
     }
 
 
@@ -17262,6 +17439,12 @@ def worker_patch_integration_preflight_conn(
             "reasons": [],
             "missing_metadata": False,
             "stale_base": False,
+            "protected_paths": [],
+            "changed_since_base": [],
+            "integration_resolution": "",
+            "integration_resolution_detail": "",
+            "integration_apply_mode": "",
+            "stable_patch_id": "",
             "safe_order": 0,
             "safe_to_order": False,
             "safe_to_integrate": False,
@@ -17275,38 +17458,104 @@ def worker_patch_integration_preflight_conn(
         if not str(patch.get("patch_path") or "").strip() and not metadata_only_patch:
             record["missing_metadata"] = True
             add_reason(record, "missing_patch_path", "Patch has no patch artifact path metadata.")
+        protected_paths = _worker_patch_preflight_protected_paths(changed_files)
+        if protected_paths:
+            record["protected_paths"] = protected_paths
+            add_reason(
+                record,
+                "protected_path",
+                f"Patch touches protected or secret-sensitive path(s): {', '.join(protected_paths[:4])}.",
+            )
         if not integration_nodes:
             add_reason(record, "missing_integration_dag_node", "Patch has not been reconciled into an integration DAG node.", severity="warn")
         elif patch_id not in ready_patch_ids:
             add_reason(record, "dag_dependencies_pending", "Patch integration DAG node is waiting on review, validation, or upstream dependencies.", severity="info")
         base_commit = str(patch.get("base_commit") or "").strip()
+        base_drift_touches: list[str] = []
+        base_drift_git_error = ""
         if target is not None and base_commit and head_commit and base_commit != head_commit and changed_files:
             if base_commit not in changed_since_base_cache:
                 changed_since_base_cache[base_commit] = _git_changed_paths_since_base(target, base_commit)
             changed_since_base, git_error = changed_since_base_cache[base_commit]
             if git_error:
-                record["stale_base"] = True
+                base_drift_git_error = git_error
                 add_reason(record, "base_commit_unavailable", f"Could not compare patch base against current HEAD: {git_error}")
             elif _preflight_path_overlap(changed_files, changed_since_base):
-                record["stale_base"] = True
-                add_reason(record, "stale_base_changed_files", "Patch base is behind current HEAD and touched files changed since that base.")
+                base_drift_touches = [
+                    path
+                    for path in changed_files
+                    if _preflight_path_overlap([path], changed_since_base)
+                ]
+                record["changed_since_base"] = base_drift_touches
+                add_reason(
+                    record,
+                    "base_drift_touched_files",
+                    "Patch base is behind current HEAD and touched files changed since that base; deterministic reconciliation preflight will classify it.",
+                    severity="info",
+                )
             else:
                 add_reason(record, "base_advanced_without_touch_overlap", "Patch base is behind current HEAD but touched files do not overlap changes since base.", severity="info")
 
+        reconciliation = _worker_patch_preflight_reconciliation(
+            target,
+            patch,
+            changed_files=changed_files,
+            head_commit=head_commit,
+        )
+        if reconciliation:
+            record["integration_resolution"] = str(reconciliation.get("resolution") or "")
+            record["integration_resolution_detail"] = _brief_text(reconciliation.get("detail") or "", limit=420)
+            record["integration_apply_mode"] = str(reconciliation.get("apply_mode") or "")
+            record["stable_patch_id"] = str(reconciliation.get("patch_id") or "")
+            if reconciliation.get("changed_since_base"):
+                record["changed_since_base"] = list(reconciliation.get("changed_since_base") or [])
+            resolution = str(reconciliation.get("resolution") or "")
+            if resolution:
+                severity = "block" if resolution in {"true_conflict", "needs_reconciliation"} else "info"
+                reason_kind = "integration_reconciliation_" + resolution
+                add_reason(
+                    record,
+                    reason_kind,
+                    str(reconciliation.get("detail") or f"Patch classified as {resolution}."),
+                    severity=severity,
+                )
+        elif base_drift_touches and not metadata_only_patch:
+            patch_file = _worker_patch_preflight_patch_path(target, str(patch.get("patch_path") or ""))
+            if patch_file is None or not patch_file.exists():
+                record["missing_metadata"] = True
+                add_reason(
+                    record,
+                    "missing_patch_artifact_for_reconciliation",
+                    "Patch base drift touches changed files but the patch artifact is unavailable for deterministic reconciliation.",
+                )
+        if base_drift_git_error and record["integration_resolution"] not in {"already_applied", "rebaseable", "direct_apply"}:
+            record["stale_base"] = True
+
         if record["missing_metadata"]:
             record["status"] = "missing_metadata"
+        elif protected_paths:
+            record["status"] = "protected_path"
         elif record["stale_base"]:
-            record["status"] = "stale_base"
+            record["status"] = "needs_reconciliation"
         elif not integration_nodes:
             record["status"] = "waiting_dag_handoff"
+        elif record["integration_resolution"] in {"already_applied", "rebaseable", "direct_apply", "true_conflict", "needs_reconciliation"}:
+            if record["integration_resolution"] in {"true_conflict", "needs_reconciliation"}:
+                record["status"] = record["integration_resolution"]
+            elif record["ready_to_integrate"]:
+                record["status"] = record["integration_resolution"]
+            else:
+                record["status"] = "waiting_validation"
+            if record["integration_resolution"] in {"already_applied", "rebaseable", "direct_apply"}:
+                record["can_proceed_after_validation"] = True
         elif not record["ready_to_integrate"]:
             record["status"] = "waiting_validation"
             record["can_proceed_after_validation"] = True
         else:
-            record["status"] = "safe"
+            record["status"] = "direct_apply"
             record["can_proceed_after_validation"] = True
 
-        if record["status"] in {"safe", "waiting_validation"}:
+        if record["status"] in {"direct_apply", "safe", "waiting_validation", "already_applied", "rebaseable"}:
             path_conflict_ids = [
                 str(prior.get("patch_id") or "")
                 for prior in orderable_records
@@ -17316,6 +17565,29 @@ def worker_patch_integration_preflight_conn(
             lease_conflict_ids = [str(item.get("patch_id") or "") for item in lease_conflicts if str(item.get("patch_id") or "")]
             conflict_patch_ids = sorted({*path_conflict_ids, *lease_conflict_ids} - {""})
             if conflict_patch_ids:
+                limited_overlap = bool(path_conflict_ids) and not lease_conflict_ids and _worker_patch_preflight_limited_overlap(
+                    record,
+                    orderable_records,
+                    path_conflict_ids,
+                )
+                record["conflict_patch_ids"] = conflict_patch_ids
+                if limited_overlap:
+                    record["status"] = "reconcilable_overlap"
+                    record["reason_kind"] = "awaiting_integrator_reconciliation"
+                    record["can_proceed_after_validation"] = True
+                    add_reason(
+                        record,
+                        "awaiting_integrator_reconciliation",
+                        f"Patch has limited changed-file overlap with queued patch(es): {', '.join(conflict_patch_ids[:4])}; serialized integration remains authoritative.",
+                        severity="info",
+                    )
+                    safe_order += 1
+                    record["safe_order"] = safe_order
+                    record["safe_to_order"] = True
+                    record["safe_to_integrate"] = bool(record["ready_to_integrate"])
+                    orderable_records.append(record)
+                    records.append(record)
+                    continue
                 record["status"] = "likely_conflict"
                 record["reason_kind"] = "overlapping_worker_patch_surface"
                 record["conflict_patch_ids"] = conflict_patch_ids
@@ -17329,7 +17601,13 @@ def worker_patch_integration_preflight_conn(
                 safe_order += 1
                 record["safe_order"] = safe_order
                 record["safe_to_order"] = True
-                record["safe_to_integrate"] = record["status"] == "safe"
+                record["safe_to_integrate"] = bool(record["ready_to_integrate"]) and record["status"] in {
+                    "direct_apply",
+                    "safe",
+                    "already_applied",
+                    "rebaseable",
+                    "reconcilable_overlap",
+                }
                 orderable_records.append(record)
         if not record["reason_kind"]:
             blocking_reason = next(
@@ -17352,11 +17630,14 @@ def worker_patch_integration_preflight_conn(
             "can_proceed_after_validation": record.get("can_proceed_after_validation"),
             "changed_files": record.get("changed_files"),
             "reason_kind": record.get("reason_kind"),
+            "integration_resolution": record.get("integration_resolution"),
+            "integration_resolution_detail": record.get("integration_resolution_detail"),
         }
         for record in records
         if bool(record.get("safe_to_order"))
     ]
     likely_conflicts = [record for record in records if str(record.get("status") or "") == "likely_conflict"]
+    reconcilable_overlaps = [record for record in records if str(record.get("status") or "") == "reconcilable_overlap"]
     safe_patch_ids = [str(record.get("patch_id") or "") for record in records if bool(record.get("safe_to_integrate"))]
     proceed_after_validation_patch_ids = [
         str(record.get("patch_id") or "")
@@ -17372,6 +17653,12 @@ def worker_patch_integration_preflight_conn(
         "ready_patch_count": len([record for record in records if bool(record.get("ready_to_integrate"))]),
         "safe_count": len(safe_patch_ids),
         "likely_conflict_count": len(likely_conflicts),
+        "reconcilable_overlap_count": len(reconcilable_overlaps),
+        "already_applied_count": len([record for record in records if str(record.get("status") or "") == "already_applied"]),
+        "rebaseable_count": len([record for record in records if str(record.get("status") or "") == "rebaseable"]),
+        "true_conflict_count": len([record for record in records if str(record.get("status") or "") == "true_conflict"]),
+        "needs_reconciliation_count": len([record for record in records if str(record.get("status") or "") == "needs_reconciliation"]),
+        "protected_path_count": len([record for record in records if str(record.get("status") or "") == "protected_path"]),
         "missing_metadata_count": len([record for record in records if bool(record.get("missing_metadata"))]),
         "stale_base_count": len([record for record in records if bool(record.get("stale_base"))]),
         "dependency_pending_count": len([record for record in records if str(record.get("status") or "") in {"waiting_validation", "waiting_dag_handoff"}]),
@@ -17381,7 +17668,7 @@ def worker_patch_integration_preflight_conn(
         "blocked_patch_ids": [
             str(record.get("patch_id") or "")
             for record in records
-            if str(record.get("status") or "") in {"missing_metadata", "stale_base", "likely_conflict"}
+            if str(record.get("status") or "") in {"missing_metadata", "stale_base", "likely_conflict", "true_conflict", "needs_reconciliation", "protected_path"}
         ],
         "safe_order": safe_order_records,
         "likely_conflicts": [
@@ -17392,6 +17679,17 @@ def worker_patch_integration_preflight_conn(
                 "changed_files": record.get("changed_files"),
             }
             for record in likely_conflicts
+        ],
+        "reconcilable_overlaps": [
+            {
+                "patch_id": record.get("patch_id"),
+                "conflict_patch_ids": record.get("conflict_patch_ids"),
+                "reason_kind": record.get("reason_kind"),
+                "changed_files": record.get("changed_files"),
+                "integration_resolution": record.get("integration_resolution"),
+                "integration_resolution_detail": record.get("integration_resolution_detail"),
+            }
+            for record in reconcilable_overlaps
         ],
         "records": records,
     }
@@ -19826,6 +20124,111 @@ def _parallel_dag_metadata(dag_node: Mapping[str, Any], task_node: Mapping[str, 
     return merged
 
 
+def _patch_ids_from_dag_scope_metadata(dag_node: Mapping[str, Any], metadata: Mapping[str, Any]) -> list[str]:
+    patch_ids: list[str] = []
+
+    def add(value: Any) -> None:
+        for item in _task_text_values(value):
+            text = str(item or "").strip()
+            if text and text not in patch_ids:
+                patch_ids.append(text)
+
+    patch = dag_node.get("patch") if isinstance(dag_node.get("patch"), Mapping) else {}
+    add(patch.get("id") or patch.get("patch_id"))
+    add(metadata.get("patch_id"))
+    add(metadata.get("patch_ids"))
+    patches = metadata.get("patches") if isinstance(metadata.get("patches"), list) else []
+    for item in patches:
+        if isinstance(item, Mapping):
+            add(item.get("id") or item.get("patch_id"))
+        else:
+            add(item)
+    return patch_ids[:20]
+
+
+def _worker_patch_scope_for_dag_node_conn(
+    conn: sqlite3.Connection,
+    dag_node: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    patch_ids = _patch_ids_from_dag_scope_metadata(dag_node, metadata)
+    if not patch_ids:
+        return {}
+    placeholders = ",".join("?" for _ in patch_ids)
+    paths: list[str] = []
+    sources: list[str] = []
+    rows = conn.execute(
+        f"""
+        SELECT patch_id, changed_files_json, payload_json
+        FROM worker_patches
+        WHERE patch_id IN ({placeholders})
+        """,
+        tuple(patch_ids),
+    ).fetchall()
+    for row in rows:
+        sources.append(str(row["patch_id"] or ""))
+        payload = _json_cell(row["payload_json"], {})
+        payload = payload if isinstance(payload, Mapping) else {}
+        for value in [
+            *_json_cell(row["changed_files_json"], []),
+            *(payload.get("changed_files") if isinstance(payload.get("changed_files"), list) else []),
+            *(payload.get("predicted_files") if isinstance(payload.get("predicted_files"), list) else []),
+        ]:
+            path = normalize_path_for_brief(str(value or ""))
+            if path:
+                paths.append(path)
+    preflight_rows = conn.execute(
+        f"""
+        SELECT patch_id, changed_files_json, payload_json
+        FROM worker_patch_integration_preflight
+        WHERE patch_id IN ({placeholders})
+        """,
+        tuple(patch_ids),
+    ).fetchall()
+    for row in preflight_rows:
+        sources.append(str(row["patch_id"] or ""))
+        payload = _json_cell(row["payload_json"], {})
+        payload = payload if isinstance(payload, Mapping) else {}
+        for value in [
+            *_json_cell(row["changed_files_json"], []),
+            *(payload.get("changed_files") if isinstance(payload.get("changed_files"), list) else []),
+            *(payload.get("changed_since_base") if isinstance(payload.get("changed_since_base"), list) else []),
+        ]:
+            path = normalize_path_for_brief(str(value or ""))
+            if path:
+                paths.append(path)
+    paths = sorted(dict.fromkeys(paths))
+    if not paths:
+        return {}
+    return {
+        "patch_ids": patch_ids,
+        "paths": paths,
+        "source_patch_ids": sorted(dict.fromkeys(sources)),
+        "source": "worker_patch_metadata",
+    }
+
+
+def _parallel_metadata_with_patch_scope_conn(
+    conn: sqlite3.Connection,
+    dag_node: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = dict(metadata)
+    if _impact_explicit_task_paths(merged):
+        return merged
+    action_type = _execution_dag_canonical_action(str(dag_node.get("action_type") or ""))
+    if action_type not in {"review", "validate", "integrate", "integration"}:
+        return merged
+    scope = _worker_patch_scope_for_dag_node_conn(conn, dag_node, merged)
+    paths = scope.get("paths") if isinstance(scope.get("paths"), list) else []
+    if not paths:
+        return merged
+    merged["paths"] = list(paths)
+    merged["patch_scope_source"] = str(scope.get("source") or "worker_patch_metadata")
+    merged["patch_scope_patch_ids"] = list(scope.get("patch_ids") or [])
+    return merged
+
+
 def _parallel_task_text_from_dag_node(
     dag_node: Mapping[str, Any],
     metadata: Mapping[str, Any],
@@ -19988,6 +20391,7 @@ def _parallel_context_pack_for_dag_node_conn(
     max_items: int = IMPACT_CONTEXT_PACK_LIMIT,
 ) -> dict[str, Any]:
     metadata = metadata if isinstance(metadata, Mapping) else _parallel_dag_metadata(dag_node, task_node)
+    metadata = _parallel_metadata_with_patch_scope_conn(conn, dag_node, metadata)
     task_id = str(dag_node.get("task_id") or "").strip()
     task_text = _parallel_task_text_from_dag_node(dag_node, metadata, task_node)
     task_terms = _impact_terms(task_text)
@@ -20902,6 +21306,14 @@ def _why_not_parallel_reason_kind(raw_reason_kind: str, candidate: Mapping[str, 
     reason_text = str(candidate.get("reason") or candidate.get("skipped_reason") or "").lower()
     if "stale_symbol" in confidence_signals or raw == "stale_symbol":
         return "stale_symbol"
+    if raw == "scope_fanout_exhausted":
+        return "serial_fallback"
+    if raw in {"awaiting_integrator_reconciliation", "overlapping_worker_patch_surface"}:
+        return "awaiting_integrator_reconciliation"
+    if raw in {"validation_backpressure", "waiting_validation"}:
+        return "waiting_validation"
+    if raw in {"no_safe_parallel_peer", "not_grouped"}:
+        return "parallel_not_worth_it"
     if raw in {"active_lease_conflict", "lease_conflict", "resource_lease_conflict"}:
         return "lease_conflict"
     if raw in {"budget_blocked", "budget_disabled", "budget_exhausted", "read_only_scope_budget_blocked", "write_worker_budget_blocked"}:
@@ -20916,6 +21328,8 @@ def _why_not_parallel_reason_kind(raw_reason_kind: str, candidate: Mapping[str, 
         return "lease_conflict"
     if "stale" in reason_text and "symbol" in reason_text:
         return "stale_symbol"
+    if "serial fallback" in reason_text:
+        return "serial_fallback"
     return "unknown"
 
 
@@ -21418,7 +21832,7 @@ def _parallel_candidate_for_task_conn(
             return None, _parallel_blocked_candidate(
                 candidate,
                 reason_kind="scope_fanout_exhausted",
-                reason="bounded read-only scope fanout completed without promotable ownership evidence; serialized builder fallback is safest",
+                reason="No promotable ownership evidence; using serial fallback.",
             )
         advisory_signals = set(confidence_signals)
         if advisory_signals.intersection({"keyword_only", "keyword_advisory"}):
@@ -21611,7 +22025,7 @@ def _parallel_candidate_for_dag_node_conn(
             return None, _parallel_blocked_candidate(
                 candidate,
                 reason_kind="scope_fanout_exhausted",
-                reason="bounded read-only scope fanout completed without promotable ownership evidence; serialized builder fallback is safest",
+                reason="No promotable ownership evidence; using serial fallback.",
             )
         advisory_signals = set(confidence_signals)
         if advisory_signals.intersection({"keyword_only", "keyword_advisory"}):
@@ -21689,6 +22103,22 @@ def _parallel_lease_conflict_reason(first: Mapping[str, Any], second: Mapping[st
     return f"write lease overlap: {reason}"
 
 
+def _parallel_limited_symbol_overlap_allowed(first_touch: Mapping[str, Any], second_touch: Mapping[str, Any]) -> bool:
+    first_path = normalize_path_for_brief(str(first_touch.get("path") or ""))
+    second_path = normalize_path_for_brief(str(second_touch.get("path") or ""))
+    if not first_path or first_path != second_path:
+        return False
+    first_symbol = str(first_touch.get("symbol_node_id") or "")
+    second_symbol = str(second_touch.get("symbol_node_id") or "")
+    if not first_symbol or not second_symbol or first_symbol == second_symbol:
+        return False
+    if bool(first_touch.get("symbol_is_stale")) or bool(second_touch.get("symbol_is_stale")):
+        return False
+    first_resolution = str(first_touch.get("symbol_resolution") or "")
+    second_resolution = str(second_touch.get("symbol_resolution") or "")
+    return first_resolution == "exact" and second_resolution == "exact"
+
+
 def _parallel_candidates_conflict(first: Mapping[str, Any], second: Mapping[str, Any]) -> tuple[bool, str]:
     if not (_parallel_write_like(first) and _parallel_write_like(second)):
         return False, ""
@@ -21715,6 +22145,8 @@ def _parallel_candidates_conflict(first: Mapping[str, Any], second: Mapping[str,
             continue
         key = str(item.get("node_id") or item.get("path") or "")
         if key and key in first_by_key:
+            if _parallel_limited_symbol_overlap_allowed(first_by_key[key], item):
+                continue
             label = str(item.get("path") or first_by_key[key].get("path") or key)
             return True, f"both write candidates may touch `{label}`"
     first_paths = [str(item.get("path") or "") for item in first_touches if isinstance(item, Mapping)]
@@ -21722,6 +22154,10 @@ def _parallel_candidates_conflict(first: Mapping[str, Any], second: Mapping[str,
     for first_path in first_paths:
         for second_path in second_paths:
             if first_path and second_path and (first_path == second_path or _path_under(first_path, second_path) or _path_under(second_path, first_path)):
+                first_touch = next((item for item in first_touches if isinstance(item, Mapping) and normalize_path_for_brief(str(item.get("path") or "")) == first_path), {})
+                second_touch = next((item for item in second_touches if isinstance(item, Mapping) and normalize_path_for_brief(str(item.get("path") or "")) == second_path), {})
+                if _parallel_limited_symbol_overlap_allowed(first_touch, second_touch):
+                    continue
                 return True, f"write impact paths overlap at `{first_path if len(first_path) <= len(second_path) else second_path}`"
     return False, ""
 
@@ -25861,7 +26297,7 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         f"- worker_reports: {_format_key_values({'active_read_only': len(active_read_only_workers), 'active_write': len(active_write_workers), 'completed': len(completed_worker_reports), 'disposition_required': _brief_bool(worker_finding_disposition_required)})}",
         f"- scope_fanout: {_format_key_values({'outcomes': len(scope_fanout_outcomes), 'exhausted': len(exhausted_scope_fanout_outcomes), 'max_completed_attempts': SCOPE_FANOUT_MAX_COMPLETED_ATTEMPTS})}",
         f"- worker_patches: {_format_key_values({'queued': len(queued_worker_patches), 'conflicts': len(write_worker_conflicts)})}",
-        f"- worker_patch_preflight: {_format_key_values({'safe': worker_patch_preflight.get('safe_count'), 'ready': worker_patch_preflight.get('ready_patch_count'), 'likely_conflicts': worker_patch_preflight.get('likely_conflict_count'), 'stale_base': worker_patch_preflight.get('stale_base_count'), 'missing_metadata': worker_patch_preflight.get('missing_metadata_count')})}",
+        f"- worker_patch_preflight: {_format_key_values({'safe': worker_patch_preflight.get('safe_count'), 'ready': worker_patch_preflight.get('ready_patch_count'), 'already_applied': worker_patch_preflight.get('already_applied_count'), 'rebaseable': worker_patch_preflight.get('rebaseable_count'), 'reconcilable': worker_patch_preflight.get('reconcilable_overlap_count'), 'true_conflict': worker_patch_preflight.get('true_conflict_count'), 'missing_metadata': worker_patch_preflight.get('missing_metadata_count')})}",
         f"- patch_lineage: {_format_key_values({'count': (snapshot.get('patch_lineage_summary') or {}).get('lineage_count') if isinstance(snapshot.get('patch_lineage_summary'), dict) else 0, 'file_f1': patch_prediction_accuracy.get('average_file_f1'), 'symbol_f1': patch_prediction_accuracy.get('average_symbol_f1'), 'conflict_rate': patch_telemetry.get('conflict_rate'), 'validation_failure_rate': patch_telemetry.get('validation_failure_rate'), 'retry_rate': patch_telemetry.get('retry_rate'), 'integration_success_rate': patch_telemetry.get('integration_success_rate'), 'wall_clock_saved_s': patch_telemetry.get('wall_clock_savings_seconds')})}",
         f"- validation_jobs: {_format_key_values({'aggregate': validation_job_summary.get('aggregate_status'), 'active': len(active_validation_jobs), 'total': validation_job_summary.get('job_count'), 'available': _brief_bool(snapshot.get('parallel_validation_available')), 'budget_allowed': _brief_bool(validation_budget_status.get('allowed'))})}",
     ])
@@ -25899,7 +26335,7 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         top_reasons = outcome.get("top_rejection_reasons") if isinstance(outcome.get("top_rejection_reasons"), list) else []
         top_reason = top_reasons[0].get("reason_kind") if top_reasons and isinstance(top_reasons[0], dict) else ""
         lines.append(
-            f"- scope_fanout_exhausted: {_format_key_values({'task': outcome.get('task_id'), 'attempts': outcome.get('attempt_count'), 'records': outcome.get('evidence_record_count'), 'accepted': outcome.get('accepted_count'), 'top_rejection': top_reason, 'next': 'serialized fallback allowed'})}"
+            f"- serial_fallback: {_format_key_values({'task': outcome.get('task_id'), 'attempts': outcome.get('attempt_count'), 'records': outcome.get('evidence_record_count'), 'accepted': outcome.get('accepted_count'), 'top_rejection': top_reason, 'reason': 'No promotable ownership evidence; using serial fallback.', 'raw_reason': 'scope_fanout_exhausted'})}"
         )
     if proposed_execution_groups:
         for group in proposed_execution_groups[:BRIEF_ITEM_LIMIT]:

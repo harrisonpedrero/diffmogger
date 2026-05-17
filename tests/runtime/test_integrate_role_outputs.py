@@ -196,6 +196,97 @@ class RuntimeStateActionTests(unittest.TestCase):
             "runtime_state_results": [],
         }
 
+    def git_head(self, target: Path) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=target,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+    def commit_all(self, target: Path, message: str) -> str:
+        subprocess.run(
+            ["git", "add", "-A", "--", ".", ":!target/automation_queue", ":!target/orchestration.sqlite3*"],
+            cwd=target,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                message,
+            ],
+            cwd=target,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        return self.git_head(target)
+
+    def write_queued_patch_manifest(
+        self,
+        target: Path,
+        *,
+        role: str,
+        run_id: str,
+        patch_path: Path,
+        base_commit: str,
+        changed_files: list[str],
+        extra: dict[str, object] | None = None,
+    ) -> Path:
+        manifest_path = patch_path.parent / "manifest.json"
+        manifest = {
+            "role": role,
+            "run_id": run_id,
+            "base_commit": base_commit,
+            "head_before_integration": None,
+            "status": "queued",
+            "patch_path": str(patch_path),
+            "changed_files": changed_files,
+            "checks_run": [],
+            "summary": (
+                "Commit type: fix\n"
+                "Commit scope: integration\n"
+                f"Commit subject: integrate {run_id}\n"
+            ),
+            "created_at": "2026-05-14T00:00:00+00:00",
+            "integrated_at": None,
+        }
+        if extra:
+            manifest.update(extra)
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return manifest_path
+
+    def write_queued_file_patch(
+        self,
+        target: Path,
+        *,
+        role: str = "builder",
+        run_id: str,
+        relative: str,
+        new_content: str,
+        base_commit: str,
+        extra: dict[str, object] | None = None,
+    ) -> Path:
+        patch = target / "target" / "automation_queue" / role / run_id / "changes.patch"
+        patch.parent.mkdir(parents=True, exist_ok=True)
+        self.write_patch_for_file(target, relative, new_content, patch)
+        return self.write_queued_patch_manifest(
+            target,
+            role=role,
+            run_id=run_id,
+            patch_path=patch,
+            base_commit=base_commit,
+            changed_files=[relative],
+            extra=extra,
+        )
+
     def write_speculative_candidate(
         self,
         target: Path,
@@ -1493,6 +1584,273 @@ AssertionError: expected 1 received 2
                     self.assertEqual("superseded", older_saved["deferral_triage_status"])
                     self.assertEqual("deferred", newer_saved["status"])
                     self.assertEqual("replace-from-current-HEAD", newer_saved["deferral_triage_status"])
+
+    def test_already_present_patch_after_checkpoint_resolves_without_deferral(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target, bridge_mode="disabled")
+                    self.add_committed_file(target, "src/app.txt", "old\n")
+                    base_commit = self.git_head(target)
+                    manifest_path = self.write_queued_file_patch(
+                        target,
+                        run_id="run-present-after-checkpoint",
+                        relative="src/app.txt",
+                        new_content="new\n",
+                        base_commit=base_commit,
+                    )
+                    (target / "src/app.txt").write_text("new\n", encoding="utf-8")
+
+                    exit_code = module.integrate(target, "integrator-already-present", dry_run=False)
+
+                    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    self.assertEqual(0, exit_code)
+                    self.assertEqual("applied", saved["status"])
+                    self.assertEqual("already_applied", saved["integration_resolution"])
+                    self.assertEqual("head_already_contained_patch", saved["accepted_commit_source"])
+                    self.assertEqual(saved["head_before_integration"], saved["accepted_commit"])
+                    self.assertNotEqual("deferred", saved["status"])
+                    self.assertEqual("new\n", (target / "src/app.txt").read_text(encoding="utf-8"))
+
+    def test_base_advanced_with_unrelated_files_integrates_directly(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target, bridge_mode="disabled")
+                    self.add_committed_file(target, "src/app.txt", "old\n")
+                    base_commit = self.git_head(target)
+                    manifest_path = self.write_queued_file_patch(
+                        target,
+                        run_id="run-unrelated-drift",
+                        relative="src/app.txt",
+                        new_content="new\n",
+                        base_commit=base_commit,
+                    )
+                    self.add_committed_file(target, "docs/notes.md", "unrelated\n")
+
+                    exit_code = module.integrate(target, "integrator-unrelated-drift", dry_run=False)
+
+                    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    self.assertEqual(0, exit_code)
+                    self.assertEqual("applied", saved["status"])
+                    self.assertEqual("direct_apply", saved["integration_resolution"])
+                    self.assertTrue(saved["accepted_commit"])
+                    self.assertEqual("new\n", (target / "src/app.txt").read_text(encoding="utf-8"))
+                    self.assertEqual("unrelated\n", (target / "docs/notes.md").read_text(encoding="utf-8"))
+
+    def test_equivalent_same_file_drift_marks_hardener_patch_applied(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target, bridge_mode="disabled")
+                    self.add_committed_file(target, "src/app.txt", "old\n")
+                    (target / ".agentic" / "verification_commands.txt").write_text(
+                        "python3 -c 'print(\"hardener baseline ok\")'\n",
+                        encoding="utf-8",
+                    )
+                    base_commit = self.git_head(target)
+                    manifest_path = self.write_queued_file_patch(
+                        target,
+                        role="hardener",
+                        run_id="run-equivalent-hardener",
+                        relative="src/app.txt",
+                        new_content="new\n",
+                        base_commit=base_commit,
+                        extra={
+                            "summary": (
+                                "Commit type: test\n"
+                                "Commit scope: app\n"
+                                "Commit subject: harden app fixture\n"
+                            )
+                        },
+                    )
+                    (target / "src/app.txt").write_text("new\n", encoding="utf-8")
+                    self.commit_all(target, "test: independently apply hardener diff")
+
+                    exit_code = module.integrate(target, "integrator-equivalent-hardener", dry_run=False)
+
+                    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    self.assertEqual(0, exit_code)
+                    self.assertEqual("applied", saved["status"])
+                    self.assertEqual("already_applied", saved["integration_resolution"])
+                    self.assertEqual("head_already_contained_patch", saved["accepted_commit_source"])
+                    self.assertIsNone(saved["deferral_reason"])
+
+    def test_clean_rebaseable_patch_applies_and_validates(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target, bridge_mode="disabled")
+                    self.add_committed_file(target, "src/app.txt", "line 1\nline 2\nline 3\nline 4\nline 5\nvalue = old\nline 7\n")
+                    base_commit = self.git_head(target)
+                    manifest_path = self.write_queued_file_patch(
+                        target,
+                        run_id="run-rebaseable",
+                        relative="src/app.txt",
+                        new_content="line 1\nline 2\nline 3\nline 4\nline 5\nvalue = new\nline 7\n",
+                        base_commit=base_commit,
+                        extra={"verification_commands": ["python3 -c 'print(\"rebase validation ok\")'"]},
+                    )
+                    (target / "src/app.txt").write_text(
+                        "line 1\nline 2 changed by HEAD\nline 3\nline 4\nline 5\nvalue = old\nline 7\n",
+                        encoding="utf-8",
+                    )
+                    self.commit_all(target, "refactor: update nearby context")
+
+                    exit_code = module.integrate(target, "integrator-rebaseable", dry_run=False)
+
+                    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    self.assertEqual(0, exit_code)
+                    self.assertEqual("applied", saved["status"])
+                    self.assertEqual("rebaseable", saved["integration_resolution"])
+                    self.assertIn("rebase validation ok", "\n".join(saved["checks_run"]))
+                    self.assertEqual(
+                        "line 1\nline 2 changed by HEAD\nline 3\nline 4\nline 5\nvalue = new\nline 7\n",
+                        (target / "src/app.txt").read_text(encoding="utf-8"),
+                    )
+
+    def test_true_conflict_still_defers_with_concrete_detail(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target, bridge_mode="disabled")
+                    self.add_committed_file(target, "src/app.txt", "header\nvalue = old\nfooter\n")
+                    base_commit = self.git_head(target)
+                    manifest_path = self.write_queued_file_patch(
+                        target,
+                        run_id="run-true-conflict",
+                        relative="src/app.txt",
+                        new_content="header\nvalue = worker\nfooter\n",
+                        base_commit=base_commit,
+                    )
+                    (target / "src/app.txt").write_text("header\nvalue = head\nfooter\n", encoding="utf-8")
+                    self.commit_all(target, "fix: change same line")
+
+                    exit_code = module.integrate(target, "integrator-true-conflict", dry_run=False)
+
+                    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    self.assertEqual(0, exit_code)
+                    self.assertEqual("deferred", saved["status"])
+                    self.assertEqual("conflict", saved["deferral_reason"])
+                    self.assertEqual("true_conflict", saved["integration_resolution"])
+                    self.assertIn("conflict", saved["integration_resolution_detail"].lower())
+                    self.assertIn("src/app.txt", saved["deferral_detail"])
+
+    def test_already_applied_patch_still_reconciles_runtime_and_ticket_actions(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target, bridge_mode="disabled")
+                    self.add_committed_file(target, "src/app.txt", "old\n")
+                    (target / ".agentic" / "automation_prompt.md").write_text("prompt v1\n", encoding="utf-8")
+                    self.commit_all(target, "chore: add automation prompt")
+                    write_ticket_run_state(
+                        target,
+                        {
+                            "schema_version": 1,
+                            "tickets": [
+                                {
+                                    "id": "TICKET-1",
+                                    "title": "Generic work",
+                                    "summary": "Generic reusable work.",
+                                    "status": "todo",
+                                    "description": "Reusable test ticket.",
+                                }
+                            ],
+                        },
+                        actor_role="test",
+                        event_type="ticket.run_seeded",
+                        source_path="test",
+                    )
+                    base_commit = self.git_head(target)
+                    patch = target / "target" / "automation_queue" / "builder" / "run-actions" / "changes.patch"
+                    patch.parent.mkdir(parents=True, exist_ok=True)
+                    self.write_patch_for_file(target, "src/app.txt", "new\n", patch)
+                    (target / "src/app.txt").write_text("new\n", encoding="utf-8")
+                    self.commit_all(target, "fix: independently apply code diff")
+                    runtime_actions = patch.parent / "runtime_state_actions.json"
+                    ticket_actions = patch.parent / "ticket_state_actions.json"
+                    runtime_actions.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "actions": [
+                                    {
+                                        "action": "replace_file",
+                                        "path": ".agentic/automation_prompt.md",
+                                        "start_hash": sha256_text("prompt v1\n"),
+                                        "end_hash": sha256_text("prompt v2\n"),
+                                        "content": "prompt v2\n",
+                                    }
+                                ],
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    current_ticket = load_ticket_run_state(target)["tickets"][0]
+                    next_ticket = {**current_ticket, "status": "done"}
+                    ticket_actions.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "actions": [
+                                    {
+                                        "action": "update_ticket",
+                                        "ticket_id": "TICKET-1",
+                                        "start_hash": ticket_digest(current_ticket),
+                                        "end_hash": ticket_digest(next_ticket),
+                                        "ticket": next_ticket,
+                                    }
+                                ],
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    manifest_path = self.write_queued_patch_manifest(
+                        target,
+                        role="builder",
+                        run_id="run-actions",
+                        patch_path=patch,
+                        base_commit=base_commit,
+                        changed_files=["src/app.txt"],
+                        extra={
+                            "runtime_state_actions_path": str(runtime_actions),
+                            "ticket_state_actions_path": str(ticket_actions),
+                            "runtime_state_status": "pending",
+                            "runtime_state_results": [],
+                        },
+                    )
+
+                    committed = module.integrate_individually(
+                        target,
+                        [(manifest_path, json.loads(manifest_path.read_text(encoding="utf-8")))],
+                        head_before=self.git_head(target),
+                        checkpoint_commit=None,
+                        baseline=None,
+                        dry_run=False,
+                    )
+
+                    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    ticket_state = load_ticket_run_state(target)
+                    self.assertEqual(1, len(committed))
+                    self.assertEqual("applied", saved["status"])
+                    self.assertEqual("already_applied", saved["integration_resolution"])
+                    self.assertEqual("prompt v2\n", (target / ".agentic" / "automation_prompt.md").read_text(encoding="utf-8"))
+                    self.assertEqual("done", ticket_state["tickets"][0]["status"])
+                    statuses = [item["status"] for item in saved["runtime_state_results"]]
+                    self.assertEqual(["applied", "applied"], statuses)
 
 
 class GitIndexLockTests(unittest.TestCase):

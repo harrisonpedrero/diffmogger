@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tempfile
+
 from .common import *
 
 @dataclass
@@ -503,6 +505,14 @@ def reset_to(target: Path, ref: str, manifests: list[dict[str, Any]], *, dry_run
 def apply_check(target: Path, patch: Path) -> subprocess.CompletedProcess[str]:
     return git(target, "apply", "--check", str(patch))
 
+def reverse_apply_check(target: Path, patch: Path) -> subprocess.CompletedProcess[str]:
+    return git(target, "apply", "--reverse", "--check", str(patch))
+
+def apply_rebaseable_patch_file(target: Path, patch: Path, *, dry_run: bool) -> subprocess.CompletedProcess[str]:
+    if dry_run:
+        return subprocess.CompletedProcess(["git", "apply", "--3way", str(patch)], 0, "", "")
+    return git(target, "apply", "--3way", str(patch))
+
 def apply_patch_file(target: Path, patch: Path, *, dry_run: bool) -> subprocess.CompletedProcess[str]:
     if dry_run:
         return subprocess.CompletedProcess(["git", "apply", str(patch)], 0, "", "")
@@ -515,6 +525,282 @@ def changed_since_base(target: Path, base_commit: str, current_head: str) -> set
     if result.returncode != 0:
         return set()
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+INTEGRATION_RECONCILIATION_RESOLUTIONS = {
+    "direct_apply",
+    "already_applied",
+    "rebaseable",
+    "needs_reconciliation",
+    "true_conflict",
+}
+
+@dataclass
+class IntegrationReconciliation:
+    resolution: str
+    detail: str
+    reason: str = ""
+    apply_mode: str = "direct"
+    patch_id: str = ""
+    base_commit: str = ""
+    head_commit: str = ""
+    changed_since_base: list[str] | None = None
+
+    @property
+    def can_apply(self) -> bool:
+        return self.resolution in {"direct_apply", "rebaseable"}
+
+    @property
+    def is_already_applied(self) -> bool:
+        return self.resolution == "already_applied"
+
+def commit_exists(target: Path, ref: str) -> bool:
+    if not ref:
+        return False
+    return git(target, "cat-file", "-e", f"{ref}^{{commit}}").returncode == 0
+
+def patch_id_from_text(target: Path, text: str) -> str:
+    if not text.strip():
+        return ""
+    result = git(target, "patch-id", "--stable", input_text=text)
+    if result.returncode != 0:
+        return ""
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if parts:
+            return parts[0]
+    return ""
+
+def patch_id_for_patch(target: Path, patch: Path) -> str:
+    try:
+        text = patch.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return patch_id_from_text(target, text)
+
+def patch_ids_from_log_range(target: Path, base_commit: str, current_head: str, changed_files: list[str]) -> set[str]:
+    if not base_commit or base_commit == current_head:
+        return set()
+    args = ["log", "--format=commit %H", "--no-ext-diff", "--binary", "-p", f"{base_commit}..{current_head}"]
+    if changed_files:
+        args.extend(["--", *changed_files])
+    log = git(target, *args)
+    if log.returncode != 0 or not log.stdout.strip():
+        return set()
+    result = git(target, "patch-id", "--stable", input_text=log.stdout)
+    if result.returncode != 0:
+        return set()
+    return {line.split()[0] for line in result.stdout.splitlines() if line.split()}
+
+def aggregate_patch_id_for_range(target: Path, base_commit: str, current_head: str, changed_files: list[str]) -> str:
+    if not base_commit or base_commit == current_head:
+        return ""
+    args = ["diff", "--binary", f"{base_commit}..{current_head}"]
+    if changed_files:
+        args.extend(["--", *changed_files])
+    diff = git(target, *args)
+    if diff.returncode != 0:
+        return ""
+    return patch_id_from_text(target, diff.stdout)
+
+def patch_id_matches_head(
+    target: Path,
+    patch: Path,
+    *,
+    base_commit: str,
+    current_head: str,
+    changed_files: list[str],
+) -> tuple[bool, str, str]:
+    patch_id = patch_id_for_patch(target, patch)
+    if not patch_id or not base_commit or base_commit == current_head:
+        return False, patch_id, ""
+    range_patch_ids = patch_ids_from_log_range(target, base_commit, current_head, changed_files)
+    if patch_id in range_patch_ids:
+        return True, patch_id, "stable patch-id matched a commit in base..HEAD"
+    aggregate_patch_id = aggregate_patch_id_for_range(target, base_commit, current_head, changed_files)
+    if aggregate_patch_id and aggregate_patch_id == patch_id:
+        return True, patch_id, "stable patch-id matched the aggregate diff from base..HEAD"
+    return False, patch_id, ""
+
+def compact_git_failure(result: subprocess.CompletedProcess[str], fallback: str) -> str:
+    text = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part and part.strip())
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:1000] if text else fallback
+
+def probe_rebaseable_with_temp_worktree(
+    target: Path,
+    patch: Path,
+    *,
+    base_commit: str,
+    current_head: str,
+) -> tuple[str, str]:
+    temp_root = Path(tempfile.mkdtemp(prefix="diffmogger-reconcile-"))
+    worktree = temp_root / "worktree"
+    added = False
+    try:
+        add = git(target, "worktree", "add", "--detach", "--quiet", str(worktree), base_commit)
+        if add.returncode != 0:
+            return "needs_reconciliation", compact_git_failure(add, "could not create isolated base worktree")
+        added = True
+        base_check = git(worktree, "apply", "--check", str(patch))
+        if base_check.returncode != 0:
+            return (
+                "needs_reconciliation",
+                "Patch did not apply cleanly to its recorded base during isolated replay: "
+                + compact_git_failure(base_check, "git apply --check failed at recorded base"),
+            )
+        base_apply = git(worktree, "apply", str(patch))
+        if base_apply.returncode != 0:
+            return (
+                "needs_reconciliation",
+                "Patch passed base check but failed while materializing the isolated replay: "
+                + compact_git_failure(base_apply, "git apply failed at recorded base"),
+            )
+        if not dirty_status(worktree):
+            return "already_applied", "Patch replay produced no worktree changes at its recorded base."
+        git(worktree, "add", "-A", check=True)
+        env = os.environ.copy()
+        env.update(
+            {
+                "GIT_AUTHOR_NAME": "Diffmogger Integrator",
+                "GIT_AUTHOR_EMAIL": "diffmogger-integrator@example.invalid",
+                "GIT_COMMITTER_NAME": "Diffmogger Integrator",
+                "GIT_COMMITTER_EMAIL": "diffmogger-integrator@example.invalid",
+            }
+        )
+        commit = git(worktree, "commit", "--no-verify", "-m", "diffmogger integration replay probe", env=env)
+        if commit.returncode != 0:
+            return "needs_reconciliation", compact_git_failure(commit, "could not commit isolated replay probe")
+        replay_commit = head(worktree)
+        reset = git(worktree, "reset", "--hard", current_head)
+        if reset.returncode != 0:
+            return "needs_reconciliation", compact_git_failure(reset, "could not reset isolated worktree to current HEAD")
+        cherry = git(worktree, "cherry-pick", "--no-commit", replay_commit)
+        if cherry.returncode == 0:
+            return (
+                "rebaseable",
+                f"Patch base drifted from {base_commit} to {current_head}, but an isolated Git replay cherry-picked cleanly.",
+            )
+        return (
+            "true_conflict",
+            "Patch base drifted and isolated Git replay conflicted: "
+            + compact_git_failure(cherry, "git cherry-pick --no-commit failed during isolated replay"),
+        )
+    finally:
+        if added:
+            run(["git", "worktree", "remove", "--force", str(worktree)], cwd=target)
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+def classify_patch_reconciliation(
+    target: Path,
+    patch: Path,
+    manifest: dict[str, Any],
+    *,
+    current_head: str,
+    apply_check_result: subprocess.CompletedProcess[str] | None = None,
+) -> IntegrationReconciliation:
+    base_commit = str(manifest.get("base_commit") or "").strip()
+    changed_files = sorted({str(item).strip() for item in manifest.get("changed_files") or [] if str(item).strip()})
+    changed = sorted(changed_since_base(target, base_commit, current_head) & set(changed_files)) if base_commit else []
+
+    reverse = reverse_apply_check(target, patch)
+    if reverse.returncode == 0:
+        return IntegrationReconciliation(
+            resolution="already_applied",
+            detail=f"git apply --reverse --check succeeded at HEAD {current_head}; patch content is already present.",
+            apply_mode="none",
+            base_commit=base_commit,
+            head_commit=current_head,
+            changed_since_base=changed,
+        )
+
+    matched, patch_id, match_detail = patch_id_matches_head(
+        target,
+        patch,
+        base_commit=base_commit,
+        current_head=current_head,
+        changed_files=changed_files,
+    )
+    if matched:
+        return IntegrationReconciliation(
+            resolution="already_applied",
+            detail=f"{match_detail}; patch content is already represented in HEAD {current_head}.",
+            apply_mode="none",
+            patch_id=patch_id,
+            base_commit=base_commit,
+            head_commit=current_head,
+            changed_since_base=changed,
+        )
+
+    check = apply_check_result if apply_check_result is not None else apply_check(target, patch)
+    if check.returncode == 0:
+        resolution = "rebaseable" if changed else "direct_apply"
+        drift = f" Base drift touched: {', '.join(changed)}." if changed else ""
+        replay = " Patch can be replayed directly on current HEAD." if changed else ""
+        return IntegrationReconciliation(
+            resolution=resolution,
+            detail=f"git apply --check succeeded at HEAD {current_head}.{drift}{replay}",
+            apply_mode="direct",
+            patch_id=patch_id,
+            base_commit=base_commit,
+            head_commit=current_head,
+            changed_since_base=changed,
+        )
+
+    if not base_commit:
+        return IntegrationReconciliation(
+            resolution="needs_reconciliation",
+            reason="staleness",
+            apply_mode="none",
+            detail="Patch failed git apply --check and did not record a base_commit. " + compact_git_failure(check, "git apply --check failed"),
+            patch_id=patch_id,
+            base_commit=base_commit,
+            head_commit=current_head,
+            changed_since_base=changed,
+        )
+    if not commit_exists(target, base_commit):
+        return IntegrationReconciliation(
+            resolution="needs_reconciliation",
+            reason="staleness",
+            apply_mode="none",
+            detail=f"Patch failed git apply --check and recorded base_commit {base_commit} is not available in this repository. "
+            + compact_git_failure(check, "git apply --check failed"),
+            patch_id=patch_id,
+            base_commit=base_commit,
+            head_commit=current_head,
+            changed_since_base=changed,
+        )
+    if base_commit == current_head:
+        return IntegrationReconciliation(
+            resolution="true_conflict",
+            reason="conflict",
+            apply_mode="none",
+            detail="Patch failed git apply --check at its recorded base/current HEAD. "
+            + compact_git_failure(check, "git apply --check failed"),
+            patch_id=patch_id,
+            base_commit=base_commit,
+            head_commit=current_head,
+            changed_since_base=changed,
+        )
+
+    replay_resolution, replay_detail = probe_rebaseable_with_temp_worktree(
+        target,
+        patch,
+        base_commit=base_commit,
+        current_head=current_head,
+    )
+    reason = "conflict" if replay_resolution == "true_conflict" else "staleness"
+    if replay_resolution == "already_applied":
+        reason = ""
+    return IntegrationReconciliation(
+        resolution=replay_resolution if replay_resolution in INTEGRATION_RECONCILIATION_RESOLUTIONS else "needs_reconciliation",
+        reason=reason,
+        apply_mode="three_way" if replay_resolution == "rebaseable" else "none",
+        detail=replay_detail,
+        patch_id=patch_id,
+        base_commit=base_commit,
+        head_commit=current_head,
+        changed_since_base=changed,
+    )
 
 def classify_apply_failure(target: Path, manifest: dict[str, Any], current_head: str, stderr: str) -> tuple[str, str]:
     base_commit = str(manifest.get("base_commit") or "")

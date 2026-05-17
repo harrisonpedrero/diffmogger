@@ -120,7 +120,9 @@ def _candidate(
     if integration_preflight:
         for key, next_action in (
             ("likely_conflict_count", "review conflicting queued patch surfaces before integration"),
-            ("stale_base_count", "refresh or rebase stale queued patches before integration"),
+            ("reconcilable_overlap_count", "awaiting serialized integrator reconciliation for limited queued patch overlap"),
+            ("true_conflict_count", "review true patch conflicts before integration"),
+            ("needs_reconciliation_count", "refresh or rebase patches that need reconciliation before integration"),
             ("missing_metadata_count", "reconcile patch metadata before integration"),
         ):
             if int(integration_preflight.get(key) or 0):
@@ -493,7 +495,11 @@ def _serial_ticket_fallback_candidate(
     reason_kind = str(selected_blocked.get("reason_kind") or "")
     reason = str(context.get("reason") or "dependency-ready ticket needs serialized role work")
     if reason_kind:
-        reason = f"{reason}; parallel DAG launch is blocked by {reason_kind}"
+        display_reason_kind = "serial_fallback" if reason_kind == "scope_fanout_exhausted" else reason_kind
+        detail = str(selected_blocked.get("reason") or "")
+        reason = f"{reason}; parallel DAG launch is using {display_reason_kind}"
+        if detail:
+            reason += f": {detail}"
     selected_node_id = str(selected_node.get("node_id") or selected_blocked.get("dag_node_id") or "")
     dag_node_id = _ticket_action_node_id(dag_model, ticket_id=ticket_id, canonical_action="build") if role == "builder" else selected_node_id
     candidate = _candidate(
@@ -508,6 +514,7 @@ def _serial_ticket_fallback_candidate(
     candidate["ticket_action"] = str(context.get("action") or "")
     candidate["ticket_summary"] = str(ticket.get("summary") or "")
     candidate["parallel_block_reason_kind"] = reason_kind
+    candidate["parallel_block_display_reason_kind"] = "serial_fallback" if reason_kind == "scope_fanout_exhausted" else reason_kind
     if selected_node_id and selected_node_id != str(candidate.get("dag_node_id") or ""):
         candidate["trigger_dag_node_id"] = selected_node_id
     return candidate
@@ -661,7 +668,11 @@ def choose_next_graph_aware(
                     if isinstance(integration_preflight.get("safe_order"), list)
                     else [],
                     "likely_conflict_count": int(integration_preflight.get("likely_conflict_count") or 0),
-                    "stale_base_count": int(integration_preflight.get("stale_base_count") or 0),
+                    "reconcilable_overlap_count": int(integration_preflight.get("reconcilable_overlap_count") or 0),
+                    "already_applied_count": int(integration_preflight.get("already_applied_count") or 0),
+                    "rebaseable_count": int(integration_preflight.get("rebaseable_count") or 0),
+                    "true_conflict_count": int(integration_preflight.get("true_conflict_count") or 0),
+                    "needs_reconciliation_count": int(integration_preflight.get("needs_reconciliation_count") or 0),
                     "missing_metadata_count": int(integration_preflight.get("missing_metadata_count") or 0),
                 }
                 candidates.append(
@@ -737,8 +748,12 @@ def choose_next_graph_aware(
                 "worker_patch_integration_preflight": {
                     "safe_count": int(integration_preflight.get("safe_count") or 0),
                     "likely_conflict_count": int(integration_preflight.get("likely_conflict_count") or 0),
+                    "reconcilable_overlap_count": int(integration_preflight.get("reconcilable_overlap_count") or 0),
+                    "already_applied_count": int(integration_preflight.get("already_applied_count") or 0),
+                    "rebaseable_count": int(integration_preflight.get("rebaseable_count") or 0),
+                    "true_conflict_count": int(integration_preflight.get("true_conflict_count") or 0),
+                    "needs_reconciliation_count": int(integration_preflight.get("needs_reconciliation_count") or 0),
                     "missing_metadata_count": int(integration_preflight.get("missing_metadata_count") or 0),
-                    "stale_base_count": int(integration_preflight.get("stale_base_count") or 0),
                 },
                 "role_manifest_sync": role_manifest_sync,
                 "failed_validation_job_count": len(failed_validation_jobs),

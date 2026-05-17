@@ -30,6 +30,15 @@ def resolve_runtime_state_actions_path(target: Path, manifest: dict[str, Any]) -
         return path
     return target / path
 
+def resolve_ticket_state_actions_path(target: Path, manifest: dict[str, Any]) -> Path | None:
+    raw = str(manifest.get("ticket_state_actions_path") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    return target / path
+
 def parse_created_at(manifest: dict[str, Any], fallback: float) -> float:
     raw = str(manifest.get("created_at") or "")
     if raw:

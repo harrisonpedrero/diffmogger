@@ -156,6 +156,38 @@ class StateStoreTests(unittest.TestCase):
             metadata={"source": "worker_patches", "patch_id": patch_id},
         )
 
+    def _git_commit_all(self, target: Path, message: str) -> str:
+        subprocess.run(["git", "add", "-A"], cwd=target, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Diffmogger", "-c", "user.email=diffmogger@example.invalid", "commit", "-q", "-m", message],
+            cwd=target,
+            check=True,
+        )
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=target, text=True, capture_output=True, check=True).stdout.strip()
+
+    def _worker_patch_fixture(
+        self,
+        target: Path,
+        *,
+        path: str = "src/app.py",
+        before: str = "def value():\n    return 1\n",
+        after: str = "def value():\n    return 2\n",
+        patch_id: str = "patch:fixture",
+    ) -> tuple[str, str]:
+        subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+        file_path = target / path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(before, encoding="utf-8")
+        base_commit = self._git_commit_all(target, "base")
+        file_path.write_text(after, encoding="utf-8")
+        diff = subprocess.run(["git", "diff", "--binary", "--", path], cwd=target, text=True, capture_output=True, check=True).stdout
+        patch_rel = f"target/automation_queue/builder/{patch_id}/changes.patch"
+        patch_path = target / patch_rel
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.write_text(diff, encoding="utf-8")
+        subprocess.run(["git", "checkout", "--", path], cwd=target, check=True)
+        return base_commit, patch_rel
+
     def test_initializes_sqlite_and_generated_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -216,7 +248,7 @@ class StateStoreTests(unittest.TestCase):
                 [(item["patch_id"], item["safe_order"]) for item in preflight["safe_order"]],
             )
 
-    def test_worker_patch_integration_preflight_blocks_overlapping_files(self) -> None:
+    def test_worker_patch_integration_preflight_allows_limited_reconcilable_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             with closing(connect(database_path_for_target(target))) as conn:
@@ -238,56 +270,186 @@ class StateStoreTests(unittest.TestCase):
 
                 preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
 
-            self.assertEqual(["patch:first"], preflight["safe_patch_ids"])
-            self.assertEqual(1, preflight["likely_conflict_count"])
-            conflict = preflight["likely_conflicts"][0]
-            self.assertEqual("patch:second", conflict["patch_id"])
-            self.assertEqual(["patch:first"], conflict["conflict_patch_ids"])
+            self.assertEqual(["patch:first", "patch:second"], preflight["safe_patch_ids"])
+            self.assertEqual(0, preflight["likely_conflict_count"])
+            self.assertEqual(1, preflight["reconcilable_overlap_count"])
+            overlap = preflight["reconcilable_overlaps"][0]
+            self.assertEqual("patch:second", overlap["patch_id"])
+            self.assertEqual(["patch:first"], overlap["conflict_patch_ids"])
 
-    def test_worker_patch_integration_preflight_blocks_stale_base_overlap(self) -> None:
+    def test_worker_patch_integration_preflight_marks_true_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
-            (target / "src").mkdir(parents=True)
-            (target / "src" / "app.py").write_text("value = 1\n", encoding="utf-8")
-            subprocess.run(["git", "init", "-q"], cwd=target, check=True)
-            subprocess.run(["git", "add", "src/app.py"], cwd=target, check=True)
-            subprocess.run(
-                ["git", "-c", "user.name=Diffmogger", "-c", "user.email=diffmogger@example.invalid", "commit", "-q", "-m", "base"],
-                cwd=target,
-                check=True,
+            base_commit, patch_rel = self._worker_patch_fixture(
+                target,
+                before="def value():\n    return 1\n",
+                after="def value():\n    return 2\n",
+                patch_id="patch:conflict",
             )
-            base_commit = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=target,
-                text=True,
-                capture_output=True,
-                check=True,
-            ).stdout.strip()
-            (target / "src" / "app.py").write_text("value = 2\n", encoding="utf-8")
-            subprocess.run(["git", "add", "src/app.py"], cwd=target, check=True)
-            subprocess.run(
-                ["git", "-c", "user.name=Diffmogger", "-c", "user.email=diffmogger@example.invalid", "commit", "-q", "-m", "advance"],
-                cwd=target,
-                check=True,
-            )
+            (target / "src" / "app.py").write_text("def value():\n    return 3\n", encoding="utf-8")
+            self._git_commit_all(target, "conflicting head")
 
             with closing(connect(database_path_for_target(target))) as conn:
                 with conn:
                     self._seed_worker_patch_for_preflight(
                         conn,
-                        patch_id="patch:stale",
+                        patch_id="patch:conflict",
                         changed_files=["src/app.py"],
+                        patch_path=patch_rel,
                         base_commit=base_commit,
                     )
-                    self._seed_ready_integration_node(conn, "patch:stale")
+                    self._seed_ready_integration_node(conn, "patch:conflict")
 
                 preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
 
             record = preflight["records"][0]
-            self.assertEqual("stale_base", record["status"])
-            self.assertEqual(1, preflight["stale_base_count"])
+            self.assertEqual("true_conflict", record["status"])
+            self.assertEqual(1, preflight["true_conflict_count"])
             self.assertEqual([], preflight["safe_patch_ids"])
-            self.assertTrue(any(reason["kind"] == "stale_base_changed_files" for reason in record["reasons"]))
+            self.assertTrue(any(reason["kind"] == "integration_reconciliation_true_conflict" for reason in record["reasons"]))
+
+    def test_worker_patch_integration_preflight_permits_already_applied_and_rebaseable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            base_commit, applied_patch_rel = self._worker_patch_fixture(
+                target,
+                path="src/already.py",
+                after="def value():\n    return 2\n",
+                patch_id="patch:already",
+            )
+            (target / "src" / "already.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+            self._git_commit_all(target, "already applied")
+
+            rebase_base, rebase_patch_rel = self._worker_patch_fixture(
+                target,
+                path="src/rebaseable.py",
+                before="def value():\n    return 10\n",
+                after="def value():\n    return 20\n",
+                patch_id="patch:rebaseable",
+            )
+            (target / "src" / "rebaseable.py").write_text("# header\n\ndef value():\n    return 10\n", encoding="utf-8")
+            self._git_commit_all(target, "same file unrelated context")
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:already",
+                        changed_files=["src/already.py"],
+                        patch_path=applied_patch_rel,
+                        base_commit=base_commit,
+                        queued_at="2026-05-15T00:00:00+00:00",
+                    )
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:rebaseable",
+                        changed_files=["src/rebaseable.py"],
+                        patch_path=rebase_patch_rel,
+                        base_commit=rebase_base,
+                        queued_at="2026-05-15T00:01:00+00:00",
+                    )
+                    self._seed_ready_integration_node(conn, "patch:already")
+                    self._seed_ready_integration_node(conn, "patch:rebaseable")
+
+                preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
+
+            statuses = {record["patch_id"]: record["status"] for record in preflight["records"]}
+            self.assertEqual("already_applied", statuses["patch:already"])
+            self.assertEqual("rebaseable", statuses["patch:rebaseable"])
+            self.assertEqual(["patch:already", "patch:rebaseable"], preflight["safe_patch_ids"])
+            self.assertEqual(1, preflight["already_applied_count"])
+            self.assertEqual(1, preflight["rebaseable_count"])
+
+    def test_worker_patch_integration_preflight_blocks_protected_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:protected",
+                        changed_files=[".env.local"],
+                    )
+                    self._seed_ready_integration_node(conn, "patch:protected")
+
+                preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
+
+            record = preflight["records"][0]
+            self.assertEqual("protected_path", record["status"])
+            self.assertEqual(1, preflight["protected_path_count"])
+            self.assertEqual([], preflight["safe_patch_ids"])
+
+    def test_review_dag_node_derives_scope_from_worker_patch_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "src").mkdir(parents=True)
+            (target / "src" / "reviewed.py").write_text("def validateWorkspace():\n    return True\n", encoding="utf-8")
+            with closing(connect(database_path_for_target(target))) as conn:
+                capability = refresh_capability_manifest_conn(conn, target)
+                ensure_codebase_graph_conn(conn, target, capability=capability)
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:review",
+                        changed_files=["src/reviewed.py"],
+                    )
+                    review_node = upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:test:review:patch-review",
+                        task_id="T-REVIEW",
+                        action_type="review",
+                        status="ready",
+                        owner_role="hardener",
+                        confidence=0.9,
+                        metadata={"patch_id": "patch:review", "summary": "Review queued worker patch"},
+                    )
+
+                candidate, blocked = state_store_module._parallel_candidate_for_dag_node_conn(conn, target, review_node)
+
+            self.assertIsNone(blocked)
+            self.assertIsNotNone(candidate)
+            preview_items = candidate["context_pack_preview"]["items"]
+            self.assertTrue(any(item.get("path") == "src/reviewed.py" for item in preview_items), preview_items)
+
+    def test_parallel_conflict_allows_disjoint_exact_symbols_in_same_file(self) -> None:
+        first = {
+            "execution_mode": "write_workers",
+            "likely_touches": [
+                {
+                    "node_id": "file:workspace",
+                    "path": "src/workspace.js",
+                    "symbol_node_id": "symbol:validateWorkspace",
+                    "symbol_resolution": "exact",
+                }
+            ],
+            "required_leases": [],
+        }
+        second = {
+            "execution_mode": "write_workers",
+            "likely_touches": [
+                {
+                    "node_id": "file:workspace",
+                    "path": "src/workspace.js",
+                    "symbol_node_id": "symbol:renderWorkspace",
+                    "symbol_resolution": "exact",
+                }
+            ],
+            "required_leases": [],
+        }
+        broad = {
+            "execution_mode": "write_workers",
+            "likely_touches": [
+                {
+                    "node_id": "file:workspace",
+                    "path": "src/workspace.js",
+                }
+            ],
+            "required_leases": [],
+        }
+
+        self.assertEqual((False, ""), state_store_module._parallel_candidates_conflict(first, second))
+        conflicts, _reason = state_store_module._parallel_candidates_conflict(first, broad)
+        self.assertTrue(conflicts)
 
     def test_worker_patch_integration_preflight_blocks_missing_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
