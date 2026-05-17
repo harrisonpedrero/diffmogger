@@ -46,6 +46,14 @@ Update this section and `.agentic/verification_commands.txt` when full-suite com
 
 The integrator records clean-HEAD full-suite baseline verification in `target/baseline_verification.json`. If that baseline fails before a queued patch is applied, normal hardener/finalization patches are deferred as `baseline_verification_blocker`; builder/planner patches can still integrate when focused checks pass and the failure is unrelated. Baseline repair patches should include `Verification scope: baseline_repair` in the role summary. Local service failures that the repo can reasonably repair, such as a missing local PostgreSQL test database with Prisma/Postgres configuration, should be classified as `repairable_local_service` and routed to a harness/setup patch before `BLOCKED_ON_ENVIRONMENT`.
 
+Frontend or static targets should add a deterministic browser smoke command once the boot/render path exists:
+
+```bash
+npm run browser-smoke
+```
+
+Use it as the fallback browser-facing validation path when Playwright MCP is unavailable.
+
 ## Automation
 
 Recurring automation prompt:
@@ -142,7 +150,7 @@ Optional MCP servers:
 {{OPTIONAL_MCP_SERVERS}}
 ```
 
-When optional MCP is enabled, project-scoped config lives in `.codex/config.toml`. Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config.
+When optional MCP is enabled, project-scoped config lives in `.codex/config.toml` for compatibility. Role wrappers mount MCPs from resolved intake/dashboard/manifest state and do not require a worktree `.codex/config.toml`. Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config.
 
 Context7 is documentation-only and should fall back to normal web search, repo docs, package metadata, or existing knowledge on auth errors, startup failures, timeouts, empty results, or tool errors. The generated MCP config inherits `CONTEXT7_API_KEY` when it is present for higher rate limits, but never stores the key.
 
@@ -150,6 +158,12 @@ Playwright MCP uses Diffmogger's managed browser when available. UI failure scre
 
 ```text
 docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png
+```
+
+Every role summary should include:
+
+```text
+MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reason>
 ```
 
 ## Ticket Campaigns

@@ -64,7 +64,9 @@ DEFAULT_MAX_PARALLEL_SCOPE_WORKERS = 2
 CONVEYOR_ROLE_PROFILE = "planner_builder_hardener_integrator"
 VALID_ROLE_PROFILES = {CONVEYOR_ROLE_PROFILE}
 VALID_CAMPAIGN_MODES = {"bounded", "ongoing"}
-VALID_OPTIONAL_MCP_SERVERS = {"context7", "playwright"}
+SUPPORTED_OPTIONAL_MCP_SERVERS = ("context7", "playwright")
+DEFAULT_OPTIONAL_MCP_SERVERS = list(SUPPORTED_OPTIONAL_MCP_SERVERS)
+VALID_OPTIONAL_MCP_SERVERS = set(SUPPORTED_OPTIONAL_MCP_SERVERS)
 MULTI_ROLE_FILES = {
     ".agentic/roles/planner.md",
     ".agentic/roles/builder.md",
@@ -112,6 +114,7 @@ DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS = [
     "/target/automation_worktrees/",
     "/target/canonical_state_brief.md",
     "/target/codex_automation.lock",
+    "/target/validation_jobs/",
     "/target/orchestration.sqlite3",
     "/target/orchestration.sqlite3-shm",
     "/target/orchestration.sqlite3-wal",
@@ -477,6 +480,8 @@ def normalize_optional_mcp_servers(value: Any) -> list[str]:
         if not text:
             continue
         normalized = text.replace("-", "_").replace(" ", "_")
+        if normalized in {"none", "disabled", "disable", "off", "false", "no"}:
+            continue
         names: list[str] = []
         if "context7" in normalized or normalized in {"context_7", "context"}:
             names.append("context7")
@@ -489,6 +494,18 @@ def normalize_optional_mcp_servers(value: Any) -> list[str]:
                 seen.add(name)
                 enabled.append(name)
     return enabled
+
+
+def resolved_optional_mcp_servers(data: dict[str, Any]) -> list[str]:
+    if "optional_mcp_servers" not in data:
+        return list(DEFAULT_OPTIONAL_MCP_SERVERS)
+    return normalize_optional_mcp_servers(data.get("optional_mcp_servers"))
+
+
+def project_intake_projection(data: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(data)
+    payload["optional_mcp_servers"] = resolved_optional_mcp_servers(data)
+    return payload
 
 
 def normalize_seed_list(value: Any) -> list[str]:
@@ -581,7 +598,7 @@ def seed_ticket_items(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def mcp_values(data: dict[str, Any]) -> dict[str, str]:
-    enabled = normalize_optional_mcp_servers(data.get("optional_mcp_servers"))
+    enabled = resolved_optional_mcp_servers(data)
     context7_enabled = "context7" in enabled
     playwright_enabled = "playwright" in enabled
     config_blocks: list[str] = []
@@ -623,22 +640,34 @@ enabled = true"""
             )
 
     if enabled:
-        setup = """Optional MCP servers enabled: {servers}
-
-- Context7 is mounted by planner/builder role wrappers. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, continue the sprint with normal web search, repo docs, package metadata, or existing knowledge.
-- Context7 uses stdio `npx -y @upstash/context7-mcp` by default. `CONTEXT7_API_KEY` is inherited when present for higher rate limits, but the key is never stored in generated files. Remote OAuth setup is manual/optional and must not be required for unattended overnight runs.
-- Playwright MCP is mounted by hardener/integrator role wrappers. Hardener and Integrator should use it for local browser validation and screenshot artifacts, not for implementation-time browsing.
-- MCP servers are optional and non-required. Missing MCP support must never change `AUTOMATION_STATUS` to `BLOCKED_ON_ENVIRONMENT` by itself.
-- Project-scoped config lives in `.codex/config.toml`; wrappers convert the enabled project entries into temporary `codex exec -c` overrides for each role. Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config.
-""".format(servers=", ".join(enabled))
+        setup_lines = [f"Optional MCP servers enabled: {', '.join(enabled)}"]
+        if context7_enabled:
+            setup_lines.extend(
+                [
+                    "- Context7 is mounted only for Planner and Builder role runs. Use it when third-party/library/API documentation materially affects planning or implementation. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, continue the sprint with normal web search, repo docs, package metadata, or existing knowledge.",
+                    "- Context7 uses stdio `npx -y @upstash/context7-mcp` by default. `CONTEXT7_API_KEY` is inherited when present for higher rate limits, but the key is never stored in generated files. Remote OAuth setup is manual/optional and must not be required for unattended overnight runs.",
+                ]
+            )
+        if playwright_enabled:
+            setup_lines.append(
+                "- Playwright MCP is mounted only for Hardener and Integrator validation lanes, plus Planner or Builder when the target or selected ticket is explicitly frontend, browser, UI, or demo-path scoped. Use it when validating browser-facing changes."
+            )
+        setup_lines.extend(
+            [
+                "- MCP servers are optional and non-required. Missing MCP support must never change `AUTOMATION_STATUS` to `BLOCKED_ON_ENVIRONMENT` by itself; failed browser validation should instead be recorded as a validation issue or explicit deferred validation blocker.",
+                "- Project-scoped config lives in `.codex/config.toml` for compatibility, while wrappers mount role-scoped MCP overrides from the resolved intake/dashboard/manifest state. Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config.",
+            ]
+        )
+        setup = "\n".join(setup_lines)
     else:
         setup = """Optional MCP servers enabled: none.
 
-No project-scoped MCP config is generated unless `optional_mcp_servers` is set in the project intake."""
+MCPs are disabled for this target because `optional_mcp_servers` was explicitly set to an empty array."""
 
     return {
         "OPTIONAL_MCP_SERVERS": "\n".join(f"- {name}" for name in enabled) if enabled else "None.",
         "OPTIONAL_MCP_SERVER_LIST": ",".join(enabled),
+        "SUPPORTED_MCP_SERVER_LIST": ",".join(SUPPORTED_OPTIONAL_MCP_SERVERS),
         "MCP_ENABLED": "true" if enabled else "false",
         "CONTEXT7_MCP_ENABLED": "true" if context7_enabled else "false",
         "PLAYWRIGHT_MCP_ENABLED": "true" if playwright_enabled else "false",
@@ -1602,6 +1631,7 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
             else {},
             sort_keys=True,
         ),
+        "PROJECT_INTAKE_JSON": json.dumps(project_intake_projection(data), indent=2, sort_keys=True),
         "CREATED_AT": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     values.update(progression_values(data, project_name))
@@ -1731,7 +1761,15 @@ def generated_template_destinations(values: dict[str, str]) -> list[str]:
 
 
 def generated_scaffold_destinations(values: dict[str, str]) -> list[str]:
-    return sorted(set([*generated_template_destinations(values), *generated_runtime_wrapper_destinations(values)]))
+    return sorted(
+        set(
+            [
+                *generated_template_destinations(values),
+                *generated_runtime_wrapper_destinations(values),
+                sidecar_rel(".agentic/project_intake.json"),
+            ]
+        )
+    )
 
 
 def iter_diffmogger_runtime_sources() -> list[Path]:
@@ -1779,6 +1817,7 @@ def diffmogger_runtime_paths(values: dict[str, str]) -> list[str]:
         sidecar_rel("target/automation_logs"),
         sidecar_rel("target/automation_runner.json"),
         sidecar_rel("target/automation_venvs"),
+        sidecar_rel("target/validation_jobs"),
         sidecar_rel("target/canonical_state_brief.md"),
         sidecar_rel("target/codex_automation.lock"),
         sidecar_rel("target/first-review"),
@@ -1846,6 +1885,12 @@ def seed_runtime_state(target: Path, values: dict[str, str]) -> None:
                 "parallel_write_direct_confidence": values.get("PARALLEL_WRITE_DIRECT_CONFIDENCE") or f"{DEFAULT_PARALLEL_WRITE_DIRECT_CONFIDENCE:.2f}",
                 "max_parallel_write_workers": values.get("MAX_PARALLEL_WRITE_WORKERS") or str(DEFAULT_MAX_PARALLEL_WRITE_WORKERS),
                 "max_parallel_scope_workers": values.get("MAX_PARALLEL_SCOPE_WORKERS") or str(DEFAULT_MAX_PARALLEL_SCOPE_WORKERS),
+                "optional_mcp_servers": [
+                    item
+                    for item in (values.get("OPTIONAL_MCP_SERVER_LIST") or "").split(",")
+                    if item
+                ],
+                "supported_mcp_servers": list(SUPPORTED_OPTIONAL_MCP_SERVERS),
             },
         },
         actor_role="scaffold",
@@ -1873,6 +1918,11 @@ def seed_runtime_state(target: Path, values: dict[str, str]) -> None:
 def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -> dict[str, Any]:
     runtime_paths = diffmogger_runtime_paths(values)
     context_paths = [sidecar_rel("docs/context")]
+    optional_mcp_servers = [
+        item
+        for item in (values.get("OPTIONAL_MCP_SERVER_LIST") or "").split(",")
+        if item
+    ]
     owned_paths = sorted(set([MANIFEST_REL, *generated_paths, *runtime_paths, *context_paths]))
     worktree_seed_paths = [
         path
@@ -1887,7 +1937,7 @@ def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -
         if key not in LEGACY_MARKDOWN_QUEUE_ALIASES
     }
     path_aliases.update(generated_script_aliases(values))
-    return sidecar_manifest(
+    manifest = sidecar_manifest(
         owned_paths=owned_paths,
         runtime_paths=runtime_paths,
         worktree_seed_paths=worktree_seed_paths,
@@ -1906,10 +1956,21 @@ def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -
             ],
             "multi_role": True,
             "optional_mcp": values.get("MCP_ENABLED") == "true",
+            "optional_mcp_servers": optional_mcp_servers,
+            "supported_mcp_servers": list(SUPPORTED_OPTIONAL_MCP_SERVERS),
             "playwright_mcp": values.get("PLAYWRIGHT_MCP_ENABLED") == "true",
             "runtime_bundle": True,
         },
     )
+    manifest["optional_mcp_servers"] = optional_mcp_servers
+    manifest["supported_mcp_servers"] = list(SUPPORTED_OPTIONAL_MCP_SERVERS)
+    manifest["mcp"] = {
+        "required": False,
+        "resolved_from": "project_intake",
+        "requested_by_default": optional_mcp_servers,
+        "supported_servers": list(SUPPORTED_OPTIONAL_MCP_SERVERS),
+    }
+    return manifest
 
 
 def diffmogger_local_exclude_patterns(values: dict[str, str]) -> list[str]:
@@ -2186,6 +2247,11 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
         if rel.parts and rel.parts[0] == "scripts" and dest.suffix in {".sh", ".py"}:
             dest.chmod(0o755)
         written.append(dest)
+    intake_dest = target / sidecar_rel(".agentic/project_intake.json")
+    if force or not intake_dest.exists():
+        intake_dest.parent.mkdir(parents=True, exist_ok=True)
+        intake_dest.write_text(values.get("PROJECT_INTAKE_JSON", "{}").rstrip() + "\n", encoding="utf-8")
+        written.append(intake_dest)
     for entry in runtime_entrypoints():
         if not runtime_entrypoint_included(entry, values):
             continue

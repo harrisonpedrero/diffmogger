@@ -30,6 +30,7 @@ from diffmogger.runtime.state_store import (
     worker_contracts_conn,
     worker_patch_read_model_conn,
     append_event,
+    decorate_execution_group_for_display,
     worker_reports_read_model_conn,
 )
 
@@ -265,7 +266,7 @@ def _execution_group_dict(conn: Any, row: Any) -> dict[str, Any]:
         for patch in (collection if isinstance(collection, list) else [])
         if isinstance(patch, dict) and patch.get("execution_group_id") == group_id
     ]
-    return {
+    return decorate_execution_group_for_display({
         "execution_group_id": group_id,
         "status": str(row["status"] or ""),
         "mode": str(row["mode"] or ""),
@@ -279,7 +280,7 @@ def _execution_group_dict(conn: Any, row: Any) -> dict[str, Any]:
         "workers": workers,
         "validation_jobs": validation_jobs,
         "patches": patch_items,
-    }
+    })
 
 
 def _execution_groups_by_status(conn: Any, statuses: set[str], *, limit: int = 12) -> list[dict[str, Any]]:
@@ -317,6 +318,8 @@ def _dashboard_parallel_read_model(target: Path) -> dict[str, Any]:
             "proposed_execution_group_rows": proposed,
             "active_execution_groups": active,
             "recent_execution_groups": recent,
+            "recently_completed_execution_groups": recent,
+            "parallel_execution": snapshot.get("parallel_execution", {}),
             "blocked_parallel_candidates": snapshot.get("blocked_parallel_candidates", []),
             "why_not_parallel": snapshot.get("why_not_parallel", {}),
             "parallelization_summary": snapshot.get("parallelization_summary", {}),
@@ -325,6 +328,7 @@ def _dashboard_parallel_read_model(target: Path) -> dict[str, Any]:
             "budget_exhaustion_reasons": snapshot.get("budget_exhaustion_reasons", []),
             "worker_contracts": contracts,
             "worker_reports": worker_reports_read_model_conn(conn),
+            "worker_disposition_summary": snapshot.get("worker_disposition_summary", {}),
             "active_leases": active_resource_leases_conn(conn),
             "conflicting_leases": current_conflicting_resource_leases_conn(conn),
             "validation_jobs": validation_jobs,
@@ -345,8 +349,10 @@ def _parallel_warnings(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     for item in snapshot.get("budget_exhaustion_reasons", []) if isinstance(snapshot.get("budget_exhaustion_reasons"), list) else []:
         if isinstance(item, dict):
             warnings.append({"kind": "budget_exhausted", "severity": "warn", "message": item.get("reason") or "A parallelism budget is exhausted."})
-    if bool(snapshot.get("worker_finding_disposition_required")):
-        warnings.append({"kind": "worker_report_disposition", "severity": "warn", "message": "One or more worker reports need main-agent disposition."})
+    disposition_summary = snapshot.get("worker_disposition_summary") if isinstance(snapshot.get("worker_disposition_summary"), dict) else {}
+    pending_count = int(disposition_summary.get("pending_count") or 0)
+    if bool(snapshot.get("worker_finding_disposition_required")) and pending_count:
+        warnings.append({"kind": "worker_report_disposition", "severity": "warn", "message": f"{pending_count} worker report(s) still need main-agent disposition."})
     backlog = snapshot.get("integration_backlog_from_parallel_workers") if isinstance(snapshot.get("integration_backlog_from_parallel_workers"), list) else []
     if len(backlog) >= 3:
         warnings.append({"kind": "integration_backlog_large", "severity": "warn", "message": f"{len(backlog)} worker patches are waiting for serialized integration."})

@@ -184,6 +184,7 @@ DEVELOPMENT_REQUIRED_STRINGS = [
     "Automation Environment Loading",
     "CODEX_AUTOMATION_ENV_FILES",
     "CODEX_AUTOMATION_ENV_DENYLIST",
+    "npm run browser-smoke",
 ]
 
 AUTOMATION_REQUIRED_STRINGS = [
@@ -200,6 +201,8 @@ AUTOMATION_REQUIRED_STRINGS = [
     "BLOCKED_ON_USER",
     "campaign",
     ".diffmogger/scripts/ticket_run.py",
+    "MCP decision: context7 used|skipped",
+    "npm run browser-smoke",
 ]
 
 RUNNER_REQUIRED_STRINGS = [
@@ -216,6 +219,10 @@ RUNNER_REQUIRED_STRINGS = [
     "mcp_servers.context7.env_vars",
     "mcp_servers.playwright.command",
     "mcp_servers.playwright.disabled_tools",
+    "mcp_telemetry_path",
+    "mcp_requested_servers",
+    "mcp_mounted_servers",
+    "playwright_validation_status",
     "--add-dir",
     "$HOME/.codex",
     "codex exec --full-auto",
@@ -388,6 +395,7 @@ ROLE_PROMPT_REQUIRED_STRINGS = [
     "CRITICAL_STOP",
     "target/canonical_state_brief.md",
     "docs/MULTI_ROLE_PROGRESS.md",
+    "MCP decision: context7 used|skipped",
 ]
 
 QUEUE_ROLE_PROMPT_REQUIRED_STRINGS = [
@@ -483,6 +491,8 @@ MCP_DOC_REQUIRED_STRINGS = [
     "Playwright MCP",
     "CONTEXT7_API_KEY",
     "auth errors",
+    "MCP decision: context7 used|skipped",
+    "do not depend on a worktree `.codex/config.toml`",
     "Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config",
 ]
 
@@ -541,7 +551,7 @@ def project_intake(root: Path) -> dict[str, object]:
 def optional_mcp_servers(root: Path) -> list[str]:
     raw = project_intake(root).get("optional_mcp_servers")
     if raw is None:
-        return []
+        return ["context7", "playwright"]
     items = raw if isinstance(raw, list) else re.split(r"[\n,]+", str(raw))
     enabled: list[str] = []
     seen: set[str] = set()

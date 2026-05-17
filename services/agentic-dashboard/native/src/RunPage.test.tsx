@@ -706,6 +706,8 @@ describe("RunPage", () => {
                   execution_group_id: "execution-group:read-only-demo",
                   status: "proposed",
                   mode: "dry_run",
+                  display_mode_label: "Planning preview",
+                  execution_mode_label: "Read-only workers",
                   reason: "read-only reviews can run together",
                   payload: { execution_mode: "read_only", why_together: "read-only surfaces do not write" },
                   items: [
@@ -723,7 +725,17 @@ describe("RunPage", () => {
                   execution_group_id: "execution-group:running-validation",
                   status: "running",
                   mode: "validation",
+                  display_mode_label: "Validation jobs",
                   selected_by: "dashboard",
+                },
+              ],
+              recent_execution_groups: [
+                {
+                  execution_group_id: "execution-group:recent-read-only",
+                  status: "completed",
+                  mode: "read_only",
+                  display_mode_label: "Read-only workers",
+                  finished_at: "2026-05-17T00:00:00+00:00",
                 },
               ],
               active_parallel_counts: {
@@ -731,27 +743,38 @@ describe("RunPage", () => {
                 active_read_only_workers: 2,
                 active_write_workers: 0,
               },
-              parallelization_summary: { mode: "dry_run", group_count: 1 },
+              parallelization_summary: { mode: "dry_run", display_mode_label: "Planning preview", group_count: 1 },
               why_not_parallel: {
-                status: "blocked",
-                summary: "1 blocked parallel candidate; top reason: Missing direct write signal.",
+                status: "serial_fallback",
+                summary: "1 parallel candidate is using serialized handling.",
                 reason_groups: [
                   {
-                    reason_kind: "missing_direct_write_signal",
-                    label: "Missing direct write signal",
+                    reason_kind: "serial_fallback",
+                    raw_reason_kinds: ["scope_fanout_exhausted"],
+                    label: "Serial fallback",
                     count: 1,
-                    next_action: "Add direct file/path metadata or exact fresh symbol ownership evidence.",
+                    human_summary: "No promotable ownership evidence; using serial fallback.",
+                    next_action: "No promotable ownership evidence; using serial fallback.",
                   },
                 ],
                 next_improvements: [
                   {
-                    reason_kind: "missing_direct_write_signal",
-                    improvement_kind: "add_paths_or_exact_symbols",
+                    reason_kind: "serial_fallback",
+                    improvement_kind: "serial_fallback",
                     count: 1,
-                    next_action: "Add direct file/path metadata or exact fresh symbol ownership evidence.",
+                    next_action: "No promotable ownership evidence; using serial fallback.",
                   },
                 ],
               },
+              completed_worker_reports: [
+                {
+                  worker_id: "worker:review",
+                  status: "completed",
+                  disposition_status: "awaiting_integrator_review",
+                  disposition_label: "Awaiting integrator review",
+                  disposition_summary: "Worker patch is queued for serialized integrator reconciliation.",
+                },
+              ],
               active_leases: [
                 {
                   lease_id: "lease:old",
@@ -784,15 +807,20 @@ describe("RunPage", () => {
     );
 
     expect(html).toContain("Parallel Execution");
+    expect(html).toContain("Planning preview");
     expect(html).toContain("execution-group:read-only-demo");
     expect(html).toContain("Start Read-Only Group");
     expect(html).toContain("Start Validation Group");
     expect(html).toContain("Stale lease: file:src/demo.ts");
     expect(html).toContain("Validation jobs");
+    expect(html).toContain("Running groups");
+    expect(html).toContain("Recently Completed");
+    expect(html).toContain("execution-group:recent-read-only");
+    expect(html).toContain("Awaiting integrator review");
     expect(html).toContain("patch:worker-1");
     expect(html).toContain("Why Not Parallel?");
-    expect(html).toContain("Missing direct write signal");
-    expect(html).toContain("add_paths_or_exact_symbols");
+    expect(html).toContain("No promotable ownership evidence; using serial fallback.");
+    expect(html).toContain("scope_fanout_exhausted");
     expect(html).toContain("unknown impact write task is serial");
     expect(html).toContain("Cancel");
     expect(html).toContain("Release");

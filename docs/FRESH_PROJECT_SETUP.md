@@ -91,7 +91,7 @@ After scaffold, the Run page has the same Ticket Queue controls: inspect, add, e
 
 For CLI validation of a ticket-campaign target, add `--ticket-campaign-enabled` to `scripts/check_required_files.py`.
 
-Optional MCP servers are opt-in through `optional_mcp_servers`:
+Diffmogger enables all supported optional MCP servers by default for new scaffolded targets. Set `optional_mcp_servers` only when you want to be explicit:
 
 ```json
 {
@@ -99,7 +99,15 @@ Optional MCP servers are opt-in through `optional_mcp_servers`:
 }
 ```
 
-Diffmogger generates project-scoped `.diffmogger/agentic/codex_config.toml` and `.diffmogger/state/MCP_INTEGRATIONS.md`, but never runs `codex mcp add`, `codex mcp login`, or edits user/global Codex config. Context7 uses stdio `npx -y @upstash/context7-mcp` by default and inherits `CONTEXT7_API_KEY` when that environment variable is present; dashboard-launched backend processes also load optional runtime variables from the Diffmogger starter repo's root `.env`. The key itself is never stored in generated files. Remote OAuth setup is manual/optional. Planner/Builder wrappers mount Context7 only; Hardener/Integrator wrappers mount Playwright MCP only. Context7 auth failures, startup failures, timeouts, empty results, and tool errors are fallback-only events, not blockers. Playwright UI failure screenshots belong under `.diffmogger/state/backlog/ui_artifacts/<run_id>/<issue-slug>.png`.
+Use an explicit empty array to opt out:
+
+```json
+{
+  "optional_mcp_servers": []
+}
+```
+
+Diffmogger generates project-scoped `.diffmogger/agentic/codex_config.toml` and `.diffmogger/state/MCP_INTEGRATIONS.md`, but never runs `codex mcp add`, `codex mcp login`, or edits user/global Codex config. Context7 uses stdio `npx -y @upstash/context7-mcp` by default and inherits `CONTEXT7_API_KEY` when that environment variable is present; dashboard-launched backend processes also load optional runtime variables from the Diffmogger starter repo's root `.env`. The key itself is never stored in generated files. Remote OAuth setup is manual/optional. Planner/Builder wrappers mount Context7. Playwright MCP mounts for Hardener/Integrator validation lanes, and for Planner/Builder only when the target or selected ticket is frontend, browser, UI, or demo-path scoped. Context7 auth failures, startup failures, timeouts, empty results, and tool errors are fallback-only events, not blockers. Playwright UI failure screenshots belong under `.diffmogger/state/backlog/ui_artifacts/<run_id>/<issue-slug>.png`.
 
 ## 2. Validate The Scaffold
 

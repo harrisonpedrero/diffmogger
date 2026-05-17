@@ -283,13 +283,13 @@
     },
     "optional_mcp_servers": {
       "type": "array",
-      "description": "Optional project-scoped MCP servers to configure for role-scoped Codex automation. Missing or unauthenticated MCP servers remain advisory and must not block overnight runs.",
+      "description": "Optional project-scoped MCP servers to configure for role-scoped Codex automation. Omit this field to enable all supported MCPs by default; set an explicit empty array to opt out. Missing or unauthenticated MCP servers remain advisory and must not block overnight runs.",
       "items": {
         "type": "string",
         "enum": ["context7", "playwright"]
       },
       "uniqueItems": true,
-      "default": []
+      "default": ["context7", "playwright"]
     },
     "meaningful_deliverable": {
       "type": "string",

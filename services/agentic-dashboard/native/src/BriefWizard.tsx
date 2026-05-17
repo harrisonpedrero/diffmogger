@@ -237,7 +237,7 @@ const defaultDraft: IntakeDraft = {
   automation_role_profile: "planner_builder_hardener_integrator",
   automation_checkpoint_commits: true,
   multi_role_allow_remotes: false,
-  optional_mcp_servers: [],
+  optional_mcp_servers: ["context7", "playwright"],
   campaign_mode: "ongoing",
   ticket_run_file: "",
   ticket_run_seed_tickets: [],
@@ -312,9 +312,10 @@ export function applyAutomationScope(draft: IntakeDraft, scope: AutomationScope)
 }
 
 function draftFromSource(source: Record<string, unknown>, targetName: string): IntakeDraft {
-  const optionalMcp = listValue(source.optional_mcp_servers).filter((item) =>
-    ["context7", "playwright"].includes(item),
-  );
+  const hasOptionalMcp = Object.prototype.hasOwnProperty.call(source, "optional_mcp_servers");
+  const optionalMcp = hasOptionalMcp
+    ? listValue(source.optional_mcp_servers).filter((item) => ["context7", "playwright"].includes(item))
+    : defaultDraft.optional_mcp_servers;
   const roleProfile = roleProfileValues();
   return {
     ...defaultDraft,
@@ -419,7 +420,7 @@ export function lowCortisolDraftFromGeneratedIntake(
     ...generated,
     human_bridge_enabled: true,
     human_bridge_mode: "file_only",
-    optional_mcp_servers: [],
+    optional_mcp_servers: generated.optional_mcp_servers,
     campaign_mode: "bounded",
     ticket_run_file: defaultDraft.ticket_run_file,
     ticket_run_seed_tickets: generatedTickets,

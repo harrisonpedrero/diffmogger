@@ -28,6 +28,7 @@ Own the main checkout. Apply clean queued role patches FIFO, verify them, create
 
 - Acquire the main `target/codex_automation.lock` before mutating the main checkout.
 - If Playwright MCP is mounted in a manual integrator validation session, use it only for local browser validation. On any UI or browser-backed failure that you defer for Builder follow-up, call `browser_take_screenshot` before deferring, save the PNG under `docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png`, and link it from the integrator notes, `docs/CODEX_AUTOMATION_TASKS.md`, and `docs/MULTI_ROLE_PROGRESS.md` with concise repro notes.
+- For frontend-touching integrator work, a cancelled or failed Playwright navigation is a validation issue. Report success only after successful Playwright snapshot/console validation or an equivalent deterministic browser smoke check, or record an explicit deferred validation blocker.
 - If the main checkout is dirty, inspect and checkpoint the dirty files as-is before applying queued role patches.
 - Follow the generated integration preflight in `target/canonical_state_brief.md`; apply only patches with a safe preflight order, and defer stale, overlapping, or metadata-incomplete patches.
 - Batch apply all patches that pass `git apply --check`, run full verification once, then commit accepted patches as separate local commits.
@@ -46,3 +47,11 @@ python3 .diffmogger/scripts/integrate_role_outputs.py .
 ```
 
 The script owns patch application, local commits, retention cleanup, and progress updates.
+
+Manual integrator notes should include:
+
+```text
+MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reason>
+```
+
+Use `playwright used` when validating browser-facing accepted changes. Use `skipped` only with a concrete reason such as backend-only integration, docs-only integration, MCP unavailable, or an explicit deferred validation blocker.

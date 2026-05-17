@@ -28,6 +28,7 @@ Maintain stable planning continuity for upcoming build, review, validation, and 
 
 - Review the current horizon, deferred-patch backlog, recent integrator outcomes, and role health.
 - If Context7 MCP is mounted, use it only for documentation-assisted scoping. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, do not halt or mark the run blocked; immediately fall back to normal web search, repo docs, package metadata, or existing knowledge and continue the sprint.
+- If Playwright MCP is mounted for frontend, browser, UI, or demo-path planning, use it only for local browser-facing planning evidence. A cancelled or failed navigation is a validation issue to record, not proof that no UI bug exists.
 - Record non-obvious design calls in your patch/summary so the integrator can reconcile them into typed state and generated progress projections.
 - Queue small, concrete planner-owned patch output when planning docs need to change.
 - Prefer clarifying the next builder/hardener work over broad replanning.
@@ -58,5 +59,13 @@ Commit subject: <imperative subject without type/scope, 72 chars or less>
 ```
 
 The commit subject must name the actual planning, docs, automation-state, validation, or user-visible behavior change. Do not use generic subjects such as `integrate planner work`, `document automation progress`, `update files`, or `changes`.
+
+Include an MCP decision note in `summary.md`:
+
+```text
+MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reason>
+```
+
+Use `context7 used` when third-party/library/API docs materially affect planning. Use `playwright used` only when browser-facing validation or demo-path evidence materially affects the plan. Use `skipped` only with a concrete reason such as backend-only planning, docs-only planning, not mounted for this role, or MCP unavailable.
 
 Do not mutate the main checkout directly.

@@ -129,7 +129,7 @@ LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "automation_role_profile": "planner_builder_hardener_integrator",
     "automation_checkpoint_commits": True,
     "multi_role_allow_remotes": False,
-    "optional_mcp_servers": [],
+    "optional_mcp_servers": ["context7", "playwright"],
     "campaign_mode": "bounded",
     "ticket_run_file": "",
     "ticket_run_seed_tickets": [],
@@ -331,7 +331,7 @@ def _normalize_low_cortisol_intake(
     payload["max_parallel_scope_workers"] = max(1, min(10, _int_value(payload.get("max_parallel_scope_workers"), 2)))
     payload["automation_checkpoint_commits"] = _bool_value(payload.get("automation_checkpoint_commits"), True)
     payload["multi_role_allow_remotes"] = False
-    payload["optional_mcp_servers"] = []
+    payload["optional_mcp_servers"] = load_dashboard_module().optional_mcp_servers_from_sources(payload)
     payload["campaign_mode"] = "bounded"
     payload["ticket_run_file"] = ""
     payload["ticket_completion_notify"] = _bool_value(payload.get("ticket_completion_notify"), True)
@@ -496,7 +496,7 @@ def _low_cortisol_intake_prompt(target: Path, description: str) -> str:
             "- Decompose the full requested project scope, not just an initial demo path.",
             "- Set automation_role_profile to planner_builder_hardener_integrator. Diffmogger uses a typed execution DAG scheduler.",
             "- Set parallel_execution_mode to aggressive, symbol_graph_languages to python/typescript/javascript, parallel_write_min_confidence and parallel_write_direct_confidence to 0.75, max_parallel_write_workers to 3, and max_parallel_scope_workers to 2 unless the request clearly needs stricter local limits.",
-            "- Set optional_mcp_servers to an empty array. Context7 and Playwright MCPs are disabled by default.",
+            "- Default optional_mcp_servers to [\"context7\", \"playwright\"] unless the human explicitly opts out with an empty array.",
             "- Set human_bridge_enabled true and human_bridge_mode to file_only.",
             "- Keep the intake reusable and target-project agnostic. Do not include secrets.",
             "- Keep assumptions concise and explicit.",
@@ -1380,7 +1380,7 @@ def scaffold_template_included(scaffold_module: Any, rel_path: str, values: dict
 
 def scaffold_file_preview(target: Path, intake: dict[str, Any], *, force: bool) -> list[dict[str, Any]]:
     scaffold_module = load_dashboard_module().load_scaffold_module()
-    scaffold_intake = project_intake_payload(intake)
+    scaffold_intake = project_intake_payload(intake, target)
     values = scaffold_module.placeholders(scaffold_intake)
     mode = values.get("PROJECT_MODE", "fresh_project")
     records: list[dict[str, Any]] = []
@@ -1476,7 +1476,7 @@ def preview_summary(files: list[dict[str, Any]]) -> dict[str, int]:
 def prereq_snapshot(target: Path, intake: dict[str, Any]) -> dict[str, Any]:
     dashboard_app = load_dashboard_module()
     bridge_mode = str(intake.get("human_bridge_mode") or "file_only")
-    optional_mcp = dashboard_app.optional_mcp_servers_from_value(intake.get("optional_mcp_servers"))
+    optional_mcp = resolved_optional_mcp_servers(dashboard_app, intake, load_dashboard_state(target))
     items = dashboard_app.check_prerequisites(target, bridge_mode, optional_mcp)
     rows = [
         {
@@ -1648,7 +1648,7 @@ def command_brief_scaffold_bootstrap(args: argparse.Namespace) -> dict[str, Any]
     state_path = write_dashboard_state_from_intake(target, intake, last_action="scaffold_bootstrap_started")
     intake_path = preferred_target_path(target, ".agentic/project_intake.json")
     intake_path.parent.mkdir(parents=True, exist_ok=True)
-    scaffold_intake = project_intake_payload(intake)
+    scaffold_intake = project_intake_payload(intake, target)
     write_json_file(intake_path, scaffold_intake)
     log("state", f"Wrote {intake_path.relative_to(target)}.")
 

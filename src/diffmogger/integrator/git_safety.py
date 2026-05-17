@@ -445,6 +445,7 @@ def update_info_exclude(target: Path, *, dry_run: bool) -> None:
         "/target/automation_worktrees/",
         "/target/baseline_verification.json",
         "/target/canonical_state_brief.md",
+        "/target/validation_jobs/",
         "/target/orchestration.sqlite3",
         "/target/orchestration.sqlite3-shm",
         "/target/orchestration.sqlite3-wal",

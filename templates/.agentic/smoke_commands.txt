@@ -2,3 +2,5 @@
 # Use plain commands for all queued patches, or selector lines:
 # role:builder | npm test -- --runInBand
 # path:src/** | npm test -- --runInBand
+# Frontend/static targets should add this once the script exists:
+# path:**/*.{html,css,js,jsx,ts,tsx} | npm run browser-smoke

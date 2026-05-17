@@ -26,7 +26,7 @@ def required_file_flags(target: Path) -> list[str]:
     campaign = campaign.replace("-", "_").replace(" ", "_")
     if campaign in {"bounded", "ticket_campaign"}:
         flags.append("--ticket-campaign-enabled")
-    if intake.get("optional_mcp_servers"):
+    if optional_mcp_from_state(target, load_dashboard_module()):
         flags.append("--optional-mcp-enabled")
     return flags
 

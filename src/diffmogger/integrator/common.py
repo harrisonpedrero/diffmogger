@@ -69,6 +69,7 @@ RUNTIME_STATE_DENY_PARTS = {
     "automation_worktrees",
     "automation_logs",
     "automation_venvs",
+    "validation_jobs",
 }
 
 RUNTIME_STATE_DENY_NAMES = {".DS_Store", "codex_automation.lock", "automation_conveyor.lock"}

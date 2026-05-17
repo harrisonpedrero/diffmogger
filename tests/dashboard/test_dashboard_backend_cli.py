@@ -207,7 +207,10 @@ class DashboardBackendCliTests(unittest.TestCase):
             for key in [
                 "proposed_execution_groups",
                 "active_execution_groups",
+                "recent_execution_groups",
+                "parallel_execution",
                 "worker_contracts",
+                "worker_disposition_summary",
                 "active_leases",
                 "conflicting_leases",
                 "validation_jobs",
@@ -1029,7 +1032,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             intake = payload["intake"]
             self.assertEqual("bounded", intake["campaign_mode"])
             self.assertEqual("", intake["ticket_run_file"])
-            self.assertEqual([], intake["optional_mcp_servers"])
+            self.assertEqual(["context7", "playwright"], intake["optional_mcp_servers"])
             self.assertEqual("file_only", intake["human_bridge_mode"])
             self.assertTrue(intake["multi_role_automations_allowed"])
             self.assertEqual("planner_builder_hardener_integrator", intake["automation_role_profile"])
@@ -1488,6 +1491,40 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertTrue(dashboard_state["multi_role_automations_allowed"])
             _run_result, run_payload = self.run_cli("run.load", "--target", tmp)
             self.assertNotIn("can_run_now", run_payload["data"]["controls"])
+
+    def test_brief_scaffold_bootstrap_repairs_mcp_drift_from_dashboard_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            dashboard_path = generated_path(target, ".agentic/dashboard_state.json")
+            dashboard_path.parent.mkdir(parents=True, exist_ok=True)
+            dashboard_path.write_text(json.dumps({"optional_mcp_servers": ["context7"]}) + "\n", encoding="utf-8")
+            intake = {
+                "project_name": "MCP Drift",
+                "project_mode": "fresh_project",
+                "product_goal": "Repair stale MCP projections.",
+                "target_user": "Maintainers",
+                "desired_first_demo": "Generated docs only.",
+                "human_bridge_enabled": False,
+                "human_bridge_mode": "disabled",
+                "automation_role_profile": "planner_builder_hardener_integrator",
+                "campaign_mode": "ongoing",
+                "additional_context_files": [],
+            }
+
+            scaffold_result, scaffold_payload = self.run_cli(
+                "brief.scaffold_bootstrap",
+                "--target",
+                tmp,
+                "--intake-json",
+                json.dumps(intake),
+            )
+
+            self.assertEqual(0, scaffold_result.returncode)
+            self.assertTrue(scaffold_payload["ok"])
+            written_intake = json.loads(generated_path(target, ".agentic/project_intake.json").read_text(encoding="utf-8"))
+            manifest = json.loads((target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(["context7"], written_intake["optional_mcp_servers"])
+            self.assertEqual(["context7"], manifest["optional_mcp_servers"])
 
     def test_brief_run_bootstrap_runs_once_and_records_completion(self) -> None:
         from diffmogger.dashboard.commands import brief as brief_commands

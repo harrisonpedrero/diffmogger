@@ -574,6 +574,33 @@ WHY_NOT_PARALLEL_REASON_GUIDANCE = {
         "improvement_kind": "raise_group_limit",
     },
 }
+PARALLEL_REASON_HUMAN_SUMMARIES = {
+    "scope_fanout_exhausted": "No promotable ownership evidence; using serial fallback.",
+    "serial_fallback": "No promotable ownership evidence; using serial fallback.",
+    "awaiting_integrator_reconciliation": "Awaiting serialized integrator reconciliation.",
+    "overlapping_worker_patch_surface": "Awaiting serialized integrator reconciliation.",
+    "waiting_validation": "Waiting for validation before more parallel work.",
+    "validation_backpressure": "Waiting for validation before more parallel work.",
+    "no_safe_parallel_peer": "Parallel launch is not worth it for this wave.",
+    "not_grouped": "Parallel launch is not worth it for this wave.",
+    "parallel_not_worth_it": "Parallel launch is not worth it for this wave.",
+}
+PARALLEL_REASON_NON_BLOCKING_KINDS = {
+    "serial_fallback",
+    "awaiting_integrator_reconciliation",
+    "waiting_validation",
+    "parallel_not_worth_it",
+}
+EXECUTION_GROUP_DISPLAY_MODE_LABELS = {
+    "dry_run": ("planner_preview", "Planning preview"),
+    "read_only": ("read_only_workers", "Read-only workers"),
+    "write_workers": ("write_workers", "Write workers"),
+    "write": ("write_workers", "Write workers"),
+    "validation": ("validation_jobs", "Validation jobs"),
+    "mixed": ("serialized_runtime", "Serialized runtime"),
+    "runtime": ("runtime", "Runtime work"),
+    "worker": ("worker_reports", "Worker reports"),
+}
 AUTOMATION_CONTROL_ID = "automation-control:default"
 AUTOMATION_CONTROL_STREAM_ID = "stream:automation-control"
 AUTOMATION_CONTROL_TASK_ID = "task:automation-control"
@@ -11793,8 +11820,14 @@ def execution_groups_read_model_conn(conn: sqlite3.Connection, *, mode: str = "d
             (group["execution_group_id"],),
         ).fetchall()
         group["items"] = [_execution_group_item_row_to_dict(item_row) for item_row in item_rows]
-        groups.append(group)
-    return {"mode": mode, "proposed_execution_groups": groups}
+        groups.append(decorate_execution_group_for_display(group))
+    display = _execution_group_mode_display(mode, {"planner_mode": mode} if mode == "dry_run" else {})
+    return {
+        "mode": mode,
+        "display_mode": display.get("display_mode", ""),
+        "display_mode_label": display.get("display_mode_label", ""),
+        "proposed_execution_groups": groups,
+    }
 
 
 def _nonnegative_int(value: Any, default: int = 0, *, maximum: int | None = None) -> int:
@@ -13375,7 +13408,7 @@ def _latest_validation_execution_group_conn(conn: sqlite3.Connection) -> dict[st
     if row is None:
         return {}
     payload = _json_cell(row["payload_json"], {})
-    return {
+    return decorate_execution_group_for_display({
         "execution_group_id": str(row["execution_group_id"]),
         "status": str(row["status"] or ""),
         "mode": str(row["mode"] or ""),
@@ -13385,7 +13418,7 @@ def _latest_validation_execution_group_conn(conn: sqlite3.Connection) -> dict[st
         "selected_by": str(row["selected_by"] or ""),
         "reason": str(row["reason"] or ""),
         "payload": payload if isinstance(payload, dict) else {},
-    }
+    })
 
 
 def validation_job_read_model_conn(conn: sqlite3.Connection, *, limit: int = 20) -> dict[str, Any]:
@@ -14444,24 +14477,249 @@ def worker_agents_conn(
     return workers
 
 
+def _execution_group_mode_display(mode: Any, payload: Mapping[str, Any] | None = None) -> dict[str, str]:
+    payload = payload if isinstance(payload, Mapping) else {}
+    raw_mode = re.sub(r"[^a-z0-9]+", "_", str(mode or "").strip().lower()).strip("_")
+    planner_mode = re.sub(r"[^a-z0-9]+", "_", str(payload.get("planner_mode") or "").strip().lower()).strip("_")
+    lookup_mode = "dry_run" if raw_mode == "dry_run" or planner_mode == "dry_run" else raw_mode
+    display_mode, display_label = EXECUTION_GROUP_DISPLAY_MODE_LABELS.get(
+        lookup_mode,
+        (lookup_mode or "runtime", (lookup_mode or "runtime").replace("_", " ").title()),
+    )
+    execution_mode = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        str(payload.get("execution_mode") or ("" if lookup_mode == "dry_run" else raw_mode)).strip().lower(),
+    ).strip("_")
+    execution_display_mode, execution_display_label = EXECUTION_GROUP_DISPLAY_MODE_LABELS.get(
+        execution_mode,
+        (execution_mode, execution_mode.replace("_", " ").title()) if execution_mode else ("", ""),
+    )
+    return {
+        "raw_mode": raw_mode,
+        "display_mode": display_mode,
+        "display_mode_label": display_label,
+        "execution_mode": execution_mode,
+        "execution_mode_display": execution_display_mode,
+        "execution_mode_label": execution_display_label,
+    }
+
+
+def _execution_group_status_label(status: Any) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(status or "").strip().lower()).strip("_")
+    return {
+        "proposed": "Proposed",
+        "running": "Running",
+        "completed": "Completed",
+        "failed": "Failed",
+        "cancelled": "Cancelled",
+    }.get(normalized, normalized.replace("_", " ").title() if normalized else "")
+
+
+def decorate_execution_group_for_display(group: Mapping[str, Any]) -> dict[str, Any]:
+    """Attach user-facing labels while preserving raw execution group fields."""
+    result = dict(group)
+    payload = result.get("payload") if isinstance(result.get("payload"), Mapping) else {}
+    display = _execution_group_mode_display(result.get("mode"), payload)
+    payload_with_display = dict(payload)
+    for key in ("display_mode", "display_mode_label", "execution_mode_display", "execution_mode_label"):
+        payload_with_display.setdefault(key, display.get(key, ""))
+    payload_with_display.setdefault("raw_mode", display.get("raw_mode", ""))
+    result["payload"] = payload_with_display
+    result.setdefault("raw_mode", display.get("raw_mode", ""))
+    result["display_mode"] = display.get("display_mode", "")
+    result["display_mode_label"] = display.get("display_mode_label", "")
+    result["execution_mode"] = display.get("execution_mode", "")
+    result["execution_mode_display"] = display.get("execution_mode_display", "")
+    result["execution_mode_label"] = display.get("execution_mode_label", "")
+    status_label = _execution_group_status_label(result.get("status"))
+    if status_label:
+        result["display_status_label"] = status_label
+    if result.get("display_mode_label") and status_label:
+        result["display_summary"] = f"{status_label} {str(result.get('display_mode_label')).lower()}"
+    elif result.get("display_mode_label"):
+        result["display_summary"] = str(result.get("display_mode_label"))
+    return result
+
+
+def _worker_patches_by_worker_id_conn(conn: sqlite3.Connection, worker_ids: list[str], *, limit: int = 200) -> dict[str, list[dict[str, Any]]]:
+    ids = [str(worker_id) for worker_id in worker_ids if str(worker_id or "")]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM worker_patches
+        WHERE worker_id IN ({placeholders})
+        ORDER BY queued_at DESC, created_at DESC, patch_id
+        LIMIT ?
+        """,
+        (*ids, max(1, int(limit))),
+    ).fetchall()
+    patches_by_worker: dict[str, list[dict[str, Any]]] = {}
+    for patch in [_worker_patch_row_to_dict(row) for row in rows]:
+        patches_by_worker.setdefault(str(patch.get("worker_id") or ""), []).append(patch)
+    return patches_by_worker
+
+
+def _payload_count(payload: Mapping[str, Any], *keys: str) -> int:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, float):
+            return max(0, int(value))
+        if isinstance(value, list):
+            return len(value)
+    return 0
+
+
+def _worker_disposition_display(worker: Mapping[str, Any], patches: list[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    payload = worker.get("payload") if isinstance(worker.get("payload"), Mapping) else {}
+    patches = [patch for patch in (patches or []) if isinstance(patch, Mapping)]
+    raw_status = re.sub(r"[^a-z0-9]+", "_", str(payload.get("disposition_status") or "").strip().lower()).strip("_")
+    raw_required = bool(payload.get("finding_disposition_required"))
+    accepted = _payload_count(payload, "accepted_count", "accepted_findings_count", "accepted_findings", "accepted")
+    rejected = _payload_count(payload, "rejected_count", "rejected_findings_count", "rejected_findings", "rejected")
+    deferred = _payload_count(payload, "deferred_count", "deferred_findings_count", "deferred_findings", "deferred")
+    patch = patches[0] if patches else {}
+    patch_status = re.sub(r"[^a-z0-9]+", "_", str(patch.get("status") or payload.get("patch_status") or payload.get("integration_status") or "").strip().lower()).strip("_")
+    integrated_at = str(patch.get("integrated_at") or payload.get("integrated_at") or "").strip()
+    if patches and (integrated_at or patch_status in {"integrated", "applied", "resolved", "superseded"}):
+        return {
+            "status": "reconciled",
+            "label": "Reconciled by integrator",
+            "summary": "Worker patch has been reconciled by the serialized integrator.",
+            "required": False,
+            "patch_id": str(patch.get("patch_id") or ""),
+            "patch_status": patch_status,
+        }
+    if patches and patch_status in {"queued", "ready", "validated", "selected", "already_applied", "rebaseable", "reconcilable_overlap"}:
+        return {
+            "status": "awaiting_integrator_review",
+            "label": "Awaiting integrator review",
+            "summary": "Worker patch is queued for serialized integrator reconciliation.",
+            "required": False,
+            "patch_id": str(patch.get("patch_id") or ""),
+            "patch_status": patch_status,
+        }
+    if patches and patch_status in {"conflict", "deferred", "true_conflict"}:
+        return {
+            "status": "deferred",
+            "label": "Deferred by integrator",
+            "summary": "Worker patch is deferred until conflict reconciliation is available.",
+            "required": False,
+            "patch_id": str(patch.get("patch_id") or ""),
+            "patch_status": patch_status,
+        }
+    if raw_status in {"accepted", "rejected", "deferred"}:
+        label = raw_status.replace("_", " ").title()
+        return {
+            "status": raw_status,
+            "label": label,
+            "summary": f"Worker findings were {raw_status.replace('_', ' ')}.",
+            "required": False,
+            "accepted_count": accepted,
+            "rejected_count": rejected,
+            "deferred_count": deferred,
+        }
+    if raw_status == "dispositioned" or accepted or rejected or deferred:
+        return {
+            "status": "dispositioned",
+            "label": "Findings dispositioned",
+            "summary": f"Accepted {accepted}, rejected {rejected}, deferred {deferred}.",
+            "required": False,
+            "accepted_count": accepted,
+            "rejected_count": rejected,
+            "deferred_count": deferred,
+        }
+    if raw_required:
+        return {
+            "status": "pending",
+            "label": "Pending main-agent disposition",
+            "summary": "Worker findings need an accept, reject, or defer decision before they influence follow-on work.",
+            "required": True,
+            "accepted_count": accepted,
+            "rejected_count": rejected,
+            "deferred_count": deferred,
+        }
+    if str(worker.get("mode") or "") == "write" and str(worker.get("status") or "") == "completed" and not patches:
+        return {
+            "status": "missing_patch_metadata",
+            "label": "Patch metadata missing",
+            "summary": "Write worker completed but no queued patch metadata is visible to the integrator.",
+            "required": True,
+        }
+    return {
+        "status": raw_status or "not_applicable",
+        "label": "No disposition required",
+        "summary": "This worker report does not require a finding disposition.",
+        "required": False,
+        "accepted_count": accepted,
+        "rejected_count": rejected,
+        "deferred_count": deferred,
+    }
+
+
+def _decorate_worker_dispositions(conn: sqlite3.Connection, workers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    patches_by_worker = _worker_patches_by_worker_id_conn(conn, [str(worker.get("worker_id") or "") for worker in workers])
+    decorated: list[dict[str, Any]] = []
+    for worker in workers:
+        item = dict(worker)
+        disposition = _worker_disposition_display(item, patches_by_worker.get(str(item.get("worker_id") or ""), []))
+        item["disposition"] = disposition
+        item["disposition_status"] = str(disposition.get("status") or "")
+        item["disposition_label"] = str(disposition.get("label") or "")
+        item["disposition_summary"] = str(disposition.get("summary") or "")
+        item["finding_disposition_required_effective"] = bool(disposition.get("required"))
+        decorated.append(item)
+    return decorated
+
+
+def _worker_disposition_summary(workers: list[Mapping[str, Any]]) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    required = 0
+    for worker in workers:
+        status = str(worker.get("disposition_status") or (worker.get("disposition") or {}).get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+        if bool(worker.get("finding_disposition_required_effective")):
+            required += 1
+    return {
+        "counts": counts,
+        "required_count": required,
+        "pending_count": counts.get("pending", 0) + counts.get("missing_patch_metadata", 0),
+        "awaiting_integrator_review_count": counts.get("awaiting_integrator_review", 0),
+        "reconciled_count": counts.get("reconciled", 0) + counts.get("dispositioned", 0) + counts.get("accepted", 0) + counts.get("rejected", 0) + counts.get("deferred", 0),
+    }
+
+
 def worker_reports_read_model_conn(conn: sqlite3.Connection, *, limit: int = 12) -> dict[str, Any]:
     active = worker_agents_conn(conn, mode="read_only", statuses={"queued", "running"}, limit=limit)
-    completed = worker_agents_conn(
+    completed_read_only = worker_agents_conn(
         conn,
         mode="read_only",
         statuses={"completed", "failed", "unavailable"},
         limit=limit,
     )
-    disposition_required = any(
-        bool(worker.get("payload", {}).get("finding_disposition_required"))
-        and str(worker.get("payload", {}).get("disposition_status") or "pending") != "dispositioned"
-        for worker in completed
+    completed_write = worker_agents_conn(
+        conn,
+        mode="write",
+        statuses={"completed", "failed", "unavailable"},
+        limit=limit,
     )
+    completed = _decorate_worker_dispositions(conn, [*completed_read_only, *completed_write])[:limit]
+    disposition_required = any(bool(worker.get("finding_disposition_required_effective")) for worker in completed)
     return {
         "active_read_only_workers": active,
         "pending_worker_reports": active,
         "completed_worker_reports": completed,
+        "completed_read_only_worker_reports": [worker for worker in completed if str(worker.get("mode") or "") == "read_only"],
+        "completed_write_worker_reports": [worker for worker in completed if str(worker.get("mode") or "") == "write"],
         "worker_finding_disposition_required": disposition_required,
+        "worker_disposition_summary": _worker_disposition_summary(completed),
     }
 
 
@@ -14500,7 +14758,7 @@ def _execution_group_by_id_conn(conn: sqlite3.Connection, execution_group_id: st
             }
         )
     payload = _json_cell(row["payload_json"], {})
-    return {
+    return decorate_execution_group_for_display({
         "execution_group_id": str(row["execution_group_id"]),
         "status": str(row["status"] or ""),
         "mode": str(row["mode"] or ""),
@@ -14511,7 +14769,30 @@ def _execution_group_by_id_conn(conn: sqlite3.Connection, execution_group_id: st
         "reason": str(row["reason"] or ""),
         "payload": payload if isinstance(payload, dict) else {},
         "items": items,
-    }
+    })
+
+
+def execution_groups_by_status_conn(
+    conn: sqlite3.Connection,
+    statuses: set[str],
+    *,
+    limit: int = 16,
+) -> list[dict[str, Any]]:
+    if not statuses:
+        return []
+    placeholders = ",".join("?" for _ in statuses)
+    rows = conn.execute(
+        f"""
+        SELECT execution_group_id
+        FROM execution_groups
+        WHERE status IN ({placeholders})
+        ORDER BY COALESCE(NULLIF(finished_at, ''), NULLIF(started_at, ''), created_at) DESC,
+                 execution_group_id DESC
+        LIMIT ?
+        """,
+        (*sorted(statuses), max(1, int(limit))),
+    ).fetchall()
+    return [_execution_group_by_id_conn(conn, str(row["execution_group_id"])) for row in rows]
 
 
 def _latest_read_only_execution_group_conn(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -16193,6 +16474,7 @@ def _write_worker_contract_payload(item: Mapping[str, Any], leases: list[dict[st
         ".env.local",
         "target/automation_queue/",
         "target/automation_worktrees/",
+        "target/validation_jobs/",
         ".diffmogger/runtime/orchestration.sqlite3",
     ]
     symbol_context = _worker_symbol_context(item)
@@ -17152,7 +17434,7 @@ def _worker_patch_preflight_protected_paths(changed_files: list[str]) -> list[st
         if lowered in {"target/orchestration.sqlite3", "target/automation_conveyor_state.json", "target/automation_runner.json"}:
             protected.append(path)
             continue
-        if lowered.startswith(("target/automation_queue/", "target/automation_worktrees/", "target/automation_logs/")):
+        if lowered.startswith(("target/automation_queue/", "target/automation_worktrees/", "target/automation_logs/", "target/validation_jobs/")):
             protected.append(path)
             continue
     return sorted(dict.fromkeys(protected))
@@ -21267,6 +21549,17 @@ def _parallel_candidate_id(candidate: Mapping[str, Any]) -> str:
     return f"parallel-candidate:{digest[:24]}"
 
 
+def _parallel_reason_human_summary(reason_kind: str, *, normalized_kind: str = "", reason: str = "") -> str:
+    raw = re.sub(r"[^a-z0-9]+", "_", str(reason_kind or "").strip().lower()).strip("_")
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(normalized_kind or "").strip().lower()).strip("_")
+    return (
+        PARALLEL_REASON_HUMAN_SUMMARIES.get(raw)
+        or PARALLEL_REASON_HUMAN_SUMMARIES.get(normalized)
+        or str(reason or "").strip()
+        or _why_not_parallel_guidance(normalized or raw or "unknown")["next_action"]
+    )
+
+
 def _parallel_blocked_candidate(candidate: Mapping[str, Any], *, reason_kind: str, reason: str) -> dict[str, Any]:
     required_leases = [item for item in (candidate.get("required_leases") if isinstance(candidate.get("required_leases"), list) else []) if isinstance(item, Mapping)]
     lease_conflicts = [
@@ -21275,6 +21568,7 @@ def _parallel_blocked_candidate(candidate: Mapping[str, Any], *, reason_kind: st
         for conflict in (lease.get("conflicts") if isinstance(lease.get("conflicts"), list) else [])
         if isinstance(conflict, Mapping)
     ]
+    human_reason = _parallel_reason_human_summary(reason_kind, reason=reason)
     return {
         "candidate_id": str(candidate.get("candidate_id") or _parallel_candidate_id(candidate)),
         "task_id": str(candidate.get("task_id") or ""),
@@ -21286,6 +21580,10 @@ def _parallel_blocked_candidate(candidate: Mapping[str, Any], *, reason_kind: st
         "action_kind": str(candidate.get("action_kind") or ""),
         "execution_mode": str(candidate.get("execution_mode") or ""),
         "reason_kind": reason_kind,
+        "raw_reason_kind": reason_kind,
+        "display_reason": human_reason,
+        "human_summary": human_reason,
+        "debug_reason_kind": reason_kind,
         "reason": _brief_text(reason, limit=220),
         "likely_touches": list(candidate.get("likely_touches") or [])[:6],
         "required_leases": [dict(item) for item in required_leases[:6]],
@@ -21350,6 +21648,9 @@ def _why_not_parallel_guidance(reason_kind: str) -> dict[str, str]:
 
 def _why_not_parallel_record(candidate: Mapping[str, Any], *, raw_reason_kind: str = "", reason: str = "") -> dict[str, Any]:
     kind = _why_not_parallel_reason_kind(raw_reason_kind or str(candidate.get("reason_kind") or ""), candidate)
+    raw_kind = str(raw_reason_kind or candidate.get("raw_reason_kind") or candidate.get("reason_kind") or "")
+    reason_text = _brief_text(reason or candidate.get("reason") or candidate.get("skipped_reason") or "", limit=220)
+    human_summary = _parallel_reason_human_summary(raw_kind or kind, normalized_kind=kind, reason=str(candidate.get("human_summary") or candidate.get("display_reason") or reason_text))
     confidence_signals = [
         str(item)
         for item in (candidate.get("confidence_signals") if isinstance(candidate.get("confidence_signals"), list) else [])
@@ -21379,8 +21680,11 @@ def _why_not_parallel_record(candidate: Mapping[str, Any], *, raw_reason_kind: s
         "action_kind": str(candidate.get("action_kind") or ""),
         "execution_mode": str(candidate.get("execution_mode") or ""),
         "reason_kind": kind,
-        "raw_reason_kind": str(raw_reason_kind or candidate.get("reason_kind") or ""),
-        "reason": _brief_text(reason or candidate.get("reason") or candidate.get("skipped_reason") or "", limit=220),
+        "raw_reason_kind": raw_kind,
+        "display_reason": human_summary,
+        "human_summary": human_summary,
+        "debug_reason_kind": raw_kind or kind,
+        "reason": reason_text,
         "likely_touches": likely_touches,
         "confidence_signals": confidence_signals,
         "missing_confidence_signal": str(candidate.get("missing_confidence_signal") or ""),
@@ -21533,6 +21837,8 @@ def why_not_parallel_read_model(
             {
                 "reason_kind": reason_kind,
                 "label": guidance["label"],
+                "human_summary": _parallel_reason_human_summary(reason_kind, normalized_kind=reason_kind, reason=guidance["next_action"]),
+                "display_reason": _parallel_reason_human_summary(reason_kind, normalized_kind=reason_kind, reason=guidance["next_action"]),
                 "count": 0,
                 "candidate_count": 0,
                 "next_action": guidance["next_action"],
@@ -21578,6 +21884,9 @@ def why_not_parallel_read_model(
                     "owner_role": record.get("owner_role"),
                     "action_kind": record.get("action_kind"),
                     "raw_reason_kind": record.get("raw_reason_kind"),
+                    "display_reason": record.get("display_reason"),
+                    "human_summary": record.get("human_summary"),
+                    "debug_reason_kind": record.get("debug_reason_kind") or record.get("raw_reason_kind"),
                     "reason": record.get("reason"),
                     "likely_touch_paths": [
                         str(item.get("path") or "")
@@ -21613,21 +21922,32 @@ def why_not_parallel_read_model(
             "reason_kind": group.get("reason_kind"),
             "label": group.get("label"),
             "count": group.get("count"),
+            "human_summary": group.get("human_summary"),
+            "display_reason": group.get("display_reason"),
             "next_action": group.get("next_action"),
             "improvement_kind": group.get("improvement_kind"),
+            "debug_reason_kind": (group.get("raw_reason_kinds") or [group.get("reason_kind")])[0]
+            if isinstance(group.get("raw_reason_kinds"), list)
+            else group.get("reason_kind"),
         }
         for group in reason_groups[:BRIEF_ITEM_LIMIT]
     ]
     top = reason_groups[0] if reason_groups else {}
     raw_summary = dict(parallelization_summary or {})
     if records:
-        summary = f"{len(records)} blocked parallel candidate(s); top reason: {top.get('label') or top.get('reason_kind')}."
-        status = "blocked"
+        all_non_blocking = all(str(record.get("reason_kind") or "") in PARALLEL_REASON_NON_BLOCKING_KINDS for record in records)
+        top_summary = str(top.get("human_summary") or top.get("display_reason") or top.get("label") or top.get("reason_kind") or "")
+        if all_non_blocking:
+            summary = f"{len(records)} parallel candidate(s) are using serialized or waiting paths; top reason: {top_summary}."
+            status = str(top.get("reason_kind") or "serial_fallback")
+        else:
+            summary = f"{len(records)} parallel candidate(s) need attention; top reason: {top.get('label') or top.get('reason_kind')}."
+            status = "blocked"
     elif proposed_groups:
-        summary = "Parallel dry run has proposed group(s) and no blocked candidate reason groups."
+        summary = "Planning preview has proposed group(s) and no candidate reason groups."
         status = "clear"
     else:
-        summary = "No blocked parallel candidates are visible in the current dry run."
+        summary = "No parallel candidate reasons are visible in the current planning preview."
         status = "clear"
     return {
         "schema_version": 1,
@@ -21646,6 +21966,8 @@ def why_not_parallel_read_model(
         "next_improvements": next_improvements,
         "parallelization": {
             "mode": str(raw_summary.get("mode") or ""),
+            "display_mode": str(raw_summary.get("display_mode") or ""),
+            "display_mode_label": str(raw_summary.get("display_mode_label") or ""),
             "planner_source": str(raw_summary.get("planner_source") or ""),
             "scheduler_basis": str(raw_summary.get("scheduler_basis") or ""),
             "group_count": int(raw_summary.get("group_count") or len(proposed_groups)),
@@ -22280,7 +22602,7 @@ def _build_parallel_groups(
                 "required_leases": list(candidate.get("required_leases") or []),
                 "context_pack_id": str(candidate.get("context_pack_id") or ""),
                 "status": "proposed",
-                "reason": "compatible dry-run execution candidate" if len(group_items) == 1 else "compatible dry-run parallel candidate",
+                "reason": "compatible planning-preview execution candidate" if len(group_items) == 1 else "compatible planning-preview parallel candidate",
                 "payload": {
                     "candidate_id": str(candidate.get("candidate_id") or ""),
                     "dag_node_id": str(candidate.get("dag_node_id") or ""),
@@ -22320,11 +22642,15 @@ def _build_parallel_groups(
             "payload": {
                 "schema_version": 1,
                 "planner_mode": "dry_run",
+                "display_mode": "planner_preview",
+                "display_mode_label": "Planning preview",
                 "planner_source": planner_source,
                 "scheduler_basis": "dag_action_capabilities" if planner_source == "execution_dag" else "task_graph_compatibility",
                 "wave_kind": "ready_execution_wave",
                 "wave_index": wave_index,
                 "execution_mode": execution_mode,
+                "execution_mode_display": _execution_group_mode_display(execution_mode).get("display_mode", ""),
+                "execution_mode_label": _execution_group_mode_display(execution_mode).get("display_mode_label", ""),
                 "scheduler_snapshot_id": task_snapshot_id,
                 "task_snapshot_id": task_snapshot_id,
                 "impact_snapshot_id": impact_snapshot_id,
@@ -22340,7 +22666,7 @@ def _build_parallel_groups(
                 "scope_evidence_required": any(bool(item.get("scope_evidence_required")) for item in group_items),
             },
         }
-        groups.append(group)
+        groups.append(decorate_execution_group_for_display(group))
         remaining = next_remaining
     if remaining and len(groups) >= PARALLEL_DRY_RUN_GROUP_LIMIT:
         for candidate in remaining:
@@ -22348,7 +22674,7 @@ def _build_parallel_groups(
                 _parallel_blocked_candidate(
                     candidate,
                     reason_kind="group_limit",
-                    reason=f"dry-run planner is bounded to {PARALLEL_DRY_RUN_GROUP_LIMIT} proposed group(s)",
+                    reason=f"planning preview is bounded to {PARALLEL_DRY_RUN_GROUP_LIMIT} proposed group(s)",
                 )
             )
     return groups, blocked[:PARALLEL_DRY_RUN_BLOCKED_LIMIT]
@@ -22653,6 +22979,8 @@ def plan_parallel_execution_groups_conn(
     summary = {
         "schema_version": 1,
         "mode": "dry_run",
+        "display_mode": "planner_preview",
+        "display_mode_label": "Planning preview",
         "generated_at": generated_at,
         "selected_by": selected_by,
         "planner_source": planner_source,
@@ -22701,6 +23029,8 @@ def plan_parallel_execution_groups_conn(
     result = {
         "schema_version": 1,
         "mode": "dry_run",
+        "display_mode": "planner_preview",
+        "display_mode_label": "Planning preview",
         "generated_at": generated_at,
         "proposed_execution_groups": groups,
         "parallelization_summary": summary,
@@ -25594,6 +25924,21 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         patch_lineage = patch_lineage_summary_conn(conn)
         candidate_lanes = candidate_lane_read_model_conn(conn)
         validation_jobs = validation_job_read_model_conn(conn)
+        active_execution_groups = execution_groups_by_status_conn(conn, {"running"}, limit=16)
+        recent_execution_groups = execution_groups_by_status_conn(conn, {"completed", "failed", "cancelled"}, limit=16)
+        parallel_execution = {
+            "schema_version": 1,
+            "authority": "sqlite_runtime_read_model",
+            "proposed_groups": parallel_dry_run.get("proposed_execution_groups", [])
+            if isinstance(parallel_dry_run.get("proposed_execution_groups"), list)
+            else [],
+            "running_groups": active_execution_groups,
+            "recently_completed_groups": recent_execution_groups,
+            "validation_jobs": validation_jobs.get("active_validation_jobs", [])
+            if isinstance(validation_jobs.get("active_validation_jobs"), list)
+            else [],
+            "validation_job_summary": validation_jobs.get("validation_job_summary", {}),
+        }
         last_event = conn.execute(
             """
             SELECT event_id, stream_id, sequence, occurred_at, event_type, actor_role,
@@ -25832,6 +26177,10 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "lease_conflicts_considered": scheduler_decision.get("lease_conflicts_considered", []),
             "legacy_result": scheduler_decision.get("legacy_result", {}),
             "proposed_execution_groups": parallel_dry_run.get("proposed_execution_groups", []),
+            "active_execution_groups": active_execution_groups,
+            "recent_execution_groups": recent_execution_groups,
+            "recently_completed_execution_groups": recent_execution_groups,
+            "parallel_execution": parallel_execution,
             "parallelization_summary": parallelization_summary,
             "blocked_parallel_candidates": parallel_dry_run.get("blocked_parallel_candidates", []),
             "why_not_parallel": why_not_parallel,
@@ -25842,7 +26191,10 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "active_read_only_workers": worker_reports.get("active_read_only_workers", []),
             "pending_worker_reports": worker_reports.get("pending_worker_reports", []),
             "completed_worker_reports": worker_reports.get("completed_worker_reports", []),
+            "completed_read_only_worker_reports": worker_reports.get("completed_read_only_worker_reports", []),
+            "completed_write_worker_reports": worker_reports.get("completed_write_worker_reports", []),
             "worker_finding_disposition_required": bool(worker_reports.get("worker_finding_disposition_required")),
+            "worker_disposition_summary": worker_reports.get("worker_disposition_summary", {}),
             "scope_evidence_records": scope_evidence_records,
             "accepted_scope_evidence_records": [record for record in scope_evidence_records if record.get("status") == "accepted"],
             "scope_fanout_outcomes": scope_fanout_outcomes,
@@ -25976,6 +26328,18 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         if isinstance(snapshot.get("proposed_execution_groups"), list)
         else []
     )
+    active_execution_groups = (
+        snapshot.get("active_execution_groups")
+        if isinstance(snapshot.get("active_execution_groups"), list)
+        else []
+    )
+    recent_execution_groups = (
+        snapshot.get("recent_execution_groups")
+        if isinstance(snapshot.get("recent_execution_groups"), list)
+        else snapshot.get("recently_completed_execution_groups")
+        if isinstance(snapshot.get("recently_completed_execution_groups"), list)
+        else []
+    )
     blocked_parallel_candidates = (
         snapshot.get("blocked_parallel_candidates")
         if isinstance(snapshot.get("blocked_parallel_candidates"), list)
@@ -26088,6 +26452,12 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         else {}
     )
     worker_finding_disposition_required = bool(snapshot.get("worker_finding_disposition_required"))
+    worker_disposition_summary = (
+        snapshot.get("worker_disposition_summary")
+        if isinstance(snapshot.get("worker_disposition_summary"), dict)
+        else {}
+    )
+    worker_disposition_counts = worker_disposition_summary.get("counts") if isinstance(worker_disposition_summary.get("counts"), dict) else {}
     runner_state = snapshot.get("runner_state") if isinstance(snapshot.get("runner_state"), dict) else {}
     automation_control = snapshot.get("automation_control") if isinstance(snapshot.get("automation_control"), dict) else {}
     human_state = snapshot.get("human_messages") if isinstance(snapshot.get("human_messages"), dict) else {}
@@ -26290,11 +26660,12 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         lines.append("- skipped_candidate: none")
     lines.extend([
         "",
-        "## Parallel Execution Dry Run",
+        "## Parallel Execution",
         "",
-        f"- summary: {_format_key_values({'mode': parallelization_summary.get('mode'), 'groups': parallelization_summary.get('group_count'), 'grouped_tasks': parallelization_summary.get('grouped_task_count'), 'blocked': parallelization_summary.get('blocked_candidate_count'), 'top_blocked': parallelization_summary.get('top_blocked_reason_kind')})}",
+        f"- summary: {_format_key_values({'display_mode': parallelization_summary.get('display_mode_label') or parallelization_summary.get('display_mode') or 'Planning preview', 'proposed': parallelization_summary.get('group_count'), 'running': len(active_execution_groups), 'recently_completed': len(recent_execution_groups), 'grouped_tasks': parallelization_summary.get('grouped_task_count'), 'reasons': parallelization_summary.get('blocked_candidate_count'), 'top_reason': parallelization_summary.get('top_blocked_reason_kind')})}",
         f"- active_counts: {_format_key_values(active_parallel_counts)}",
-        f"- worker_reports: {_format_key_values({'active_read_only': len(active_read_only_workers), 'active_write': len(active_write_workers), 'completed': len(completed_worker_reports), 'disposition_required': _brief_bool(worker_finding_disposition_required)})}",
+        f"- worker_reports: {_format_key_values({'active_read_only': len(active_read_only_workers), 'active_write': len(active_write_workers), 'completed': len(completed_worker_reports), 'disposition_required': _brief_bool(worker_finding_disposition_required), 'awaiting_integrator_review': worker_disposition_summary.get('awaiting_integrator_review_count'), 'pending_disposition': worker_disposition_summary.get('pending_count')})}",
+        f"- worker_dispositions: {_format_key_values(worker_disposition_counts)}",
         f"- scope_fanout: {_format_key_values({'outcomes': len(scope_fanout_outcomes), 'exhausted': len(exhausted_scope_fanout_outcomes), 'max_completed_attempts': SCOPE_FANOUT_MAX_COMPLETED_ATTEMPTS})}",
         f"- worker_patches: {_format_key_values({'queued': len(queued_worker_patches), 'conflicts': len(write_worker_conflicts)})}",
         f"- worker_patch_preflight: {_format_key_values({'safe': worker_patch_preflight.get('safe_count'), 'ready': worker_patch_preflight.get('ready_patch_count'), 'already_applied': worker_patch_preflight.get('already_applied_count'), 'rebaseable': worker_patch_preflight.get('rebaseable_count'), 'reconcilable': worker_patch_preflight.get('reconcilable_overlap_count'), 'true_conflict': worker_patch_preflight.get('true_conflict_count'), 'missing_metadata': worker_patch_preflight.get('missing_metadata_count')})}",
@@ -26337,14 +26708,22 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         lines.append(
             f"- serial_fallback: {_format_key_values({'task': outcome.get('task_id'), 'attempts': outcome.get('attempt_count'), 'records': outcome.get('evidence_record_count'), 'accepted': outcome.get('accepted_count'), 'top_rejection': top_reason, 'reason': 'No promotable ownership evidence; using serial fallback.', 'raw_reason': 'scope_fanout_exhausted'})}"
         )
+    if completed_worker_reports:
+        for worker in completed_worker_reports[:BRIEF_ITEM_LIMIT]:
+            if not isinstance(worker, dict):
+                continue
+            lines.append(
+                f"- worker_report: {_format_key_values({'worker': worker.get('worker_id'), 'mode': worker.get('mode'), 'status': worker.get('status'), 'disposition': worker.get('disposition_label') or worker.get('disposition_status'), 'detail': worker.get('disposition_summary')})}"
+            )
     if proposed_execution_groups:
+        lines.append("- proposed_groups: Planning preview")
         for group in proposed_execution_groups[:BRIEF_ITEM_LIMIT]:
             if not isinstance(group, dict):
                 continue
             items = group.get("items") if isinstance(group.get("items"), list) else []
             payload = group.get("payload") if isinstance(group.get("payload"), dict) else {}
             lines.append(
-                f"- proposed_group: {_format_key_values({'id': group.get('execution_group_id'), 'mode': group.get('mode'), 'execution': payload.get('execution_mode'), 'items': len(items), 'reason': group.get('reason')})}"
+                f"- proposed_group: {_format_key_values({'id': group.get('execution_group_id'), 'display': group.get('display_mode_label') or payload.get('display_mode_label') or 'Planning preview', 'execution': group.get('execution_mode_label') or payload.get('execution_mode_label') or payload.get('execution_mode'), 'items': len(items), 'reason': group.get('reason')})}"
             )
             if payload.get("why_together"):
                 lines.append(f"- why_together: {_brief_text(payload.get('why_together'), limit=240)}")
@@ -26366,12 +26745,32 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
                     )
     else:
         lines.append("- proposed_group: none")
+    if active_execution_groups:
+        lines.append("- running_groups: active serialized runtime")
+        for group in active_execution_groups[:BRIEF_ITEM_LIMIT]:
+            if not isinstance(group, dict):
+                continue
+            lines.append(
+                f"- running_group: {_format_key_values({'id': group.get('execution_group_id'), 'display': group.get('display_mode_label') or group.get('mode'), 'status': group.get('status'), 'selected_by': group.get('selected_by')})}"
+            )
+    else:
+        lines.append("- running_group: none")
+    if recent_execution_groups:
+        lines.append("- recently_completed_groups: parallel history")
+        for group in recent_execution_groups[:BRIEF_ITEM_LIMIT]:
+            if not isinstance(group, dict):
+                continue
+            lines.append(
+                f"- recent_group: {_format_key_values({'id': group.get('execution_group_id'), 'display': group.get('display_mode_label') or group.get('mode'), 'status': group.get('status'), 'finished_at': group.get('finished_at') or group.get('started_at')})}"
+            )
+    else:
+        lines.append("- recent_group: none")
     if blocked_parallel_candidates:
         for candidate in blocked_parallel_candidates[:BRIEF_ITEM_LIMIT]:
             if not isinstance(candidate, dict):
                 continue
             lines.append(
-                f"- skipped_parallel_candidate: {_format_key_values({'task': candidate.get('task_id') or candidate.get('graph_task_node_id'), 'role': candidate.get('owner_role'), 'action': candidate.get('action_kind'), 'kind': candidate.get('reason_kind'), 'reason': candidate.get('reason')})}"
+                f"- skipped_parallel_candidate: {_format_key_values({'task': candidate.get('task_id') or candidate.get('graph_task_node_id'), 'role': candidate.get('owner_role'), 'action': candidate.get('action_kind'), 'summary': candidate.get('human_summary') or candidate.get('display_reason') or candidate.get('reason'), 'debug_kind': candidate.get('debug_reason_kind') or candidate.get('raw_reason_kind') or candidate.get('reason_kind')})}"
             )
     else:
         lines.append("- skipped_parallel_candidate: none")
@@ -26379,21 +26778,21 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         "",
         "## Why Not Parallel?",
         "",
-        f"- summary: {_format_key_values({'status': why_not_parallel.get('status'), 'blocked': why_not_parallel.get('blocked_candidate_count'), 'top_reason': why_not_parallel.get('top_reason_kind'), 'next': why_not_parallel.get('top_next_action')})}",
+        f"- summary: {_format_key_values({'status': why_not_parallel.get('status'), 'candidates': why_not_parallel.get('blocked_candidate_count'), 'top_reason': why_not_parallel.get('top_reason_kind'), 'summary': why_not_parallel.get('summary'), 'next': why_not_parallel.get('top_next_action')})}",
     ])
     if why_not_parallel_groups:
         for group in why_not_parallel_groups[:BRIEF_ITEM_LIMIT]:
             if not isinstance(group, dict):
                 continue
             lines.append(
-                f"- reason_group: {_format_key_values({'kind': group.get('reason_kind'), 'count': group.get('count'), 'next': group.get('next_action')})}"
+                f"- reason_group: {_format_key_values({'summary': group.get('human_summary') or group.get('display_reason') or group.get('next_action'), 'count': group.get('count'), 'debug_kind': group.get('reason_kind')})}"
             )
             examples = group.get("examples") if isinstance(group.get("examples"), list) else []
             for example in examples[:2]:
                 if not isinstance(example, dict):
                     continue
                 lines.append(
-                    f"- reason_example: {_format_key_values({'task': example.get('task_id') or example.get('dag_node_id'), 'action': example.get('action_kind'), 'raw_kind': example.get('raw_reason_kind'), 'reason': example.get('reason')})}"
+                    f"- reason_example: {_format_key_values({'task': example.get('task_id') or example.get('dag_node_id'), 'action': example.get('action_kind'), 'summary': example.get('human_summary') or example.get('display_reason') or example.get('reason'), 'debug_kind': example.get('debug_reason_kind') or example.get('raw_reason_kind')})}"
                 )
     else:
         lines.append("- reason_group: none")

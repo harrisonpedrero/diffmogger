@@ -453,6 +453,8 @@ describe("buildRunModel", () => {
                 execution_group_id: "group:write",
                 status: "proposed",
                 mode: "dry_run",
+                display_mode_label: "Planning preview",
+                execution_mode_label: "Write workers",
                 payload: { execution_mode: "write_workers", why_together: "write candidates have disjoint likely_touches" },
                 items: [
                   {
@@ -470,6 +472,15 @@ describe("buildRunModel", () => {
                 ],
               },
             ],
+            recent_execution_groups: [
+              {
+                execution_group_id: "group:validation",
+                status: "completed",
+                mode: "validation",
+                display_mode_label: "Validation jobs",
+                finished_at: "2026-05-17T00:00:00+00:00",
+              },
+            ],
           },
         },
       }),
@@ -478,10 +489,14 @@ describe("buildRunModel", () => {
     expect(model.operations.concurrencyWaves[0]).toMatchObject({
       id: "group:write",
       kind: "proposed",
-      mode: "write_workers",
+      mode: "Planning preview",
       itemCount: 2,
       owners: ["builder"],
       leases: ["src/a.ts", "src/b.ts"],
+    });
+    expect(model.operations.concurrencyWaves.find((wave) => wave.id === "group:validation" && wave.kind === "completed")).toMatchObject({
+      mode: "Validation jobs",
+      status: "completed",
     });
   });
 

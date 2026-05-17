@@ -39,6 +39,7 @@ Do not build unrelated apps or large unrelated systems.
 - Do not install dependencies globally; use ignored local venvs, `node_modules`, or other project-local runtime state.
 - For browser-backed smoke checks, visual QA, or documentation research, prefer `.diffmogger/scripts/diffmogger_browser.py` and the exported `DIFFMOGGER_BROWSER_PATH`/`CHROME_PATH` over ambient system Chrome.
 - If Playwright MCP is enabled, use it only for local browser validation and save deferred UI failure screenshots under `docs/backlog/ui_artifacts/<run_id>/` with Markdown links in task/progress state.
+- For frontend-touching hardener or integrator work, a cancelled or failed Playwright navigation is a validation issue. Record successful Playwright snapshot/console validation, a successful deterministic browser smoke command such as `npm run browser-smoke`, or an explicit deferred validation blocker.
 - If repeated browser launches fail before DevTools is ready, record `BLOCKED_ON_ENVIRONMENT` with diagnostics and use an equivalent manual or managed-browser QA path instead of looping on the same launch command.
 - In `bounded` campaign mode, do not implement tickets during bootstrap, use `.diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket context, let the DAG scheduler group only compatible ready nodes, and do not expand scope after the listed tickets are done or blocked; run `.diffmogger/scripts/ticket_run.py` finalization and leave push/PR creation to the human.
 - In `ongoing` campaign mode, continue by drafting/enqueuing safe project-agnostic follow-up tickets from typed runtime context when no dependency-ready tickets remain; do not pause for approval merely because a ticket was drafted.
@@ -50,6 +51,7 @@ Do not build unrelated apps or large unrelated systems.
 
 - Use worker agents only for bounded subtasks.
 - Make an explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` every run.
+- Make an explicit `MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reason>` every run.
 - Make an explicit worker strategy decision every run: `READ_ONLY_REPORTS`, `WRITE_WORKERS`, `INTEGRATION_ONLY`, or `NO_WORKERS`.
 - Choose and record a parallelism budget every run.
 - Check `command -v codex` before using Codex CLI workers.

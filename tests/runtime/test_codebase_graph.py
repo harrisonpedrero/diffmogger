@@ -3489,7 +3489,7 @@ class ParallelExecutionPlannerTests(unittest.TestCase):
             self.assertIn("scheduler_parallel_dry_run", second)
             self.assertIn("proposed_execution_groups", second)
             self.assertIn("blocked_parallel_candidates", second)
-            self.assertIn("## Parallel Execution Dry Run", markdown)
+            self.assertIn("## Parallel Execution", markdown)
             self.assertIn("proposed_group", markdown)
             self.assertIn("context_preview", markdown)
             self.assertNotIn("SECRET_SOURCE_BODY", json.dumps(second["scheduler_parallel_dry_run"], sort_keys=True))

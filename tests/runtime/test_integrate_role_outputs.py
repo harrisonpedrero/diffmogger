@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 from diffmogger.integrator.queue import load_queued_manifests
+from diffmogger.integrator.runtime_state import runtime_state_path_safe
 from diffmogger.runtime.paths import target_path
 from diffmogger.runtime.state_store import (
     connect,
@@ -173,6 +174,12 @@ class RuntimeStateActionTests(unittest.TestCase):
                 else:
                     os.environ["DIFFMOGGER_SELECTED_PATCH_IDS"] = previous
             self.assertEqual(["patch:deferred"], [manifest["patch_id"] for _path, manifest in selected_from_env])
+
+    def test_runtime_state_rejects_validation_job_logs_even_without_ignore(self) -> None:
+        ok, detail = runtime_state_path_safe("target/validation_jobs/validation-job-test.log")
+
+        self.assertFalse(ok)
+        self.assertIn("denied runtime artifacts", detail)
 
     def write_patch_for_file(self, target: Path, relative: str, new_content: str, patch_path: Path) -> None:
         (target / relative).write_text(new_content, encoding="utf-8")

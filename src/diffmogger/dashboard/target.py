@@ -235,6 +235,31 @@ def normalize_symbol_graph_languages(value: Any) -> list[str]:
     return languages or ["python", "typescript", "javascript"]
 
 
+def resolved_optional_mcp_servers(dashboard_app: Any, *sources: dict[str, Any]) -> list[str]:
+    resolver = getattr(dashboard_app, "optional_mcp_servers_from_sources", None)
+    if callable(resolver):
+        return list(resolver(*sources))
+    parser = getattr(dashboard_app, "optional_mcp_servers_from_value", None)
+    supported = list(getattr(dashboard_app, "OPTIONAL_MCP_SERVERS", ("context7", "playwright")))
+    enabled: list[str] = []
+    seen: set[str] = set()
+    saw_field = False
+    for index, source in enumerate(sources):
+        if not isinstance(source, dict) or "optional_mcp_servers" not in source:
+            continue
+        saw_field = True
+        normalized = list(parser(source.get("optional_mcp_servers"))) if callable(parser) else []
+        if not normalized and index == 0:
+            return []
+        for name in normalized:
+            if name not in seen:
+                seen.add(name)
+                enabled.append(name)
+    if enabled:
+        return [name for name in supported if name in seen] + [name for name in enabled if name not in supported]
+    return [] if saw_field else supported
+
+
 def dashboard_state_from_intake(
     target: Path,
     intake: dict[str, Any],
@@ -243,7 +268,7 @@ def dashboard_state_from_intake(
 ) -> dict[str, Any]:
     dashboard_app = load_dashboard_module()
     existing = load_dashboard_state(target)
-    optional_mcp = dashboard_app.optional_mcp_servers_from_value(intake.get("optional_mcp_servers"))
+    optional_mcp = resolved_optional_mcp_servers(dashboard_app, intake, existing)
     write_workers_enabled = True
     automation_role_profile = normalize_automation_role_profile(intake)
     multi_role_enabled = True
@@ -258,6 +283,7 @@ def dashboard_state_from_intake(
             enabled=True,
         ),
         "campaign_mode": campaign_mode,
+        "optional_mcp_servers": optional_mcp,
         "parallel_execution_mode": (
             "conservative" if str(intake.get("parallel_execution_mode") or "").strip().lower() == "conservative" else "aggressive"
         ),
@@ -307,7 +333,7 @@ def dashboard_state_from_intake(
     }
     return state
 
-def project_intake_payload(intake: dict[str, Any]) -> dict[str, Any]:
+def project_intake_payload(intake: dict[str, Any], target: Path | None = None) -> dict[str, Any]:
     payload = dict(intake)
     automation_role_profile = normalize_automation_role_profile(payload)
     payload["automation_role_profile"] = automation_role_profile
@@ -318,6 +344,8 @@ def project_intake_payload(intake: dict[str, Any]) -> dict[str, Any]:
         payload.get("max_write_worker_count"),
         enabled=True,
     )
+    existing = load_dashboard_state(target) if target is not None else {}
+    payload["optional_mcp_servers"] = resolved_optional_mcp_servers(dashboard_app, payload, existing)
     payload.pop("overwrite_existing_scaffold_files", None)
     return payload
 
@@ -414,10 +442,8 @@ def detect_target_context(target: Path) -> dict[str, Any]:
 
 def optional_mcp_from_state(target: Path, dashboard_app: Any) -> list[str]:
     dashboard_state = load_dashboard_state(target)
-    if "optional_mcp_servers" in dashboard_state:
-        return dashboard_app.optional_mcp_servers_from_value(dashboard_state.get("optional_mcp_servers"))
     intake = load_intake(target)
-    return dashboard_app.optional_mcp_servers_from_value(intake.get("optional_mcp_servers"))
+    return resolved_optional_mcp_servers(dashboard_app, dashboard_state, intake)
 
 def human_bridge_mode_from_state(target: Path) -> str:
     for data in (load_intake(target), load_dashboard_state(target)):

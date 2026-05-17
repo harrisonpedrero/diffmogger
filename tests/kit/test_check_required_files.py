@@ -66,7 +66,7 @@ class RequiredFilesCheckTests(unittest.TestCase):
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
 
-    def test_scaffold_without_optional_mcp_omits_mcp_state_files(self) -> None:
+    def test_default_scaffold_generates_supported_mcp_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self.scaffold_target(target)
@@ -75,11 +75,71 @@ class RequiredFilesCheckTests(unittest.TestCase):
                 ".codex/config.toml",
                 "docs/MCP_INTEGRATIONS.md",
                 "docs/backlog/README.md",
-                ".diffmogger/scripts/run_playwright_mcp.sh",
             ]:
-                self.assertFalse((target / rel).exists(), rel)
+                self.assertTrue(generated_path(target, rel).exists(), rel)
+            self.assertTrue(generated_path(target, "scripts/run_playwright_mcp.sh").exists())
+            intake = json.loads(generated_path(target, ".agentic/project_intake.json").read_text(encoding="utf-8"))
+            self.assertEqual(["context7", "playwright"], intake["optional_mcp_servers"])
 
-            result = self.run_check(target)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECK_SCRIPT),
+                    "--human-bridge-mode",
+                    "file_only",
+                    "--multi-role-enabled",
+                    "--optional-mcp-enabled",
+                    str(target),
+                ],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+
+    def test_explicit_optional_mcp_opt_out_omits_mcp_state_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.NamedTemporaryFile("w", suffix=".json") as intake:
+            target = Path(tmp)
+            intake.write(
+                """
+{
+  "project_name": "MCP Opt Out",
+  "product_goal": "Validate explicit MCP opt-out.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "Generated docs only.",
+  "human_bridge_enabled": false,
+  "human_bridge_mode": "disabled",
+  "automation_role_profile": "planner_builder_hardener_integrator",
+  "optional_mcp_servers": [],
+  "verification_commands": ["npm test"]
+}
+""".strip()
+            )
+            intake.flush()
+
+            self.scaffold_target(target, Path(intake.name))
+
+            for rel in [
+                ".codex/config.toml",
+                "docs/MCP_INTEGRATIONS.md",
+                "docs/backlog/README.md",
+                "scripts/run_playwright_mcp.sh",
+            ]:
+                self.assertFalse(generated_path(target, rel).exists(), rel)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECK_SCRIPT),
+                    "--human-bridge-mode",
+                    "disabled",
+                    "--multi-role-enabled",
+                    str(target),
+                ],
+                text=True,
+                capture_output=True,
+            )
 
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)

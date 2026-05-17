@@ -984,7 +984,182 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual("clear", model["status"])
         self.assertEqual({}, model["reason_counts"])
         self.assertEqual(1, model["proposed_group_count"])
-        self.assertEqual("Parallel dry run has proposed group(s) and no blocked candidate reason groups.", model["summary"])
+        self.assertEqual("Planning preview has proposed group(s) and no candidate reason groups.", model["summary"])
+
+    def test_parallel_display_mode_preserves_raw_dry_run_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            group = state_store_module.decorate_execution_group_for_display(
+                {
+                    "execution_group_id": "execution-group:preview",
+                    "status": "proposed",
+                    "mode": "dry_run",
+                    "reason": "read-only reviews can run together",
+                    "payload": {
+                        "planner_mode": "dry_run",
+                        "execution_mode": "read_only",
+                        "why_together": "read-only candidates do not write",
+                    },
+                    "items": [{"item_id": "item:1", "task_id": "T1", "owner_role": "hardener", "action_kind": "review"}],
+                }
+            )
+
+            self.assertEqual("dry_run", group["mode"])
+            self.assertEqual("planner_preview", group["display_mode"])
+            self.assertEqual("Planning preview", group["display_mode_label"])
+            self.assertEqual("Read-only workers", group["execution_mode_label"])
+
+            brief = render_canonical_state_brief(
+                {
+                    "database": {"path": str(database_path_for_target(target)), "exists": True},
+                    "automation_control": {"status": "ACTIVE"},
+                    "execution_dag": {"nodes": [], "edges": [], "ready_nodes": [], "active_nodes": [], "blocked_nodes": []},
+                    "proposed_execution_groups": [group],
+                    "parallelization_summary": {
+                        "mode": "dry_run",
+                        "display_mode": "planner_preview",
+                        "display_mode_label": "Planning preview",
+                        "group_count": 1,
+                        "grouped_task_count": 1,
+                    },
+                },
+                target=target,
+            )
+
+            self.assertIn("## Parallel Execution", brief)
+            self.assertNotIn("## Parallel Execution Dry Run", brief)
+            self.assertIn("display_mode=Planning preview", brief)
+            self.assertNotIn("mode=dry_run", brief)
+
+    def test_execution_group_read_model_separates_running_recent_and_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with closing(connect(database_path_for_target(target))) as conn:
+                now = "2026-05-17T00:00:00+00:00"
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO execution_groups(
+                            execution_group_id, status, mode, created_at, started_at, selected_by, reason, payload_json
+                        )
+                        VALUES('execution-group:running', 'running', 'read_only', ?, ?, 'test', 'running read-only group', '{}')
+                        """,
+                        (now, now),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO execution_groups(
+                            execution_group_id, status, mode, created_at, started_at, finished_at, selected_by, reason, payload_json
+                        )
+                        VALUES('execution-group:completed-validation', 'completed', 'validation', ?, ?, ?, 'test', 'validation completed', '{}')
+                        """,
+                        (now, now, now),
+                    )
+
+                running = state_store_module.execution_groups_by_status_conn(conn, {"running"})
+                recent = state_store_module.execution_groups_by_status_conn(conn, {"completed"})
+
+            self.assertEqual(["execution-group:running"], [item["execution_group_id"] for item in running])
+            self.assertEqual("Read-only workers", running[0]["display_mode_label"])
+            self.assertEqual(["execution-group:completed-validation"], [item["execution_group_id"] for item in recent])
+            self.assertEqual("Validation jobs", recent[0]["display_mode_label"])
+
+    def test_scope_fanout_exhausted_uses_serial_fallback_summary(self) -> None:
+        model = state_store_module.why_not_parallel_read_model(
+            [
+                {
+                    "candidate_id": "candidate:scope",
+                    "task_id": "T1",
+                    "action_kind": "launch_scope_group",
+                    "reason_kind": "scope_fanout_exhausted",
+                    "reason": "scope fanout exhausted",
+                }
+            ],
+        )
+
+        self.assertEqual("serial_fallback", model["status"])
+        self.assertIn("serialized or waiting paths", model["summary"])
+        self.assertEqual("serial_fallback", model["reason_groups"][0]["reason_kind"])
+        self.assertEqual("No promotable ownership evidence; using serial fallback.", model["reason_groups"][0]["human_summary"])
+        self.assertEqual("scope_fanout_exhausted", model["reason_groups"][0]["examples"][0]["debug_reason_kind"])
+
+    def test_worker_report_disposition_display_is_reconciled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            now = "2026-05-17T00:00:00+00:00"
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO worker_agents(
+                            worker_id, execution_group_id, run_id, mode, role, status,
+                            started_at, finished_at, payload_json
+                        )
+                        VALUES('worker:accepted', '', 'run:accepted', 'read_only', 'hardener', 'completed', ?, ?, ?)
+                        """,
+                        (
+                            now,
+                            now,
+                            stable_json(
+                                {
+                                    "finding_disposition_required": True,
+                                    "disposition_status": "dispositioned",
+                                    "accepted_findings": [{"id": "finding:1"}],
+                                    "rejected_findings": [],
+                                    "deferred_findings": [],
+                                }
+                            ),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_agents(
+                            worker_id, execution_group_id, run_id, mode, role, status,
+                            started_at, finished_at, payload_json
+                        )
+                        VALUES('worker:pending', '', 'run:pending', 'read_only', 'hardener', 'completed', ?, ?, ?)
+                        """,
+                        (
+                            now,
+                            now,
+                            stable_json({"finding_disposition_required": True, "disposition_status": "pending"}),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_agents(
+                            worker_id, execution_group_id, run_id, mode, role, status,
+                            started_at, finished_at, payload_json
+                        )
+                        VALUES('worker:queued-patch', 'execution-group:write', 'run:write', 'write', 'builder', 'completed', ?, ?, ?)
+                        """,
+                        (now, now, stable_json({"finding_disposition_required": False, "disposition_status": "not_applicable"})),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_patches(
+                            patch_id, worker_id, execution_group_id, status, manifest_path, patch_path,
+                            changed_files_json, base_commit, leases_json, validation_evidence_json,
+                            created_at, queued_at, payload_json
+                        )
+                        VALUES('patch:queued', 'worker:queued-patch', 'execution-group:write', 'queued',
+                               'target/automation_queue/manifest.json', 'target/automation_queue/changes.patch',
+                               '["src/example.py"]', 'HEAD', '[]', '[]', ?, ?, '{}')
+                        """,
+                        (now, now),
+                    )
+
+                model = state_store_module.worker_reports_read_model_conn(conn, limit=10)
+
+            by_worker = {worker["worker_id"]: worker for worker in model["completed_worker_reports"]}
+            self.assertEqual("dispositioned", by_worker["worker:accepted"]["disposition_status"])
+            self.assertEqual("Findings dispositioned", by_worker["worker:accepted"]["disposition_label"])
+            self.assertEqual("pending", by_worker["worker:pending"]["disposition_status"])
+            self.assertTrue(by_worker["worker:pending"]["finding_disposition_required_effective"])
+            self.assertEqual("awaiting_integrator_review", by_worker["worker:queued-patch"]["disposition_status"])
+            self.assertEqual("Awaiting integrator review", by_worker["worker:queued-patch"]["disposition_label"])
+            self.assertTrue(model["worker_finding_disposition_required"])
+            self.assertEqual(1, model["worker_disposition_summary"]["awaiting_integrator_review_count"])
 
     def test_parallel_validation_runs_independent_commands_as_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

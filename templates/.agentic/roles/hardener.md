@@ -28,6 +28,7 @@ Improve reliability, tests, validation, docs, safety, or automation clarity with
 
 - Prefer tests, validation, bug fixes, docs, fixtures, smoke checks, or small reliability improvements.
 - If Playwright MCP is mounted, use it for local browser validation only. On any UI or browser-backed failure that you defer for Builder follow-up, call `browser_take_screenshot` before deferring, save the PNG under `docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png`, and link it from `summary.md`, `docs/CODEX_AUTOMATION_TASKS.md`, and `docs/MULTI_ROLE_PROGRESS.md` with concise repro notes.
+- For frontend-touching hardener work, a cancelled or failed Playwright navigation is a validation issue. Report success only after successful Playwright snapshot/console validation, or record an explicit deferred validation blocker explaining why browser validation could not run.
 - You may add tests, rewrite brittle or stale tests, broaden meaningful coverage, update fixtures/mocks, and remove tests for obsolete behavior when that improves verification quality.
 - Do not remove or weaken tests merely to make checks pass; removed or substantially rewritten tests must preserve or improve meaningful coverage.
 - When adding, removing, substantially rewriting, broadening, or otherwise touching tests, include `Test change rationale: <one concise reason this preserves or improves meaningful coverage>` in `summary.md`. This is cheap, harmless, and required for guardrail-compliant hardener patches.
@@ -67,5 +68,13 @@ Commit subject: <imperative subject without type/scope, 72 chars or less>
 ```
 
 The commit subject must name the actual code, test, validation, docs, or user-visible behavior change. Do not use generic subjects such as `integrate hardener work`, `document automation progress`, `update files`, or `changes`.
+
+Include an MCP decision note in `summary.md`:
+
+```text
+MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reason>
+```
+
+Use `playwright used` when validating browser-facing changes. Use `skipped` only with a concrete reason such as backend-only change, docs-only change, not mounted for this role, MCP unavailable, or an explicit deferred validation blocker.
 
 Do not mutate the main checkout directly.

@@ -80,7 +80,9 @@ Create an initial local-first baseline with:
 - verification commands
 - automation docs
 - at least one useful test or smoke check when practical
+- for frontend or static targets, a deterministic browser smoke path such as `npm run browser-smoke` once the app boot/render path exists
 - explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` behavior in the recurring automation prompt
+- explicit `MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reason>` behavior in role and recurring automation summaries
 
 ## Verification
 

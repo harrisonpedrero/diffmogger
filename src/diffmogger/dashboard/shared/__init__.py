@@ -49,6 +49,7 @@ DEFAULT_AUTOMATION_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/s
 MULTI_ROLE_PROFILE = "planner_builder_hardener_integrator"
 MULTI_ROLE_ROLES = ("planner", "builder", "hardener", "integrator")
 OPTIONAL_MCP_SERVERS = ("context7", "playwright")
+DEFAULT_OPTIONAL_MCP_SERVERS = list(OPTIONAL_MCP_SERVERS)
 ENV_ACCESS_PROJECT_COMMANDS_ONLY = "project_commands_only"
 ENV_ACCESS_DIRECT = "direct_env_files_allowed"
 ENV_ACCESS_LABELS = {
@@ -312,6 +313,36 @@ def optional_mcp_servers_from_value(value: Any) -> list[str]:
                 seen.add(name)
                 enabled.append(name)
     return enabled
+
+
+def optional_mcp_servers_from_sources(*sources: Any) -> list[str]:
+    """Resolve MCPs from ordered intake/dashboard sources.
+
+    A missing field means the current default, all supported MCPs. An explicit
+    empty field in the first source is an opt-out. Existing non-empty secondary
+    sources can repair stale missing primary projections by unioning values.
+    """
+    enabled: list[str] = []
+    seen: set[str] = set()
+    saw_field = False
+    for index, source in enumerate(sources):
+        if not isinstance(source, dict) or "optional_mcp_servers" not in source:
+            continue
+        saw_field = True
+        normalized = optional_mcp_servers_from_value(source.get("optional_mcp_servers"))
+        if not normalized and index == 0:
+            return []
+        for name in normalized:
+            if name not in seen:
+                seen.add(name)
+                enabled.append(name)
+    if enabled:
+        ordered = [name for name in OPTIONAL_MCP_SERVERS if name in seen]
+        extras = [name for name in enabled if name not in ordered]
+        return [*ordered, *extras]
+    if saw_field:
+        return []
+    return list(DEFAULT_OPTIONAL_MCP_SERVERS)
 
 
 def target_script_path(target: Path, legacy_rel: str) -> Path:

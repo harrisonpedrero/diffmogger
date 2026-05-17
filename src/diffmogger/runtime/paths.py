@@ -49,6 +49,7 @@ PATH_ALIASES: dict[str, str] = {
     "target/automation_runner.json": ".diffmogger/runtime/automation_runner.json",
     "target/automation_venvs": ".diffmogger/runtime/automation_venvs",
     "target/automation_worktrees": ".diffmogger/runtime/automation_worktrees",
+    "target/validation_jobs": ".diffmogger/runtime/validation_jobs",
     "target/baseline_verification.json": ".diffmogger/runtime/baseline_verification.json",
     "target/canonical_state_brief.md": ".diffmogger/runtime/canonical_state_brief.md",
     "target/codex_automation.lock": ".diffmogger/runtime/codex_automation.lock",

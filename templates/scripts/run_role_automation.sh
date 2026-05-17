@@ -21,6 +21,12 @@ EOF
 original_args=("$@")
 runner_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 script_parent="$(cd "$runner_script_dir/.." && pwd)"
+runtime_script_dir="$script_parent/runtime"
+if [[ -f "$runtime_script_dir/run_process_watchdog.py" ]]; then
+  helper_script_dir="$runtime_script_dir"
+else
+  helper_script_dir="$runner_script_dir"
+fi
 if [[ "$(basename "$script_parent")" == ".diffmogger" ]]; then
   default_target="$(cd "$script_parent/.." && pwd)"
 else
@@ -79,8 +85,8 @@ load_codex_automation_env() {
   if [[ "${CODEX_AUTOMATION_ENV_LOADED:-}" == "1" ]]; then
     return 0
   fi
-  if [[ -f "$runner_script_dir/load_automation_env.py" ]]; then
-    exec python3 "$runner_script_dir/load_automation_env.py" --target "$target_abs" -- "${BASH:-bash}" "$0" "${original_args[@]}"
+  if [[ -f "$helper_script_dir/load_automation_env.py" ]]; then
+    exec python3 "$helper_script_dir/load_automation_env.py" --target "$target_abs" -- "${BASH:-bash}" "$0" "${original_args[@]}"
   fi
   export CODEX_AUTOMATION_ENV_LOADED="1"
 }
@@ -89,8 +95,8 @@ load_codex_automation_env
 
 if [[ -n "${DIFFMOGGER_BROWSER_PATH:-}" && -z "${CHROME_PATH:-}" ]]; then
   export CHROME_PATH="$DIFFMOGGER_BROWSER_PATH"
-elif [[ -z "${DIFFMOGGER_BROWSER_PATH:-}" && -z "${CHROME_PATH:-}" && -f "$runner_script_dir/diffmogger_browser.py" ]]; then
-  browser_env="$(python3 "$runner_script_dir/diffmogger_browser.py" env 2>/dev/null || true)"
+elif [[ -z "${DIFFMOGGER_BROWSER_PATH:-}" && -z "${CHROME_PATH:-}" && -f "$helper_script_dir/diffmogger_browser.py" ]]; then
+  browser_env="$(python3 "$helper_script_dir/diffmogger_browser.py" env 2>/dev/null || true)"
   if [[ -n "$browser_env" ]]; then
     eval "$browser_env"
   fi
@@ -175,6 +181,7 @@ for pattern in \
   "/target/automation_queue/" \
   "/target/automation_venvs/" \
   "/target/automation_worktrees/" \
+  "/target/validation_jobs/" \
   "/target/codex_automation.lock" \
   "/target/prisma-cache/" \
   "/target/ticket_run_completion.json" \
@@ -273,20 +280,259 @@ if [[ ! -f "$prompt_path" ]]; then
 fi
 
 regenerate_state_brief() {
-  if [[ -f "$runner_script_dir/state_brief.py" ]]; then
-    python3 "$runner_script_dir/state_brief.py" --target "$target_abs" --quiet || {
+  if [[ -f "$helper_script_dir/state_brief.py" ]]; then
+    python3 "$helper_script_dir/state_brief.py" --target "$target_abs" --quiet || {
       printf 'WARN: failed to regenerate canonical state brief at %s\n' "$state_brief_path" >&2
     }
   fi
 }
 
+resolve_mcp_telemetry() {
+  local output_path="$1"
+  local ticket_claim="${2:-}"
+  python3 - "$target_abs" "$role" "$run_id" "$output_path" "$ticket_claim" <<'PY'
+import json
+import re
+import shlex
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+target = Path(sys.argv[1])
+role = sys.argv[2]
+run_id = sys.argv[3]
+output_path = Path(sys.argv[4])
+ticket_claim_path = Path(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else None
+
+SUPPORTED = ["context7", "playwright"]
+FRONTEND_TERMS = {
+    "app shell",
+    "browser",
+    "canvas",
+    "chrome",
+    "client",
+    "component",
+    "css",
+    "dashboard",
+    "demo path",
+    "demo-path",
+    "dom",
+    "frontend",
+    "front-end",
+    "html",
+    "next.js",
+    "page",
+    "react",
+    "route",
+    "screenshot",
+    "static",
+    "svelte",
+    "ui",
+    "vite",
+    "visual",
+    "vue",
+    "web app",
+}
+
+def normalize_rel(value: str) -> str:
+    rel = str(value).strip().replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.lstrip("/")
+
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+manifest = load_json(target / ".diffmogger" / "manifest.json")
+aliases = manifest.get("path_aliases") if isinstance(manifest.get("path_aliases"), dict) else {}
+
+def rel(path: str) -> str:
+    path = normalize_rel(path)
+    if path in aliases:
+        return normalize_rel(str(aliases[path]))
+    for old, new in sorted(aliases.items(), key=lambda item: len(str(item[0])), reverse=True):
+        old_rel = normalize_rel(str(old)).rstrip("/")
+        new_rel = normalize_rel(str(new)).rstrip("/")
+        if old_rel and path.startswith(old_rel + "/"):
+            return new_rel + path[len(old_rel):]
+    return path
+
+def load_target_json(legacy_rel: str) -> dict[str, Any]:
+    candidates = [target / rel(legacy_rel), target / normalize_rel(legacy_rel)]
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        data = load_json(candidate)
+        if data:
+            return data
+    return {}
+
+def normalize_servers(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, list) else re.split(r"[\n,]+", str(value))
+    enabled: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = re.sub(r"^[-*]\s+", "", str(item).strip().lower())
+        if not text:
+            continue
+        normalized = text.replace("-", "_").replace(" ", "_")
+        if normalized in {"none", "disabled", "disable", "off", "false", "no"}:
+            continue
+        names: list[str] = []
+        if "context7" in normalized or normalized in {"context_7", "context"}:
+            names.append("context7")
+        if "playwright" in normalized:
+            names.append("playwright")
+        if normalized in SUPPORTED:
+            names.append(normalized)
+        for name in names:
+            if name not in seen:
+                seen.add(name)
+                enabled.append(name)
+    return [name for name in SUPPORTED if name in seen] + [name for name in enabled if name not in SUPPORTED]
+
+def resolve_from_sources(*sources: dict[str, Any]) -> list[str]:
+    enabled: list[str] = []
+    seen: set[str] = set()
+    saw_field = False
+    for index, source in enumerate(sources):
+        if not isinstance(source, dict) or "optional_mcp_servers" not in source:
+            continue
+        saw_field = True
+        normalized = normalize_servers(source.get("optional_mcp_servers"))
+        if not normalized and index == 0:
+            return []
+        for name in normalized:
+            if name not in seen:
+                seen.add(name)
+                enabled.append(name)
+    if enabled:
+        return [name for name in SUPPORTED if name in seen] + [name for name in enabled if name not in SUPPORTED]
+    return [] if saw_field else list(SUPPORTED)
+
+intake = load_target_json(".agentic/project_intake.json")
+dashboard_state = load_target_json(".agentic/dashboard_state.json")
+features = manifest.get("features") if isinstance(manifest.get("features"), dict) else {}
+if "optional_mcp_servers" in manifest:
+    enabled_servers = normalize_servers(manifest.get("optional_mcp_servers"))
+    resolved_from = "manifest"
+elif "optional_mcp_servers" in features:
+    enabled_servers = normalize_servers(features.get("optional_mcp_servers"))
+    resolved_from = "manifest.features"
+else:
+    enabled_servers = resolve_from_sources(dashboard_state, intake)
+    resolved_from = "dashboard_state+project_intake"
+
+def text_blob(value: Any, *, limit: int = 40000) -> str:
+    try:
+        text = json.dumps(value, sort_keys=True)
+    except TypeError:
+        text = str(value)
+    return text[:limit].lower()
+
+def scope_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: scope_payload(item)
+            for key, item in value.items()
+            if "mcp" not in str(key).lower()
+        }
+    if isinstance(value, list):
+        return [scope_payload(item) for item in value]
+    return value
+
+def contains_frontend_term(text: str) -> bool:
+    return any(
+        re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", text)
+        for term in FRONTEND_TERMS
+    )
+
+ticket_claim = load_json(ticket_claim_path) if ticket_claim_path else {}
+dashboard_intake = dashboard_state.get("brief_draft_intake") if isinstance(dashboard_state, dict) else {}
+target_text = "\n".join([text_blob(scope_payload(intake)), text_blob(scope_payload(dashboard_intake)), text_blob(scope_payload(features))])
+ticket_text = text_blob(scope_payload(ticket_claim))
+target_frontend = contains_frontend_term(target_text)
+ticket_frontend = contains_frontend_term(ticket_text)
+
+requested: list[str] = []
+scope_reasons: list[str] = []
+if "context7" in enabled_servers and role in {"planner", "builder"}:
+    requested.append("context7")
+    scope_reasons.append("context7 role documentation support")
+if "playwright" in enabled_servers:
+    if role in {"hardener", "integrator"}:
+        requested.append("playwright")
+        scope_reasons.append("playwright validation lane")
+    elif role == "planner" and (target_frontend or ticket_frontend):
+        requested.append("playwright")
+        scope_reasons.append("planner frontend/browser/UI/demo scope")
+    elif role == "builder" and ticket_frontend:
+        requested.append("playwright")
+        scope_reasons.append("builder selected ticket is frontend/browser/UI/demo scoped")
+
+skipped: list[dict[str, str]] = []
+for server in SUPPORTED:
+    if server not in enabled_servers:
+        skipped.append({"server": server, "reason": "disabled by optional_mcp_servers opt-out"})
+    elif server not in requested:
+        skipped.append({"server": server, "reason": "not relevant for this role or selected scope"})
+
+payload = {
+    "schema_version": 1,
+    "run_id": run_id,
+    "role": role,
+    "supported_servers": SUPPORTED,
+    "enabled_servers": enabled_servers,
+    "requested_servers": requested,
+    "mounted_servers": [],
+    "skipped_servers": skipped,
+    "required": {server: False for server in SUPPORTED},
+    "resolved_from": resolved_from,
+    "target_frontend_scope": target_frontend,
+    "ticket_frontend_scope": ticket_frontend,
+    "scope_reasons": scope_reasons,
+    "usage_outcome": {},
+    "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+}
+output_path.parent.mkdir(parents=True, exist_ok=True)
+output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+def q(value: str) -> str:
+    return shlex.quote(value)
+
+print(f"mcp_enabled_servers={q(','.join(enabled_servers))}")
+print(f"mcp_requested_servers={q(','.join(requested))}")
+print("mcp_mounted_servers=''")
+print(f"mcp_target_frontend_scope={q('1' if target_frontend else '0')}")
+print(f"mcp_ticket_frontend_scope={q('1' if ticket_frontend else '0')}")
+print(f"mcp_scope_reason={q('; '.join(scope_reasons) or 'no role-relevant MCP scope')}")
+PY
+}
+
 regenerate_state_brief
 
+mcp_telemetry_path="$queue_dir/mcp_telemetry.json"
+mkdir -p "$queue_dir"
+eval "$(resolve_mcp_telemetry "$mcp_telemetry_path")"
+export DIFFMOGGER_MCP_TELEMETRY_PATH="$mcp_telemetry_path"
+export DIFFMOGGER_MCP_ENABLED_SERVERS="$mcp_enabled_servers"
+export DIFFMOGGER_MCP_REQUESTED_SERVERS="$mcp_requested_servers"
+export DIFFMOGGER_MCP_MOUNTED_SERVERS="$mcp_mounted_servers"
+
 if [[ "$role" == "integrator" ]]; then
-  python3 "$runner_script_dir/integrate_role_outputs.py" "$target_abs" --run-id "$run_id"
+  python3 "$helper_script_dir/integrate_role_outputs.py" "$target_abs" --run-id "$run_id"
   integrator_status=$?
-  if [[ "$integrator_status" -eq 0 && -f "$runner_script_dir/ticket_run.py" ]]; then
-    python3 "$runner_script_dir/ticket_run.py" "$target_abs" should-halt --finalize || true
+  if [[ "$integrator_status" -eq 0 && -f "$helper_script_dir/ticket_run.py" ]]; then
+    python3 "$helper_script_dir/ticket_run.py" "$target_abs" should-halt --finalize || true
   fi
   exit "$integrator_status"
 fi
@@ -319,8 +565,8 @@ rerun_watchdog_status_path="$queue_dir/codex.rerun.watchdog.json"
 final_watchdog_status_path="$watchdog_status_path"
 hardener_queue_root="$(dirname "$(dirname "$queue_dir")")/hardener"
 
-if [[ "$role" == "builder" && -f "$runner_script_dir/ticket_run.py" ]]; then
-  DIFFMOGGER_TICKET_STATE_DIRECT=1 python3 "$runner_script_dir/ticket_run.py" "$target_abs" claim-next \
+if [[ "$role" == "builder" && -f "$helper_script_dir/ticket_run.py" ]]; then
+  DIFFMOGGER_TICKET_STATE_DIRECT=1 python3 "$helper_script_dir/ticket_run.py" "$target_abs" claim-next \
     --role "$role" \
     --run-id "$run_id" \
     --json >"$ticket_claim_path" 2>"$ticket_claim_stderr_path" || {
@@ -331,6 +577,11 @@ if [[ "$role" == "builder" && -f "$runner_script_dir/ticket_run.py" ]]; then
     }
   regenerate_state_brief
 fi
+
+eval "$(resolve_mcp_telemetry "$mcp_telemetry_path" "$ticket_claim_path")"
+export DIFFMOGGER_MCP_ENABLED_SERVERS="$mcp_enabled_servers"
+export DIFFMOGGER_MCP_REQUESTED_SERVERS="$mcp_requested_servers"
+export DIFFMOGGER_MCP_MOUNTED_SERVERS="$mcp_mounted_servers"
 
 git worktree add --detach "$worktree_dir" "$base_commit" >/dev/null
 mkdir -p "$(dirname "$worktree_summary_path")"
@@ -459,6 +710,7 @@ deny_parts = {
     "automation_worktrees",
     "automation_logs",
     "automation_venvs",
+    "validation_jobs",
 }
 deny_names = {".DS_Store", "codex_automation.lock", "automation_conveyor.lock"}
 deny_suffixes = (
@@ -599,9 +851,9 @@ for rel in "${runtime_state_paths[@]}"; do
   seed_context_path "$rel"
 done
 
-if [[ -f "$runner_script_dir/ticket_run.py" ]]; then
+if [[ -f "$helper_script_dir/ticket_run.py" ]]; then
   mkdir -p "$(dirname "$worktree_ticket_state_snapshot_path")"
-  if DIFFMOGGER_TICKET_STATE_DIRECT=1 python3 "$runner_script_dir/ticket_run.py" "$target_abs" snapshot --json >"$worktree_ticket_state_snapshot_path"; then
+  if DIFFMOGGER_TICKET_STATE_DIRECT=1 python3 "$helper_script_dir/ticket_run.py" "$target_abs" snapshot --json >"$worktree_ticket_state_snapshot_path"; then
     cp "$worktree_ticket_state_snapshot_path" "$ticket_state_snapshot_path"
   else
     printf 'WARN: failed to write ticket-state readonly snapshot for %s run %s; role may fall back to canonical state reads.\n' "$role" "$run_id" >&2
@@ -613,12 +865,22 @@ export PLAYWRIGHT_MCP_OUTPUT_DIR="${PLAYWRIGHT_MCP_OUTPUT_DIR:-$worktree_dir/$pl
 export DIFFMOGGER_TICKET_STATE_ACTIONS_PATH="$worktree_ticket_state_actions_path"
 export DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT="$worktree_ticket_state_snapshot_path"
 
-CODEX_ROLE_ARGS=(--add-dir "$HOME/.codex")
+CODEX_ROLE_ARGS=(
+  --add-dir "$HOME/.codex"
+  -c 'mcp_servers.context7.enabled=false'
+  -c 'mcp_servers.playwright.enabled=false'
+)
 toml_quote() {
   local value="$1"
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   printf '"%s"' "$value"
+}
+
+csv_has() {
+  local csv="$1"
+  local needle="$2"
+  [[ ",$csv," == *",$needle,"* ]]
 }
 
 append_context7_mcp_args() {
@@ -651,18 +913,48 @@ append_playwright_mcp_args() {
   fi
 }
 
-if [[ -f "$worktree_dir/$mcp_config_rel" ]]; then
-  CODEX_ROLE_ARGS+=(
-    -c 'mcp_servers.context7.enabled=false'
-    -c 'mcp_servers.playwright.enabled=false'
-  )
-  if [[ "$role" == "planner" || "$role" == "builder" ]] && grep -q "mcp_servers.context7" "$worktree_dir/$mcp_config_rel"; then
-    append_context7_mcp_args
-  fi
-  if [[ "$role" == "hardener" || "$role" == "integrator" ]] && grep -q "mcp_servers.playwright" "$worktree_dir/$mcp_config_rel"; then
+MCP_MOUNTED_SERVERS=()
+MCP_MOUNT_SKIPS=()
+if csv_has "$mcp_requested_servers" "context7"; then
+  append_context7_mcp_args
+  MCP_MOUNTED_SERVERS+=("context7")
+fi
+if csv_has "$mcp_requested_servers" "playwright"; then
+  if [[ -f "$worktree_dir/$playwright_mcp_rel" ]]; then
     append_playwright_mcp_args
+    MCP_MOUNTED_SERVERS+=("playwright")
+  else
+    MCP_MOUNT_SKIPS+=("playwright:playwright helper is unavailable in the role worktree")
   fi
 fi
+mcp_mounted_servers="$(
+  IFS=,
+  printf '%s' "${MCP_MOUNTED_SERVERS[*]-}"
+)"
+export DIFFMOGGER_MCP_MOUNTED_SERVERS="$mcp_mounted_servers"
+python3 - "$mcp_telemetry_path" "$mcp_mounted_servers" "${MCP_MOUNT_SKIPS[@]+"${MCP_MOUNT_SKIPS[@]}"}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+mounted = [item for item in sys.argv[2].split(",") if item]
+extra_skips = sys.argv[3:]
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    payload = {}
+if not isinstance(payload, dict):
+    payload = {}
+payload["mounted_servers"] = mounted
+skipped = [item for item in payload.get("skipped_servers") or [] if isinstance(item, dict)]
+for raw in extra_skips:
+    server, _, reason = raw.partition(":")
+    if server and not any(item.get("server") == server for item in skipped):
+        skipped.append({"server": server, "reason": reason or "not mounted"})
+payload["skipped_servers"] = skipped
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
 
 python3 - "$target_abs" "$runtime_state_start_path" "${runtime_state_paths[@]}" <<'PY'
 import hashlib
@@ -877,6 +1169,40 @@ $state_brief_rel
 
 Treat it as a bounded generated view, not editable authority. If it conflicts with Markdown or JSON projections, reconcile through the target-local Diffmogger typed state APIs.
 
+## MCP Runtime Context
+
+Resolved enabled MCP servers:
+
+\`\`\`text
+${mcp_enabled_servers:-}
+\`\`\`
+
+Requested for this role:
+
+\`\`\`text
+${mcp_requested_servers:-}
+\`\`\`
+
+Mounted for this Codex run:
+
+\`\`\`text
+${mcp_mounted_servers:-}
+\`\`\`
+
+Scope reason:
+
+\`\`\`text
+${mcp_scope_reason:-}
+\`\`\`
+
+You must include this line in \`summary.md\`:
+
+\`\`\`text
+MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reason>
+\`\`\`
+
+Use \`context7 used\` when third-party/library/API docs materially affect planning or implementation. Use \`playwright used\` when validating browser-facing changes. Use \`skipped\` only with a concrete reason such as backend-only change, docs-only change, not mounted for this role, MCP unavailable, or explicit opt-out.
+
 ## Runtime Summary Contract
 
 Before your final response, write a concise Markdown summary to this exact file:
@@ -911,7 +1237,7 @@ Do not remove or weaken tests merely to make verification pass.
 EOF
 } >"$runtime_prompt_path"
 
-watchdog_helper="$runner_script_dir/run_process_watchdog.py"
+watchdog_helper="$helper_script_dir/run_process_watchdog.py"
 
 run_with_watchdog() {
   local stdout_file="$1"
@@ -980,9 +1306,9 @@ if detect_critical_stop "$run_stdout" || detect_critical_stop "$run_stderr"; the
   fi
 fi
 
-if [[ "$codex_status" != "0" && "$codex_status" != "124" && "$critical_stop_detected" != "1" && -f "$runner_script_dir/repair_environment.py" ]]; then
+if [[ "$codex_status" != "0" && "$codex_status" != "124" && "$critical_stop_detected" != "1" && -f "$helper_script_dir/repair_environment.py" ]]; then
   repair_status=0
-  python3 "$runner_script_dir/repair_environment.py" "$target_abs" \
+  python3 "$helper_script_dir/repair_environment.py" "$target_abs" \
     --command "codex exec role $role" \
     --exit-code "$codex_status" \
     --stdout-file "$run_stdout" \
@@ -1169,7 +1495,7 @@ PY
   git diff --name-only "$base_commit" -- . "${context_excludes[@]}" >"$queue_dir/changed_files.txt"
 )
 
-python3 - "$summary_path" "$role" "$run_id" "$base_commit" "$codex_status" "$target_abs" "$final_watchdog_status_path" <<'PY'
+python3 - "$summary_path" "$role" "$run_id" "$base_commit" "$codex_status" "$target_abs" "$final_watchdog_status_path" "$mcp_telemetry_path" <<'PY'
 import json
 import re
 import sys
@@ -1182,6 +1508,7 @@ base_commit = sys.argv[4]
 codex_status = sys.argv[5]
 target = Path(sys.argv[6])
 watchdog_status_path = Path(sys.argv[7])
+mcp_telemetry_path = Path(sys.argv[8])
 
 def scrub(text: str) -> str:
     replacements = {
@@ -1198,12 +1525,45 @@ def has_commit_intent(text: str) -> bool:
     lowered = text.lower()
     return all(marker in lowered for marker in ("commit type:", "commit scope:", "commit subject:"))
 
+def has_mcp_decision(text: str) -> bool:
+    return any(
+        re.sub(r"\s+", " ", raw.strip().lower()).startswith("mcp decision:")
+        for raw in text.splitlines()
+    )
+
+def mcp_decision_fallback() -> str:
+    try:
+        telemetry = json.loads(mcp_telemetry_path.read_text(encoding="utf-8"))
+    except Exception:
+        telemetry = {}
+    mounted = {str(item) for item in telemetry.get("mounted_servers") or []}
+    requested = {str(item) for item in telemetry.get("requested_servers") or []}
+    enabled = {str(item) for item in telemetry.get("enabled_servers") or []}
+    skipped = {
+        str(item.get("server") or ""): str(item.get("reason") or "not mounted")
+        for item in telemetry.get("skipped_servers") or []
+        if isinstance(item, dict)
+    }
+    parts = []
+    for server in ("context7", "playwright"):
+        if server in mounted:
+            parts.append(f"{server} skipped - role summary did not record whether the mounted MCP was used")
+        elif server in requested:
+            parts.append(f"{server} skipped - {skipped.get(server, 'requested but not mounted')}")
+        elif server in enabled:
+            parts.append(f"{server} skipped - not relevant for this role or selected scope")
+        else:
+            parts.append(f"{server} skipped - disabled by optional_mcp_servers")
+    return "MCP decision: " + "; ".join(parts)
+
 if summary_path.exists():
     original = scrub(summary_path.read_text(encoding="utf-8", errors="replace"))
 else:
     original = ""
 
 if has_commit_intent(original):
+    if not has_mcp_decision(original):
+        original = original.rstrip() + "\n\n" + mcp_decision_fallback() + "\n"
     summary_path.write_text(original.rstrip() + "\n", encoding="utf-8")
     raise SystemExit(0)
 
@@ -1219,6 +1579,7 @@ fallback = [
     "## Checks",
     f"- Codex exit code: {codex_status}",
     f"- Base commit: {base_commit[:12]}",
+    f"- {mcp_decision_fallback()}",
 ]
 try:
     watchdog = json.loads(watchdog_status_path.read_text(encoding="utf-8"))
@@ -1239,7 +1600,7 @@ summary_path.parent.mkdir(parents=True, exist_ok=True)
 summary_path.write_text("\n".join(fallback).rstrip() + "\n", encoding="utf-8")
 PY
 
-python3 - "$manifest_path" "$role" "$run_id" "$base_commit" "$patch_path" "$summary_path" "$codex_status" "$queue_dir/changed_files.txt" "$runtime_state_actions_path" "$runtime_state_changed_files_path" "$ticket_state_actions_path" "$final_watchdog_status_path" <<'PY'
+python3 - "$manifest_path" "$role" "$run_id" "$base_commit" "$patch_path" "$summary_path" "$codex_status" "$queue_dir/changed_files.txt" "$runtime_state_actions_path" "$runtime_state_changed_files_path" "$ticket_state_actions_path" "$final_watchdog_status_path" "$mcp_telemetry_path" <<'PY'
 import json
 import re
 import sys
@@ -1258,6 +1619,7 @@ runtime_state_actions_path = Path(sys.argv[9])
 runtime_state_changed_files_path = Path(sys.argv[10])
 ticket_state_actions_path = Path(sys.argv[11])
 watchdog_status_path = Path(sys.argv[12])
+mcp_telemetry_path = Path(sys.argv[13])
 changed_files = [
     line.strip()
     for line in changed_files_path.read_text(encoding="utf-8").splitlines()
@@ -1273,6 +1635,12 @@ try:
     watchdog_status = json.loads(watchdog_status_path.read_text(encoding="utf-8"))
 except Exception:
     watchdog_status = {}
+try:
+    mcp_telemetry = json.loads(mcp_telemetry_path.read_text(encoding="utf-8"))
+except Exception:
+    mcp_telemetry = {}
+if not isinstance(mcp_telemetry, dict):
+    mcp_telemetry = {}
 
 def summary_field(field_name: str) -> str:
     prefix = f"{field_name.lower()}:"
@@ -1284,6 +1652,103 @@ def summary_field(field_name: str) -> str:
 
 verification_scope = summary_field("Verification scope").lower().replace("-", "_")
 test_change_rationale = summary_field("Test change rationale")
+mcp_decision = summary_field("MCP decision")
+
+def frontend_touching() -> bool:
+    terms = {
+        "app shell",
+        "browser",
+        "canvas",
+        "chrome",
+        "client",
+        "component",
+        "css",
+        "dashboard",
+        "demo",
+        "dom",
+        "frontend",
+        "front-end",
+        "html",
+        "jsx",
+        "next.js",
+        "page",
+        "react",
+        "route",
+        "screenshot",
+        "static",
+        "svelte",
+        "tsx",
+        "ui",
+        "vite",
+        "visual",
+        "vue",
+        "web app",
+    }
+    def contains_frontend_term(text: str) -> bool:
+        return any(
+            re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", text)
+            for term in terms
+        )
+    paths = " ".join(changed_files).lower()
+    text = (paths + "\n" + summary.lower())
+    if contains_frontend_term(text):
+        return True
+    return bool(mcp_telemetry.get("ticket_frontend_scope"))
+
+def mcp_usage_outcome(server: str) -> dict[str, str]:
+    lower = mcp_decision.lower()
+    mounted = {str(item) for item in mcp_telemetry.get("mounted_servers") or []}
+    requested = {str(item) for item in mcp_telemetry.get("requested_servers") or []}
+    enabled = {str(item) for item in mcp_telemetry.get("enabled_servers") or []}
+    skipped = {
+        str(item.get("server") or ""): str(item.get("reason") or "not mounted")
+        for item in mcp_telemetry.get("skipped_servers") or []
+        if isinstance(item, dict)
+    }
+    if f"{server} used" in lower:
+        return {"outcome": "used", "reason": mcp_decision}
+    if f"{server} skipped" in lower:
+        return {"outcome": "skipped", "reason": mcp_decision}
+    if server in mounted:
+        return {"outcome": "missing_decision_note", "reason": "mounted but summary did not record use or skip"}
+    if server in requested:
+        return {"outcome": "skipped", "reason": skipped.get(server, "requested but not mounted")}
+    if server in enabled:
+        return {"outcome": "skipped", "reason": "not relevant for this role or selected scope"}
+    return {"outcome": "disabled", "reason": "disabled by optional_mcp_servers"}
+
+def has_deferred_validation_blocker() -> bool:
+    lower = summary.lower()
+    return (
+        "deferred validation blocker" in lower
+        or "validation blocker" in lower
+        or "blocked_on_environment" in lower
+        or "blocked on environment" in lower
+    )
+
+def playwright_validation_issue() -> str:
+    lower = summary.lower()
+    failure_terms = (
+        "playwright navigation cancelled",
+        "playwright navigation canceled",
+        "navigation cancelled",
+        "navigation canceled",
+        "navigation failed",
+        "failed navigation",
+        "browser navigation failed",
+    )
+    if any(term in lower for term in failure_terms):
+        return "Playwright navigation failed or was cancelled; record this as validation evidence or a deferred blocker."
+    if role in {"hardener", "integrator"} and frontend_touching():
+        usage = mcp_usage_outcome("playwright")
+        if usage.get("outcome") == "used" and any(term in lower for term in ("snapshot", "console", "browser", "navigation", "screenshot")):
+            return ""
+        if "npm run browser-smoke" in lower and any(term in lower for term in ("pass", "passed", "success", "succeeded")):
+            return ""
+        if has_deferred_validation_blocker():
+            return ""
+        return "Frontend-touching hardener/integrator work requires Playwright snapshot/console validation, `npm run browser-smoke`, or an explicit deferred validation blocker."
+    return ""
 try:
     runtime_actions_payload = json.loads(runtime_state_actions_path.read_text(encoding="utf-8"))
 except Exception:
@@ -1294,6 +1759,20 @@ runtime_state_action_count = len(
 patch_empty = not patch_path.exists() or patch_path.stat().st_size == 0
 runtime_state_empty = not runtime_state_changed_files and runtime_state_action_count == 0
 status = "failed" if exit_code != 0 else ("skipped" if patch_empty and runtime_state_empty else "queued")
+playwright_issue = playwright_validation_issue()
+if status == "queued" and playwright_issue:
+    status = "failed"
+if playwright_issue:
+    mcp_telemetry["playwright_validation_status"] = "failed"
+    mcp_telemetry["playwright_validation_detail"] = playwright_issue
+elif role in {"hardener", "integrator"} and frontend_touching():
+    mcp_telemetry["playwright_validation_status"] = "passed_or_blocker_recorded"
+else:
+    mcp_telemetry["playwright_validation_status"] = "not_required"
+mcp_telemetry["usage_outcome"] = {
+    "context7": mcp_usage_outcome("context7"),
+    "playwright": mcp_usage_outcome("playwright"),
+}
 manifest = {
     "role": role,
     "run_id": run_id,
@@ -1310,6 +1789,17 @@ manifest = {
     "runtime_state_changed_files": runtime_state_changed_files,
     "runtime_state_status": "pending" if not runtime_state_empty else "none",
     "runtime_state_results": [],
+    "mcp_supported_servers": mcp_telemetry.get("supported_servers") or ["context7", "playwright"],
+    "mcp_enabled_servers": mcp_telemetry.get("enabled_servers") or [],
+    "mcp_requested_servers": mcp_telemetry.get("requested_servers") or [],
+    "mcp_mounted_servers": mcp_telemetry.get("mounted_servers") or [],
+    "mcp_skipped_servers": mcp_telemetry.get("skipped_servers") or [],
+    "mcp_required": mcp_telemetry.get("required") or {"context7": False, "playwright": False},
+    "mcp_usage_outcome": mcp_telemetry.get("usage_outcome") or {},
+    "mcp_usage_note": mcp_decision,
+    "mcp_telemetry_path": str(mcp_telemetry_path),
+    "playwright_validation_status": mcp_telemetry.get("playwright_validation_status"),
+    "playwright_validation_detail": mcp_telemetry.get("playwright_validation_detail", ""),
     "watchdog_status_path": str(watchdog_status_path),
     "watchdog_timed_out": bool(watchdog_status.get("timed_out")),
     "watchdog_idle_timed_out": bool(watchdog_status.get("idle_timed_out")),
@@ -1326,6 +1816,10 @@ manifest = {
     "checkpoint_commit": None,
     "accepted_commit": None,
 }
+if playwright_issue:
+    manifest["deferral_reason"] = "playwright_validation_issue"
+    manifest["deferral_detail"] = playwright_issue
+mcp_telemetry_path.write_text(json.dumps(mcp_telemetry, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 

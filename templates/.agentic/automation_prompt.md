@@ -186,6 +186,14 @@ target/agent_runs/<run_id>/worker_<role>.md
 
 Context7 and Playwright MCP are optional accelerators. Missing MCP support, expired auth, startup failures, timeouts, empty results, or MCP tool errors must not halt the run or become `BLOCKED_ON_ENVIRONMENT` by themselves. Continue with normal web search, repo docs, package metadata, existing knowledge, shell checks, or `.diffmogger/scripts/diffmogger_browser.py`.
 
+At the beginning of every run, make an explicit MCP decision:
+
+```text
+MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reason>
+```
+
+Use `context7 used` when third-party/library/API docs materially affect planning or implementation. Use `playwright used` when validating browser-facing changes. Use `skipped` only with a concrete reason such as backend-only change, docs-only change, not mounted for this role, MCP unavailable, or explicit opt-out.
+
 When using Playwright MCP for UI validation, save failure screenshots under:
 
 ```text
@@ -193,6 +201,8 @@ docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png
 ```
 
 Link screenshot-backed bugs in `docs/CODEX_AUTOMATION_TASKS.md` and, when multi-role mode is enabled, `docs/MULTI_ROLE_PROGRESS.md`.
+
+A cancelled or failed Playwright navigation is a validation issue, not evidence that no UI bug exists. For frontend-touching hardener or integrator work, record either successful Playwright snapshot/console validation, a successful deterministic browser smoke command such as `npm run browser-smoke`, or an explicit deferred validation blocker.
 
 ## Human-Intervention Protocol
 
@@ -265,6 +275,8 @@ python3 .diffmogger/scripts/diffmogger_browser.py env
 
 Use `DIFFMOGGER_BROWSER_PATH` or `CHROME_PATH` when launching headless browser checks. If the same browser launch fails repeatedly before DevTools is ready, record the diagnostics as `BLOCKED_ON_ENVIRONMENT` and switch to an equivalent managed-browser/manual QA path rather than retrying the identical command.
 
+Frontend or static targets should add a deterministic browser smoke script such as `npm run browser-smoke` once the app boot/render path exists, so app launch and first render can be checked even when Playwright MCP is unavailable.
+
 ## End-Of-Run Requirements
 
 Update typed control state before changing generated projections. Use the target-local helper, for example:
@@ -291,6 +303,7 @@ Then refresh `docs/CODEX_AUTOMATION_TASKS.md` as a generated prompt/handoff proj
 - generated artifacts
 - product horizon state and horizon transition log
 - Codex CLI worker decision: `USE`, `SKIP`, or `UNAVAILABLE`, with reason
+- MCP decision note for Context7 and Playwright, with used/skipped/unavailable reason
 - worker-agent activity
 - worker outputs consumed
 - known issues

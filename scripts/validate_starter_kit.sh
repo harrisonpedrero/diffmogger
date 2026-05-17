@@ -39,6 +39,7 @@ for marker in [
     "discord_notifier",
     "local_notifications_enabled",
     "optional_mcp_servers",
+    "\"default\": [\"context7\", \"playwright\"]",
     "context7",
     "playwright",
 ]:
@@ -204,6 +205,8 @@ guardrail_markers = [
     "{{MULTI_ROLE_GUARDRAILS_POLICY}}",
     "Optional MCP servers must never be required for progress",
     "docs/backlog/ui_artifacts/<run_id>/",
+    "MCP decision: context7 used|skipped",
+    "npm run browser-smoke",
     "## Lock-File Policy",
     "## Human-Intervention Policy",
     "## Status Policy",
@@ -228,6 +231,7 @@ for marker in [
     ".diffmogger/scripts/summarize_worker_outputs.py",
     "target/canonical_state_brief.md",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
+    "MCP decision: context7 used|skipped",
     "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS",
     "Parallelism budget:",
     "Write-capable worker agents allowed:",
@@ -240,6 +244,7 @@ for marker in [
     "{{MCP_SETUP_SECTION}}",
     "expired auth",
     "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png",
+    "npm run browser-smoke",
     "{{TICKET_CAMPAIGN_SECTION}}",
     "{{PRODUCT_HORIZON_GUIDANCE}}",
     "## Product Horizon State",
@@ -259,6 +264,10 @@ for marker in [
     "mcp_servers.context7.env_vars",
     "mcp_servers.playwright.command",
     "mcp_servers.playwright.disabled_tools",
+    "mcp_telemetry_path",
+    "mcp_requested_servers",
+    "mcp_mounted_servers",
+    "playwright_validation_status",
     "--add-dir",
     "codex exec --full-auto",
     "--skip-git-repo-check",
@@ -310,6 +319,8 @@ for marker in [
     "Role wrappers apply temporary `codex exec -c` MCP overrides",
     "CONTEXT7_API_KEY",
     "browser_take_screenshot",
+    "MCP decision: context7 used|skipped",
+    "do not depend on a worktree `.codex/config.toml`",
 ]:
     if marker not in mcp_docs:
         print(f"MCP docs template missing marker: {marker}", file=sys.stderr)
@@ -467,6 +478,7 @@ for role in ["planner", "builder", "hardener", "integrator"]:
         "CRITICAL_STOP",
         "target/canonical_state_brief.md",
         "docs/MULTI_ROLE_PROGRESS.md",
+        "MCP decision: context7 used|skipped",
     ]
     if role != "integrator":
         markers.extend(["Commit subject:", "Do not use generic subjects"])
@@ -492,6 +504,10 @@ for marker in [
     "mcp_servers.context7.env_vars",
     "mcp_servers.playwright.command",
     "mcp_servers.playwright.disabled_tools",
+    "mcp_telemetry_path",
+    "mcp_requested_servers",
+    "mcp_mounted_servers",
+    "playwright_validation_status",
     "git remote -v",
     "git worktree add",
     "git ls-files --others --exclude-standard -z",
@@ -500,6 +516,7 @@ for marker in [
     "repair_environment.py",
     "automation_queue",
     "automation_worktrees",
+    "validation_jobs",
     "manifest.json",
     "runtime_state_actions.json",
     "runtime_state_changed_files",
@@ -542,6 +559,7 @@ for marker in [
     "runtime_state_results",
     "RUNTIME_STATE_ALLOWED_PREFIXES",
     "RUNTIME_STATE_DENY_PARTS",
+    "validation_jobs",
     ".agentic/automation_prompt.md",
     ".agentic/roles/builder.md",
     "parse_commit_intent",
@@ -587,6 +605,8 @@ for marker in [
     "write_worker_count_from_text",
     "env_access_policy_from_value",
     "optional_mcp_servers_from_value",
+    "optional_mcp_servers_from_sources",
+    "DEFAULT_OPTIONAL_MCP_SERVERS",
     "codex_mcp_detail",
     "CONTEXT7_API_KEY",
     "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
@@ -1307,7 +1327,7 @@ rm -rf "$lock_smoke_dir"
 
 tmp_dir="$(mktemp -d)"
 python3 scripts/scaffold_project_docs.py --intake examples/generic-web-app/project_intake.md --target "$tmp_dir" >/tmp/Diffmogger-scaffold.log
-python3 scripts/check_required_files.py --human-bridge-mode file_only "$tmp_dir" >/tmp/Diffmogger-check.log
+python3 scripts/check_required_files.py --human-bridge-mode file_only --multi-role-enabled --optional-mcp-enabled "$tmp_dir" >/tmp/Diffmogger-check.log
 if grep -R "POST http://127.0.0.1:8765/api/notify\\|NOTIFIER_UNREACHABLE\\|message_body\\|discord_notifier\\|DISCORD_" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" >/tmp/Diffmogger-file-only-grep.log 2>&1; then
     echo "File-only scaffold unexpectedly contains notifier-only markers" >&2
     cat /tmp/Diffmogger-file-only-grep.log >&2
@@ -1345,25 +1365,40 @@ if present:
     print(f"Default scaffold manifest still aliases removed Markdown queues: {present}", file=sys.stderr)
     raise SystemExit(1)
 PY
-for unexpected_mcp_path in \
-    ".codex/config.toml" \
+for expected_mcp_path in \
     ".diffmogger/agentic/codex_config.toml" \
-    "docs/MCP_INTEGRATIONS.md" \
     ".diffmogger/state/MCP_INTEGRATIONS.md" \
-    "docs/backlog/README.md" \
     ".diffmogger/state/backlog/README.md" \
     ".diffmogger/scripts/run_playwright_mcp.sh"; do
-    if [ -e "$tmp_dir/$unexpected_mcp_path" ]; then
-        echo "Default scaffold unexpectedly generated optional MCP file: $unexpected_mcp_path" >&2
+    if [ ! -e "$tmp_dir/$expected_mcp_path" ]; then
+        echo "Default scaffold missing enabled MCP file: $expected_mcp_path" >&2
         rm -rf "$tmp_dir"
         exit 1
     fi
 done
+python3 - "$tmp_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+intake = json.loads((target / ".diffmogger/agentic/project_intake.json").read_text(encoding="utf-8"))
+manifest = json.loads((target / ".diffmogger/manifest.json").read_text(encoding="utf-8"))
+expected = ["context7", "playwright"]
+if intake.get("optional_mcp_servers") != expected:
+    print(f"Default scaffold did not write all supported MCPs to intake: {intake.get('optional_mcp_servers')}", file=sys.stderr)
+    raise SystemExit(1)
+if manifest.get("optional_mcp_servers") != expected:
+    print(f"Default scaffold did not write resolved MCPs to manifest: {manifest.get('optional_mcp_servers')}", file=sys.stderr)
+    raise SystemExit(1)
+PY
 for marker in \
     "H2 Local-first demo" \
     "weekly board" \
     "Long-run direction" \
     "recurring review capsules" \
+    "MCP decision: context7 used|skipped" \
+    "npm run browser-smoke" \
     "## Improvement Backlog"; do
     if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-mode-horizon-grep.log 2>&1; then
         echo "Continuous-improvement scaffold missing mode-aware horizon marker: $marker" >&2
@@ -1373,6 +1408,36 @@ for marker in \
     fi
 done
 rm -rf "$tmp_dir"
+
+tmp_dir="$(mktemp -d)"
+tmp_intake="$(mktemp /tmp/Diffmogger-mcp-opt-out.XXXXXX)"
+cat >"$tmp_intake" <<'JSON'
+{
+  "project_name": "MCP Opt Out Smoke",
+  "product_goal": "Validate explicit MCP opt-out.",
+  "target_user": "Automation tester.",
+  "desired_first_demo": "Generated docs only.",
+  "human_bridge_enabled": false,
+  "human_bridge_mode": "disabled",
+  "automation_role_profile": "planner_builder_hardener_integrator",
+  "optional_mcp_servers": [],
+  "verification_commands": ["npm test"]
+}
+JSON
+python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-mcp-opt-out.log
+python3 scripts/check_required_files.py --human-bridge-mode disabled --multi-role-enabled "$tmp_dir" >/tmp/Diffmogger-check-mcp-opt-out.log
+for unexpected_mcp_path in \
+    ".diffmogger/agentic/codex_config.toml" \
+    ".diffmogger/state/MCP_INTEGRATIONS.md" \
+    ".diffmogger/state/backlog/README.md" \
+    ".diffmogger/scripts/run_playwright_mcp.sh"; do
+    if [ -e "$tmp_dir/$unexpected_mcp_path" ]; then
+        echo "Explicit optional_mcp_servers opt-out unexpectedly generated MCP file: $unexpected_mcp_path" >&2
+        rm -rf "$tmp_dir" "$tmp_intake"
+        exit 1
+    fi
+done
+rm -rf "$tmp_dir" "$tmp_intake"
 
 tmp_dir="$(mktemp -d)"
 tmp_intake="$(mktemp /tmp/Diffmogger-local-excludes.XXXXXX)"
@@ -1402,7 +1467,7 @@ JSON
   git commit -m "product base" >/tmp/Diffmogger-local-excludes-commit.log
 )
 python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-local-excludes-scaffold.log
-for ignored_path in ".diffmogger/agentic/automation_prompt.md" ".diffmogger/state/CODEX_AUTOMATION_TASKS.md" ".diffmogger/scripts/run_role_automation.sh" ".diffmogger/runtime/agent_runs/run-1/summary.md" ".diffmogger/runtime/prisma-cache/node/cache-file"; do
+for ignored_path in ".diffmogger/agentic/automation_prompt.md" ".diffmogger/state/CODEX_AUTOMATION_TASKS.md" ".diffmogger/scripts/run_role_automation.sh" ".diffmogger/runtime/agent_runs/run-1/summary.md" ".diffmogger/runtime/prisma-cache/node/cache-file" "target/validation_jobs/validation-job-test.log"; do
     if ! git -C "$tmp_dir" check-ignore -q -- "$ignored_path"; then
         echo "Existing-project scaffold failed to locally ignore Diffmogger path: $ignored_path" >&2
         cat "$tmp_dir/.git/info/exclude" >&2
@@ -1591,7 +1656,11 @@ for marker in \
     'mcp_servers.context7.env_vars=["CONTEXT7_API_KEY"]' \
     'mcp_servers.playwright.command="bash"' \
     'mcp_servers.playwright.disabled_tools=["browser_run_code_unsafe","browser_file_upload"]' \
-    "PLAYWRIGHT_MCP_OUTPUT_DIR"; do
+    "PLAYWRIGHT_MCP_OUTPUT_DIR" \
+    "mcp_telemetry_path" \
+    "mcp_requested_servers" \
+    "mcp_mounted_servers" \
+    "playwright_validation_status"; do
     if ! grep -F -- "$marker" "$tmp_dir/.diffmogger/scripts/run_role_automation.sh" >/tmp/Diffmogger-optional-mcp-runner-grep.log 2>&1; then
         echo "Optional MCP runner missing marker: $marker" >&2
         rm -rf "$tmp_dir" "$tmp_intake"
@@ -1601,7 +1670,9 @@ done
 for marker in \
     "auth errors" \
     "browser_take_screenshot" \
-    "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png"; do
+    "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png" \
+    "MCP decision: context7 used|skipped" \
+    "npm run browser-smoke"; do
     if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" >/tmp/Diffmogger-optional-mcp-prompt-grep.log 2>&1; then
         echo "Optional MCP prompt/docs missing marker: $marker" >&2
         rm -rf "$tmp_dir" "$tmp_intake"

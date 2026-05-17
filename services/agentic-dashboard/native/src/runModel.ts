@@ -650,7 +650,7 @@ function dagGroups(snapshot: ProjectSnapshot | null, nodes: RunDagNode[]): RunDa
   const groups: RunDagGroup[] = proposed
     .map((group, index) => {
       const id = text(group.execution_group_id, `proposed-wave-${index + 1}`);
-      const mode = text(group.mode, text(record(group.payload).execution_mode, "dry_run"));
+      const mode = displayGroupMode(group);
       const status = text(group.status, "proposed");
       const nodeIds = groupItemNodeIds(group, nodes);
       return {
@@ -1012,11 +1012,36 @@ const PROGRESS_STATUS_PRIORITY: RunDagStatusKind[] = ["failed", "blocked", "runn
 
 function operationTone(status: unknown): RunTone {
   const normalized = text(status, "").toLowerCase().replace(/[\s-]+/g, "_");
-  if (["completed", "done", "passed", "integrated", "resolved"].includes(normalized)) return "good";
+  if (["completed", "done", "passed", "integrated", "resolved", "reconciled", "dispositioned", "accepted"].includes(normalized)) return "good";
   if (["failed", "critical", "conflict", "error"].includes(normalized)) return "critical";
   if (["blocked", "blocked_on_user", "blocked_on_environment", "warning", "warn"].includes(normalized)) return "warn";
-  if (["running", "active", "ready", "selected", "queued", "proposed", "in_progress"].includes(normalized)) return "info";
+  if ([
+    "running",
+    "active",
+    "ready",
+    "selected",
+    "queued",
+    "proposed",
+    "in_progress",
+    "serial_fallback",
+    "awaiting_integrator_reconciliation",
+    "awaiting_integrator_review",
+    "waiting_validation",
+    "parallel_not_worth_it",
+  ].includes(normalized)) return "info";
   return "quiet";
+}
+
+function displayGroupMode(group: Record<string, unknown>, fallback = "Planning preview"): string {
+  const payload = record(group.payload);
+  return firstNonEmpty([
+    group.display_mode_label,
+    payload.display_mode_label,
+    group.execution_mode_label,
+    payload.execution_mode_label,
+    payload.execution_mode,
+    group.mode,
+  ], fallback);
 }
 
 function firstNonEmpty(values: unknown[], fallback = ""): string {
@@ -1322,7 +1347,7 @@ function groupWave(
   const payload = record(group.payload);
   const items = list(group.items).map(record);
   const sourceItems = items.length ? items : sources;
-  const mode = text(payload.execution_mode || group.mode, kind);
+  const mode = displayGroupMode(group, kind);
   const status = text(group.status, kind);
   const owners = sampleUnique(sourceItems.map((item) => text(item.owner_role || item.role, "")), 3);
   const tasks = sampleUnique(sourceItems.map((item) => text(item.task_id || item.ticket_id || item.graph_task_node_id || item.dag_node_id, "")), 4);
@@ -1341,7 +1366,7 @@ function groupWave(
     owners,
     tasks,
     leases,
-    detail: firstNonEmpty([group.reason, payload.why_together, payload.summary], kind === "blocked" ? "Parallel candidate is blocked." : "Execution wave is recorded."),
+    detail: firstNonEmpty([group.human_summary, group.display_reason, group.reason, payload.why_together, payload.summary], kind === "blocked" ? "Parallel candidate is waiting for serial handling or more evidence." : "Execution wave is recorded."),
   };
 }
 
@@ -1356,6 +1381,11 @@ function concurrencyWavesModel(snapshot: ProjectSnapshot | null, integrationBack
 
   const activeGroups = list(state.active_execution_groups).map(record);
   activeGroups.forEach((group, index) => add(groupWave(group, "active", index)));
+  const recentGroups = [
+    ...list(state.recent_execution_groups).map(record),
+    ...list(state.recently_completed_execution_groups).map(record),
+  ];
+  recentGroups.forEach((group, index) => add(groupWave(group, "completed", index)));
   const activeSources = [
     ...list(state.active_read_only_workers).map(record),
     ...list(state.active_write_workers).map(record),
@@ -1374,9 +1404,9 @@ function concurrencyWavesModel(snapshot: ProjectSnapshot | null, integrationBack
   list(state.completed_worker_reports).map(record).slice(0, 4).forEach((report, index) => {
     add(groupWave({
       execution_group_id: text(report.execution_group_id || report.report_id || report.worker_id, `completed:${index + 1}`),
-      status: text(report.status, "completed"),
-      mode: "worker",
-      reason: firstNonEmpty([report.summary, report.report_path], "Worker report completed."),
+      status: text(report.disposition_status || report.status, "completed"),
+      mode: text(report.disposition_label, "worker"),
+      reason: firstNonEmpty([report.disposition_summary, report.summary, report.report_path], "Worker report completed."),
       items: [report],
     }, "completed", index));
   });

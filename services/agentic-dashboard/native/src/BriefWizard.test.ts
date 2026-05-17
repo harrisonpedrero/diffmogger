@@ -42,7 +42,7 @@ function draft(overrides: Partial<IntakeDraft> = {}): IntakeDraft {
     automation_role_profile: "planner_builder_hardener_integrator",
     automation_checkpoint_commits: true,
     multi_role_allow_remotes: false,
-    optional_mcp_servers: [],
+    optional_mcp_servers: ["context7", "playwright"],
     campaign_mode: "ongoing",
     ticket_run_file: "",
     ticket_run_seed_tickets: [],
@@ -135,7 +135,7 @@ describe("Brief automation mode mapping", () => {
 
     expect(next.campaign_mode).toBe("bounded");
     expect(next.ticket_run_file).toBe("");
-    expect(next.optional_mcp_servers).toEqual([]);
+    expect(next.optional_mcp_servers).toEqual(["context7", "playwright"]);
     expect(next.human_bridge_mode).toBe("file_only");
     expect(next.ticket_run_seed_tickets).toHaveLength(1);
     expect(next.additional_context_files).toEqual([".diffmogger/context/notes.md"]);

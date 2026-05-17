@@ -132,8 +132,36 @@ function toneForStatus(status: unknown): string {
   if (["completed", "passed", "pass", "released"].includes(value)) return "good";
   if (["failed", "blocked", "conflict", "critical"].includes(value)) return "critical";
   if (["warning", "warn", "cancelled", "expired"].includes(value)) return "warn";
-  if (["running", "queued", "proposed", "active"].includes(value)) return "info";
+  if ([
+    "running",
+    "queued",
+    "proposed",
+    "active",
+    "serial_fallback",
+    "awaiting_integrator_reconciliation",
+    "awaiting_integrator_review",
+    "waiting_validation",
+    "parallel_not_worth_it",
+  ].includes(value)) return "info";
   return "quiet";
+}
+
+function displayGroupMode(group: Record<string, unknown>, fallback = "Planning preview"): string {
+  const payload = asRecord(group.payload);
+  return compactValue(
+    group.display_mode_label ||
+      payload.display_mode_label ||
+      group.execution_mode_label ||
+      payload.execution_mode_label ||
+      payload.execution_mode ||
+      group.mode,
+    fallback,
+  );
+}
+
+function debugReason(group: Record<string, unknown>): string {
+  const raw = stringList(group.raw_reason_kinds)[0];
+  return compactValue(group.debug_reason_kind || raw || group.raw_reason_kind || group.reason_kind, "debug");
 }
 
 function isTicketCampaign(snapshot: ProjectSnapshot | null): boolean {
@@ -734,7 +762,7 @@ export function AutomationActivityGraphPanel(props: {
           <DetailRow label="Blocked" value={dag.summary.blocked + dag.summary.failed} />
           <DetailRow label="Completed" value={dag.summary.completed + dag.summary.skipped} />
           <DetailRow label="Planned waves" value={dag.parallel.proposedGroups} />
-          <DetailRow label="Active groups" value={dag.parallel.activeGroups} />
+          <DetailRow label="Running groups" value={dag.parallel.activeGroups} />
           <DetailRow label={abstracted ? "Clusters" : "Visible"} value={abstracted ? dag.abstraction.clusterCount : dag.renderLimit.visibleNodeCount} />
           <DetailRow label={abstracted ? "Bundled edges" : "Edges"} value={abstracted ? dag.abstraction.bundledEdgeCount : dag.renderLimit.visibleEdgeCount} />
         </div>
@@ -1050,15 +1078,24 @@ function ParallelExecutionPanel(props: {
 }) {
   const state = asRecord(props.snapshot?.run?.state);
   const details = asRecord(props.details);
+  const parallelSummary = asRecord(details.parallelization_summary || state.parallelization_summary);
+  const parallelExecution = asRecord(details.parallel_execution || state.parallel_execution);
   const proposed = [
+    ...asRecords(parallelExecution.proposed_groups),
     ...asRecords(details.proposed_execution_group_rows),
     ...asRecords(state.proposed_execution_groups),
   ];
   const activeGroups = [
+    ...asRecords(parallelExecution.running_groups),
     ...asRecords(details.active_execution_groups),
     ...asRecords(state.active_execution_groups),
   ];
-  const recentGroups = asRecords(details.recent_execution_groups).slice(0, 4);
+  const recentGroups = [
+    ...asRecords(parallelExecution.recently_completed_groups),
+    ...asRecords(details.recent_execution_groups),
+    ...asRecords(state.recent_execution_groups),
+    ...asRecords(state.recently_completed_execution_groups),
+  ].slice(0, 4);
   const skipped = [
     ...asRecords(details.blocked_parallel_candidates),
     ...asRecords(state.blocked_parallel_candidates),
@@ -1079,6 +1116,11 @@ function ParallelExecutionPanel(props: {
     ...asRecords(state.conflicting_leases),
   ].slice(0, 4);
   const contracts = asRecords(details.worker_contracts).slice(0, 5);
+  const workerReportsModel = asRecord(details.worker_reports);
+  const completedWorkerReports = [
+    ...asRecords(workerReportsModel.completed_worker_reports),
+    ...asRecords(state.completed_worker_reports),
+  ].slice(0, 5);
   const validationJobsModel = asRecord(details.validation_jobs || state.validation_job_summary);
   const validationSummary = asRecord(validationJobsModel.validation_job_summary || state.validation_job_summary);
   const validationJobs = [
@@ -1121,7 +1163,7 @@ function ParallelExecutionPanel(props: {
       <div className="panel-heading-row">
         <div>
           <h2>Parallel Execution</h2>
-          <p>{compactValue(asRecord(state.parallelization_summary).mode, "dry_run")} · {numberValue(asRecord(state.parallelization_summary).group_count)} proposed groups</p>
+          <p>{compactValue(parallelSummary.display_mode_label || parallelSummary.display_mode, "Planning preview")} · {numberValue(parallelSummary.group_count)} proposed groups · {activeGroups.length} running · {recentGroups.length} recently completed</p>
         </div>
         <div className="inline-actions">
           <button className="icon-text-button" onClick={props.onLoad} disabled={props.busy}>
@@ -1136,10 +1178,10 @@ function ParallelExecutionPanel(props: {
       </div>
 
       <div className="parallel-summary-grid">
-        <DetailRow label="Groups" value={numberValue(asRecord(state.parallelization_summary).group_count)} />
+        <DetailRow label="Proposed" value={numberValue(parallelSummary.group_count)} />
+        <DetailRow label="Recently completed" value={recentGroups.length} />
         <DetailRow label="Active jobs" value={numberValue(activeCounts.active_validation_jobs)} />
-        <DetailRow label="Read workers" value={numberValue(activeCounts.active_read_only_workers)} />
-        <DetailRow label="Write workers" value={numberValue(activeCounts.active_write_workers)} />
+        <DetailRow label="Running workers" value={numberValue(activeCounts.active_read_only_workers) + numberValue(activeCounts.active_write_workers)} />
       </div>
 
       {warnings.length > 0 && (
@@ -1171,15 +1213,15 @@ function ParallelExecutionPanel(props: {
             <div className="parallel-row compact" key={`${group.reason_kind ?? "reason"}-${index}`}>
               <div>
                 <strong>{compactValue(group.label || group.reason_kind)}</strong>
-                <span>{numberValue(group.count)} candidate(s) · {compactValue(group.next_action)}</span>
+                <span>{numberValue(group.count)} candidate(s) · {compactValue(group.human_summary || group.display_reason || group.next_action)}</span>
               </div>
-              <RunTonePill tone="warn">{compactValue(group.reason_kind, "blocked")}</RunTonePill>
+              <RunTonePill tone={toneForStatus(group.reason_kind)}>{debugReason(group)}</RunTonePill>
             </div>
           )) : (
             <div className="parallel-row compact">
               <div>
                 <strong>{compactValue(whyNotParallel.status, "clear")}</strong>
-                <span>{compactValue(whyNotParallel.summary, "No blocked parallel candidates recorded.")}</span>
+                <span>{compactValue(whyNotParallel.summary, "No parallel candidate reasons recorded.")}</span>
               </div>
               <RunTonePill tone="good">clear</RunTonePill>
             </div>
@@ -1201,15 +1243,14 @@ function ParallelExecutionPanel(props: {
         <div className="parallel-row-list">
           {proposed.length ? proposed.slice(0, 4).map((group, index) => {
             const id = textValue(group.execution_group_id, `group-${index}`);
-            const payload = asRecord(group.payload);
             return (
               <div className="parallel-row" key={`${id}-${index}`}>
                 <div>
                   <strong>{id}</strong>
-                  <span>{compactValue(payload.execution_mode || group.mode)} · {groupItems(group).length || numberValue(group.item_count)} item(s)</span>
+                  <span>{displayGroupMode(group)} · {groupItems(group).length || numberValue(group.item_count)} item(s)</span>
                 </div>
                 <RunTonePill tone={toneForStatus(group.status || "proposed")}>{compactValue(group.status || "proposed")}</RunTonePill>
-                <p>{compactValue(group.reason || payload.why_together, "No grouping reason recorded.")}</p>
+                <p>{compactValue(group.reason || asRecord(group.payload).why_together, "No grouping reason recorded.")}</p>
                 {groupItems(group).map((item) => (
                   <code key={textValue(item.item_id) || textValue(item.task_id)}>
                     {compactValue(item.task_id || item.graph_task_node_id)} · {compactValue(item.owner_role)} · {compactValue(item.action_kind)}
@@ -1222,7 +1263,7 @@ function ParallelExecutionPanel(props: {
       </section>
 
       <section className="parallel-section">
-        <h3>Active groups</h3>
+        <h3>Running groups</h3>
         <div className="parallel-row-list">
           {activeGroups.length ? activeGroups.map((group, index) => {
             const id = textValue(group.execution_group_id, `active-${index}`);
@@ -1230,7 +1271,7 @@ function ParallelExecutionPanel(props: {
               <div className="parallel-row" key={id}>
                 <div>
                   <strong>{id}</strong>
-                  <span>{compactValue(group.mode)} · {compactValue(group.selected_by)}</span>
+                  <span>{displayGroupMode(group, "Runtime work")} · {compactValue(group.selected_by)}</span>
                 </div>
                 <RunTonePill tone="info">{compactValue(group.status, "running")}</RunTonePill>
                 <button className="ledger-action" disabled={props.busy} onClick={() => props.onCancelGroup(id)}>
@@ -1262,6 +1303,21 @@ function ParallelExecutionPanel(props: {
               <RunTonePill tone={toneForStatus(job.status)}>{compactValue(job.status)}</RunTonePill>
             </div>
           ))}
+        </div>
+      </section>
+
+      <section className="parallel-section">
+        <h3>Worker reports</h3>
+        <div className="parallel-row-list">
+          {completedWorkerReports.length ? completedWorkerReports.map((report, index) => (
+            <div className="parallel-row compact" key={textValue(report.worker_id || report.report_id, `worker-report-${index}`)}>
+              <div>
+                <strong>{compactValue(report.worker_id || report.report_id)}</strong>
+                <span>{compactValue(report.disposition_summary || report.failure_reason || report.report_artifact_id, "Worker report completed.")}</span>
+              </div>
+              <RunTonePill tone={toneForStatus(report.disposition_status || report.status)}>{compactValue(report.disposition_label || report.disposition_status || report.status)}</RunTonePill>
+            </div>
+          )) : <p className="empty-copy">No completed worker reports recorded yet.</p>}
         </div>
       </section>
 
@@ -1361,13 +1417,13 @@ function ParallelExecutionPanel(props: {
 
       {recentGroups.length > 0 && (
         <section className="parallel-section">
-          <h3>Recent groups</h3>
+          <h3>Recently Completed</h3>
           <div className="parallel-row-list">
             {recentGroups.map((group, index) => (
               <div className="parallel-row compact" key={textValue(group.execution_group_id, `recent-${index}`)}>
                 <div>
                   <strong>{compactValue(group.execution_group_id)}</strong>
-                  <span>{compactValue(group.mode)} · {compactValue(group.finished_at || group.started_at)}</span>
+                  <span>{displayGroupMode(group, "Runtime work")} · {compactValue(group.finished_at || group.started_at)}</span>
                 </div>
                 <RunTonePill tone={toneForStatus(group.status)}>{compactValue(group.status)}</RunTonePill>
               </div>
