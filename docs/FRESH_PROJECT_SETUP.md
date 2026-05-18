@@ -24,7 +24,7 @@ The native dashboard opens a local window and calls the Diffmogger backend comma
 - optional local notifier health when using `local_notifier`
 - optional macOS desktop notification command when ticket completion notifications are enabled
 
-Fill in the wizard, choose the target directory, optionally add context files such as PDFs or research notes, then click **Scaffold**. Choose fresh-project mode for a new target directory. Choose existing-project mode when the target already has project files and describe the first integrated change in the intake. The dashboard writes `.diffmogger/agentic/project_intake.json`, copies context files into `.diffmogger/context/`, creates `.diffmogger/state/PROJECT_CONTEXT.md`, scaffolds required files, validates them, and ensures the target has a local git repo with an initial `chore: initial commit` when `HEAD` does not exist. Then open **Run** and click **Start**. On the first start, the dashboard runs the generated initial Codex bootstrap prompt once as guarded target preparation; the backend refuses a second successful bootstrap for the same target.
+Fill in the wizard, choose the target directory, optionally add context files such as PDFs or research notes, then click **Scaffold**. Choose fresh-project mode for a new target directory. Choose existing-project mode when the target already has project files and describe the first integrated change in the intake. The dashboard writes `.diffmogger/agentic/project_intake.json`, copies context files into `.diffmogger/context/`, creates `.diffmogger/state/PROJECT_CONTEXT.md`, scaffolds required files, validates them, and ensures the target has a local git repo with an initial `chore: initial commit` when `HEAD` does not exist. Then open **Run** and click **Start** to launch the actual automation.
 
 When integrating into an existing repo, Diffmogger preserves project-owned files by keeping Diffmogger state under `.diffmogger/`. If root `AGENTS.md` exists, Diffmogger adds or updates a managed block that points Codex at the sidecar prompt. Keep repo-owned instructions outside that managed block.
 
@@ -87,7 +87,7 @@ For bounded ticket work, choose **Bounded campaign** in the dashboard run config
 
 The native dashboard provides a **Ticket Queue** panel before scaffold when bounded campaign is selected. Low-cortisol generation creates a full-scope seed queue by splitting the described project into reviewable local patches with no fixed ticket-count ceiling. Use the queue panel to add/edit/delete seed tickets, paste Markdown/CSV/JSON imports, or ask Codex to draft review-only follow-up candidates from current project state. CLI intakes can also include `ticket_run_seed_tickets`; scaffold writes those into the target-local SQLite ticket queue.
 
-After scaffold, the Run page has the same Ticket Queue controls: inspect, add, edit, delete, preview/apply imports transactionally, draft from intake, and accept selected draft candidates. Runtime decisions, execution DAG progress, repo capability manifest, events, blockers, and next actions remain canonical in `.diffmogger/runtime/orchestration.sqlite3`. Bootstrap is readiness-only in bounded campaign mode: it should confirm setup, ticket parsing, and verification, not implement the tickets. Normal campaign runs use `python3 .diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket context; the DAG scheduler may launch compatible ready nodes across tickets when dependencies, confidence, and ownership scopes allow. Ongoing campaigns draft/enqueue safe follow-up tickets from typed runtime context when no dependency-ready tickets remain. Completion notifications use the laptop's native desktop notification system when enabled; failures are recorded in typed human-message state.
+After scaffold, the Run page has the same Ticket Queue controls: inspect, add, edit, delete, preview/apply imports transactionally, draft from intake, and accept selected draft candidates. Runtime decisions, execution DAG progress, repo capability manifest, events, blockers, and next actions remain canonical in `.diffmogger/runtime/orchestration.sqlite3`. Scaffold initializes ticket readiness, and Start launches actual automation directly. Normal campaign runs use `python3 .diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket context; the DAG scheduler may launch compatible ready nodes across tickets when dependencies, confidence, and ownership scopes allow. Ongoing campaigns draft/enqueue safe follow-up tickets from typed runtime context when no dependency-ready tickets remain. Completion notifications use the laptop's native desktop notification system when enabled; failures are recorded in typed human-message state.
 
 For CLI validation of a ticket-campaign target, add `--ticket-campaign-enabled` to `scripts/check_required_files.py`.
 
@@ -152,12 +152,12 @@ The integrator records clean-HEAD full-suite baseline verification in `.diffmogg
 
 Target-project automation runs should use those local scripts, not scripts from the Diffmogger starter repo.
 
-## 3. First Run Preparation
+## 3. First Run
 
-The dashboard normally handles this from **Run** when the user clicks **Start** for the first time. For debugging, the same generated prompt can be run manually from the target repo:
+The dashboard handles this from **Run** when the user clicks **Start**. For debugging, start the target-local automation directly:
 
 ```bash
-codex exec --full-auto --skip-git-repo-check "$(cat .diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md)"
+python3 .diffmogger/scripts/run_conveyor_automation.py .
 ```
 
 Review the first run closely. Confirm the app or workflow is runnable and that `.diffmogger/runtime/canonical_state_brief.md` shows a clear next sprint; `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` should match it as a generated handoff projection.
@@ -203,7 +203,7 @@ remain visible across local DAG scheduler cycles.
 
 ### First Review Checklist
 
-After the first bootstrap, use one local review path:
+After the first automation run, use one local review path:
 
 1. From the Diffmogger starter-kit source, run `bash scripts/validate_starter_kit.sh`.
 2. Open the native dashboard, reopen the target, and click **Run Safety Check**.

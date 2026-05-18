@@ -332,6 +332,35 @@ def _is_worker_patch_handoff_node(node: Mapping[str, Any]) -> bool:
     return str(metadata.get("source") or "") == "worker_patches" or bool(str(node.get("patch_id") or ""))
 
 
+def _node_mentions_ticket(node: Mapping[str, Any], ticket_id: str) -> bool:
+    if str(node.get("task_id") or "") == ticket_id:
+        return True
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+    covered = metadata.get("covered_task_ids") if isinstance(metadata.get("covered_task_ids"), list) else []
+    return ticket_id in {str(item) for item in covered}
+
+
+def _node_is_terminal(node: Mapping[str, Any]) -> bool:
+    status = str(node.get("status") or "").lower().replace("-", "_")
+    return status in {"done", "complete", "completed", "passed", "validated", "reviewed", "integrated", "resolved", "closed", "skipped", "superseded"}
+
+
+def _has_active_worker_patch_handoff_for_ticket(dag_model: Mapping[str, Any], ticket_id: str) -> bool:
+    nodes = dag_model.get("nodes") if isinstance(dag_model.get("nodes"), list) else []
+    for node in nodes:
+        if not isinstance(node, Mapping):
+            continue
+        if not _node_mentions_ticket(node, ticket_id):
+            continue
+        if not _is_worker_patch_handoff_node(node):
+            continue
+        if _node_canonical_action(node) not in {"review", "audit", "validate", "integrate"}:
+            continue
+        if not _node_is_terminal(node):
+            return True
+    return False
+
+
 def _ready_single_action_candidates(dag_model: Mapping[str, Any]) -> list[dict[str, Any]]:
     ready = dag_model.get("ready_nodes") if isinstance(dag_model.get("ready_nodes"), list) else []
     full_nodes = dag_model.get("nodes") if isinstance(dag_model.get("nodes"), list) else []
@@ -351,7 +380,7 @@ def _ready_single_action_candidates(dag_model: Mapping[str, Any]) -> list[dict[s
         capability = execution_dag_action_capability(action_type)
         canonical_action = _node_canonical_action(node)
         task_id = str(node.get("task_id") or "")
-        if not task_id or task_id in COMPATIBILITY_CONVEYOR_TASK_IDS or canonical_action in {"ticket", "blocker", "build", "repair", "integrate", "completion"}:
+        if not task_id or task_id in COMPATIBILITY_CONVEYOR_TASK_IDS or canonical_action in {"ticket", "blocker", "build", "integrate", "completion"}:
             continue
         if canonical_action in {"orchestrate", "decompose", "scope", "calibrate"}:
             candidates.append(
@@ -387,6 +416,18 @@ def _ready_single_action_candidates(dag_model: Mapping[str, Any]) -> list[dict[s
                     role=str(capability.get("role_family") or "hardener"),
                     score=60.0,
                     reason="single ready DAG validation node is runnable",
+                    dag_node_id=dag_node_id,
+                    task_id=task_id,
+                )
+            )
+        elif canonical_action == "repair":
+            metadata = node_detail.get("metadata") if isinstance(node_detail.get("metadata"), Mapping) else {}
+            candidates.append(
+                _candidate(
+                    action_kind="run_serial_role",
+                    role=str(capability.get("role_family") or "builder"),
+                    score=82.0,
+                    reason=str(metadata.get("summary") or "ready DAG repair node is runnable"),
                     dag_node_id=dag_node_id,
                     task_id=task_id,
                 )
@@ -454,6 +495,8 @@ def _serial_ticket_fallback_candidate(
     role = str(context.get("role") or "")
     if not ticket_id or not role:
         return None
+    if role == "hardener" and _has_active_worker_patch_handoff_for_ticket(dag_model, ticket_id):
+        return None
     trigger_actions = _serial_fallback_trigger_actions(role)
     if not trigger_actions:
         return None
@@ -502,10 +545,11 @@ def _serial_ticket_fallback_candidate(
             reason += f": {detail}"
     selected_node_id = str(selected_node.get("node_id") or selected_blocked.get("dag_node_id") or "")
     dag_node_id = _ticket_action_node_id(dag_model, ticket_id=ticket_id, canonical_action="build") if role == "builder" else selected_node_id
+    serial_score = 88.0 if str(context.get("action") or "") == "verify_candidate" else 66.0
     candidate = _candidate(
         action_kind="run_serial_role",
         role=role,
-        score=68.0 if role == "hardener" else 66.0,
+        score=serial_score,
         reason=reason,
         dag_node_id=dag_node_id or selected_node_id,
         task_id=ticket_id,

@@ -707,7 +707,7 @@ Then stop launching new work. Diffmogger writes a local report, sends a native d
         task_notes = """Campaign mode: `bounded`
 
 - Ticket authoring surface: dashboard-backed SQLite ticket queue
-- Bootstrap boundary: readiness-only; do not implement tickets during bootstrap.
+- Scaffold seeds and validates the ticket queue; Start launches the first actual automation run.
 - Normal campaign runs use `python3 scripts/ticket_run.py . next --json` for dependency-aware ticket context.
 - The DAG scheduler may group compatible ready nodes across tickets when dependencies, confidence, and ownership scopes allow.
 - Optional dependencies: use `depends_on` arrays in the dashboard ticket queue when one ticket must wait for another.
@@ -723,7 +723,7 @@ python3 scripts/ticket_run.py . next --json
 python3 scripts/ticket_run.py . should-halt --finalize
 ```
 
-Bootstrap is readiness-only in bounded campaign mode: it should confirm setup, ticket shape, and verification commands, but it must not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, or finalize the campaign. Normal campaign runs should use `next --json` for dependency-aware context and let the DAG scheduler group only compatible ready nodes. The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in typed human-message state."""
+Scaffold initializes the bounded campaign and Start launches actual ticket work directly. Normal campaign runs should use `next --json` for dependency-aware context and let the DAG scheduler group only compatible ready nodes. The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in typed human-message state."""
     else:
         section = """Campaign mode: `ongoing`
 
@@ -814,7 +814,7 @@ def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str
                 "`scripts/ticket_run.py . should-halt --finalize` writes the report and completion state, then automation stops launching new work.",
             ),
         ]
-        guidance = f"""Progression is campaign-aware for this target. Because `campaign_mode` is `bounded`, use the bounded ticket-run phases below instead of an open-ended roadmap. The {ticket_file} is the ticket-scope authoring surface; runtime decisions and blockers remain canonical in SQLite. Do not invent new roadmap work after listed tickets are done or blocked. After T1 readiness, use `python3 scripts/ticket_run.py . next --json` for dependency-aware ticket context and let DAG readiness, confidence, and ownership policy shape execution waves.
+        guidance = f"""Progression is campaign-aware for this target. Because `campaign_mode` is `bounded`, use the bounded ticket-run phases below instead of an open-ended roadmap. The {ticket_file} is the ticket-scope authoring surface; runtime decisions and blockers remain canonical in SQLite. Do not invent new roadmap work after listed tickets are done or blocked. Scaffold handles ticket-run readiness; Start uses `python3 scripts/ticket_run.py . next --json` for dependency-aware ticket context and lets DAG readiness, confidence, and ownership policy shape execution waves.
 
 {markdown_table(rows)}
 
@@ -831,8 +831,8 @@ At the end of every run, update `## Product Horizon State` with:
 If the phase criteria are met, update the current horizon to the next ticket-run phase and append a dated note to `## Horizon Transition Log` with the previous phase, new phase, evidence, and checks. When every ticket is done, or when all remaining tickets are blocked, finalize the bounded campaign and stop launching new work."""
         return {
             "PRODUCT_HORIZON_GUIDANCE": guidance.strip(),
-            "CURRENT_HORIZON": "T1 Ticket-run readiness",
-            "HORIZON_GOAL": f"Confirm the {ticket_file}, local setup, and verification are ready for `{project_name}`.",
+            "CURRENT_HORIZON": "T2 Ticket implementation",
+            "HORIZON_GOAL": "Use `scripts/ticket_run.py . next --json` to select dependency-aware ticket context, then let DAG readiness and ownership policy shape execution waves.",
             "HORIZON_ADVANCEMENT_CRITERIA": "\n".join(
                 [
                     "  - The dashboard-backed SQLite ticket queue contains the bounded ticket scope.",
@@ -845,18 +845,17 @@ If the phase criteria are met, update the current horizon to the next ticket-run
             "REMAINING_WORK_BEFORE_ADVANCEMENT": "\n".join(
                 [
                     "  - Populate or confirm the dashboard ticket queue.",
-                    "  - Run the readiness-only bootstrap prompt, verify local setup, and record ticket-readiness evidence.",
-                    "  - Do not implement ticket acceptance criteria during bootstrap.",
+                    "  - Start the actual automation run when the ticket queue is actionable.",
+                    "  - Do not expand ticket scope beyond the bounded queue.",
                 ]
             ),
             "INITIAL_KNOWN_ISSUES": "\n".join(
                 [
-                    "- Ticket queue still needs to be populated or confirmed.",
-                    "- Verification commands may need adjustment after bootstrap.",
+                    "- Verification commands may need adjustment after the first ticket creates project files.",
                 ]
             ),
-            "BEST_NEXT_MILESTONE": f"Complete T1 readiness-only ticket bootstrap for `{project_name}` and record whether one-ticket campaign runs can start.",
-            "SUGGESTED_NEXT_SPRINT_TASK": "Run `docs/INITIAL_BOOTSTRAP_PROMPT.md` in Codex, confirm the dashboard ticket queue, run ticket status/next parsing, setup docs, checks, automation state, and ticket-readiness evidence without implementing tickets.",
+            "BEST_NEXT_MILESTONE": f"Start the first dependency-ready ticket for `{project_name}`.",
+            "SUGGESTED_NEXT_SPRINT_TASK": "Run `python3 scripts/ticket_run.py . next --json`, implement one dependency-ready ticket, and record candidate evidence or a blocker.",
             "BACKLOG_SECTION_HEADING": "Deferred / Follow-Up Tickets",
             "BACKLOG_SECTION_BODY": "\n".join(
                 [
@@ -868,8 +867,8 @@ If the phase criteria are met, update the current horizon to the next ticket-run
             "CONTINUE_RATIONALE": "Continue. The bounded campaign has local ticket scope and no active blocker.",
             "AGENTS_PROGRESS_RULE": "Treat the ticket queue as a bounded, dependency-aware execution queue; after readiness, use `scripts/ticket_run.py . next --json` for ticket context and let DAG readiness, confidence, and ownership policy shape execution waves.",
             "INITIAL_PROGRESS_EVIDENCE_LABEL": "ticket-readiness evidence",
-            "BOOTSTRAP_SCOPE_BOUNDARY": "Bounded campaign bootstrap is readiness-only: inspect the repo, confirm the dashboard ticket queue parses, run `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` when possible, configure docs/checks, and update typed automation control state plus generated projections. If the ticket queue is empty, placeholder-only, malformed, or ambiguous, record `ACTIVE_WITH_PENDING_USER_INPUT` or an honest blocker instead of solving tickets. Do not implement ticket acceptance criteria, mark tickets `candidate_done` or `done`, finalize the campaign, or continue into the first ticket.",
-            "BOOTSTRAP_END_NOTE": "Use the ticket queue as the first bounded readiness phase. Do not implement tickets during bootstrap, and do not create extra roadmap work after every ticket is done or blocked.",
+            "BOOTSTRAP_SCOPE_BOUNDARY": "Scaffold already initialized the bounded campaign. Use `python3 scripts/ticket_run.py . next --json` to select the next dependency-ready ticket, then implement only that ticket or record an honest blocker. Do not expand scope after every ticket is done or blocked.",
+            "BOOTSTRAP_END_NOTE": "Use the ticket queue as the bounded scope. Do not create extra roadmap work after every ticket is done or blocked.",
         }
 
     rows = [
@@ -945,15 +944,15 @@ Long-run direction: {long_run}"""
             ]
         ),
         "NEXT_HORIZON_CANDIDATE": "H2 Local-first demo",
-        "REMAINING_WORK_BEFORE_ADVANCEMENT": "  - Run the bootstrap prompt, create or inspect the baseline, and record verification results.",
+        "REMAINING_WORK_BEFORE_ADVANCEMENT": "  - Start automation, create or inspect the baseline, and record verification results.",
         "INITIAL_KNOWN_ISSUES": "\n".join(
             [
                 "- Product baseline still needs to be created or inspected.",
-                "- Verification commands may need adjustment after bootstrap.",
+                "- Verification commands may need adjustment after the first automation run.",
             ]
         ),
         "BEST_NEXT_MILESTONE": f"Complete H1 Runnable baseline for `{project_name}` and record whether the project is ready to advance to H2 Local-first demo.",
-        "SUGGESTED_NEXT_SPRINT_TASK": "Run `docs/INITIAL_BOOTSTRAP_PROMPT.md` in Codex to scaffold the first demo, setup docs, checks, automation state, and H1 advancement evidence.",
+        "SUGGESTED_NEXT_SPRINT_TASK": "Start automation to create or confirm the first runnable demo, setup docs, checks, automation state, and H1 advancement evidence.",
         "BACKLOG_SECTION_HEADING": "Improvement Backlog",
         "BACKLOG_SECTION_BODY": "\n".join(
             [
@@ -966,7 +965,7 @@ Long-run direction: {long_run}"""
         "CONTINUE_RATIONALE": "Continue. The project has a clear mission and no active blocker.",
         "AGENTS_PROGRESS_RULE": "Treat the first working baseline as an early milestone, not the finish line.",
         "INITIAL_PROGRESS_EVIDENCE_LABEL": "H1 advancement evidence",
-        "BOOTSTRAP_SCOPE_BOUNDARY": "During bootstrap, create or confirm the first runnable baseline and automation state for the current horizon.",
+        "BOOTSTRAP_SCOPE_BOUNDARY": "Start automation to create or confirm the first runnable baseline and automation state for the current horizon.",
         "BOOTSTRAP_END_NOTE": "Do not stop merely because a basic demo exists. This is the first horizon, not the final product.",
     }
 
@@ -1062,7 +1061,7 @@ def project_mode_guidance(mode: str) -> str:
         )
     return (
         "Create a new target project from the intake. Choose simple local-first defaults, create "
-        "the initial repo structure, and document setup and verification as part of bootstrap."
+        "the initial repo structure, and document setup and verification as part of the first automation run."
     )
 
 
@@ -1313,7 +1312,7 @@ The target must have a local git repo with an initial commit. Diffmogger scaffol
 
 {scheduler_config}
 
-After bootstrap, the scaffold step ensures this target has a local git repo and initial commit before continuous automation starts. The role prompts, DAG scheduler, and helpers are generated locally; no remote git operations are allowed."""
+After scaffold, the target has a local git repo and initial commit before continuous automation starts. The role prompts, DAG scheduler, and helpers are generated locally; no remote git operations are allowed."""
 
     return {
         "MULTI_ROLE_AUTOMATIONS_ALLOWED": str(enabled).lower(),
@@ -1598,7 +1597,7 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
     )
     verification = normalize_lines(
         data.get("verification_commands"),
-        "Add project-specific test, lint, build, or demo commands during bootstrap.",
+        "Add project-specific test, lint, build, or demo commands during the first automation run.",
     )
     bootstrap_verification = bootstrap_baseline_command_text(data)
     env_values = env_access_values(data)
@@ -1624,7 +1623,7 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
         "MEANINGFUL_DELIVERABLE": normalize_lines(data.get("meaningful_deliverable"), "A runnable, verified increment."),
         "BEYOND_MVP": normalize_lines(data.get("beyond_mvp"), "Continue improving core value, demo quality, integrations, and automation reliability."),
         "LONG_RUN_DIRECTION": normalize_lines(data.get("beyond_mvp"), "Continue improving core value, demo quality, integrations, and automation reliability."),
-        "ASSUMPTIONS": normalize_lines(data.get("assumptions"), "Assumptions should be documented during bootstrap."),
+        "ASSUMPTIONS": normalize_lines(data.get("assumptions"), "Assumptions should be documented during automation runs."),
         "PARALLELISM_BUDGET_OVERRIDES_JSON": json.dumps(
             data.get("parallelism_budget_overrides")
             if isinstance(data.get("parallelism_budget_overrides"), dict)
@@ -1859,12 +1858,12 @@ def seed_runtime_state(target: Path, values: dict[str, str]) -> None:
             "last_updated": values.get("CREATED_AT") or "",
             "horizon": values.get("CURRENT_HORIZON") or "H1 Runnable baseline",
             "horizon_decision": "stay",
-            "current_assessment": "Current baseline: not bootstrapped yet.",
+            "current_assessment": "Scaffold initialized the automation runtime; no product ticket has run yet.",
             "best_next_milestone": values.get("BEST_NEXT_MILESTONE") or "Create or confirm setup, local run path, and verification.",
-            "suggested_next_task": values.get("SUGGESTED_NEXT_SPRINT_TASK") or "Run one bootstrap pass that records local verification evidence.",
+            "suggested_next_task": values.get("SUGGESTED_NEXT_SPRINT_TASK") or "Start automation and record local verification evidence.",
             "known_issue": "No active issue summary.",
             "known_issues": [],
-            "bootstrap_status": "pending",
+            "bootstrap_status": "ready",
             "worker": {
                 "agents_allowed": values.get("WORKER_AGENTS_ALLOWED") == "true",
                 "write_workers_allowed": True,
@@ -2291,7 +2290,7 @@ def main() -> int:
     print(f"Scaffolded {len(written)} files into {target}")
     for path in written:
         print(path.relative_to(target))
-    print(f"Git bootstrap: {git_bootstrap['status']}")
+    print(f"Git setup: {git_bootstrap['status']}")
     if git_bootstrap.get("commit"):
         print(f"Git commit: {git_bootstrap['commit']}")
     return 0

@@ -484,8 +484,6 @@ export function visibleScaffoldPreviewFiles(files: ScaffoldPreviewFile[]): Scaff
   return files.filter((file) => file.action !== "skip_existing");
 }
 
-const pendingBootstrapStatuses = new Set(["", "unknown", "pending", "not_bootstrapped", "not bootstrapped"]);
-
 function normalizedStatus(value: string): string {
   return value.trim().toLowerCase().replace(/-/g, "_");
 }
@@ -514,8 +512,8 @@ export function setupRunState(
     normalizedStatus(stringValue(dashboard.initial_bootstrap_status, "")) === "pass" ||
     Boolean(String(dashboard.initial_bootstrap_completed_at ?? "").trim());
   const scaffolded = snapshot.target.automation_task_exists || Boolean(options.scaffoldResultPresent);
-  const bootstrapStatus = normalizedStatus(stringValue(task.bootstrap_status, scaffolded ? "pending" : "unknown"));
-  const completed = dashboardPassed || (scaffolded && !pendingBootstrapStatuses.has(bootstrapStatus));
+  const bootstrapStatus = normalizedStatus(stringValue(task.bootstrap_status, ""));
+  const completed = scaffolded || dashboardPassed || Boolean(bootstrapStatus);
   if (!scaffolded) {
     return {
       enabled: false,
@@ -567,8 +565,8 @@ export function setupRunState(
   return {
     enabled: true,
     bootstrapCompleted: completed,
-    reason: completed ? "Open Run." : "Open Run; the first Start will prepare the target automatically.",
-    status: completed ? "Ready" : "First run will prepare target",
+    reason: "Open Run.",
+    status: "Ready",
   };
 }
 
@@ -590,7 +588,7 @@ function logEventsFromDetails(value: unknown, runId: string): BackendLogEvent[] 
     const record = asRecord(item);
     return {
       runId,
-      command: stringValue(record.command, "brief.scaffold_bootstrap"),
+      command: stringValue(record.command, "brief.scaffold"),
       stage: stringValue(record.stage, `log-${index + 1}`),
       level: stringValue(record.level, "info"),
       message: stringValue(record.message, JSON.stringify(record)),
@@ -1149,7 +1147,7 @@ export function BriefWizard(props: {
     }
   }
 
-  async function scaffoldBootstrap() {
+  async function scaffoldProject() {
     if (!targetPath) {
       setCommandError("Choose a target folder before scaffolding.");
       return;
@@ -1163,7 +1161,7 @@ export function BriefWizard(props: {
     setScaffoldResult(null);
     setScaffoldFailure(null);
     setProgressLogs([]);
-    const runId = `brief-bootstrap-${Date.now()}`;
+    const runId = `brief-scaffold-${Date.now()}`;
     let unlisten: (() => void) | null = null;
     try {
       unlisten = await listenBackendLogs(runId, (event) => {
@@ -1171,7 +1169,7 @@ export function BriefWizard(props: {
       });
       const envelope: BackendEnvelope<ScaffoldResponse> = await runBackendCommandStreamed<ScaffoldResponse>({
         runId,
-        command: "brief.scaffold_bootstrap",
+        command: "brief.scaffold",
         target: targetPath,
         intakeJson: draftPayload,
         force: draft.overwrite_existing_scaffold_files,
@@ -1964,7 +1962,7 @@ export function BriefWizard(props: {
                 </button>
               ) : (
                 <div className="setup-final-actions">
-                  <button className="secondary-action" disabled={!targetPath || scaffoldBusy || saveState === "saving" || ticketIssues.length > 0} onClick={scaffoldBootstrap}>
+                  <button className="secondary-action" disabled={!targetPath || scaffoldBusy || saveState === "saving" || ticketIssues.length > 0} onClick={scaffoldProject}>
                     <Hammer size={17} />
                     {scaffoldBusy ? "Working" : "Scaffold"}
                   </button>

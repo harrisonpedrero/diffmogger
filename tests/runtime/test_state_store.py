@@ -788,6 +788,69 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual("in_progress", ticket_row["status"])
             self.assertEqual("role-patch:test", build_node["metadata"]["worker_patch_handoffs"][0]["patch_id"])
 
+    def test_integrated_builder_patch_does_not_materialize_in_progress_build_as_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "dag-handoff",
+                    "tickets": [
+                        {
+                            "id": "TICKET-001",
+                            "summary": "Create repository skeleton",
+                            "status": "in_progress",
+                        }
+                    ],
+                },
+                actor_role="test",
+                event_type="ticket.run_seeded",
+            )
+            now = "2026-05-15T00:00:00+00:00"
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO worker_agents(
+                            worker_id, execution_group_id, run_id, mode, role, status,
+                            context_pack_id, started_at, finished_at, payload_json
+                        )
+                        VALUES('role-manifest:builder:run-001', 'serial-role:builder:run-001',
+                               'run-001', 'write', 'builder', 'completed', '', ?, ?, ?)
+                        """,
+                        (
+                            now,
+                            now,
+                            stable_json({"task_id": "TICKET-001", "dag_node_id": "dag-node:test:build"}),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_patches(
+                            patch_id, worker_id, execution_group_id, status, manifest_path,
+                            patch_path, changed_files_json, base_commit, leases_json,
+                            validation_evidence_json, conflict_signature, created_at,
+                            queued_at, integrated_at, payload_json
+                        )
+                        VALUES('role-patch:test', 'role-manifest:builder:run-001',
+                               'serial-role:builder:run-001', 'integrated',
+                               'target/automation_queue/builder/run-001/manifest.json',
+                               'target/automation_queue/builder/run-001/changes.patch',
+                               ?, '', '[]', '[]', '', ?, ?, ?, '{}')
+                        """,
+                        (json.dumps(["src/app.py"]), now, now, now),
+                    )
+                    materialize_execution_dag_conn(conn, target, {}, event_type="test.materialize")
+                    model = execution_dag_read_model(conn)
+                    ticket_row = conn.execute(
+                        "SELECT status FROM ticket_items WHERE ticket_id = 'TICKET-001'",
+                    ).fetchone()
+
+            build_node = next(node for node in model["nodes"] if node["task_id"] == "TICKET-001" and node["action_type"] == "build")
+            self.assertEqual("running", build_node["status"])
+            self.assertEqual("in_progress", ticket_row["status"])
+            self.assertEqual([], build_node["metadata"]["worker_patch_handoffs"])
+
     def test_parallelism_budget_ignores_disabled_legacy_write_worker_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -1810,6 +1873,97 @@ class StateStoreTests(unittest.TestCase):
                 )
             )
 
+    def test_empty_conflict_worker_patch_is_superseded_without_repair_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            patch_path = target / "target" / "automation_queue" / "builder" / "run-empty" / "changes.patch"
+            patch_path.parent.mkdir(parents=True, exist_ok=True)
+            patch_path.write_text("", encoding="utf-8")
+            now = "2026-05-15T00:00:00+00:00"
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:test:empty-build",
+                        task_id="T-empty",
+                        action_type="build",
+                        status="done",
+                        owner_role="builder",
+                        confidence=0.91,
+                        metadata={"summary": "Build should not be repaired from an empty patch"},
+                    )
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:worker-repair:stale-empty",
+                        task_id="T-empty",
+                        action_type="repair",
+                        status="ready",
+                        owner_role="builder",
+                        patch_id="patch:empty",
+                        patch_path="target/automation_queue/builder/run-empty/changes.patch",
+                        blocker_reason="empty-signature",
+                        confidence=0.84,
+                        metadata={"summary": "Stale repair from an empty worker patch"},
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_agents(
+                            worker_id, execution_group_id, run_id, mode, role, status,
+                            context_pack_id, started_at, finished_at, payload_json
+                        )
+                        VALUES('worker:empty', 'execution-group:empty', 'run-empty',
+                               'write', 'builder', 'failed', '', ?, ?, ?)
+                        """,
+                        (
+                            now,
+                            now,
+                            stable_json({"task_id": "T-empty", "dag_node_id": "dag-node:test:empty-build"}),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_patches(
+                            patch_id, worker_id, execution_group_id, status, manifest_path,
+                            patch_path, changed_files_json, base_commit, leases_json,
+                            validation_evidence_json, conflict_signature, created_at,
+                            queued_at, integrated_at, payload_json
+                        )
+                        VALUES('patch:empty', 'worker:empty', 'execution-group:empty',
+                               'conflict', 'target/automation_queue/builder/run-empty/manifest.json',
+                               'target/automation_queue/builder/run-empty/changes.patch',
+                               '[]', '', '[]', '[]', 'empty-signature', ?, '', '', ?)
+                        """,
+                        (
+                            now,
+                            stable_json({"failure_reason": 'error: No valid patches in input (allow with "--allow-empty")'}),
+                        ),
+                    )
+                result = reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="test")
+                patch_row = conn.execute("SELECT status, payload_json FROM worker_patches WHERE patch_id = 'patch:empty'").fetchone()
+                active_repair_count = conn.execute(
+                    """
+                    SELECT count(*)
+                    FROM execution_dag_nodes
+                    WHERE action_type = 'repair'
+                      AND patch_id = 'patch:empty'
+                      AND status IN ('ready', 'pending', 'planned', 'queued', 'active', 'running', 'in_progress', 'blocked', 'waiting')
+                    """
+                ).fetchone()[0]
+                repair_status = conn.execute(
+                    "SELECT status FROM execution_dag_nodes WHERE node_id = 'dag-node:worker-repair:stale-empty'"
+                ).fetchone()["status"]
+                lineages = worker_patch_lineage_conn(conn, patch_id="patch:empty")
+
+            self.assertEqual("reconciled", result["status"])
+            self.assertEqual(1, result["superseded_patch_count"])
+            self.assertEqual(0, result["repair_node_count"])
+            self.assertEqual(0, active_repair_count)
+            self.assertEqual("superseded", repair_status)
+            self.assertEqual("superseded", patch_row["status"])
+            self.assertEqual("superseded", lineages[0]["status"])
+            self.assertEqual("superseded", lineages[0]["integration_result"])
+            self.assertIn("superseded_reason", json.loads(patch_row["payload_json"]))
+
     def test_parallel_validation_uses_dag_node_validation_plan_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -2413,7 +2567,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual("H1 Runnable baseline", loaded["horizon"])
             self.assertNotEqual("H9 Poisoned Markdown", loaded["horizon"])
 
-    def test_ticket_progress_advances_ticket_campaign_control_from_readiness(self) -> None:
+    def test_ticket_progress_updates_ticket_campaign_control_from_ready_scaffold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             agentic = target / ".agentic"
@@ -2429,7 +2583,8 @@ class StateStoreTests(unittest.TestCase):
             )
 
             seeded = automation_control_state(target)
-            self.assertEqual("T1 Ticket-run readiness", seeded["horizon"])
+            self.assertEqual("T2 Ticket implementation", seeded["horizon"])
+            self.assertEqual("ready", seeded["bootstrap_status"])
 
             write_ticket_run_state(
                 target,
@@ -2455,7 +2610,7 @@ class StateStoreTests(unittest.TestCase):
 
             control = automation_control_state(target)
             self.assertEqual("T2 Ticket implementation", control["horizon"])
-            self.assertEqual("advance", control["horizon_decision"])
+            self.assertEqual("stay", control["horizon_decision"])
             self.assertEqual("bootstrapped", control["bootstrap_status"])
             self.assertIn("1/2 done", control["current_assessment"])
             self.assertIn("next dependency-ready ticket", control["best_next_milestone"])

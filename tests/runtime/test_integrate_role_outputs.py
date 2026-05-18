@@ -181,6 +181,56 @@ class RuntimeStateActionTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("denied runtime artifacts", detail)
 
+    def test_duplicate_ticket_action_files_are_deduplicated(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.init_repo(target)
+                    ticket = {
+                        "id": "TICKET-1",
+                        "summary": "Generic reusable work.",
+                        "status": "candidate_done",
+                        "depends_on": [],
+                    }
+                    write_ticket_run_state(
+                        target,
+                        {"schema_version": 1, "tickets": [ticket]},
+                        actor_role="test",
+                        event_type="ticket.run_seeded",
+                        source_path="test",
+                    )
+                    next_ticket = {**ticket, "status": "done"}
+                    action = {
+                        "action": "update_ticket",
+                        "ticket_id": "TICKET-1",
+                        "start_hash": ticket_digest(ticket),
+                        "end_hash": ticket_digest(next_ticket),
+                        "ticket": next_ticket,
+                    }
+                    queue_dir = target / "target" / "automation_queue" / "hardener" / "run-actions"
+                    queue_dir.mkdir(parents=True, exist_ok=True)
+                    runtime_actions = queue_dir / "runtime_state_actions.json"
+                    ticket_actions = queue_dir / "ticket_state_actions.json"
+                    payload = json.dumps({"schema_version": 1, "actions": [action]}, indent=2, sort_keys=True) + "\n"
+                    runtime_actions.write_text(payload, encoding="utf-8")
+                    ticket_actions.write_text(payload, encoding="utf-8")
+                    manifest = {
+                        "run_id": "run-actions",
+                        "runtime_state_actions_path": str(runtime_actions),
+                        "ticket_state_actions_path": str(ticket_actions),
+                        "runtime_state_status": "pending",
+                        "runtime_state_results": [],
+                    }
+
+                    results = module.apply_runtime_state_actions(target, manifest, dry_run=False)
+                    ticket_state = load_ticket_run_state(target)
+
+                    self.assertEqual(1, len(results))
+                    self.assertEqual("applied", results[0]["status"])
+                    self.assertEqual("applied", manifest["runtime_state_status"])
+                    self.assertEqual("done", ticket_state["tickets"][0]["status"])
+
     def write_patch_for_file(self, target: Path, relative: str, new_content: str, patch_path: Path) -> None:
         (target / relative).write_text(new_content, encoding="utf-8")
         result = subprocess.run(

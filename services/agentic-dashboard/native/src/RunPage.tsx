@@ -1652,49 +1652,6 @@ export function RunPage(props: {
     });
   }
 
-  async function runBootstrapThenStart(action: RunAction) {
-    if (!target) return;
-    const command = "automation.bootstrap_start";
-    const runId = `${command}-${Date.now()}`;
-    setBusyCommand(command);
-    setCommandMessage("Preparing target before start.");
-    setLogs([]);
-    let unlisten: (() => void) | null = null;
-    try {
-      unlisten = await listenBackendLogs(runId, (event) => {
-        setLogs((current) => [...current, { ...event, capturedAt: new Date().toISOString() }]);
-      });
-      const bootstrapPayload: BackendEnvelope<Record<string, unknown>> = await runBackendCommandStreamed({
-        runId,
-        command: "brief.run_bootstrap",
-        target,
-      });
-      const bootstrapAlreadyCompleted = bootstrapPayload.error?.type === "bootstrap_already_completed";
-      if (!bootstrapPayload.ok && !bootstrapAlreadyCompleted) {
-        setCommandError(bootstrapPayload.message ?? "First-run preparation failed.");
-        props.onRefresh();
-        return;
-      }
-      setCommandMessage("Preparation completed. Starting automation.");
-      const startPayload: BackendEnvelope<Record<string, unknown>> = await runBackendCommandStreamed({
-        runId,
-        command: "automation.start",
-        target,
-      });
-      if (!startPayload.ok) {
-        setCommandError(startPayload.message ?? "Automation start failed.");
-      } else {
-        setCommandMessage(`${action.label} completed.`);
-      }
-      props.onRefresh();
-    } catch (error) {
-      setCommandError(error instanceof Error ? error.message : String(error));
-    } finally {
-      unlisten?.();
-      setBusyCommand(null);
-    }
-  }
-
   async function runAction(action: RunAction) {
     setCommandError(null);
     setCommandMessage(null);
@@ -1709,10 +1666,6 @@ export function RunPage(props: {
     }
     if (!action.command || !target || !action.enabled) return;
     const command = action.command;
-    if (command === "automation.bootstrap_start") {
-      await runBootstrapThenStart(action);
-      return;
-    }
     if (command === "worker.run_write" && !writeOwnership.trim()) {
       setCommandError("Enter a disjoint ownership scope before launching a write worker.");
       return;

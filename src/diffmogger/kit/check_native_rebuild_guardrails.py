@@ -32,12 +32,12 @@ NATIVE_RUST = ROOT / "services" / "agentic-dashboard" / "native" / "src-tauri" /
 
 FEATURE_COMMAND_REQUIREMENTS: dict[str, list[str]] = {
     "prerequisite checks": ["diagnostics.environment", "diagnostics.run_checks"],
-    "fresh-project setup": ["brief.load", "brief.save_draft", "brief.scaffold_preview", "brief.scaffold_bootstrap"],
-    "existing-project setup": ["brief.scaffold_preview", "brief.scaffold_bootstrap"],
-    "project intake fields": ["brief.load", "brief.save_draft", "brief.scaffold_bootstrap"],
+    "fresh-project setup": ["brief.load", "brief.save_draft", "brief.scaffold_preview", "brief.scaffold"],
+    "existing-project setup": ["brief.scaffold_preview", "brief.scaffold"],
+    "project intake fields": ["brief.load", "brief.save_draft", "brief.scaffold"],
     "context-file import": ["context.import"],
     "project-context generation": ["context.import"],
-    "scaffold/bootstrap": ["brief.scaffold_preview", "brief.scaffold_bootstrap", "brief.run_bootstrap"],
+    "scaffold/start": ["brief.scaffold_preview", "brief.scaffold", "automation.start"],
     "continuous automation start/stop": ["run.load", "automation.start", "automation.stop"],
     "run safety check": ["safety.run_check"],
     "review export": ["review.load", "review.export_bundle", "review.mark_reviewed"],
@@ -50,8 +50,8 @@ FEATURE_COMMAND_REQUIREMENTS: dict[str, list[str]] = {
         "advanced.save_file",
         "advanced.validate_file",
     ],
-    "Multi-role and DAG scheduler intake settings": ["brief.save_draft", "brief.scaffold_bootstrap", "run.load"],
-    "Context7 and Playwright MCP options": ["brief.load", "brief.save_draft", "brief.scaffold_bootstrap"],
+    "Multi-role and DAG scheduler intake settings": ["brief.save_draft", "brief.scaffold", "run.load"],
+    "Context7 and Playwright MCP options": ["brief.load", "brief.save_draft", "brief.scaffold"],
     "dashboard state persistence": ["project.load_snapshot", "brief.load", "brief.save_draft"],
     "debug bundle": ["advanced.export_debug_bundle"],
 }

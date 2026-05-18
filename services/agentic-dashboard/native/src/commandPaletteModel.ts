@@ -13,7 +13,7 @@ export type PaletteCommandId =
   | "open-project-editor"
   | "continue-brief"
   | "import-context-files"
-  | "scaffold-bootstrap"
+  | "scaffold-project"
   | "start-automation"
   | "stop-automation"
   | "run-safety-check"
@@ -59,10 +59,6 @@ function runControlReason(snapshot: ProjectSnapshot | null, key: string, fallbac
 function automationState(snapshot: ProjectSnapshot | null): string {
   const value = snapshot?.run.automation?.state;
   return typeof value === "string" ? value.trim().toLowerCase() : "";
-}
-
-function canBootstrapAndStart(snapshot: ProjectSnapshot | null): boolean {
-  return snapshot?.run.controls?.can_bootstrap_and_start === true;
 }
 
 function rawAutomationTasksReason(snapshot: ProjectSnapshot | null): string | undefined {
@@ -201,13 +197,13 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       disabledReason: busyReason ?? targetReason,
     },
     {
-      id: "scaffold-bootstrap",
+      id: "scaffold-project",
       title: "Scaffold",
       section: "Setup",
       description: scaffolded
         ? "Open setup to review scaffold settings before running this again."
         : "Open setup review before writing generated project files.",
-      keywords: ["scaffold", "bootstrap", "setup"],
+      keywords: ["scaffold", "setup"],
       dangerous: true,
       routesTo: "Brief",
       disabledReason: busyReason ?? targetReason,
@@ -216,15 +212,13 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       id: "start-automation",
       title: "Start",
       section: "Run",
-      description: canBootstrapAndStart(snapshot)
-        ? "Start automation; first start prepares the target if needed."
-        : "Start automation.",
-      keywords: ["automation", "run", "start", "bootstrap"],
+      description: "Start automation.",
+      keywords: ["automation", "run", "start"],
       dangerous: true,
       disabledReason:
         busyReason ??
         targetReason ??
-        (snapshot?.run.controls?.can_start_automation === true || canBootstrapAndStart(snapshot)
+        (snapshot?.run.controls?.can_start_automation === true
           ? undefined
           : String(snapshot?.run.controls?.start_automation_reason ?? "Automation is not ready to start.")),
     },

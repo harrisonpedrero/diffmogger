@@ -544,6 +544,96 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                     self.assertEqual("in_progress", ticket["status"])
                     self.assertEqual("done", build["status"])
 
+    def test_candidate_done_ticket_prefers_serial_hardener_over_review_fanout(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    write_ticket_run_state(
+                        target,
+                        {
+                            "run_id": "ticket-run",
+                            "tickets": [
+                                {
+                                    "id": "TICKET-001",
+                                    "summary": "Create Python packaging metadata.",
+                                    "status": "candidate_done",
+                                    "depends_on": [],
+                                }
+                            ],
+                        },
+                        actor_role="test",
+                        event_type="ticket.run_test",
+                    )
+
+                    role, reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+
+                    self.assertEqual("hardener", role)
+                    self.assertFalse(stop)
+                    self.assertIn("candidate_done ticket needs serialized hardener verification", reason)
+                    self.assertEqual("run_serial_role", candidate["action_kind"])
+                    self.assertEqual("verify_candidate", candidate["ticket_action"])
+                    self.assertEqual("TICKET-001", candidate["task_id"])
+                    self.assertGreater(candidate["score"], 72.0)
+
+    def test_candidate_done_ticket_uses_queued_patch_handoff_before_serial_hardener(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    write_ticket_run_state(
+                        target,
+                        {
+                            "run_id": "ticket-run",
+                            "tickets": [
+                                {
+                                    "id": "TICKET-001",
+                                    "summary": "Create Python packaging metadata.",
+                                    "status": "candidate_done",
+                                    "depends_on": [],
+                                }
+                            ],
+                        },
+                        actor_role="test",
+                        event_type="ticket.run_test",
+                    )
+                    self.seed_worker_patch(
+                        target,
+                        patch_id="patch:test-hardener",
+                        worker_id="worker:test-hardener",
+                        execution_group_id="execution-group:test-hardener",
+                        run_id="run:test-hardener",
+                        source_node_id="dag-node:test:ticket-001-build",
+                        task_id="TICKET-001",
+                        changed_files=["tests/test_package_import.py"],
+                    )
+
+                    role, reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+                    self.assertEqual("integrator", role)
+                    self.assertFalse(stop)
+                    self.assertIn("queued worker patch", reason)
+                    self.assertEqual("reconcile_worker_results", candidate["action_kind"])
+                    self.assertEqual(0, conveyor_runner.run_scheduler_action(target, candidate, False))
+
+                    role, reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+                    self.assertEqual("hardener", role)
+                    self.assertFalse(stop)
+                    self.assertIn("queued worker patch", reason)
+                    self.assertEqual("launch_review_group", candidate["action_kind"])
+                    self.assertNotEqual("run_serial_role", candidate["action_kind"])
+                    self.assertEqual(0, self.run_fake_review_action(target, candidate))
+
+                    role, _reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+                    self.assertEqual("hardener", role)
+                    self.assertFalse(stop)
+                    self.assertEqual("launch_validation_group", candidate["action_kind"])
+
     def test_dag_ready_write_node_launches_through_runner_action(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
@@ -912,7 +1002,10 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                     )
 
                     module.choose_next(target, {}, 2)
-                    self.assertNotEqual("create_repair_nodes", self.latest_candidate(target).get("action_kind"))
+                    candidate = self.latest_candidate(target)
+                    self.assertEqual("run_serial_role", candidate.get("action_kind"))
+                    self.assertEqual("builder", candidate.get("role"))
+                    self.assertEqual(repair["node_id"], candidate.get("dag_node_id"))
 
     def test_repeated_validation_failures_create_explicit_blocker_after_retry_limit(self) -> None:
         for path, _module in self.modules:

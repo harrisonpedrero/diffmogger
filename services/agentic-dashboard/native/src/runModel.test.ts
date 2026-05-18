@@ -110,7 +110,7 @@ describe("buildRunModel", () => {
     expect(model.controls.safetyCheck.enabled).toBe(true);
   });
 
-  it("lets Start handle pending bootstrap as first-run preparation", () => {
+  it("keeps Start mapped to automation start", () => {
     const model = buildRunModel(
       snapshot({
         run: {
@@ -122,25 +122,23 @@ describe("buildRunModel", () => {
           controls: {
             is_scaffolded: true,
             is_running: false,
-            can_start_automation: false,
-            start_automation_reason: "Continuous automation is not ready. Bootstrap has not completed yet.",
+            can_start_automation: true,
+            start_automation_reason: "Ready.",
             can_bootstrap_and_start: true,
-            bootstrap_start_reason: "Ready to run initial bootstrap before starting automation.",
             can_stop_automation: false,
             can_run_safety_check: true,
           },
           automation: {
-            state: "not_ready",
-            message: "Continuous automation is not ready. Bootstrap has not completed yet.",
+            state: "stopped",
+            message: "Ready.",
           },
         },
       }),
     );
 
     expect(model.banner.badge).toBe("Ready");
-    expect(model.banner.subheadline).toContain("prepare the target");
     expect(model.banner.primaryAction.label).toBe("Start");
-    expect(model.controls.startAutomation.command).toBe("automation.bootstrap_start");
+    expect(model.controls.startAutomation.command).toBe("automation.start");
     expect(model.controls.startAutomation.enabled).toBe(true);
   });
 

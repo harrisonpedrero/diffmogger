@@ -104,8 +104,7 @@ Errors also return JSON and use non-zero exit codes:
 Current command groups:
 
 - Project and Brief: `project.load_snapshot`, `project.list_recent`, `brief.load`,
-  `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`,
-  `brief.run_bootstrap`.
+  `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold`.
 - Context: `context.import`.
 - Run and automation: `run.load`, `run.load_log`, `automation.start`,
   `automation.stop`, `safety.run_check`.
@@ -157,7 +156,7 @@ Keep native behavior and test coverage aligned with the backend contracts for:
 - fresh and existing project setup
 - project intake fields
 - context-file import and `.diffmogger/state/PROJECT_CONTEXT.md` updates
-- scaffold/bootstrap preview and execution
+- scaffold preview and execution
 - continuous automation start/stop
 - run safety checks
 - review bundle export

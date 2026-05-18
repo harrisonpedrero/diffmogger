@@ -19,7 +19,7 @@ This should not become pure meta-work. The default mode remains building the pro
 
 ## Entries
 
-### {{CREATED_AT}} bootstrap
+### {{CREATED_AT}} scaffold
 
 - Automation operating files were scaffolded.
 - First goal: create a runnable baseline and verify it.

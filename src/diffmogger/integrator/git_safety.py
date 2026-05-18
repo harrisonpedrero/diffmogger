@@ -411,7 +411,6 @@ def update_info_exclude(target: Path, *, dry_run: bool) -> None:
         "/docs/DAILY_AUTOMATION_REVIEW.md",
         "/docs/DEVELOPMENT.md",
         "/docs/HUMAN_BRIDGE_SETUP.md",
-        "/docs/INITIAL_BOOTSTRAP_PROMPT.md",
         "/docs/MULTI_ROLE_PROGRESS.md",
         "/docs/PROJECT_CONTEXT.md",
         "/scripts/acquire_codex_lock.sh",

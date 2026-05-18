@@ -69,7 +69,6 @@ DOC_CHOICES = {
     "Project Context": sidecar_rel("docs/PROJECT_CONTEXT.md"),
     "Daily Review": sidecar_rel("docs/DAILY_AUTOMATION_REVIEW.md"),
     "Experiment Log": sidecar_rel("docs/AUTONOMY_EXPERIMENT_LOG.md"),
-    "Initial Bootstrap Prompt": sidecar_rel("docs/INITIAL_BOOTSTRAP_PROMPT.md"),
     "Automation Prompt": sidecar_rel(".agentic/automation_prompt.md"),
 }
 
@@ -517,7 +516,7 @@ def check_prerequisites(target: Path, human_bridge_mode: str, optional_mcp_serve
             "Codex CLI installed and signed in",
             codex_ok,
             True,
-            codex_detail if codex_ok else codex_detail + " Install and run `codex` once before bootstrapping.",
+            codex_detail if codex_ok else codex_detail + " Install and run `codex` once before starting automation.",
         )
     )
 
@@ -1002,7 +1001,7 @@ Use this file as an index for supplemental research, PDFs, notes, designs, and o
 
 ## Automation Notes
 
-- During bootstrap, inspect relevant context files when they help clarify the product goal, constraints, domain, or desired demo.
+- During automation runs, inspect relevant context files when they help clarify the product goal, constraints, domain, or desired demo.
 - Prefer concise summaries in task files instead of copying long passages from context sources.
 - Treat binary context such as PDFs as reference material, not as executable input.
 """

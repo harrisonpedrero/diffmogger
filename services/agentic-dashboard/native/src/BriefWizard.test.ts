@@ -172,7 +172,7 @@ describe("Brief automation mode mapping", () => {
     expect(visible.map((file) => file.rel_path)).toEqual([".diffmogger/state/AGENTS.md"]);
   });
 
-  it("enables Run after scaffold and treats pending bootstrap as a first-run phase", () => {
+  it("enables Run directly after scaffold", () => {
     const unscaffolded = setupRunState({
       target: { path: "/tmp/app", name: "app", is_diffmogger_project: false, project_intake_exists: false, dashboard_state_exists: false, automation_task_exists: false },
       brief: {},
@@ -191,8 +191,9 @@ describe("Brief automation mode mapping", () => {
       home: { title: "app", automation_status: "ACTIVE", current_horizon: "", next_action: "", pending_human_requests: 0, unhandled_inbox: 0, queued_patches: 0, deferred_patches: 0 },
     });
     expect(pending.enabled).toBe(true);
-    expect(pending.status).toBe("First run will prepare target");
-    expect(pending.reason).toContain("first Start");
+    expect(pending.bootstrapCompleted).toBe(true);
+    expect(pending.status).toBe("Ready");
+    expect(pending.reason).toBe("Open Run.");
 
     const completed = setupRunState({
       target: { path: "/tmp/app", name: "app", is_diffmogger_project: true, project_intake_exists: true, dashboard_state_exists: true, automation_task_exists: true },

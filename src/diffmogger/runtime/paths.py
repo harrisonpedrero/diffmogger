@@ -33,7 +33,6 @@ PATH_ALIASES: dict[str, str] = {
     "docs/HUMAN_OUTBOX.md": ".diffmogger/state/HUMAN_OUTBOX.md",
     "docs/HUMAN_REQUESTS.md": ".diffmogger/state/HUMAN_REQUESTS.md",
     "docs/HUMAN_RESPONSES_ARCHIVE.md": ".diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md",
-    "docs/INITIAL_BOOTSTRAP_PROMPT.md": ".diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md",
     "docs/MCP_INTEGRATIONS.md": ".diffmogger/state/MCP_INTEGRATIONS.md",
     "docs/MULTI_ROLE_PROGRESS.md": ".diffmogger/state/MULTI_ROLE_PROGRESS.md",
     "docs/PROJECT_CONTEXT.md": ".diffmogger/state/PROJECT_CONTEXT.md",

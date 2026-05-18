@@ -270,6 +270,7 @@ def load_runtime_state_actions(target: Path, manifest: dict[str, Any]) -> tuple[
     if not action_paths:
         return [], []
     actions: list[dict[str, Any]] = []
+    seen_actions: set[str] = set()
     load_errors: list[dict[str, Any]] = []
     target_resolved = target.resolve()
     for key, actions_path in action_paths:
@@ -312,6 +313,10 @@ def load_runtime_state_actions(target: Path, manifest: dict[str, Any]) -> tuple[
             continue
         for action in raw_actions:
             if isinstance(action, dict):
+                action_digest = stable_json(dict(action))
+                if action_digest in seen_actions:
+                    continue
+                seen_actions.add(action_digest)
                 actions.append(dict(action))
             else:
                 actions.append(action)

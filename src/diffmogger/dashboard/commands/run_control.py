@@ -225,7 +225,6 @@ def automation_ready(target: Path, dashboard_app: Any, *, allow_bootstrap_pendin
     required = [
         existing_or_target_path(target, ".agentic/project_intake.json"),
         existing_or_target_path(target, ".agentic/automation_prompt.md"),
-        existing_or_target_path(target, "docs/INITIAL_BOOTSTRAP_PROMPT.md"),
         existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md"),
         target_script_path(target, "scripts/run_conveyor_automation.sh"),
         target_script_path(target, "scripts/run_conveyor_automation.py"),
@@ -252,14 +251,6 @@ def automation_ready(target: Path, dashboard_app: Any, *, allow_bootstrap_pendin
         ticket_state = ticket_run.ticket_source_state(target)
         if not bool(ticket_state.get("actionable")):
             return False, str(ticket_state.get("start_reason") or "Ticket campaign has no actionable ticket.")
-        if bool(control_state.get("bootstrap_pending")):
-            if allow_bootstrap_pending:
-                return True, str(ticket_state.get("start_reason") or "Ready to run initial bootstrap before starting automation.")
-            return False, "Bootstrap has not completed yet."
-    elif bool(control_state.get("bootstrap_pending")):
-        if allow_bootstrap_pending:
-            return True, "Ready to run initial bootstrap before starting automation."
-        return False, "Bootstrap has not completed yet."
     return True, "Ready."
 
 def run_once_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
@@ -648,21 +639,14 @@ def run_controls_snapshot(target: Path, dashboard_app: Any, snapshot: dict[str, 
     active_role_run = snapshot.get("conveyor", {}).get("active_role_run") if isinstance(snapshot.get("conveyor"), dict) else {}
     automation = automation_status_snapshot(target, dashboard_app)
     is_running = bool(active_role_run) or automation.get("state") == "running"
-    control_state = automation_control_state(target)
-    bootstrap_pending = bool(control_state.get("bootstrap_pending"))
-    bootstrap_ready, bootstrap_reason = (
-        automation_ready(target, dashboard_app, allow_bootstrap_pending=True)
-        if bootstrap_pending
-        else (False, "Initial bootstrap has already completed.")
-    )
     return {
         "is_scaffolded": target_metadata(target)["automation_task_exists"],
         "is_running": is_running,
         "can_start_automation": bool(automation.get("can_start")) and not bool(active_role_run),
         "start_automation_reason": automation.get("message"),
-        "bootstrap_pending": bootstrap_pending,
-        "can_bootstrap_and_start": bootstrap_pending and bootstrap_ready and not is_running,
-        "bootstrap_start_reason": bootstrap_reason,
+        "bootstrap_pending": False,
+        "can_bootstrap_and_start": False,
+        "bootstrap_start_reason": "Start launches automation directly after scaffold.",
         "can_stop_automation": bool(automation.get("can_stop")),
         "stop_automation_reason": automation.get("message"),
         "can_run_safety_check": True,

@@ -7,12 +7,12 @@ The current app is `services/agentic-dashboard/native`. It calls `scripts/dashbo
 ## Backend Command Groups
 
 - Prerequisite checks: `diagnostics.environment`, `diagnostics.run_checks`.
-- Fresh-project setup: `brief.load`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`.
-- Existing-project setup: `brief.scaffold_preview`, `brief.scaffold_bootstrap`.
-- Project intake fields: `brief.load`, `brief.save_draft`, `brief.scaffold_bootstrap`.
+- Fresh-project setup: `brief.load`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold`.
+- Existing-project setup: `brief.scaffold_preview`, `brief.scaffold`.
+- Project intake fields: `brief.load`, `brief.save_draft`, `brief.scaffold`.
 - Context-file import: `context.import`.
 - Project-context generation: `context.import`.
-- Scaffold/bootstrap: `brief.scaffold_preview`, `brief.scaffold_bootstrap`, `brief.run_bootstrap`.
+- Scaffold/start: `brief.scaffold_preview`, `brief.scaffold`, `automation.start`.
 - Continuous automation start/stop: `run.load`, `automation.start`, `automation.stop`.
 - Run safety check: `safety.run_check`.
 - Review export: `review.load`, `review.export_bundle`, `review.mark_reviewed`.
@@ -20,8 +20,8 @@ The current app is `services/agentic-dashboard/native`. It calls `scripts/dashbo
 - Worker strategy controls: `run.load`, `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`.
 - Human bridge and file-only messaging: `inbox.load`, `inbox.send_note`, `inbox.reply_request`.
 - Markdown file monitor/editor: `advanced.list_files`, `advanced.load_file`, `advanced.save_file`, `advanced.validate_file`.
-- Multi-role and DAG scheduler intake settings: `brief.save_draft`, `brief.scaffold_bootstrap`, `run.load`.
-- Context7 and Playwright MCP options: `brief.load`, `brief.save_draft`, `brief.scaffold_bootstrap`.
+- Multi-role and DAG scheduler intake settings: `brief.save_draft`, `brief.scaffold`, `run.load`.
+- Context7 and Playwright MCP options: `brief.load`, `brief.save_draft`, `brief.scaffold`.
 - Dashboard state persistence: `project.load_snapshot`, `brief.load`, `brief.save_draft`.
 - Debug bundle: `advanced.export_debug_bundle`.
 

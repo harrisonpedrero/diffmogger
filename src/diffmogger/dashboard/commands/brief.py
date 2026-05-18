@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import signal
 import tempfile
 
@@ -10,7 +9,6 @@ from ..target import *
 
 from .context import merge_context_files
 from .diagnostics import run_subprocess
-from .run_control import run_subprocess_streamed
 from ..ticket_generation import (
     build_ticket_generation_snapshot,
     normalize_ticket_complexity,
@@ -22,80 +20,11 @@ from ..ticket_generation import (
     ticket_scope_groups_from_intake,
 )
 from diffmogger.runtime import ticket_run
-from diffmogger.runtime.state_store import (
-    connect,
-    automation_control_state,
-    database_path_for_target,
-    open_blockers,
-    upsert_blocker,
-    write_automation_control_state,
-)
 
 DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS = 180
 DEFAULT_TICKET_CODEX_TIMEOUT_SECONDS = 420
 DEFAULT_TICKET_REFINEMENT_CODEX_TIMEOUT_SECONDS = 420
 LOW_CORTISOL_FALLBACK_MAX_TICKETS = 120
-BOOTSTRAP_PENDING_STATUSES = {"", "unknown", "pending", "not_bootstrapped", "not bootstrapped", "blocked"}
-BOOTSTRAP_PRODUCT_COMMIT_MESSAGE = "chore(bootstrap): checkpoint runnable baseline"
-BOOTSTRAP_SUCCESSFUL_CHECKPOINT_STATUSES = {"committed", "already_checkpointed", "already_tracked"}
-STALE_BOOTSTRAP_CHECKPOINT_BLOCKER_TERMS = (
-    ".git/index.lock",
-    "initial local commit",
-    "git metadata",
-    "write access to .git",
-)
-BOOTSTRAP_PRODUCT_EXCLUDED_PREFIXES = (
-    ".diffmogger/",
-    ".agentic/",
-    ".codex/",
-    ".git/",
-    "target/",
-    "__pycache__/",
-    ".pytest_cache/",
-    ".mypy_cache/",
-    ".ruff_cache/",
-    "node_modules/",
-)
-BOOTSTRAP_PRODUCT_EXCLUDED_NAMES = {
-    "AGENTS.md",
-    ".DS_Store",
-}
-BOOTSTRAP_PRODUCT_EXCLUDED_SUFFIXES = (
-    ".pyc",
-    ".pyo",
-    ".sqlite",
-    ".sqlite3",
-    ".db",
-    ".log",
-    ".lock",
-)
-BOOTSTRAP_SCAFFOLD_INTERNALS = {
-    "docs/CODEX_AUTOMATION_TASKS.md",
-    "docs/INITIAL_BOOTSTRAP_PROMPT.md",
-    "docs/MULTI_ROLE_PROGRESS.md",
-    "docs/HUMAN_BRIDGE_SETUP.md",
-    "docs/HUMAN_INBOX.md",
-    "docs/HUMAN_OUTBOX.md",
-    "docs/HUMAN_REQUESTS.md",
-    "docs/HUMAN_RESPONSES_ARCHIVE.md",
-    "docs/TICKET_RUN.md",
-    "scripts/acquire_codex_lock.sh",
-    "scripts/compact_agent_state.py",
-    "scripts/integrate_role_outputs.py",
-    "scripts/list_deferred_patches.py",
-    "scripts/load_automation_env.py",
-    "scripts/release_codex_lock.sh",
-    "scripts/repair_environment.py",
-    "scripts/run_conveyor_automation.py",
-    "scripts/run_conveyor_automation.sh",
-    "scripts/run_observatory.py",
-    "scripts/run_process_watchdog.py",
-    "scripts/run_role_automation.sh",
-    "scripts/spawn_worker_agent.sh",
-    "scripts/state_brief.py",
-    "scripts/summarize_worker_outputs.py",
-    "scripts/ticket_run.py",
-}
 
 LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "project_name": "New Project",
@@ -951,424 +880,6 @@ def run_required_file_check_for_intake(target: Path, intake: dict[str, Any]) -> 
     result["status"] = "pass" if result["exit_code"] == 0 else "fail"
     return result
 
-def bootstrap_status_pending(control: dict[str, Any]) -> bool:
-    status = str(control.get("bootstrap_status") or "").strip().lower()
-    return status in BOOTSTRAP_PENDING_STATUSES
-
-def initial_bootstrap_completed(target: Path, control: dict[str, Any] | None = None) -> bool:
-    dashboard_state = load_dashboard_state(target)
-    dashboard_status = str(dashboard_state.get("initial_bootstrap_status") or "").strip().lower()
-    if dashboard_status == "pass" or str(dashboard_state.get("initial_bootstrap_completed_at") or "").strip():
-        return True
-    control = control or automation_control_state(target)
-    return not bootstrap_status_pending(control)
-
-def bootstrap_lock_path(target: Path) -> Path:
-    return target_path(target.expanduser().resolve(), "target/automation_logs/initial_bootstrap.lock")
-
-@contextlib.contextmanager
-def acquire_initial_bootstrap_lock(target: Path):
-    path = bootstrap_lock_path(target)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise BackendError(
-            "Initial bootstrap is already running for this target.",
-            error_type="bootstrap_already_running",
-            details={"lock_path": str(path)},
-        ) from exc
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "pid": os.getpid(),
-                        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-        yield path
-    finally:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-
-def checkpoint_completed_successfully(checkpoint: Mapping[str, Any] | None) -> bool:
-    return str((checkpoint or {}).get("status") or "").strip().lower() in BOOTSTRAP_SUCCESSFUL_CHECKPOINT_STATUSES
-
-def bootstrap_checkpoint_reference(checkpoint: Mapping[str, Any] | None) -> str:
-    commit = str((checkpoint or {}).get("commit") or "").strip()
-    return commit[:12] if commit else "the recorded bootstrap checkpoint"
-
-def has_stale_bootstrap_checkpoint_blocker_text(control: Mapping[str, Any]) -> bool:
-    pieces = [
-        str(control.get("current_assessment") or ""),
-        str(control.get("best_next_milestone") or ""),
-        str(control.get("suggested_next_task") or ""),
-        str(control.get("known_issue") or ""),
-    ]
-    issues = control.get("known_issues") if isinstance(control.get("known_issues"), list) else []
-    pieces.extend(str(item) for item in issues)
-    text = "\n".join(pieces).lower()
-    return any(term in text for term in STALE_BOOTSTRAP_CHECKPOINT_BLOCKER_TERMS)
-
-def should_clear_stale_bootstrap_blocker(
-    target: Path,
-    control: Mapping[str, Any],
-    checkpoint: Mapping[str, Any] | None,
-) -> bool:
-    if not checkpoint_completed_successfully(checkpoint):
-        return False
-    if str(control.get("status") or "").strip().upper() != "BLOCKED_ON_ENVIRONMENT":
-        return False
-    if not has_stale_bootstrap_checkpoint_blocker_text(control):
-        return False
-    with connect(database_path_for_target(target)) as conn:
-        return not open_blockers(conn)
-
-def ensure_bootstrap_control_completed(target: Path, checkpoint: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    control = automation_control_state(target)
-    clear_stale_blocker = should_clear_stale_bootstrap_blocker(target, control, checkpoint)
-    if not bootstrap_status_pending(control) and not clear_stale_blocker:
-        return control
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    current_assessment = str(control.get("current_assessment") or "").strip()
-    if not current_assessment or "not bootstrapped" in current_assessment.lower():
-        current_assessment = "Initial bootstrap completed from the dashboard."
-    updates: dict[str, Any] = {
-        "last_updated": now,
-        "current_assessment": current_assessment,
-        "bootstrap_status": "bootstrapped",
-    }
-    if clear_stale_blocker:
-        checkpoint_ref = bootstrap_checkpoint_reference(checkpoint)
-        updates.update(
-            {
-                "status": "ACTIVE",
-                "current_assessment": (
-                    f"Initial bootstrap completed and product baseline checkpoint `{checkpoint_ref}` is recorded; "
-                    "continue with the next typed ticket or DAG action."
-                ),
-                "best_next_milestone": "Continue the next dependency-ready typed ticket or DAG action from the successful bootstrap baseline.",
-                "suggested_next_task": "Use the queued ticket/DAG scheduler state to continue product work from the verified bootstrap baseline.",
-                "known_issue": "",
-                "known_issues": [],
-            }
-        )
-    return write_automation_control_state(
-        target,
-        updates,
-        actor_role="dashboard",
-        event_type="automation.initial_bootstrap_completed",
-    )
-
-def run_git(target: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=target,
-        env=env,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        check=False,
-    )
-
-def git_head(target: Path) -> str:
-    result = run_git(target, "rev-parse", "--verify", "HEAD")
-    return result.stdout.strip() if result.returncode == 0 else ""
-
-def parse_git_status_paths(output: str) -> list[str]:
-    paths: list[str] = []
-    records = [item for item in output.split("\0") if item]
-    index = 0
-    while index < len(records):
-        record = records[index]
-        if len(record) < 4:
-            index += 1
-            continue
-        status = record[:2]
-        path = record[3:]
-        if status.startswith(("R", "C")) and index + 1 < len(records):
-            path = records[index + 1]
-            index += 1
-        paths.append(path)
-        index += 1
-    return paths
-
-def bootstrap_product_path_allowed(rel_path: str) -> bool:
-    rel_path = rel_path.strip().lstrip("/")
-    if not rel_path:
-        return False
-    if rel_path in BOOTSTRAP_PRODUCT_EXCLUDED_NAMES or rel_path in BOOTSTRAP_SCAFFOLD_INTERNALS:
-        return False
-    if rel_path.startswith(BOOTSTRAP_PRODUCT_EXCLUDED_PREFIXES):
-        return False
-    name = Path(rel_path).name
-    if name.startswith(".env") or name in {"id_rsa", "id_ed25519"}:
-        return False
-    if rel_path.endswith(BOOTSTRAP_PRODUCT_EXCLUDED_SUFFIXES):
-        return False
-    parts = set(Path(rel_path).parts)
-    if parts.intersection({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules"}):
-        return False
-    return True
-
-def bootstrap_product_status_paths(target: Path) -> list[str]:
-    result = run_git(target, "status", "--porcelain=v1", "-z", "--untracked-files=all")
-    if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout or "git status failed").strip())
-    return sorted({path for path in parse_git_status_paths(result.stdout) if bootstrap_product_path_allowed(path)})
-
-def tracked_product_paths(target: Path) -> list[str]:
-    result = run_git(target, "ls-files", "-z")
-    if result.returncode != 0:
-        return []
-    return sorted({path for path in result.stdout.split("\0") if bootstrap_product_path_allowed(path)})
-
-def bootstrap_git_commit_env() -> dict[str, str]:
-    env = dict(os.environ)
-    env.setdefault("GIT_AUTHOR_NAME", "Diffmogger Bootstrap")
-    env.setdefault("GIT_AUTHOR_EMAIL", "diffmogger-bootstrap@example.invalid")
-    env.setdefault("GIT_COMMITTER_NAME", "Diffmogger Bootstrap")
-    env.setdefault("GIT_COMMITTER_EMAIL", "diffmogger-bootstrap@example.invalid")
-    return env
-
-def record_bootstrap_checkpoint_blocker(target: Path, *, reason: str, detail: str) -> dict[str, Any]:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    blocker_payload = {
-        "schema_version": 1,
-        "reason": reason,
-        "detail": detail,
-        "next_action": "Inspect bootstrap output, create a safe local product checkpoint, then rerun or clear the bootstrap gate.",
-    }
-    with connect(database_path_for_target(target)) as conn:
-        with conn:
-            upsert_blocker(
-                conn,
-                blocker_id="blocker:initial_bootstrap_checkpoint",
-                task_id="task:initial_bootstrap",
-                kind="initial_bootstrap_checkpoint",
-                status="open",
-                summary=detail,
-                resume_token=reason,
-                created_at=now,
-                updated_at=now,
-                payload=blocker_payload,
-            )
-    control = write_automation_control_state(
-        target,
-        {
-            "status": "BLOCKED_ON_ENVIRONMENT",
-            "bootstrap_status": "blocked",
-            "current_assessment": detail,
-            "known_issue": detail,
-            "known_issues": [detail],
-            "last_updated": now,
-        },
-        actor_role="dashboard",
-        event_type="automation.initial_bootstrap_checkpoint_blocked",
-    )
-    return {"status": "blocked", "reason": reason, "detail": detail, "automation_control": control}
-
-def checkpoint_initial_bootstrap_baseline(target: Path, *, head_before: str) -> dict[str, Any]:
-    target = target.expanduser().resolve()
-    head_after = git_head(target)
-    changed_product_paths = bootstrap_product_status_paths(target)
-    if changed_product_paths:
-        add = run_git(target, "add", "-A", "--", *changed_product_paths)
-        if add.returncode != 0:
-            detail = (add.stderr or add.stdout or "git add failed").strip()
-            return record_bootstrap_checkpoint_blocker(target, reason="git_add_failed", detail=detail)
-        diff = run_git(target, "diff", "--cached", "--quiet", "--exit-code")
-        if diff.returncode not in {0, 1}:
-            detail = (diff.stderr or diff.stdout or "git diff failed").strip()
-            return record_bootstrap_checkpoint_blocker(target, reason="git_diff_failed", detail=detail)
-        if diff.returncode == 1:
-            commit = run_git(
-                target,
-                "commit",
-                "--no-verify",
-                "-m",
-                BOOTSTRAP_PRODUCT_COMMIT_MESSAGE,
-                env=bootstrap_git_commit_env(),
-            )
-            if commit.returncode != 0:
-                detail = (commit.stderr or commit.stdout or "git commit failed").strip()
-                return record_bootstrap_checkpoint_blocker(target, reason="git_commit_failed", detail=detail)
-            return {
-                "status": "committed",
-                "commit": git_head(target),
-                "message": BOOTSTRAP_PRODUCT_COMMIT_MESSAGE,
-                "paths": changed_product_paths,
-            }
-
-    tracked_products = tracked_product_paths(target)
-    if tracked_products and head_after and head_after != head_before:
-        return {"status": "already_checkpointed", "commit": head_after, "paths": tracked_products}
-    if tracked_products and head_after:
-        return {"status": "already_tracked", "commit": head_after, "paths": tracked_products}
-    return record_bootstrap_checkpoint_blocker(
-        target,
-        reason="no_product_checkpoint",
-        detail="Initial bootstrap finished, but no safe product baseline files were available to checkpoint.",
-    )
-
-def run_initial_bootstrap(
-    args: argparse.Namespace,
-    target: Path,
-    *,
-    log: Callable[[str, str], None] | None = None,
-) -> dict[str, Any]:
-    def note(stage: str, message: str) -> None:
-        if log is not None:
-            log(stage, message)
-        else:
-            stream_event(args, stage, message)
-
-    intake = load_intake(target)
-    if not intake:
-        raise BackendError(
-            "Setup must be scaffolded before initial bootstrap can run.",
-            error_type="bootstrap_not_scaffolded",
-            details={"target": str(target)},
-        )
-    prompt_path = preferred_target_path(target, "docs/INITIAL_BOOTSTRAP_PROMPT.md")
-    if not prompt_path.exists():
-        raise BackendError(
-            "Could not read the initial bootstrap prompt.",
-            error_type="bootstrap_prompt_missing",
-            details={"path": str(prompt_path)},
-        )
-    control = automation_control_state(target)
-    if initial_bootstrap_completed(target, control):
-        raise BackendError(
-            "Initial bootstrap has already completed for this target.",
-            error_type="bootstrap_already_completed",
-            details={
-                "bootstrap_status": str(control.get("bootstrap_status") or ""),
-                "dashboard_state": {
-                    "initial_bootstrap_status": str(load_dashboard_state(target).get("initial_bootstrap_status") or ""),
-                    "initial_bootstrap_completed_at": str(load_dashboard_state(target).get("initial_bootstrap_completed_at") or ""),
-                },
-            },
-        )
-
-    prerequisites = prereq_snapshot(target, intake)
-    required_failures = list(prerequisites.get("required_failures") or [])
-    if required_failures:
-        raise BackendError(
-            "Required prerequisites are missing before initial bootstrap.",
-            error_type="prerequisites_failed",
-            details={"required_failures": required_failures, "prerequisites": prerequisites},
-        )
-    required_files = run_required_file_check_for_intake(target, intake)
-    if required_files.get("exit_code") != 0:
-        raise BackendError(
-            "Required-file validation failed before initial bootstrap.",
-            error_type="required_files_failed",
-            details=required_files,
-        )
-
-    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    write_dashboard_action_state(
-        target,
-        last_action="initial_bootstrap_started",
-        updates={
-            "initial_bootstrap_status": "running",
-            "last_initial_bootstrap_started_at": started_at,
-        },
-    )
-    note("bootstrap", "Starting Codex initial bootstrap run.")
-    prompt = prompt_path.read_text(encoding="utf-8")
-    dashboard_app = load_dashboard_module()
-    try:
-        dashboard_app.load_scaffold_module().ensure_initial_git_commit(target)
-    except Exception as exc:
-        raise BackendError(
-            "Git bootstrap failed before initial Codex bootstrap.",
-            error_type="git_bootstrap_failed",
-            details={"target": str(target), "exception": str(exc)},
-        ) from exc
-    env = {**os.environ, **dashboard_app.automation_environment(target)}
-    head_before = git_head(target)
-    result = run_subprocess_streamed(
-        args,
-        ["codex", "exec", "--full-auto", "--skip-git-repo-check", prompt],
-        cwd=target,
-        stage="bootstrap",
-        env=env,
-    )
-    finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    exit_code = int(result.get("exit_code") if result.get("exit_code") is not None else 1)
-    status = "pass" if exit_code == 0 else "fail"
-    if status != "pass":
-        write_dashboard_action_state(
-            target,
-            last_action="initial_bootstrap_failed",
-            updates={
-                "initial_bootstrap_status": status,
-                "last_initial_bootstrap_started_at": started_at,
-                "last_initial_bootstrap_finished_at": finished_at,
-                "last_initial_bootstrap_exit_code": result.get("exit_code"),
-            },
-        )
-        raise BackendError(
-            "Codex bootstrap failed.",
-            error_type="codex_bootstrap_failed",
-            details={**result, "started_at": started_at, "finished_at": finished_at},
-        )
-
-    checkpoint = checkpoint_initial_bootstrap_baseline(target, head_before=head_before)
-    if checkpoint.get("status") == "blocked":
-        write_dashboard_action_state(
-            target,
-            last_action="initial_bootstrap_checkpoint_blocked",
-            updates={
-                "initial_bootstrap_status": "blocked",
-                "last_initial_bootstrap_started_at": started_at,
-                "last_initial_bootstrap_finished_at": finished_at,
-                "last_initial_bootstrap_exit_code": result.get("exit_code"),
-                "initial_bootstrap_checkpoint": checkpoint,
-            },
-        )
-        raise BackendError(
-            "Initial bootstrap completed but no safe product checkpoint could be created.",
-            error_type="bootstrap_checkpoint_failed",
-            details={**checkpoint, "started_at": started_at, "finished_at": finished_at},
-        )
-
-    control = ensure_bootstrap_control_completed(target, checkpoint=checkpoint)
-    state_path = write_dashboard_action_state(
-        target,
-        last_action="initial_bootstrap_completed",
-        updates={
-            "initial_bootstrap_status": status,
-            "initial_bootstrap_completed_at": finished_at,
-            "last_initial_bootstrap_started_at": started_at,
-            "last_initial_bootstrap_finished_at": finished_at,
-            "last_initial_bootstrap_exit_code": result.get("exit_code"),
-            "initial_bootstrap_checkpoint": checkpoint,
-        },
-    )
-    note("bootstrap", "Initial bootstrap completed.")
-    return {
-        "target": target_metadata(target),
-        "dashboard_state_path": str(state_path),
-        "status": status,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "result": result,
-        "checkpoint": checkpoint,
-        "required_files": required_files,
-        "prerequisites": prerequisites,
-        "automation_control": control,
-    }
-
 def scaffold_template_included(scaffold_module: Any, rel_path: str, values: dict[str, str]) -> bool:
     if hasattr(scaffold_module, "template_included"):
         return bool(scaffold_module.template_included(rel_path, values))
@@ -1552,18 +1063,6 @@ def command_brief_scaffold_preview(args: argparse.Namespace) -> dict[str, Any]:
         )
     return build_scaffold_preview(target, intake, force=bool(args.force))
 
-def command_brief_run_bootstrap(args: argparse.Namespace) -> dict[str, Any]:
-    target = resolve_target(args.target)
-    if target == KIT_ROOT:
-        raise BackendError(
-            "Refusing to bootstrap the Diffmogger source checkout.",
-            exit_code=2,
-            error_type="invalid_target",
-            details={"target": str(target)},
-        )
-    with acquire_initial_bootstrap_lock(target):
-        return run_initial_bootstrap(args, target)
-
 def native_next_state_from_target(target: Path) -> dict[str, Any]:
     try:
         snapshot = build_observatory_snapshot(target)
@@ -1591,7 +1090,7 @@ def native_next_state_from_target(target: Path) -> dict[str, Any]:
         "task_status": task.get("status") or "unknown",
     }
 
-def command_brief_scaffold_bootstrap(args: argparse.Namespace) -> dict[str, Any]:
+def command_brief_scaffold(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     intake = parse_json_arg(args.intake_json, label="intake-json")
     if not isinstance(intake, dict):
@@ -1624,28 +1123,16 @@ def command_brief_scaffold_bootstrap(args: argparse.Namespace) -> dict[str, Any]
     log("preflight", "Building scaffold preview and prerequisite summary.")
     preflight = build_scaffold_preview(target, intake, force=bool(args.force))
     required_failures = list((preflight.get("prerequisites") or {}).get("required_failures") or [])
-    if required_failures and bool(args.run_codex):
-        log(
-            "preflight",
-            "Required prerequisites are missing; Codex bootstrap cannot start.",
-            level="error",
-            data={"required_failures": required_failures},
-        )
-        raise BackendError(
-            "Required prerequisites are missing before Codex bootstrap.",
-            error_type="prerequisites_failed",
-            details={"required_failures": required_failures, "preflight": preflight, "log": log_lines[-12:]},
-        )
     if required_failures:
         log(
             "preflight",
-            "Required prerequisites are missing for full bootstrap; scaffold will continue without running Codex.",
+            "Required prerequisites are missing; scaffold will continue and Start will surface readiness blockers.",
             level="warning",
             data={"required_failures": required_failures},
         )
 
     log("state", "Writing target-local dashboard state.")
-    state_path = write_dashboard_state_from_intake(target, intake, last_action="scaffold_bootstrap_started")
+    state_path = write_dashboard_state_from_intake(target, intake, last_action="scaffold_started")
     intake_path = preferred_target_path(target, ".agentic/project_intake.json")
     intake_path.parent.mkdir(parents=True, exist_ok=True)
     scaffold_intake = project_intake_payload(intake, target)
@@ -1685,14 +1172,10 @@ def command_brief_scaffold_bootstrap(args: argparse.Namespace) -> dict[str, Any]
         )
 
     codex_result: dict[str, Any] = {
-        "status": "skipped",
-        "reason": "Codex bootstrap was not requested by this backend command.",
+        "status": "retired",
+        "reason": "First-run Codex preparation is retired; scaffolded targets start automation directly.",
     }
-    if bool(args.run_codex):
-        with acquire_initial_bootstrap_lock(target):
-            codex_result = run_initial_bootstrap(args, target, log=log)
-    else:
-        log("bootstrap", "Skipped Codex initial bootstrap; use the Setup bootstrap control before starting ongoing automation.")
+    log("state", "First-run Codex preparation is retired; Start will launch the actual automation run.")
 
     git_bootstrap: dict[str, Any] = {}
     try:
@@ -1713,9 +1196,9 @@ def command_brief_scaffold_bootstrap(args: argparse.Namespace) -> dict[str, Any]
         else:
             log("git", "Target already has an initial git commit.", data=git_bootstrap)
     except Exception as exc:
-        log("git", f"Git bootstrap failed: {exc}", level="error")
+        log("git", f"Git setup failed: {exc}", level="error")
         raise BackendError(
-            "Git bootstrap failed after scaffolding.",
+            "Git setup failed after scaffolding.",
             error_type="git_bootstrap_failed",
             details={"target": str(target), "exception": str(exc), "log": log_lines[-20:]},
         ) from exc
@@ -1723,7 +1206,7 @@ def command_brief_scaffold_bootstrap(args: argparse.Namespace) -> dict[str, Any]
     write_dashboard_state_from_intake(
         target,
         intake,
-        last_action="scaffold_bootstrap_completed" if bool(args.run_codex) else "scaffold_completed",
+        last_action="scaffold_completed",
     )
     next_state = native_next_state_from_target(target)
     log("done", f"Scaffold pipeline completed: {next_state['state']}.", data=next_state)

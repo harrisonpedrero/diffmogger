@@ -985,7 +985,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
                         ## Current Project State
 
-                        - Current assessment: initial scaffold is ready for bootstrap.
+- Current assessment: scaffold initialized; no product ticket has run yet.
 
                         ## Product Horizon State
 
@@ -994,7 +994,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
                         ## Checks From Last Run
 
-                        - Not run yet. Bootstrap run should discover or create verification commands.
+- Not run yet. The first automation run should discover or create verification commands.
 
                         ## Known Issues
 
@@ -1086,7 +1086,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual("ready", snapshot["first_review"]["status"])
                     self.assertEqual("pass", first_review_items["Run Safety Check"]["status"])
 
-    def test_prebootstrap_generated_target_gets_target_local_validation_action(self) -> None:
+    def test_pre_first_run_generated_target_gets_target_local_validation_action(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -1103,7 +1103,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
                         ## Current Project State
 
-                        - Current assessment: not bootstrapped yet.
+                        - Current assessment: scaffold initialized; no product ticket has run yet.
 
                         ## Product Horizon State
 
@@ -1112,7 +1112,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
                         ## Checks From Last Run
 
-                        - Not run yet. Bootstrap run should discover or create verification commands.
+                        - Not run yet. The first automation run should discover or create verification commands.
 
                         ## Known Issues
 
@@ -1120,7 +1120,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
 
                         ## Suggested Next Sprint-Sized Task
 
-                        Run the initial bootstrap prompt.
+                        Start the first automation run.
                         """,
                     )
                     self.write_text(
@@ -1162,9 +1162,9 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual("attention", snapshot["first_review"]["status"])
                     self.assertEqual("warn", first_review_items["Validation"]["status"])
                     self.assertIn("target-local validation", first_review_items["Validation"]["detail"])
-                    self.assertIn("Complete the first bootstrap", missing_actions[0])
+                    self.assertIn("Complete the first automation run", missing_actions[0])
                     self.assertNotIn("validate_starter_kit.sh", missing_actions[0])
-                    self.assertIn("Complete the first bootstrap", report)
+                    self.assertIn("Complete the first automation run", report)
 
     def test_review_markdown_export_summarizes_local_state(self) -> None:
         for path, module in self.modules:

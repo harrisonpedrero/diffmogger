@@ -316,14 +316,13 @@ class RequiredFilesCheckTests(unittest.TestCase):
 
             self.scaffold_target(target, Path(intake.name))
             prompt = generated_path(target, ".agentic/automation_prompt.md").read_text(encoding="utf-8")
-            bootstrap = generated_path(target, "docs/INITIAL_BOOTSTRAP_PROMPT.md").read_text(encoding="utf-8")
             task = generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
-            combined = prompt + "\n" + bootstrap + "\n" + task
+            combined = prompt + "\n" + task
 
             self.assertIn("T1 Ticket-run readiness", combined)
             self.assertIn("T4 Completion report and stop", combined)
-            self.assertIn("Bounded campaign bootstrap is readiness-only", bootstrap)
-            self.assertIn("Do not implement ticket acceptance criteria", bootstrap)
+            self.assertFalse(generated_path(target, "docs/INITIAL_BOOTSTRAP_PROMPT.md").exists())
+            self.assertIn("Scaffold seeds and validates the ticket queue", combined)
             self.assertIn("python3 .diffmogger/scripts/ticket_run.py . next --json", prompt)
             self.assertIn("let execution DAG dependencies, confidence, and ownership scopes determine", prompt)
             self.assertIn("## Deferred / Follow-Up Tickets", task)

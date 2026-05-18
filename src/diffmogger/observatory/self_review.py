@@ -204,14 +204,14 @@ def first_review_validation_detail(target: Path) -> str:
         return "No passing validation run is recorded in the task file yet."
     return (
         "No passing target-local validation run is recorded yet. Generated targets usually show this "
-        "until bootstrap creates or confirms the project's own checks."
+        "until the first automation run creates or confirms the project's own checks."
     )
 
 def first_review_validation_missing_action(target: Path) -> str:
     if (target / "scripts" / "validate_starter_kit.sh").is_file():
         return "Record a passing `bash scripts/validate_starter_kit.sh` run."
     return (
-        "Complete the first bootstrap and record a passing target-local verification receipt in typed runtime state."
+        "Complete the first automation run and record a passing target-local verification receipt in typed runtime state."
     )
 
 def first_review_snapshot(target: Path, task: dict[str, Any]) -> dict[str, Any]:

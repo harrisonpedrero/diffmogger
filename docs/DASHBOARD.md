@@ -43,7 +43,7 @@ The packaged app is source-checkout-backed. Set `DIFFMOGGER_KIT_ROOT=/path/to/Di
 The dashboard frontend should call backend commands instead of reading arbitrary files or recreating scaffold logic in TypeScript. Important command groups:
 
 - Project: `project.load_snapshot`, `project.list_recent`.
-- Brief: `brief.load`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold_bootstrap`, `brief.run_bootstrap`.
+- Brief: `brief.load`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold`.
 - Context: `context.import`.
 - Run and automation: `run.load`, `run.load_log`, `automation.start`, `automation.stop`.
 - State: `state.snapshot`, `state.validate`; these expose SQLite-backed execution DAG progress, capability manifest, graph summaries, context-pack previews, leases, scheduler candidates, next actions, validation receipts, event history, and narrow compatibility projections for older helpers.
@@ -79,18 +79,16 @@ When a bounded campaign is selected, the wizard shows a **Ticket Queue** panel b
 
 ## Scaffold And First Run
 
-Manual setup writes target files; the first Run prepares the target if needed. **Scaffold** runs this source-kit pipeline:
+Manual setup writes target files and Start launches the actual automation run. **Scaffold** runs this source-kit pipeline:
 
 1. write `.diffmogger/agentic/project_intake.json`
 2. copy context files into `.diffmogger/context/`
 3. scaffold target docs, shell scripts, Python wrappers, `.diffmogger/lib/diffmogger/`, and the exported state schema
 4. update the target `.git/info/exclude`
 5. run `scripts/check_required_files.py`
-6. leaves first-run preparation for the Run page
+6. leaves the target ready for `automation.start` when the ticket queue is actionable
 
-When the user clicks **Start** for a scaffolded target whose first-run preparation is still pending, the Run page runs the guarded `brief.run_bootstrap` phase first, records completion in target-local state, refuses a second successful bootstrap, and starts automation only if preparation succeeds.
-
-The legacy **Scaffold & Bootstrap** wording refers to this guarded scaffold plus first-run preparation flow.
+When the user clicks **Start** for a scaffolded target, the Run page calls `automation.start` directly. The old guarded first-run bootstrap phase has been removed from the dashboard flow.
 
 `diffmogger.kit.scaffold_project_docs` is the source of truth for generated files. The dashboard is a UI over that contract.
 
@@ -111,9 +109,9 @@ Before automation starts, the dashboard checks:
 
 ## Continuous Automation
 
-After scaffold/bootstrap and required-file validation, the Run page can start or stop a detached target-scoped DAG scheduler runner.
+After scaffold and required-file validation, the Run page can start or stop a detached target-scoped DAG scheduler runner.
 
-- **Start** launches `.diffmogger/scripts/run_conveyor_automation.sh` in a detached local process. On the first start, it runs guarded target preparation first and launches automation only after that phase passes. The script keeps its historical filename, but the runtime model is the execution DAG.
+- **Start** launches `.diffmogger/scripts/run_conveyor_automation.sh` in a detached local process. The script keeps its historical filename, but the runtime model is the execution DAG.
 - **Stop** terminates the recorded runner process group.
 
 Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Execution DAG state is canonical in `.diffmogger/runtime/orchestration.sqlite3`; the Run page surfaces DAG Progress, owner role, validation receipts, blockers, capability manifest, and queued next actions as the primary progress model. It also shows the graph-derived Codebase Graph summary, Task Graph summary, Impact View, context-pack reasons, active leases, lease conflicts, stale graph warnings, scheduler candidates, proposed execution groups, validation jobs, worker contracts, and integration backlog from allowlisted backend commands over typed state. `.diffmogger/runtime/canonical_state_brief.md` is the generated agent-facing view, and `.diffmogger/runtime/automation_runner.json` plus `.diffmogger/runtime/automation_conveyor_state.json` are generated compatibility projections.

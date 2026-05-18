@@ -6750,7 +6750,7 @@ def _worker_patch_handoffs_by_task_conn(conn: sqlite3.Connection) -> dict[str, l
                worker.payload_json AS worker_payload_json
         FROM worker_patches patch
         LEFT JOIN worker_agents worker ON worker.worker_id = patch.worker_id
-        WHERE patch.status IN ('queued', 'validated', 'integrated')
+        WHERE patch.status IN ('queued', 'validated')
         ORDER BY patch.queued_at DESC, patch.created_at DESC, patch.patch_id
         """
     ).fetchall()
@@ -11083,6 +11083,32 @@ def release_resource_lease_conn(
     return {"released": bool(row and str(row["status"]) == status), "lease": _lease_row_to_dict(conn, row) if row else {}}
 
 
+def release_resource_lease_records_conn(
+    conn: sqlite3.Connection,
+    leases: list[dict[str, Any]],
+    *,
+    status: str = "released",
+    released_at: str | None = None,
+) -> list[dict[str, Any]]:
+    status = str(status or "released").strip().lower()
+    if status not in {"released", "superseded", "expired"}:
+        raise ValueError(f"unsupported release status: {status}")
+    released_at = released_at or utc_now()
+    updated: list[dict[str, Any]] = []
+    for lease in leases:
+        lease_id = str(lease.get("lease_id") or "").strip()
+        if not lease_id:
+            updated.append(dict(lease))
+            continue
+        conn.execute(
+            "UPDATE resource_leases SET status = ?, released_at = ? WHERE lease_id = ? AND status = 'active'",
+            (status, released_at, lease_id),
+        )
+        row = conn.execute("SELECT * FROM resource_leases WHERE lease_id = ?", (lease_id,)).fetchone()
+        updated.append(_lease_row_to_dict(conn, row) if row else dict(lease))
+    return updated
+
+
 def release_resource_lease(target: Path, lease_id: str, *, released_at: str | None = None) -> dict[str, Any]:
     target = target.expanduser().resolve()
     with closing(connect(database_path_for_target(target))) as conn:
@@ -12296,20 +12322,42 @@ def classify_validation_command(command: str, *, exclusive: bool = False) -> str
         return "smoke"
     if any(token in lowered for token in ("build", "vite build", "next build", "cargo build", "go build", "webpack", "rollup")):
         return "build"
-    if any(token in lowered for token in ("pytest", "unittest", "npm test", "pnpm test", "yarn test", "vitest", "jest", "cargo test", "go test")):
+    if _validation_command_has_runner(command, {"pytest", "unittest", "vitest", "jest"}) or any(
+        token in lowered for token in ("npm test", "pnpm test", "yarn test", "cargo test", "go test")
+    ):
         return "unit_test"
     if any(token in lowered for token in ("check",)):
         return "read_only_check"
     return "unknown"
 
 
+def _validation_command_words(command: str) -> set[str]:
+    try:
+        parts = shlex.split(str(command or ""))
+    except ValueError:
+        parts = str(command or "").split()
+    words: set[str] = set()
+    for part in parts:
+        lowered = part.lower()
+        words.add(lowered)
+        words.add(Path(lowered).name)
+    return words
+
+
+def _validation_command_has_runner(command: str, runners: set[str]) -> bool:
+    words = _validation_command_words(command)
+    return any(runner in words for runner in runners)
+
+
 def _validation_command_family(command: str, classification: str) -> str:
     classification = str(classification or "unknown").strip()
     if classification in {"unit_test", "test"}:
         lowered = str(command or "").lower()
-        if "pytest" in lowered or "unittest" in lowered:
+        if _validation_command_has_runner(command, {"pytest", "unittest"}):
             return "python_tests"
-        if any(token in lowered for token in ("vitest", "jest", "npm test", "pnpm test", "yarn test", "node --test")):
+        if _validation_command_has_runner(command, {"vitest", "jest"}) or any(
+            token in lowered for token in ("npm test", "pnpm test", "yarn test", "node --test")
+        ):
             return "javascript_tests"
         if "go test" in lowered:
             return "go_tests"
@@ -16582,29 +16630,43 @@ def _prepare_write_worker_scratch(target: Path, scratch_dir: Path, allowed_paths
     if scratch_dir.exists():
         shutil.rmtree(scratch_dir)
     scratch_dir.mkdir(parents=True, exist_ok=True)
-    copied = False
     for rel in allowed_paths:
         source = target / rel
         dest = scratch_dir / rel
         if source.is_file():
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, dest)
-            copied = True
     subprocess.run(["git", "init", "-q"], cwd=scratch_dir, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["git", "add", "-A"], cwd=scratch_dir, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if copied:
-        subprocess.run(
-            ["git", "-c", "user.name=Diffmogger", "-c", "user.email=diffmogger@example.invalid", "commit", "-q", "-m", "worker base"],
-            cwd=scratch_dir,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Diffmogger",
+            "-c",
+            "user.email=diffmogger@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "worker base",
+        ],
+        cwd=scratch_dir,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
-def _scratch_patch_and_changed_files(scratch_dir: Path, patch_path: Path, changed_files_path: Path) -> list[str]:
+def _scratch_patch_and_changed_files(
+    scratch_dir: Path,
+    patch_path: Path,
+    changed_files_path: Path,
+    allowed_paths: list[str],
+) -> list[str]:
+    pathspec = [path for path in allowed_paths if normalize_path_for_brief(path)]
     untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", *pathspec],
         cwd=scratch_dir,
         text=False,
         capture_output=True,
@@ -16613,7 +16675,7 @@ def _scratch_patch_and_changed_files(scratch_dir: Path, patch_path: Path, change
     if untracked.stdout:
         subprocess.run(["git", "add", "-N", "--", *[item.decode() for item in untracked.stdout.split(b"\0") if item]], cwd=scratch_dir, check=False)
     changed = subprocess.run(
-        ["git", "diff", "--name-only", "HEAD"],
+        ["git", "diff", "--name-only", "HEAD", "--", *pathspec],
         cwd=scratch_dir,
         text=True,
         capture_output=True,
@@ -16621,7 +16683,7 @@ def _scratch_patch_and_changed_files(scratch_dir: Path, patch_path: Path, change
     )
     changed_files = [line.strip() for line in changed.stdout.splitlines() if line.strip()]
     patch = subprocess.run(
-        ["git", "diff", "--binary", "HEAD"],
+        ["git", "diff", "--binary", "HEAD", "--", *pathspec],
         cwd=scratch_dir,
         text=True,
         capture_output=True,
@@ -16660,6 +16722,173 @@ def _worker_patch_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "integrated_at": str(row["integrated_at"] or ""),
         "payload": payload if isinstance(payload, dict) else {},
     }
+
+
+def _worker_patch_artifact_path(target: Path | None, patch_path: Any) -> Path | None:
+    raw = str(patch_path or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return path
+    if target is None:
+        return None
+    return target_path(target, raw)
+
+
+def _worker_patch_failure_detail(patch: Mapping[str, Any]) -> str:
+    payload = patch.get("payload") if isinstance(patch.get("payload"), Mapping) else {}
+    if not isinstance(payload, Mapping):
+        return ""
+    return str(payload.get("failure_reason") or payload.get("conflict_detail") or payload.get("detail") or "")
+
+
+def _nonrepairable_worker_patch_reason(patch: Mapping[str, Any], *, target: Path | None) -> str:
+    status = str(patch.get("status") or "")
+    changed_files = [str(item) for item in patch.get("changed_files") or [] if str(item or "")]
+    detail = _worker_patch_failure_detail(patch)
+    if status == "failed":
+        return detail or "worker patch failed before producing an integration patch"
+    if status != "conflict":
+        return ""
+    if not changed_files:
+        return "worker patch conflict has no changed files"
+    if "No valid patches in input" in detail:
+        return "worker patch conflict contains no valid patch input"
+    artifact = _worker_patch_artifact_path(target, patch.get("patch_path"))
+    if artifact is None:
+        return ""
+    try:
+        data = artifact.read_bytes()
+    except OSError:
+        return "worker patch conflict artifact is missing or unreadable"
+    if not data.strip():
+        return "worker patch conflict artifact is empty"
+    return ""
+
+
+def _supersede_repair_nodes_for_worker_patch_conn(conn: sqlite3.Connection, patch_id: str, *, reason: str, now: str) -> list[str]:
+    terminal_statuses = sorted(EXECUTION_DAG_TERMINAL_STATUSES)
+    placeholders = ",".join("?" for _ in terminal_statuses)
+    rows = conn.execute(
+        f"""
+        SELECT node_id, metadata_json
+        FROM execution_dag_nodes
+        WHERE patch_id = ?
+          AND action_type = 'repair'
+          AND status NOT IN ({placeholders})
+        """,
+        (patch_id, *terminal_statuses),
+    ).fetchall()
+    superseded_node_ids: list[str] = []
+    for row in rows:
+        metadata = _json_cell(row["metadata_json"], {})
+        metadata = dict(metadata if isinstance(metadata, Mapping) else {})
+        metadata.update(
+            {
+                "superseded_by_worker_patch_reconcile": True,
+                "superseded_reason": reason,
+                "superseded_at": now,
+            }
+        )
+        node_id = str(row["node_id"] or "")
+        conn.execute(
+            """
+            UPDATE execution_dag_nodes
+            SET status = 'superseded',
+                blocker_reason = ?,
+                metadata_json = ?,
+                updated_at = ?,
+                finished_at = ?
+            WHERE node_id = ?
+            """,
+            (reason, stable_json(metadata), now, now, node_id),
+        )
+        superseded_node_ids.append(node_id)
+    return superseded_node_ids
+
+
+def _supersede_nonrepairable_worker_patch_conn(
+    conn: sqlite3.Connection,
+    patch: Mapping[str, Any],
+    *,
+    worker_payload: Mapping[str, Any],
+    task_id: str,
+    source_dag_node_id: str,
+    reason: str,
+    selected_by: str,
+) -> str:
+    patch_id = str(patch.get("patch_id") or "")
+    if not patch_id:
+        return ""
+    previous_status = str(patch.get("status") or "")
+    now = utc_now()
+    payload = dict(patch.get("payload") if isinstance(patch.get("payload"), Mapping) else {})
+    payload.update(
+        {
+            "previous_status": previous_status,
+            "superseded_at": now,
+            "superseded_by": selected_by,
+            "superseded_reason": reason,
+        }
+    )
+    leases = [dict(lease) for lease in patch.get("leases") or [] if isinstance(lease, Mapping)]
+    released_leases = release_resource_lease_records_conn(conn, leases, status="superseded", released_at=now)
+    conn.execute(
+        """
+        UPDATE worker_patches
+        SET status = 'superseded',
+            leases_json = ?,
+            payload_json = ?
+        WHERE patch_id = ?
+        """,
+        (stable_json(released_leases), stable_json(payload), patch_id),
+    )
+    changed_files = [str(item) for item in patch.get("changed_files") or [] if str(item or "")]
+    superseded_repair_node_ids = _supersede_repair_nodes_for_worker_patch_conn(conn, patch_id, reason=reason, now=now)
+    conflicts = []
+    if previous_status == "conflict":
+        conflicts.append(
+            {
+                "conflict_signature": str(patch.get("conflict_signature") or ""),
+                "detail": _brief_text(_worker_patch_failure_detail(patch) or reason, limit=220),
+                "detected_at": str(patch.get("created_at") or now),
+                "source": "worker_patch_status",
+            }
+        )
+    upsert_worker_patch_lineage_conn(
+        conn,
+        patch_id=patch_id,
+        worker_id=str(patch.get("worker_id") or ""),
+        execution_group_id=str(patch.get("execution_group_id") or ""),
+        task_id=task_id,
+        source_dag_node_id=source_dag_node_id,
+        status="superseded",
+        predicted_files=_lineage_unique_paths(worker_payload.get("predicted_files") or []) or None,
+        predicted_symbols=_lineage_dedupe_symbols(
+            [dict(item) for item in worker_payload.get("predicted_symbols") or [] if isinstance(item, Mapping)]
+        )
+        or None,
+        actual_files=changed_files,
+        actual_symbols=_lineage_actual_symbols_for_files_conn(conn, changed_files),
+        conflicts=conflicts,
+        integration_result="superseded",
+        started_at=str(patch.get("created_at") or ""),
+        finished_at=now,
+        telemetry={
+            "reconciled": True,
+            "patch_status": previous_status,
+            "superseded": True,
+            "superseded_reason": reason,
+            "superseded_repair_node_count": len(superseded_repair_node_ids),
+        },
+        payload={
+            "selected_by": selected_by,
+            "superseded_reason": reason,
+            "superseded_repair_node_ids": superseded_repair_node_ids,
+        },
+    )
+    return patch_id
 
 
 def worker_patches_conn(conn: sqlite3.Connection, *, statuses: set[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
@@ -18256,6 +18485,7 @@ def reconcile_worker_results_into_execution_dag_conn(
     validation_nodes: list[dict[str, Any]] = []
     repair_nodes: list[dict[str, Any]] = []
     created_edges: list[dict[str, Any]] = []
+    superseded_patch_ids: list[str] = []
     with conn:
         for row in rows:
             patch = _worker_patch_row_to_dict(row)
@@ -18297,6 +18527,20 @@ def reconcile_worker_results_into_execution_dag_conn(
                     }
                 )
             else:
+                nonrepairable_reason = _nonrepairable_worker_patch_reason(patch, target=target)
+                if nonrepairable_reason:
+                    superseded_patch_id = _supersede_nonrepairable_worker_patch_conn(
+                        conn,
+                        patch,
+                        worker_payload=worker_payload,
+                        task_id=task_id,
+                        source_dag_node_id=source_dag_node_id,
+                        reason=nonrepairable_reason,
+                        selected_by=selected_by,
+                    )
+                    if superseded_patch_id:
+                        superseded_patch_ids.append(superseded_patch_id)
+                    continue
                 node = upsert_execution_dag_node(
                     conn,
                     node_id=f"dag-node:worker-repair:{sha256_text(patch_id + ':' + status)[:24]}",
@@ -18369,7 +18613,7 @@ def reconcile_worker_results_into_execution_dag_conn(
                 validation_nodes.append(dict(handoff["validation_node"]))
             integration_nodes.extend([dict(item) for item in handoff.get("integration_nodes") or [] if isinstance(item, Mapping)])
             created_edges.extend([dict(item) for item in handoff.get("edges") or [] if isinstance(item, Mapping)])
-        if integration_nodes or repair_nodes:
+        if integration_nodes or repair_nodes or superseded_patch_ids:
             append_event(
                 conn,
                 StateEvent(
@@ -18383,12 +18627,14 @@ def reconcile_worker_results_into_execution_dag_conn(
                         "validation_node_count": len(validation_nodes),
                         "integration_node_count": len(integration_nodes),
                         "repair_node_count": len(repair_nodes),
+                        "superseded_patch_count": len(superseded_patch_ids),
+                        "superseded_patch_ids": superseded_patch_ids,
                         "edge_count": len(created_edges),
                     },
                 ),
             )
     return {
-        "status": "reconciled" if integration_nodes or review_nodes or validation_nodes or repair_nodes else "skipped",
+        "status": "reconciled" if integration_nodes or review_nodes or validation_nodes or repair_nodes or superseded_patch_ids else "skipped",
         "review_nodes": review_nodes,
         "validation_nodes": validation_nodes,
         "integration_nodes": integration_nodes,
@@ -18398,6 +18644,8 @@ def reconcile_worker_results_into_execution_dag_conn(
         "validation_node_count": len(validation_nodes),
         "integration_node_count": len(integration_nodes),
         "repair_node_count": len(repair_nodes),
+        "superseded_patch_ids": superseded_patch_ids,
+        "superseded_patch_count": len(superseded_patch_ids),
     }
 
 
@@ -18453,15 +18701,19 @@ def mark_worker_patches_integrated_conn(
                 payload = _json_cell(row["payload_json"], {})
                 payload = payload if isinstance(payload, dict) else {}
                 payload["integrated_by"] = selected_by
+                leases = _json_cell(row["leases_json"], [])
+                leases = leases if isinstance(leases, list) else []
+                released_leases = release_resource_lease_records_conn(conn, leases)
                 conn.execute(
                     """
                     UPDATE worker_patches
                     SET status = 'integrated',
                         integrated_at = ?,
+                        leases_json = ?,
                         payload_json = ?
                     WHERE patch_id = ?
                     """,
-                    (now, stable_json(payload), patch_id),
+                    (now, stable_json(released_leases), stable_json(payload), patch_id),
                 )
                 changed_files = _json_cell(row["changed_files_json"], [])
                 changed_files = changed_files if isinstance(changed_files, list) else []
@@ -20101,19 +20353,30 @@ def launch_write_execution_group_conn(
         status = str(worker_result.get("status") or "failed")
         failure_reason = str(worker_result.get("failure_reason") or "")
         queue_dir.mkdir(parents=True, exist_ok=True)
-        changed_files = _scratch_patch_and_changed_files(scratch_dir, patch_path, changed_files_path)
-        patch_check = subprocess.run(["git", "apply", "--check", str(patch_path)], cwd=target, text=True, capture_output=True, check=False)
-        patch_status = "queued" if status == "completed" and patch_check.returncode == 0 else "failed"
+        changed_files = _scratch_patch_and_changed_files(
+            scratch_dir,
+            patch_path,
+            changed_files_path,
+            [str(path) for path in contract.get("allowed_paths", []) if str(path or "").strip()],
+        )
+        patch_status = "failed"
         conflict_signature = ""
-        if status == "completed" and patch_check.returncode != 0:
-            patch_status = "conflict"
-            conflict_signature = _patch_conflict_signature(patch_check.stderr)
-            failure_reason = patch_check.stderr.strip() or "git apply --check failed"
-            status = "failed"
-        if not changed_files and status == "completed":
-            patch_status = "failed"
-            status = "failed"
-            failure_reason = "write worker produced no changed files"
+        if status == "completed":
+            if not changed_files:
+                status = "failed"
+                failure_reason = "write worker produced no changed files"
+            else:
+                patch_check = subprocess.run(["git", "apply", "--check", str(patch_path)], cwd=target, text=True, capture_output=True, check=False)
+                if patch_check.returncode == 0:
+                    patch_status = "queued"
+                else:
+                    patch_status = "conflict"
+                    conflict_signature = _patch_conflict_signature(patch_check.stderr)
+                    failure_reason = patch_check.stderr.strip() or "git apply --check failed"
+                    status = "failed"
+        manifest_leases = acquired_leases
+        if patch_status != "queued":
+            manifest_leases = release_resource_lease_records_conn(conn, acquired_leases)
         patch_id = f"worker-patch:{sha256_text(worker_id + ':' + worker_run_id)[:20]}"
         summary_path.write_text(
             "\n".join(
@@ -20157,7 +20420,7 @@ def launch_write_execution_group_conn(
             "changed_files": changed_files,
             "checks_run": [],
             "validation_evidence": [],
-            "required_leases": acquired_leases,
+            "required_leases": manifest_leases,
             "predicted_files": list(predicted_impact.get("files") or []),
             "predicted_symbols": list(predicted_impact.get("symbols") or []),
             "ownership_scope": str(contract["ownership_scope"]),
@@ -20205,7 +20468,7 @@ def launch_write_execution_group_conn(
                     target_rel(target, f"target/automation_queue/builder/{worker_run_id}/changes.patch"),
                     stable_json(changed_files),
                     base_commit,
-                    stable_json(acquired_leases),
+                    stable_json(manifest_leases),
                     conflict_signature,
                     created_at,
                     created_at if patch_status == "queued" else "",
@@ -22026,6 +22289,12 @@ def _validation_job_backpressure_paths_conn(conn: sqlite3.Connection, job: Mappi
 
 def _validation_backpressure_for_candidate_conn(conn: sqlite3.Connection, candidate: Mapping[str, Any]) -> dict[str, Any]:
     if str(candidate.get("execution_mode") or "") != "write_workers":
+        return {}
+    action_text = " ".join(
+        str(candidate.get(key) or "").strip().lower()
+        for key in ("action_type", "canonical_action_type", "action_kind")
+    )
+    if "repair" in action_text:
         return {}
     candidate_paths = _candidate_touch_paths(candidate)
     if not candidate_paths:
@@ -24144,13 +24413,13 @@ def _default_automation_control_from_setup(target: Path) -> dict[str, Any]:
     max_write_workers = max(1, min(10, max_write_workers))
     campaign = _normalize_campaign_mode(setup.get("campaign_mode"), setup.get("automation_run_mode"))
     if campaign == "bounded":
-        horizon = "T1 Ticket-run readiness"
-        milestone = "Confirm the ticket queue, setup, and verification path."
-        suggested = "Run ticket readiness checks and select one dependency-ready ticket."
+        horizon = "T2 Ticket implementation"
+        milestone = "Start the first dependency-ready ticket."
+        suggested = "Run ticket selection, implement the selected ticket, and record evidence or a blocker."
     else:
         horizon = "H1 Runnable baseline"
         milestone = "Create or confirm setup, local run path, and verification."
-        suggested = "Run one bootstrap pass, then let the ongoing campaign draft or select the next safe ticket."
+        suggested = "Start automation and let the ongoing campaign draft or select the next safe ticket."
     return {
         "status": "ACTIVE",
         "last_updated": "",
@@ -24161,7 +24430,7 @@ def _default_automation_control_from_setup(target: Path) -> dict[str, Any]:
         "suggested_next_task": suggested,
         "known_issue": "No active issue summary.",
         "known_issues": [],
-        "bootstrap_status": "pending",
+        "bootstrap_status": "ready",
         "worker": {
             "agents_allowed": workers_allowed,
             "write_workers_allowed": True,
@@ -24230,6 +24499,8 @@ def _parse_legacy_task_markdown(text: str, *, source_path: Path) -> dict[str, An
     bootstrap_status = "unknown"
     if re.search(r"Current baseline:\s*not bootstrapped yet", text, re.IGNORECASE):
         bootstrap_status = "pending"
+    elif re.search(r"Current baseline:\s*scaffold initialized", text, re.IGNORECASE):
+        bootstrap_status = "ready"
     elif current_assessment:
         bootstrap_status = "bootstrapped"
     known_issues = [
@@ -24567,6 +24838,11 @@ def _first_ticket_summary(tickets: list[dict[str, Any]], statuses: set[str]) -> 
     return ""
 
 
+def _ticket_summary_clause(summary: str) -> str:
+    summary = str(summary or "").strip().rstrip(".")
+    return f": {summary}" if summary else ""
+
+
 def _derive_ticket_campaign_control_updates(
     target: Path,
     control: Mapping[str, Any],
@@ -24613,9 +24889,9 @@ def _derive_ticket_campaign_control_updates(
         milestone = "Draft the next safe unblocked ticket or blocker-resolution ticket from available context."
         suggested = "Use blocker details and runtime state to draft/enqueue a safe next ticket without waiting for approval unless no useful work can continue."
     elif total == 0:
-        horizon = "T1 Ticket-run readiness"
-        bootstrap_status = "pending"
-        assessment = "Ticket campaign readiness is pending; the canonical ticket queue is empty."
+        horizon = "T1 Ticket queue setup"
+        bootstrap_status = "needs_tickets"
+        assessment = "Ticket campaign cannot start because the canonical ticket queue is empty."
         milestone = f"Populate or confirm the dashboard-backed ticket queue for `{project_name}`."
         suggested = "Add the bounded ticket scope, confirm ticket-run status and next selection, then start one-ticket campaign runs."
     elif all_done:
@@ -24634,7 +24910,7 @@ def _derive_ticket_campaign_control_updates(
         horizon = "T3 Verification and hardening"
         bootstrap_status = "bootstrapped"
         candidate_summary = _first_ticket_summary(tickets, {"candidate_done"})
-        target_text = f": {candidate_summary}" if candidate_summary else ""
+        target_text = _ticket_summary_clause(candidate_summary)
         assessment = (
             f"Ticket campaign verification is active; {done}/{total} done, "
             f"{candidate_done} candidate, {pending} pending."
@@ -24645,7 +24921,7 @@ def _derive_ticket_campaign_control_updates(
         horizon = "T2 Ticket implementation"
         bootstrap_status = "bootstrapped"
         active_summary = _first_ticket_summary(tickets, {"in_progress"})
-        active_text = f": {active_summary}" if active_summary else ""
+        active_text = _ticket_summary_clause(active_summary)
         assessment = (
             f"Ticket campaign implementation is underway; {done}/{total} done, "
             f"{in_progress} in progress, {pending} pending, {blocked} blocked."
@@ -24657,11 +24933,13 @@ def _derive_ticket_campaign_control_updates(
             milestone = f"Implement the next dependency-ready ticket for `{project_name}`."
             suggested = "Use ticket-run next selection, act on one dependency-ready pending ticket, and record candidate evidence or a blocker."
     else:
-        horizon = "T1 Ticket-run readiness"
-        bootstrap_status = "pending"
-        assessment = f"Ticket campaign queue has {total} pending ticket(s), but no implementation ticket has started yet."
-        milestone = f"Complete readiness-only ticket bootstrap for `{project_name}` and confirm one-ticket runs can start."
-        suggested = "Confirm ticket-run status and next selection, setup docs, checks, and readiness evidence without implementing tickets."
+        horizon = "T2 Ticket implementation"
+        bootstrap_status = "ready"
+        first_summary = _first_ticket_summary(tickets, {"pending"})
+        target_text = _ticket_summary_clause(first_summary)
+        assessment = f"Ticket campaign is ready; {total} pending ticket(s) are available and no implementation ticket has started yet."
+        milestone = f"Start the first dependency-ready ticket for `{project_name}`{target_text}."
+        suggested = "Run ticket-run next selection, implement one dependency-ready pending ticket, and record candidate evidence or a blocker."
 
     previous_horizon = str(control.get("horizon") or "").strip()
     horizon_decision = "advance" if previous_horizon and previous_horizon != horizon else "stay"

@@ -121,7 +121,7 @@ BOILERPLATE_GUIDANCE_MARKERS = (
     "continuous conveyor automation should use `scripts/run_conveyor_automation.sh`",
     "continuous conveyor automation should use `.diffmogger/scripts/run_conveyor_automation.sh`",
 )
-VERIFICATION_BOOTSTRAP_MARKER = "verification commands may need adjustment after bootstrap"
+VERIFICATION_BOOTSTRAP_MARKER = "verification commands may need adjustment after the first automation run"
 
 def is_stale_ticket_source_issue(value: Any) -> bool:
     lower = str(value or "").lower()

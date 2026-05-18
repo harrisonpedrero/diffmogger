@@ -41,7 +41,6 @@ BASE_REQUIRED = [
     "scripts/spawn_worker_agent.sh",
     "scripts/summarize_worker_outputs.py",
     "scripts/compact_agent_state.py",
-    "docs/INITIAL_BOOTSTRAP_PROMPT.md",
     "docs/DEVELOPMENT.md",
     "docs/PROJECT_CONTEXT.md",
     "docs/CODEX_AUTOMATION_TASKS.md",

@@ -671,6 +671,75 @@ class WriteWorkerFanoutTests(unittest.TestCase):
             target_file.write_text(current + "# worker change\n", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="worker complete\n", stderr="")
 
+    def test_new_file_worker_patch_is_collected_without_report_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.write_intake(target, write_enabled=True, max_write_workers=1)
+            subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "chore: empty base",
+                ],
+                cwd=target,
+                check=True,
+            )
+            group = {
+                "execution_group_id": "execution-group:new-file",
+                "payload": {"execution_mode": "write_workers"},
+                "items": [
+                    {
+                        "item_id": "execution-group-item:new-file",
+                        "task_id": "T1",
+                        "owner_role": "builder",
+                        "action_kind": "build_execution",
+                        "required_leases": [
+                            {
+                                "scope_kind": "file",
+                                "scope_node_id": "path:pyproject.toml",
+                                "path": "pyproject.toml",
+                            }
+                        ],
+                        "payload": {"likely_touches": [{"path": "pyproject.toml"}]},
+                    }
+                ],
+            }
+
+            def new_file_runner(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+                run_id = command[command.index("--run-id") + 1]
+                role = command[command.index("--role") + 1]
+                (cwd / "pyproject.toml").write_text("[project]\nname = \"demo\"\nversion = \"0.1.0\"\n", encoding="utf-8")
+                report = target_path(cwd, "target/agent_runs") / run_id / f"worker_{role}.md"
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text("# worker report\n", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, stdout=f"WORKER_REPORT path={report}\n", stderr="")
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = launch_write_execution_group_conn(
+                    conn,
+                    target,
+                    group=group,
+                    command_runner=new_file_runner,
+                )
+                patches = worker_patches_conn(conn)
+                active_leases = conn.execute("SELECT count(*) FROM resource_leases WHERE status = 'active'").fetchone()[0]
+
+            self.assertEqual("completed", result["status"])
+            self.assertEqual(1, result["queued_patch_count"])
+            self.assertEqual(1, active_leases)
+            self.assertEqual(["pyproject.toml"], patches[0]["changed_files"])
+            patch_text = (target / patches[0]["patch_path"]).read_text(encoding="utf-8")
+            self.assertIn("diff --git a/pyproject.toml b/pyproject.toml", patch_text)
+            self.assertNotIn("target/agent_runs", patch_text)
+
     def test_write_worker_ignores_disabled_legacy_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -908,11 +977,43 @@ class WriteWorkerFanoutTests(unittest.TestCase):
                     command_runner=conflicting_runner,
                 )
                 patches = worker_patches_conn(conn)
+                active_leases = conn.execute("SELECT count(*) FROM resource_leases WHERE status = 'active'").fetchone()[0]
 
             self.assertEqual("failed", result["status"])
             self.assertEqual(1, result["conflict_count"])
+            self.assertEqual(0, active_leases)
             self.assertEqual("conflict", patches[0]["status"])
+            self.assertEqual("released", patches[0]["leases"][0]["status"])
             self.assertTrue(patches[0]["conflict_signature"])
+
+    def test_noop_write_worker_records_failed_patch_without_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            group_id = self.setup_target(target)
+
+            def noop_runner(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(command, 0, stdout="worker complete\n", stderr="")
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = launch_write_execution_group_conn(
+                    conn,
+                    target,
+                    execution_group_id=group_id,
+                    max_workers=1,
+                    command_runner=noop_runner,
+                )
+                patches = worker_patches_conn(conn)
+                active_leases = conn.execute("SELECT count(*) FROM resource_leases WHERE status = 'active'").fetchone()[0]
+
+            self.assertEqual("failed", result["status"])
+            self.assertEqual(0, result["queued_patch_count"])
+            self.assertEqual(0, result["conflict_count"])
+            self.assertEqual(0, active_leases)
+            self.assertEqual("failed", patches[0]["status"])
+            self.assertEqual([], patches[0]["changed_files"])
+            self.assertEqual("", patches[0]["conflict_signature"])
+            self.assertEqual("write worker produced no changed files", patches[0]["payload"]["failure_reason"])
+            self.assertEqual("released", patches[0]["leases"][0]["status"])
 
 
 class SpeculativeCandidateLaneTests(unittest.TestCase):

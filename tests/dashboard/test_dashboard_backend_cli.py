@@ -406,7 +406,6 @@ class DashboardBackendCliTests(unittest.TestCase):
             ".agentic/roles/builder.md": "# Builder\n",
             ".agentic/roles/hardener.md": "# Hardener\n",
             ".agentic/roles/integrator.md": "# Integrator\n",
-            "docs/INITIAL_BOOTSTRAP_PROMPT.md": "# Bootstrap\n",
             "docs/CODEX_AUTOMATION_TASKS.md": "AUTOMATION_STATUS: ACTIVE\n\nCurrent baseline: bootstrapped.\n",
             "docs/MULTI_ROLE_PROGRESS.md": "# Progress\n",
             "scripts/run_role_automation.sh": "#!/usr/bin/env bash\nexit 0\n",
@@ -443,12 +442,12 @@ class DashboardBackendCliTests(unittest.TestCase):
 
 ## Current Project State
 
-- Current baseline: not bootstrapped yet.
+- Current baseline: scaffold initialized; no product ticket has run yet.
 
 ## Known Issues
 
 - Ticket queue still needs to be populated or confirmed.
-- Verification commands may need adjustment after bootstrap.
+- Verification commands may need adjustment after the first automation run.
 """,
             encoding="utf-8",
         )
@@ -503,7 +502,7 @@ class DashboardBackendCliTests(unittest.TestCase):
 
         return module, FakeDashboard()
 
-    def test_populated_ticket_campaign_uses_explicit_bootstrap_start_gate(self) -> None:
+    def test_populated_ticket_campaign_starts_directly_after_scaffold(self) -> None:
         from diffmogger.observatory.snapshots import build_snapshot
 
         module, fake_dashboard = self.fake_dashboard_for_automation()
@@ -517,14 +516,14 @@ class DashboardBackendCliTests(unittest.TestCase):
             snapshot = build_snapshot(target)
             controls = module.run_controls_snapshot(target, fake_dashboard, snapshot)
 
-            self.assertFalse(ready)
-            self.assertIn("Bootstrap has not completed yet", reason)
+            self.assertTrue(ready)
+            self.assertEqual("Ready.", reason)
             self.assertTrue(bootstrap_ready)
-            self.assertIn("TICKET-001", bootstrap_reason)
-            self.assertFalse(controls["can_start_automation"])
-            self.assertTrue(controls["can_bootstrap_and_start"])
+            self.assertEqual("Ready.", bootstrap_reason)
+            self.assertTrue(controls["can_start_automation"])
+            self.assertFalse(controls["can_bootstrap_and_start"])
             self.assertNotIn("Ticket queue still needs to be populated or confirmed.", snapshot["task"]["known_issues"])
-            self.assertEqual("Verification commands may need adjustment after bootstrap.", snapshot["task"]["known_issue"])
+            self.assertEqual("Verification commands may need adjustment after the first automation run.", snapshot["task"]["known_issue"])
 
     def test_automation_ready_uses_typed_status_not_task_markdown(self) -> None:
         module, fake_dashboard = self.fake_dashboard_for_automation()
@@ -584,7 +583,7 @@ class DashboardBackendCliTests(unittest.TestCase):
 - Invoking the ticket helper against the main target path from this role sandbox fails to open the canonical SQLite database, so role worktrees cannot currently mutate dashboard ticket state directly.
 - Canonical ticket helper read-only commands currently fail in this role worktree with `sqlite3.OperationalError: unable to open database file`.
 - Isolated builder/hardener worktrees cannot currently run canonical `ticket_run.py . status --json` or `next --json` because opening the canonical SQLite path fails under the role sandbox.
-- Verification commands may need adjustment after bootstrap.
+- Verification commands may need adjustment after the first automation run.
 """,
                 encoding="utf-8",
             )
@@ -611,7 +610,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertNotIn("role worktrees cannot currently mutate", " ".join(snapshot["task"]["known_issues"]))
             self.assertNotIn("Canonical ticket helper read-only commands", " ".join(snapshot["task"]["known_issues"]))
             self.assertNotIn("worktrees cannot currently run canonical", " ".join(snapshot["task"]["known_issues"]))
-            self.assertEqual("Verification commands may need adjustment after bootstrap.", snapshot["task"]["known_issue"])
+            self.assertEqual("Verification commands may need adjustment after the first automation run.", snapshot["task"]["known_issue"])
 
     def test_automation_start_stop_and_idempotent_running_state(self) -> None:
         module, fake_dashboard = self.fake_dashboard_for_automation()
@@ -1431,7 +1430,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             _load_result, load_payload = self.run_cli("brief.load", "--target", tmp)
             self.assertIn(records[0]["rel_path"], load_payload["data"]["draft_intake"]["additional_context_files"])
 
-    def test_brief_scaffold_bootstrap_scaffolds_without_codex_by_default(self) -> None:
+    def test_brief_scaffold_scaffolds_without_codex_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             intake = {
                 "project_name": "Scaffold Smoke",
@@ -1463,7 +1462,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             }
 
             scaffold_result, scaffold_payload = self.run_cli(
-                "brief.scaffold_bootstrap",
+                "brief.scaffold",
                 "--target",
                 tmp,
                 "--intake-json",
@@ -1472,7 +1471,7 @@ class DashboardBackendCliTests(unittest.TestCase):
 
             self.assertEqual(0, scaffold_result.returncode)
             self.assertTrue(scaffold_payload["ok"])
-            self.assertEqual("skipped", scaffold_payload["data"]["codex"]["status"])
+            self.assertEqual("retired", scaffold_payload["data"]["codex"]["status"])
             self.assertEqual("created_initial_commit", scaffold_payload["data"]["git"]["status"])
             self.assertTrue(scaffold_payload["data"]["git"]["initialized"])
             self.assertTrue(scaffold_payload["data"]["git"]["committed"])
@@ -1480,7 +1479,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertIn(scaffold_payload["data"]["native_next_state"]["state"], {"FIRST_REVIEW_NEEDED", "READY_TO_RUN"})
             self.assertGreater(len(scaffold_payload["data"]["log"]), 0)
             self.assertTrue(generated_path(Path(tmp), ".agentic/project_intake.json").exists())
-            self.assertTrue(generated_path(Path(tmp), "docs/INITIAL_BOOTSTRAP_PROMPT.md").exists())
+            self.assertFalse(generated_path(Path(tmp), "docs/INITIAL_BOOTSTRAP_PROMPT.md").exists())
             self.assertTrue((Path(tmp) / ".diffmogger" / "scripts" / "run_role_automation.sh").exists())
             head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=tmp, capture_output=True, text=True, check=False)
             self.assertEqual(0, head.returncode, head.stderr)
@@ -1492,7 +1491,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             _run_result, run_payload = self.run_cli("run.load", "--target", tmp)
             self.assertNotIn("can_run_now", run_payload["data"]["controls"])
 
-    def test_brief_scaffold_bootstrap_repairs_mcp_drift_from_dashboard_state(self) -> None:
+    def test_brief_scaffold_repairs_mcp_drift_from_dashboard_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             dashboard_path = generated_path(target, ".agentic/dashboard_state.json")
@@ -1512,7 +1511,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             }
 
             scaffold_result, scaffold_payload = self.run_cli(
-                "brief.scaffold_bootstrap",
+                "brief.scaffold",
                 "--target",
                 tmp,
                 "--intake-json",
@@ -1526,175 +1525,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual(["context7"], written_intake["optional_mcp_servers"])
             self.assertEqual(["context7"], manifest["optional_mcp_servers"])
 
-    def test_brief_run_bootstrap_runs_once_and_records_completion(self) -> None:
-        from diffmogger.dashboard.commands import brief as brief_commands
-        from diffmogger.dashboard.errors import BackendError
-
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp)
-            self.scaffold_target(target)
-            generated_path(target, ".agentic/project_intake.json").write_text(
-                json.dumps({"project_name": "Bootstrap Test", "campaign_mode": "ongoing"}) + "\n",
-                encoding="utf-8",
-            )
-            args = argparse.Namespace(target=str(target), stream_jsonl=False)
-
-            def fake_bootstrap(*_args: object, **_kwargs: object) -> dict[str, object]:
-                (target / "src").mkdir(parents=True, exist_ok=True)
-                (target / "tests").mkdir(parents=True, exist_ok=True)
-                (target / "README.md").write_text("# Bootstrap Test\n", encoding="utf-8")
-                (target / "src" / "app.py").write_text("def ok():\n    return True\n", encoding="utf-8")
-                (target / "tests" / "test_app.py").write_text(
-                    "import unittest\n\n"
-                    "class AppTest(unittest.TestCase):\n"
-                    "    def test_ok(self):\n"
-                    "        self.assertTrue(True)\n",
-                    encoding="utf-8",
-                )
-                return {"command": "codex exec", "exit_code": 0, "stdout": "ok", "stderr": ""}
-
-            with (
-                mock.patch.object(brief_commands, "run_subprocess_streamed", side_effect=fake_bootstrap),
-                mock.patch.object(
-                    brief_commands,
-                    "prereq_snapshot",
-                    return_value={"status": "pass", "required_failures": [], "advisory_warnings": [], "items": []},
-                ),
-                mock.patch.object(
-                    brief_commands,
-                    "run_required_file_check_for_intake",
-                    return_value={"status": "pass", "exit_code": 0, "stdout": "", "stderr": "", "command": "check"},
-                ),
-            ):
-                payload = brief_commands.command_brief_run_bootstrap(args)
-
-                self.assertEqual("pass", payload["status"])
-                self.assertEqual("committed", payload["checkpoint"]["status"])
-                dashboard_state = json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
-                self.assertEqual("initial_bootstrap_completed", dashboard_state["last_action"])
-                self.assertEqual("pass", dashboard_state["initial_bootstrap_status"])
-                self.assertEqual("bootstrapped", automation_control_state(target)["bootstrap_status"])
-                tracked = subprocess.run(["git", "ls-files"], cwd=target, capture_output=True, text=True, check=False)
-                self.assertIn("src/app.py", tracked.stdout.splitlines())
-                self.assertNotIn(".diffmogger/manifest.json", tracked.stdout.splitlines())
-
-                with self.assertRaises(BackendError) as raised:
-                    brief_commands.command_brief_run_bootstrap(args)
-                self.assertEqual("bootstrap_already_completed", raised.exception.error_type)
-
-    def test_brief_run_bootstrap_clears_stale_git_checkpoint_blocker_after_successful_commit(self) -> None:
-        from diffmogger.dashboard.commands import brief as brief_commands
-
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp)
-            self.scaffold_target(target)
-            generated_path(target, ".agentic/project_intake.json").write_text(
-                json.dumps({"project_name": "Bootstrap Stale Blocker", "campaign_mode": "ongoing"}) + "\n",
-                encoding="utf-8",
-            )
-            args = argparse.Namespace(target=str(target), stream_jsonl=False)
-            stale_detail = (
-                "Bootstrap delivered the baseline, but the required initial local commit is blocked "
-                "because this sandbox cannot write .git/index.lock; test -w .git reports not writable."
-            )
-
-            def fake_bootstrap(*_args: object, **_kwargs: object) -> dict[str, object]:
-                (target / "src").mkdir(parents=True, exist_ok=True)
-                (target / "README.md").write_text("# Bootstrap Stale Blocker\n", encoding="utf-8")
-                (target / "src" / "app.py").write_text("def ok():\n    return True\n", encoding="utf-8")
-                brief_commands.write_automation_control_state(
-                    target,
-                    {
-                        "status": "BLOCKED_ON_ENVIRONMENT",
-                        "current_assessment": stale_detail,
-                        "best_next_milestone": "Restore write access to .git and create the local initial commit.",
-                        "suggested_next_task": "Fix the local git metadata write permission, then continue.",
-                        "known_issue": stale_detail,
-                        "known_issues": [stale_detail],
-                    },
-                    actor_role="state_brief",
-                    event_type="automation.control_updated_from_state_brief_cli",
-                )
-                return {"command": "codex exec", "exit_code": 0, "stdout": "ok", "stderr": ""}
-
-            with (
-                mock.patch.object(brief_commands, "run_subprocess_streamed", side_effect=fake_bootstrap),
-                mock.patch.object(
-                    brief_commands,
-                    "prereq_snapshot",
-                    return_value={"status": "pass", "required_failures": [], "advisory_warnings": [], "items": []},
-                ),
-                mock.patch.object(
-                    brief_commands,
-                    "run_required_file_check_for_intake",
-                    return_value={"status": "pass", "exit_code": 0, "stdout": "", "stderr": "", "command": "check"},
-                ),
-            ):
-                payload = brief_commands.command_brief_run_bootstrap(args)
-
-            self.assertEqual("pass", payload["status"])
-            self.assertEqual("committed", payload["checkpoint"]["status"])
-            control = automation_control_state(target)
-            self.assertEqual("ACTIVE", control["status"])
-            self.assertEqual("bootstrapped", control["bootstrap_status"])
-            combined_control_text = "\n".join(
-                [
-                    str(control.get("current_assessment") or ""),
-                    str(control.get("best_next_milestone") or ""),
-                    str(control.get("suggested_next_task") or ""),
-                    str(control.get("known_issue") or ""),
-                    "\n".join(str(item) for item in control.get("known_issues") or []),
-                ]
-            ).lower()
-            self.assertNotIn(".git/index.lock", combined_control_text)
-            self.assertNotIn("initial local commit", combined_control_text)
-            self.assertNotIn("git metadata", combined_control_text)
-            with connect(database_path_for_target(target)) as conn:
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM blockers WHERE status NOT IN ('closed', 'resolved', 'superseded')"
-                ).fetchone()
-            self.assertEqual(0, int(row[0]))
-            tracked = subprocess.run(["git", "ls-files"], cwd=target, capture_output=True, text=True, check=False)
-            self.assertIn("src/app.py", tracked.stdout.splitlines())
-
-    def test_brief_run_bootstrap_blocks_when_product_checkpoint_is_empty(self) -> None:
-        from diffmogger.dashboard.commands import brief as brief_commands
-        from diffmogger.dashboard.errors import BackendError
-
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp)
-            self.scaffold_target(target)
-            generated_path(target, ".agentic/project_intake.json").write_text(
-                json.dumps({"project_name": "Bootstrap Blocked", "campaign_mode": "ongoing"}) + "\n",
-                encoding="utf-8",
-            )
-            args = argparse.Namespace(target=str(target), stream_jsonl=False)
-
-            def fake_bootstrap(*_args: object, **_kwargs: object) -> dict[str, object]:
-                return {"command": "codex exec", "exit_code": 0, "stdout": "ok", "stderr": ""}
-
-            with (
-                mock.patch.object(brief_commands, "run_subprocess_streamed", side_effect=fake_bootstrap),
-                mock.patch.object(
-                    brief_commands,
-                    "prereq_snapshot",
-                    return_value={"status": "pass", "required_failures": [], "advisory_warnings": [], "items": []},
-                ),
-                mock.patch.object(
-                    brief_commands,
-                    "run_required_file_check_for_intake",
-                    return_value={"status": "pass", "exit_code": 0, "stdout": "", "stderr": "", "command": "check"},
-                ),
-            ):
-                with self.assertRaises(BackendError) as raised:
-                    brief_commands.command_brief_run_bootstrap(args)
-
-            self.assertEqual("bootstrap_checkpoint_failed", raised.exception.error_type)
-            control = automation_control_state(target)
-            self.assertEqual("BLOCKED_ON_ENVIRONMENT", control["status"])
-            self.assertEqual("blocked", control["bootstrap_status"])
-
-    def test_brief_scaffold_bootstrap_commits_existing_unborn_repo(self) -> None:
+    def test_brief_scaffold_commits_existing_unborn_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             subprocess.run(["git", "init", "-q"], cwd=target, check=True)
@@ -1717,7 +1548,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             }
 
             scaffold_result, scaffold_payload = self.run_cli(
-                "brief.scaffold_bootstrap",
+                "brief.scaffold",
                 "--target",
                 tmp,
                 "--intake-json",
@@ -1796,7 +1627,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             }
 
             scaffold_result, scaffold_payload = self.run_cli(
-                "brief.scaffold_bootstrap",
+                "brief.scaffold",
                 "--target",
                 tmp,
                 "--intake-json",
@@ -1813,7 +1644,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertIn("Keep this too.", dev_text)
             self.assertIn("First Review Checklist", sidecar_dev_text)
 
-    def test_scaffold_bootstrap_streams_jsonl_progress(self) -> None:
+    def test_scaffold_streams_jsonl_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             intake = {
                 "project_name": "Stream Smoke",
@@ -1831,7 +1662,7 @@ class DashboardBackendCliTests(unittest.TestCase):
                     sys.executable,
                     str(CLI),
                     "--stream-jsonl",
-                    "brief.scaffold_bootstrap",
+                    "brief.scaffold",
                     "--target",
                     tmp,
                     "--intake-json",
@@ -1847,7 +1678,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual(0, result.returncode)
             self.assertTrue(any(line.get("event") == "log" and line.get("stage") == "scaffold" for line in lines))
             self.assertTrue(lines[-1]["ok"])
-            self.assertEqual("brief.scaffold_bootstrap", lines[-1]["command"])
+            self.assertEqual("brief.scaffold", lines[-1]["command"])
 
     def test_scaffolded_target_exposes_brief_run_files_and_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

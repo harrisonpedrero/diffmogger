@@ -146,7 +146,6 @@ for pattern in \
   "/docs/DAILY_AUTOMATION_REVIEW.md" \
   "/docs/DEVELOPMENT.md" \
   "/docs/HUMAN_BRIDGE_SETUP.md" \
-  "/docs/INITIAL_BOOTSTRAP_PROMPT.md" \
   "/docs/MULTI_ROLE_PROGRESS.md" \
   "/docs/PROJECT_CONTEXT.md" \
   "/scripts/acquire_codex_lock.sh" \
@@ -1689,8 +1688,14 @@ def frontend_touching() -> bool:
             re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", text)
             for term in terms
         )
+    summary_signal_lines = []
+    for raw in summary.splitlines():
+        line = re.sub(r"\s+", " ", raw.strip().lstrip("#>*- \t").strip("` "))
+        if line.lower().startswith("mcp decision:"):
+            continue
+        summary_signal_lines.append(raw)
     paths = " ".join(changed_files).lower()
-    text = (paths + "\n" + summary.lower())
+    text = (paths + "\n" + "\n".join(summary_signal_lines).lower())
     if contains_frontend_term(text):
         return True
     return bool(mcp_telemetry.get("ticket_frontend_scope"))

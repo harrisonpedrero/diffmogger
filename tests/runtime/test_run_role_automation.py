@@ -145,6 +145,37 @@ class RunRoleAutomationTests(unittest.TestCase):
         codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
         return bin_dir
 
+    def write_backend_playwright_skip_codex(self, root: Path) -> Path:
+        bin_dir = root / "bin"
+        codex = bin_dir / "codex"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            "worktree=\"\"\n"
+            "while [[ $# -gt 0 ]]; do\n"
+            "  if [[ \"$1\" == \"-C\" ]]; then worktree=\"$2\"; shift 2; continue; fi\n"
+            "  prompt=\"$1\"\n"
+            "  shift\n"
+            "done\n"
+            "mkdir -p \"$worktree/tests\"\n"
+            "printf 'def test_package_import():\\n    import pathlib\\n    assert pathlib.Path is not None\\n' > \"$worktree/tests/test_package_import.py\"\n"
+            "python3 - \"$prompt\" <<'PY'\n"
+            "import re\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "match = re.search(r'(/[^`\\n]+summary\\.md)', sys.argv[1])\n"
+            "if not match:\n"
+            "    raise SystemExit(64)\n"
+            "summary = Path(match.group(1))\n"
+            "summary.parent.mkdir(parents=True, exist_ok=True)\n"
+            "summary.write_text('''Commit type: test\\nCommit scope: backend\\nCommit subject: add package import coverage\\n\\nMCP decision: context7 skipped - backend-only package/test change; playwright skipped - backend-only package/test change with no browser surface\\n\\nTest change rationale: Keeps package import coverage explicit.\\n\\n## Summary\\n- Added backend package import coverage.\\n\\n## Checks\\n- Not run in fake harness.\\n''', encoding='utf-8')\n"
+            "PY\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
+        return bin_dir
+
     def write_ticket_action_codex(self, root: Path) -> Path:
         bin_dir = root / "bin"
         codex = bin_dir / "codex"
@@ -477,6 +508,42 @@ class RunRoleAutomationTests(unittest.TestCase):
             self.assertEqual("failed", manifest["status"])
             self.assertEqual("playwright_validation_issue", manifest["deferral_reason"])
             self.assertIn("requires Playwright snapshot/console validation", manifest["playwright_validation_detail"])
+
+    def test_backend_hardener_playwright_skip_note_does_not_force_frontend_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            target = tmp_path / "target"
+            target.mkdir()
+            self.seed_git_target(target)
+            self.write_text(
+                target,
+                ".agentic/project_intake.json",
+                json.dumps({"optional_mcp_servers": ["context7", "playwright"], "product_goal": "Build a frontend UI."}) + "\n",
+            )
+            self.write_text(target, "scripts/run_playwright_mcp.sh", "#!/usr/bin/env bash\nexit 0\n")
+            fake_bin = self.write_backend_playwright_skip_codex(tmp_path)
+            env = os.environ.copy()
+            env["CODEX_AUTOMATION_PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            env["CODEX_RUN_ID"] = "backend-playwright-skipped"
+            env["DIFFMOGGER_BROWSER_PATH"] = "/tmp/diffmogger-browser"
+
+            result = subprocess.run(
+                ["bash", str(ROLE_RUNNER_PATHS[0]), "--target", str(target), "--role", "hardener"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            manifest = json.loads((target / "target" / "automation_queue" / "hardener" / "backend-playwright-skipped" / "manifest.json").read_text(encoding="utf-8"))
+            telemetry = json.loads(Path(manifest["mcp_telemetry_path"]).read_text(encoding="utf-8"))
+            self.assertEqual("queued", manifest["status"])
+            self.assertIsNone(manifest["deferral_reason"])
+            self.assertEqual("not_required", manifest["playwright_validation_status"])
+            self.assertTrue(telemetry["target_frontend_scope"])
+            self.assertFalse(telemetry["ticket_frontend_scope"])
 
     def test_source_runner_keeps_sidecar_alias_paths_dotted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

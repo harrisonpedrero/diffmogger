@@ -1590,15 +1590,11 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
   const automationState = text(automation.state, "").toLowerCase();
   const automationRunning = automationState === "running";
   const running = bool(controls.is_running) || statusUpper.includes("RUNNING") || automationRunning;
-  const canBootstrapAndStart = scaffolded && bool(controls.can_bootstrap_and_start) && !running;
-
   const startAutomation = makeAction(
     "Start",
-    scaffolded && (bool(controls.can_start_automation) || canBootstrapAndStart),
-    canBootstrapAndStart
-      ? text(controls.bootstrap_start_reason, "First start will prepare the target, then automation will start.")
-      : scaffolded ? text(controls.start_automation_reason, text(automation.message, "Automation is not ready.")) : "Complete setup before running.",
-    canBootstrapAndStart ? "automation.bootstrap_start" : "automation.start",
+    scaffolded && bool(controls.can_start_automation),
+    scaffolded ? text(controls.start_automation_reason, text(automation.message, "Automation is not ready.")) : "Complete setup before running.",
+    "automation.start",
   );
   const stopAutomation = makeAction(
     "Stop",
@@ -1643,10 +1639,6 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
     subheadline = text(automation.message, "Refresh to inspect the latest run state.");
     badge = "Running";
     primaryAction = routeAction("Refresh", "Run", "Reload the latest run state.");
-  } else if (snapshot && canBootstrapAndStart) {
-    subheadline = "First start will prepare the target, then continuous automation will start.";
-    badge = "Ready";
-    primaryAction = startAutomation;
   } else if (snapshot && startAutomation.enabled) {
     subheadline = "The target files are present and continuous automation can start.";
     badge = "Ready";

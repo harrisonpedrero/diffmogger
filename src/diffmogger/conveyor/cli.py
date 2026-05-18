@@ -17,7 +17,7 @@ from .queue_state import queued_manifests
 from .runner import finish_active_role_run
 from .state import *
 from .tickets import finalize_ticket_campaign, ticket_campaign_terminal
-from diffmogger.runtime.state_store import connect, database_path_for_target, latest_scheduler_decision_conn
+from diffmogger.runtime.state_store import connect, database_path_for_target, human_messages_snapshot, latest_scheduler_decision_conn
 
 
 def _latest_selected_scheduler_candidate(target: Path) -> dict[str, Any]:
@@ -28,6 +28,22 @@ def _latest_selected_scheduler_candidate(target: Path) -> dict[str, Any]:
         return {}
     selected = decision.get("selected_candidate") if isinstance(decision.get("selected_candidate"), dict) else {}
     return dict(selected)
+
+
+def _role_run_status(target: Path, exit_code: int) -> str:
+    if exit_code == 0:
+        return "ACTIVE"
+    try:
+        human = human_messages_snapshot(target, import_legacy=False)
+    except Exception:
+        return "ACTIVE"
+    counts = human.get("counts") if isinstance(human.get("counts"), dict) else {}
+    pending = (
+        int(counts.get("pending_requests") or 0)
+        + int(counts.get("queued_notes") or 0)
+        + int(counts.get("failed_notes") or 0)
+    )
+    return "ACTIVE_WITH_PENDING_USER_INPUT" if pending else "ACTIVE"
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -188,7 +204,7 @@ def main() -> int:
                 event_type="role_run.finished",
                 actor_role=role,
                 phase="role_execution",
-                status="ACTIVE" if exit_code == 0 else "ACTIVE_WITH_PENDING_USER_INPUT",
+                status=_role_run_status(target, exit_code),
                 payload={
                     "role": role,
                     "reason": reason,

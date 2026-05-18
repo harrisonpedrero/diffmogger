@@ -271,7 +271,7 @@ describe("RunPage", () => {
     expect(html).not.toContain("<h1>Ready</h1>");
   });
 
-  it("renders Start when scaffolded automation will prepare the target first", () => {
+  it("renders direct Start readiness without first-run preparation copy", () => {
     const html = renderToStaticMarkup(
       <RunPage
         snapshot={snapshot({
@@ -280,14 +280,13 @@ describe("RunPage", () => {
             controls: {
               is_scaffolded: true,
               is_running: false,
-              can_start_automation: false,
-              start_automation_reason: "Bootstrap has not completed yet.",
+              can_start_automation: true,
+              start_automation_reason: "Continuous automation is ready to start.",
               can_bootstrap_and_start: true,
-              bootstrap_start_reason: "Ready to run initial bootstrap before starting automation.",
               can_stop_automation: false,
               can_run_safety_check: true,
             },
-            automation: { state: "not_ready", message: "Continuous automation is not ready. Bootstrap has not completed yet." },
+            automation: { state: "stopped", message: "Continuous automation is ready to start." },
           },
         })}
         loading={false}
@@ -298,7 +297,7 @@ describe("RunPage", () => {
     );
 
     expect(html).toContain(">Ready</span>");
-    expect(html).toContain("First start will prepare the target");
+    expect(html).toContain("continuous automation can start");
     expect(html).toContain("Start");
   });
 

@@ -15,7 +15,7 @@ Last updated: {{CREATED_AT}}
 - Desired runnable milestone: {{DESIRED_FIRST_DEMO}}
 - Tech preferences: {{TECH_PREFERENCES}}
 - Project-mode guidance: {{PROJECT_MODE_GUIDANCE}}
-- Current baseline: not bootstrapped yet.
+- Current baseline: scaffold initialized; no product ticket has run yet.
 - State authority: canonical runtime/task-control state is `target/orchestration.sqlite3`; this Markdown file is a generated prompt/handoff projection.
 - Activity graph: tickets, planning/scoping, building, reviewing, validation, integration, blockers, completion, hard/advisory dependencies, validation receipts, and next actions are typed SQLite state. Generated views are compatibility projections only.
 
@@ -34,7 +34,7 @@ Last updated: {{CREATED_AT}}
 - Advancement criteria:
 {{HORIZON_ADVANCEMENT_CRITERIA}}
 - Evidence gathered this run:
-  - Initial scaffold only; bootstrap has not run yet.
+  - Initial scaffold only; automation has not run yet.
 - Advancement decision: stay
 - Next horizon candidate: {{NEXT_HORIZON_CANDIDATE}}
 - Remaining work before advancement:
@@ -50,10 +50,10 @@ Last updated: {{CREATED_AT}}
 
 ## Checks From Last Run
 
-- Not run yet. Bootstrap run should discover or create verification commands.
+- Not run yet. The first automation run should discover or create verification commands.
 - Not run yet: integration safety (`python3 scripts/check_integration_safety.py`) is pending until dashboard **Run Safety Check** records a target-local result.
 - Full-suite config: `.agentic/verification_commands.txt`
-- Bootstrap-safe baseline commands: `{{BOOTSTRAP_BASELINE_COMMANDS_INLINE}}`
+- Baseline verification commands: `{{BOOTSTRAP_BASELINE_COMMANDS_INLINE}}`
 - Preferred commands: `{{VERIFICATION_COMMANDS}}`
 
 ## Worker-Agent Activity

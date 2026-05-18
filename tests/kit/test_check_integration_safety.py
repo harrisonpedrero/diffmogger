@@ -172,7 +172,6 @@ class DashboardIntegrationSafetyAffordanceTests(unittest.TestCase):
         (target / ".agentic" / "automation_prompt.md").write_text("prompt", encoding="utf-8")
         for role in ("planner", "builder", "hardener", "integrator"):
             (target / ".agentic" / "roles" / f"{role}.md").write_text(role, encoding="utf-8")
-        (target / "docs" / "INITIAL_BOOTSTRAP_PROMPT.md").write_text("bootstrap", encoding="utf-8")
         (target / "docs" / "CODEX_AUTOMATION_TASKS.md").write_text("AUTOMATION_STATUS: ACTIVE\n", encoding="utf-8")
         (target / "docs" / "MULTI_ROLE_PROGRESS.md").write_text("# Multi-Role Progress\n", encoding="utf-8")
         for script in (

@@ -646,7 +646,7 @@ for marker in [
     "brief.load",
     "brief.save_draft",
     "brief.scaffold_preview",
-    "brief.scaffold_bootstrap",
+    "brief.scaffold",
     "context.import",
     "inbox.load",
     "inbox.send_note",
@@ -742,7 +742,7 @@ for marker in [
     "update_advanced_settings",
     "run_backend_command_streamed",
     "backend-log",
-    "brief.scaffold_bootstrap",
+    "brief.scaffold",
     "brief.scaffold_preview",
     "context.import",
     "inbox.load",
@@ -903,7 +903,7 @@ for marker in [
     "brief.save_draft",
     "brief.scaffold_preview",
     "context.import",
-    "brief.scaffold_bootstrap",
+    "brief.scaffold",
     "Scaffold",
     "Add context files",
     "Context7 MCP",
@@ -1147,7 +1147,7 @@ dashboard_readme = Path("services/agentic-dashboard/README.md").read_text(encodi
 for marker in [
     "services/agentic-dashboard/native",
     "scripts/dashboard_backend_cli.py",
-    "Scaffold & Bootstrap",
+    "Scaffold",
     ".diffmogger/agentic/dashboard_state.json",
     "Open Diffmogger Project",
     ".diffmogger/context/",
@@ -1513,7 +1513,7 @@ for command in \
     "python3 .diffmogger/scripts/ticket_run.py . next --json" \
     "python3 -m py_compile .diffmogger/scripts/run_process_watchdog.py .diffmogger/scripts/ticket_run.py .diffmogger/scripts/compact_agent_state.py .diffmogger/scripts/run_observatory.py .diffmogger/scripts/repair_environment.py"; do
     if ! grep -Fx "$command" "$tmp_dir/.diffmogger/agentic/verification_commands.txt" >/tmp/Diffmogger-ticket-campaign-verification-grep.log 2>&1; then
-        echo "Ticket-campaign scaffold missing bootstrap-safe baseline command: $command" >&2
+            echo "Ticket-campaign scaffold missing baseline verification command: $command" >&2
         cat "$tmp_dir/.diffmogger/agentic/verification_commands.txt" >&2
         rm -rf "$tmp_dir" "$tmp_intake"
         exit 1
@@ -1529,7 +1529,7 @@ done
     /bin/bash -lc "$command"
   done < .diffmogger/agentic/verification_commands.txt
 ) >/tmp/Diffmogger-ticket-campaign-baseline.log 2>&1 || {
-    echo "Ticket-campaign bootstrap-safe baseline commands did not pass" >&2
+    echo "Ticket-campaign baseline verification commands did not pass" >&2
     cat /tmp/Diffmogger-ticket-campaign-baseline.log >&2
     rm -rf "$tmp_dir" "$tmp_intake"
     exit 1
@@ -1542,12 +1542,12 @@ fi
 for marker in \
     "T1 Ticket-run readiness" \
     "T4 Completion report and stop" \
-    "Bounded campaign bootstrap is readiness-only" \
+    "Scaffold seeds and validates the ticket queue" \
     "python3 .diffmogger/scripts/ticket_run.py . next --json" \
     "let execution DAG dependencies, confidence, and ownership scopes determine" \
     "depends_on" \
     "## Deferred / Follow-Up Tickets"; do
-    if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" "$tmp_dir/.diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md" >/tmp/Diffmogger-ticket-horizon-grep.log 2>&1; then
+    if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-ticket-horizon-grep.log 2>&1; then
         echo "Ticket-campaign scaffold missing ticket progression marker: $marker" >&2
         cat /tmp/Diffmogger-ticket-horizon-grep.log >&2
         rm -rf "$tmp_dir" "$tmp_intake"

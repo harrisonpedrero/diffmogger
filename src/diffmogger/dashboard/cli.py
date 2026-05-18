@@ -19,9 +19,8 @@ from .commands.advanced import (
 from .commands.brief import (
     command_brief_generate_intake,
     command_brief_load,
-    command_brief_run_bootstrap,
     command_brief_save_draft,
-    command_brief_scaffold_bootstrap,
+    command_brief_scaffold,
     command_brief_scaffold_preview,
 )
 from .commands.context import command_context_import
@@ -82,8 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
         "brief.generate_intake": command_brief_generate_intake,
         "brief.save_draft": command_brief_save_draft,
         "brief.scaffold_preview": command_brief_scaffold_preview,
-        "brief.scaffold_bootstrap": command_brief_scaffold_bootstrap,
-        "brief.run_bootstrap": command_brief_run_bootstrap,
+        "brief.scaffold": command_brief_scaffold,
         "context.import": command_context_import,
         "inbox.load": command_inbox_load,
         "inbox.send_note": command_inbox_send_note,
@@ -153,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument("--heartbeat-seconds", type=float, default=5.0, help=argparse.SUPPRESS)
             subparser.add_argument("--max-events", type=int, default=0, help=argparse.SUPPRESS)
             subparser.add_argument("--max-heartbeats", type=int, default=0, help=argparse.SUPPRESS)
-        if name in {"brief.save_draft", "brief.scaffold_preview", "brief.scaffold_bootstrap"}:
+        if name in {"brief.save_draft", "brief.scaffold_preview", "brief.scaffold"}:
             subparser.add_argument("--intake-json", required=True, help="JSON object with intake fields")
         if name == "brief.generate_intake":
             subparser.add_argument("--body", required=True, help="Short description of what the user wants to build")
@@ -184,10 +182,8 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument("--max-workers", type=int, default=0, help="Maximum workers to launch when starting worker groups")
         if name == "lease.release_stale":
             subparser.add_argument("--lease-id", required=True, help="Active lease id to release")
-        if name in {"brief.scaffold_preview", "brief.scaffold_bootstrap"}:
+        if name in {"brief.scaffold_preview", "brief.scaffold"}:
             subparser.add_argument("--force", action="store_true", help="Overwrite existing scaffold-managed files")
-        if name == "brief.scaffold_bootstrap":
-            subparser.add_argument("--run-codex", action="store_true", help="Run the initial Codex bootstrap after scaffolding")
         if name in {"ticket.add", "ticket.update"}:
             subparser.add_argument("--ticket-json", required=True, help="JSON object with ticket fields")
         if name in {"ticket.update", "ticket.delete"}:

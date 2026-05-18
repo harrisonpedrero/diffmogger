@@ -44,8 +44,7 @@ const READ_ONLY_BACKEND_COMMANDS: &[&str] = &[
 const MUTATING_BACKEND_COMMANDS: &[&str] = &[
     "brief.generate_intake",
     "brief.save_draft",
-    "brief.scaffold_bootstrap",
-    "brief.run_bootstrap",
+    "brief.scaffold",
     "context.import",
     "ticket.add",
     "ticket.update",
@@ -594,7 +593,7 @@ fn build_backend_args(
     intent: Option<&str>,
     related: Option<&str>,
     force: Option<bool>,
-    run_codex: Option<bool>,
+    _run_codex: Option<bool>,
     ticket_json: Option<&str>,
     ticket_id: Option<&str>,
     import_format: Option<&str>,
@@ -700,7 +699,7 @@ fn build_backend_args(
 
     if matches!(
         command,
-        "brief.save_draft" | "brief.scaffold_preview" | "brief.scaffold_bootstrap"
+        "brief.save_draft" | "brief.scaffold_preview" | "brief.scaffold"
     ) {
         let payload = intake_json.ok_or_else(|| {
             CommandError::new(
@@ -829,16 +828,10 @@ fn build_backend_args(
 
     if matches!(
         command,
-        "brief.scaffold_preview" | "brief.scaffold_bootstrap"
+        "brief.scaffold_preview" | "brief.scaffold"
     ) {
         if force.unwrap_or(false) {
             args.push("--force".to_string());
-        }
-    }
-
-    if command == "brief.scaffold_bootstrap" {
-        if run_codex.unwrap_or(false) {
-            args.push("--run-codex".to_string());
         }
     }
 
@@ -2016,8 +2009,9 @@ mod tests {
     }
 
     #[test]
-    fn allows_setup_bootstrap_command() {
-        assert!(backend_command_allowed("brief.run_bootstrap"));
+    fn does_not_allow_retired_setup_bootstrap_command() {
+        assert!(!backend_command_allowed("brief.scaffold_bootstrap"));
+        assert!(!backend_command_allowed("brief.run_bootstrap"));
     }
 
     #[test]

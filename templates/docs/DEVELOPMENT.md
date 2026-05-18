@@ -10,7 +10,7 @@ Goal: {{PRODUCT_GOAL}}
 
 ## Setup
 
-Document local setup here after bootstrap.
+Document local setup here as the first automation run discovers or creates it.
 
 ## Verification
 
@@ -36,7 +36,7 @@ Preferred commands:
 {{VERIFICATION_COMMANDS}}
 ```
 
-Bootstrap-safe baseline commands:
+Baseline verification commands:
 
 ```text
 {{BOOTSTRAP_BASELINE_COMMANDS}}
@@ -183,7 +183,7 @@ remain visible across local DAG scheduler cycles.
 
 ### First Review Checklist
 
-After the first bootstrap, use one local review path:
+After the first automation run, use one local review path:
 
 1. In the Diffmogger starter-kit source, run `bash scripts/validate_starter_kit.sh` when reviewing kit or scaffold behavior.
 2. Open the native dashboard from the Diffmogger checkout, reopen this target, and click **Run Safety Check** on the Run page.
