@@ -91,7 +91,7 @@ class RuntimeStateActionTests(unittest.TestCase):
             stdout=subprocess.DEVNULL,
         )
 
-    def test_progress_projection_keeps_required_fast_follow_marker(self) -> None:
+    def test_integrator_updates_lean_task_projection(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -102,19 +102,20 @@ class RuntimeStateActionTests(unittest.TestCase):
                         encoding="utf-8",
                     )
 
-                    module.update_progress(
+                    module.update_task_file(
                         target,
                         run_id="integrator-smoke",
-                        verification_status="pass",
+                        checkpoint_commit=None,
+                        dirty_files=[],
                         committed=[],
                         deferred_count=0,
-                        checkpoint_commit=None,
-                        cleanup_summary=[],
                         dry_run=False,
                     )
 
-                    progress = (target / "docs" / "MULTI_ROLE_PROGRESS.md").read_text(encoding="utf-8")
-                    self.assertIn("fast-follow replanning", progress)
+                    task = (target / "docs" / "CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
+                    self.assertIn("## Multi-Role Integration integrator-smoke", task)
+                    self.assertIn("- deferred_patches: 0", task)
+                    self.assertFalse((target / "docs" / "MULTI_ROLE_PROGRESS.md").exists())
 
     def add_committed_file(self, target: Path, relative: str, content: str) -> None:
         path = target / relative

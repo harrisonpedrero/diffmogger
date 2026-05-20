@@ -140,14 +140,9 @@ for pattern in \
   "/apps/*/.env.local" \
   "/.agentic/" \
   "/AGENTS.md" \
-  "/docs/AUTONOMY_EXPERIMENT_LOG.md" \
   "/docs/CODEX_AUTOMATION_GUARDRAILS.md" \
   "/docs/CODEX_AUTOMATION_TASKS.md" \
-  "/docs/DAILY_AUTOMATION_REVIEW.md" \
   "/docs/DEVELOPMENT.md" \
-  "/docs/HUMAN_BRIDGE_SETUP.md" \
-  "/docs/MULTI_ROLE_PROGRESS.md" \
-  "/docs/PROJECT_CONTEXT.md" \
   "/scripts/acquire_codex_lock.sh" \
   "/scripts/__pycache__/" \
   "/scripts/build_replay.py" \
@@ -266,7 +261,7 @@ values = {
     "state_brief_rel": rel("target/canonical_state_brief.md"),
     "mcp_config_rel": rel(".codex/config.toml"),
     "playwright_mcp_rel": rel("scripts/run_playwright_mcp.sh"),
-    "playwright_artifact_rel": rel(f"docs/backlog/ui_artifacts/{run_id}"),
+    "playwright_artifact_rel": rel(f"target/validation_jobs/{run_id}/ui_artifacts"),
 }
 for key, value in values.items():
     print(f"{key}={shlex.quote(str(value))}")
@@ -333,6 +328,54 @@ FRONTEND_TERMS = {
     "vue",
     "web app",
 }
+CONTEXT7_TERMS = {
+    "api",
+    "client library",
+    "dependency",
+    "dependencies",
+    "documentation",
+    "external service",
+    "framework",
+    "graphql",
+    "library",
+    "oauth",
+    "package",
+    "package api",
+    "api docs",
+    "external docs",
+    "rest api",
+    "sdk",
+    "third-party",
+    "third party",
+    "webhook",
+}
+CONTEXT7_SCOPE_KEYS = {
+    "acceptance_criteria",
+    "api",
+    "apis",
+    "dependencies",
+    "dependency",
+    "description",
+    "external_services",
+    "framework",
+    "frameworks",
+    "integrations",
+    "libraries",
+    "library",
+    "package",
+    "packages",
+    "product_goal",
+    "sdk",
+    "selected_ticket",
+    "stack",
+    "summary",
+    "task",
+    "tasks",
+    "technology_stack",
+    "ticket",
+    "tickets",
+    "title",
+}
 
 def normalize_rel(value: str) -> str:
     rel = str(value).strip().replace("\\", "/")
@@ -362,16 +405,7 @@ def rel(path: str) -> str:
     return path
 
 def load_target_json(legacy_rel: str) -> dict[str, Any]:
-    candidates = [target / rel(legacy_rel), target / normalize_rel(legacy_rel)]
-    seen: set[Path] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        data = load_json(candidate)
-        if data:
-            return data
-    return {}
+    return load_json(target / rel(legacy_rel))
 
 def normalize_servers(value: Any) -> list[str]:
     if value is None:
@@ -449,10 +483,33 @@ def scope_payload(value: Any) -> Any:
         return [scope_payload(item) for item in value]
     return value
 
+def context7_scope_payload(value: Any, *, include: bool = False) -> Any:
+    if isinstance(value, dict):
+        payload: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if "mcp" in lowered:
+                continue
+            child_include = include or lowered in CONTEXT7_SCOPE_KEYS
+            scoped = context7_scope_payload(item, include=child_include)
+            if child_include and scoped not in ({}, [], ""):
+                payload[key] = scoped
+        return payload
+    if isinstance(value, list):
+        items = [context7_scope_payload(item, include=include) for item in value]
+        return [item for item in items if item not in ({}, [], "")]
+    return value if include else ""
+
 def contains_frontend_term(text: str) -> bool:
     return any(
         re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", text)
         for term in FRONTEND_TERMS
+    )
+
+def contains_context7_term(text: str) -> bool:
+    return any(
+        re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", text)
+        for term in CONTEXT7_TERMS
     )
 
 ticket_claim = load_json(ticket_claim_path) if ticket_claim_path else {}
@@ -461,16 +518,20 @@ target_text = "\n".join([text_blob(scope_payload(intake)), text_blob(scope_paylo
 ticket_text = text_blob(scope_payload(ticket_claim))
 target_frontend = contains_frontend_term(target_text)
 ticket_frontend = contains_frontend_term(ticket_text)
+context7_target_text = "\n".join([text_blob(context7_scope_payload(intake)), text_blob(context7_scope_payload(dashboard_intake)), text_blob(context7_scope_payload(features))])
+context7_ticket_text = text_blob(context7_scope_payload(ticket_claim))
+target_context7 = contains_context7_term(context7_target_text)
+ticket_context7 = contains_context7_term(context7_ticket_text)
 
 requested: list[str] = []
 scope_reasons: list[str] = []
-if "context7" in enabled_servers and role in {"planner", "builder"}:
+if "context7" in enabled_servers and role in {"planner", "builder"} and (target_context7 or ticket_context7):
     requested.append("context7")
-    scope_reasons.append("context7 role documentation support")
+    scope_reasons.append("context7 package/API/framework documentation scope")
 if "playwright" in enabled_servers:
-    if role in {"hardener", "integrator"}:
+    if role in {"hardener", "integrator"} and (target_frontend or ticket_frontend):
         requested.append("playwright")
-        scope_reasons.append("playwright validation lane")
+        scope_reasons.append("playwright frontend/browser validation lane")
     elif role == "planner" and (target_frontend or ticket_frontend):
         requested.append("playwright")
         scope_reasons.append("planner frontend/browser/UI/demo scope")
@@ -498,6 +559,8 @@ payload = {
     "resolved_from": resolved_from,
     "target_frontend_scope": target_frontend,
     "ticket_frontend_scope": ticket_frontend,
+    "target_context7_scope": target_context7,
+    "ticket_context7_scope": ticket_context7,
     "scope_reasons": scope_reasons,
     "usage_outcome": {},
     "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -592,13 +655,7 @@ context_paths=(
   ".agentic/roles"
   ".codex/config.toml"
   "docs/CODEX_AUTOMATION_TASKS.md"
-  "docs/MULTI_ROLE_PROGRESS.md"
   "docs/CODEX_AUTOMATION_GUARDRAILS.md"
-  "docs/PROJECT_CONTEXT.md"
-  "docs/AUTONOMY_EXPERIMENT_LOG.md"
-  "docs/DAILY_AUTOMATION_REVIEW.md"
-  "docs/HUMAN_BRIDGE_SETUP.md"
-  "docs/backlog/README.md"
   "scripts/acquire_codex_lock.sh"
   "scripts/build_replay.py"
   "scripts/compact_agent_state.py"
@@ -690,7 +747,6 @@ else:
       ".agentic/roles/integrator.md",
       ".codex/config.toml",
         "docs/CODEX_AUTOMATION_TASKS.md",
-        "docs/MULTI_ROLE_PROGRESS.md",
         "target/automation_runner.json",
     ]
     scan_roots = [".agentic", "docs"]
@@ -866,8 +922,6 @@ export DIFFMOGGER_TICKET_STATE_READONLY_SNAPSHOT="$worktree_ticket_state_snapsho
 
 CODEX_ROLE_ARGS=(
   --add-dir "$HOME/.codex"
-  -c 'mcp_servers.context7.enabled=false'
-  -c 'mcp_servers.playwright.enabled=false'
 )
 toml_quote() {
   local value="$1"
@@ -894,6 +948,12 @@ append_context7_mcp_args() {
   )
 }
 
+append_context7_disabled_arg() {
+  CODEX_ROLE_ARGS+=(
+    -c 'mcp_servers.context7.enabled=false'
+  )
+}
+
 append_playwright_mcp_args() {
   CODEX_ROLE_ARGS+=(
     -c 'mcp_servers.playwright.command="bash"'
@@ -912,19 +972,30 @@ append_playwright_mcp_args() {
   fi
 }
 
+append_playwright_disabled_arg() {
+  CODEX_ROLE_ARGS+=(
+    -c 'mcp_servers.playwright.enabled=false'
+  )
+}
+
 MCP_MOUNTED_SERVERS=()
 MCP_MOUNT_SKIPS=()
 if csv_has "$mcp_requested_servers" "context7"; then
   append_context7_mcp_args
   MCP_MOUNTED_SERVERS+=("context7")
+else
+  append_context7_disabled_arg
 fi
 if csv_has "$mcp_requested_servers" "playwright"; then
   if [[ -f "$worktree_dir/$playwright_mcp_rel" ]]; then
     append_playwright_mcp_args
     MCP_MOUNTED_SERVERS+=("playwright")
   else
+    append_playwright_disabled_arg
     MCP_MOUNT_SKIPS+=("playwright:playwright helper is unavailable in the role worktree")
   fi
+else
+  append_playwright_disabled_arg
 fi
 mcp_mounted_servers="$(
   IFS=,
@@ -1267,7 +1338,7 @@ set +e
 regenerate_state_brief
 seed_context_path "$state_brief_rel"
 run_with_watchdog "$run_stdout" "$run_stderr" "$watchdog_status_path" \
-  codex exec --full-auto --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")"
+  codex exec --sandbox danger-full-access -c 'approval_policy="never"' --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")"
 codex_status=$?
 set -e
 append_watchdog_status "$watchdog_status_path" "$run_stderr"
@@ -1346,7 +1417,7 @@ PY
     regenerate_state_brief
     seed_context_path "$state_brief_rel"
     run_with_watchdog "$rerun_stdout" "$rerun_stderr" "$rerun_watchdog_status_path" \
-      codex exec --full-auto --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")"
+      codex exec --sandbox danger-full-access -c 'approval_policy="never"' --skip-git-repo-check "${CODEX_ROLE_ARGS[@]}" -C "$worktree_dir" "$(cat "$runtime_prompt_path")"
     rerun_status=$?
     set -e
     append_watchdog_status "$rerun_watchdog_status_path" "$rerun_stderr"
@@ -1722,11 +1793,11 @@ def mcp_usage_outcome(server: str) -> dict[str, str]:
         return {"outcome": "skipped", "reason": "not relevant for this role or selected scope"}
     return {"outcome": "disabled", "reason": "disabled by optional_mcp_servers"}
 
-def has_deferred_validation_blocker() -> bool:
+def has_deferred_validation_work() -> bool:
     lower = summary.lower()
     return (
-        "deferred validation blocker" in lower
-        or "validation blocker" in lower
+        "deferred validation work" in lower
+        or "validation follow-up" in lower
         or "blocked_on_environment" in lower
         or "blocked on environment" in lower
     )
@@ -1743,16 +1814,16 @@ def playwright_validation_issue() -> str:
         "browser navigation failed",
     )
     if any(term in lower for term in failure_terms):
-        return "Playwright navigation failed or was cancelled; record this as validation evidence or a deferred blocker."
+        return "Playwright navigation failed or was cancelled; record this as validation evidence or deferred validation work."
     if role in {"hardener", "integrator"} and frontend_touching():
         usage = mcp_usage_outcome("playwright")
         if usage.get("outcome") == "used" and any(term in lower for term in ("snapshot", "console", "browser", "navigation", "screenshot")):
             return ""
         if "npm run browser-smoke" in lower and any(term in lower for term in ("pass", "passed", "success", "succeeded")):
             return ""
-        if has_deferred_validation_blocker():
+        if has_deferred_validation_work():
             return ""
-        return "Frontend-touching hardener/integrator work requires Playwright snapshot/console validation, `npm run browser-smoke`, or an explicit deferred validation blocker."
+        return "Frontend-touching hardener/integrator work requires Playwright snapshot/console validation, `npm run browser-smoke`, or explicit deferred validation work."
     return ""
 try:
     runtime_actions_payload = json.loads(runtime_state_actions_path.read_text(encoding="utf-8"))

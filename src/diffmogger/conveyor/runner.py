@@ -7,6 +7,7 @@ from diffmogger.runtime.state_store import (
     connect,
     create_repair_nodes_for_failed_validation_conn,
     database_path_for_target,
+    ensure_execution_group_for_dag_node_conn,
     launch_read_only_execution_group_conn,
     launch_write_execution_group_conn,
     mark_worker_patches_integrated_conn,
@@ -221,6 +222,7 @@ def run_scheduler_action(
             with closing(connect(database_path_for_target(target))) as conn:
                 mark_worker_patches_integrated_conn(
                     conn,
+                    target=target,
                     selected_by="dag_scheduler.run_serial_integration",
                     patch_ids=patch_ids or None,
                 )
@@ -228,12 +230,31 @@ def run_scheduler_action(
     with closing(connect(database_path_for_target(target))) as conn:
         if action in {"launch_scope_group", "launch_review_group"}:
             plan_parallel_execution_groups_conn(conn, target, selected_by=f"dag_scheduler.{action}")
-            result = launch_read_only_execution_group_conn(
-                conn,
-                target,
-                execution_group_id=str(candidate.get("execution_group_id") or ""),
-                selected_by=f"dag_scheduler.{action}",
-            )
+            execution_group_id = str(candidate.get("execution_group_id") or "")
+            dag_node_id = str(candidate.get("dag_node_id") or "")
+            if dag_node_id:
+                selected_group = ensure_execution_group_for_dag_node_conn(
+                    conn,
+                    target,
+                    dag_node_id,
+                    selected_by=f"dag_scheduler.{action}",
+                    exact=True,
+                )
+                execution_group_id = str(selected_group.get("execution_group_id") or execution_group_id)
+            if not execution_group_id and dag_node_id:
+                result = {
+                    "status": "skipped",
+                    "reason_kind": "no_selected_read_only_group",
+                    "reason": "No read-only execution group could be prepared for the selected DAG node.",
+                    "dag_node_id": dag_node_id,
+                }
+            else:
+                result = launch_read_only_execution_group_conn(
+                    conn,
+                    target,
+                    execution_group_id=execution_group_id,
+                    selected_by=f"dag_scheduler.{action}",
+                )
             if _action_success(str(result.get("status") or "")) and str(result.get("execution_group_id") or ""):
                 update_execution_group_dag_nodes_conn(
                     conn,

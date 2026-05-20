@@ -12,7 +12,7 @@ Update typed automation control state around one best next milestone, then refre
 
 Require an integrated deliverable each run: code, tests, report, demo command, fixture, screenshot, UX improvement, or verification result.
 
-In file-only human bridge mode, summary/status requests should be satisfied through the dashboard Inbox or an explicitly requested local artifact. In notifier modes, if the human asked to be messaged or sent a status update, writing a local Markdown summary is insufficient; the automation should call `POST http://127.0.0.1:8765/api/notify` when the notifier is available.
+In file-only human bridge mode, summary/status requests should be satisfied through the dashboard human-input panel or an explicitly requested local artifact. In notifier modes, if the human asked to be messaged or sent a status update, writing a local Markdown summary is insufficient; the automation should call `POST http://127.0.0.1:8765/api/notify` when the notifier is available.
 
 ## Automation Keeps Asking The Human
 
@@ -45,9 +45,9 @@ python3 .diffmogger/scripts/diffmogger_browser.py env
 The helper resolves `DIFFMOGGER_BROWSER_PATH`, `CHROME_PATH`, then the managed
 cache at `DIFFMOGGER_BROWSER_CACHE` or `~/.cache/diffmogger/browsers`. Automation
 wrappers export the managed browser path when
-it exists. If repeated browser launches exit before DevTools is ready, record the
-diagnostics as `BLOCKED_ON_ENVIRONMENT`, avoid retrying the same command, and use
-a managed-browser or manual visual-QA path.
+it exists. If repeated browser launches exit before DevTools is ready, record
+diagnostics, create local setup/harness/mock/fixture or deferred-validation work,
+avoid retrying the same command, and use a managed-browser or manual visual-QA path.
 
 ## Broad Runs Skip Workers Without Explanation
 

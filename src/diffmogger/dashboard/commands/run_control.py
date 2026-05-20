@@ -26,6 +26,13 @@ TARGET_OWNED_DESCENDANT_MARKERS = (
     "run_process_watchdog.py",
     "codex exec",
 )
+MCP_PROCESS_MARKERS = (
+    "context7",
+    "@upstash/context7-mcp",
+    "playwright-mcp",
+    "run_playwright_mcp.sh",
+    "mcp-server-playwright",
+)
 
 def prereq_rows(items: list[Any]) -> list[dict[str, Any]]:
     return [
@@ -210,13 +217,17 @@ def target_git_remotes(target: Path) -> str:
     return (result.stdout or result.stderr).strip() if result.returncode == 0 else ""
 
 def task_file_control_state(target: Path) -> tuple[Path, dict[str, Any], str]:
-    """Return typed automation control state; the path is only for compatibility messages."""
+    """Return typed automation control state plus the generated task projection path."""
     control = automation_control_state(target)
     status = str(control.get("status") or "").strip().upper()
     return existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md"), control, status
 
 def startable_statuses(dashboard_app: Any) -> set[str]:
-    statuses = getattr(dashboard_app, "STARTABLE_STATUSES", {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"})
+    statuses = getattr(
+        dashboard_app,
+        "STARTABLE_STATUSES",
+        {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT", "BLOCKED_ON_USER", "BLOCKED_ON_ENVIRONMENT"},
+    )
     return {str(item).upper() for item in statuses}
 
 def automation_ready(target: Path, dashboard_app: Any, *, allow_bootstrap_pending: bool = False) -> tuple[bool, str]:
@@ -232,7 +243,6 @@ def automation_ready(target: Path, dashboard_app: Any, *, allow_bootstrap_pendin
         existing_or_target_path(target, ".agentic/roles/builder.md"),
         existing_or_target_path(target, ".agentic/roles/hardener.md"),
         existing_or_target_path(target, ".agentic/roles/integrator.md"),
-        existing_or_target_path(target, "docs/MULTI_ROLE_PROGRESS.md"),
         target_script_path(target, "scripts/run_role_automation.sh"),
         target_script_path(target, "scripts/integrate_role_outputs.py"),
         target_script_path(target, "scripts/list_deferred_patches.py"),
@@ -245,8 +255,8 @@ def automation_ready(target: Path, dashboard_app: Any, *, allow_bootstrap_pendin
     task_path, control_state, status = task_file_control_state(target)
     if not status:
         return False, "Missing typed automation control status in SQLite."
-    if status not in startable_statuses(dashboard_app):
-        return False, f"Automation status is {status}; start requires ACTIVE or ACTIVE_WITH_PENDING_USER_INPUT."
+    if status == "CRITICAL_STOP":
+        return False, "Automation status is CRITICAL_STOP; start requires a non-critical automation status."
     if ticket_campaign_enabled:
         ticket_state = ticket_run.ticket_source_state(target)
         if not bool(ticket_state.get("actionable")):
@@ -266,8 +276,8 @@ def run_once_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
     task_path, _control_state, status = task_file_control_state(target)
     if not status:
         return False, "Missing typed automation control status in SQLite."
-    if status not in startable_statuses(dashboard_app):
-        return False, f"Automation status is {status}; run-once requires ACTIVE or ACTIVE_WITH_PENDING_USER_INPUT."
+    if status == "CRITICAL_STOP":
+        return False, "Automation status is CRITICAL_STOP; run-once requires a non-critical automation status."
     return True, "Ready."
 
 def automation_log_dir(target: Path) -> Path:
@@ -364,6 +374,31 @@ def process_command_matches_target(target: Path, command: str, markers: tuple[st
 def process_command_is_target_runner(command: str) -> bool:
     return any(marker in command for marker in CONVEYOR_PROCESS_MARKERS)
 
+def process_command_is_mcp(command: str) -> bool:
+    lowered = str(command or "").lower()
+    return any(marker.lower() in lowered for marker in MCP_PROCESS_MARKERS)
+
+def process_command_has_target_owned_path(target: Path, command: str) -> bool:
+    if not command:
+        return False
+    raw_target_text = str(target.expanduser())
+    try:
+        target_text = str(target.expanduser().resolve())
+    except OSError:
+        target_text = raw_target_text
+    target_variants = sorted({raw_target_text, target_text})
+    owned_markers = tuple(
+        marker
+        for base in target_variants
+        for marker in (
+            base,
+            f"{base}/.diffmogger/",
+            f"{base}/target/automation_",
+            f"{base}/target/validation_jobs/",
+        )
+    )
+    return any(marker in command for marker in owned_markers)
+
 def descendant_pids(root_pids: set[int], table: dict[int, dict[str, Any]]) -> set[int]:
     descendants: set[int] = set()
     frontier = set(root_pids)
@@ -377,6 +412,40 @@ def descendant_pids(root_pids: set[int], table: dict[int, dict[str, Any]]) -> se
                 next_frontier.add(pid)
         frontier = next_frontier
     return descendants
+
+def owned_mcp_cleanup_pids(target: Path, live: dict[str, Any], table: dict[int, dict[str, Any]]) -> list[int]:
+    roots = {int(item) for item in live.get("roots") or [] if int(item) > 0}
+    descendants = descendant_pids(roots, table) if roots else set()
+    owned_existing = {int(item) for item in live.get("pids") or [] if int(item) > 0}
+    candidates: set[int] = set()
+    for pid, row in table.items():
+        command = str(row.get("command") or "")
+        if not process_command_is_mcp(command):
+            continue
+        if pid in descendants or pid in owned_existing:
+            candidates.add(pid)
+            continue
+        ppid = int(row.get("ppid") or 0)
+        parent = table.get(ppid)
+        parent_command = str((parent or {}).get("command") or "")
+        parent_codex_alive = parent is not None and "codex" in parent_command.lower()
+        if not parent_codex_alive and process_command_has_target_owned_path(target, command):
+            candidates.add(pid)
+    return sorted(pid for pid in candidates if process_is_alive(pid))
+
+def cleanup_owned_mcp_processes(target: Path, live: dict[str, Any], *, grace_seconds: float = 2.0) -> dict[str, Any]:
+    table = read_process_table()
+    pids = owned_mcp_cleanup_pids(target, live, table)
+    if not pids:
+        return {"pids": [], "terminated": False, "killed": False}
+    signal_pids(pids, signal.SIGTERM)
+    terminated = wait_for_processes_to_exit(pids, grace_seconds)
+    killed = False
+    if not terminated:
+        killed = True
+        signal_pids(pids, signal.SIGKILL)
+        terminated = wait_for_processes_to_exit(pids, 1)
+    return {"pids": pids, "terminated": terminated, "killed": killed}
 
 def live_target_conveyor_processes(target: Path, runner_state: dict[str, Any] | None = None) -> dict[str, Any]:
     target = target.expanduser().resolve()
@@ -650,7 +719,6 @@ def run_controls_snapshot(target: Path, dashboard_app: Any, snapshot: dict[str, 
         "can_stop_automation": bool(automation.get("can_stop")),
         "stop_automation_reason": automation.get("message"),
         "can_run_safety_check": True,
-        "can_export_review": target_metadata(target)["automation_task_exists"],
     }
 
 def run_subprocess_streamed(
@@ -698,48 +766,6 @@ def run_subprocess_streamed(
         "exit_code": exit_code,
         "stdout": "\n".join(lines).strip(),
         "stderr": "",
-    }
-
-def command_run_load(args: argparse.Namespace) -> dict[str, Any]:
-    target = resolve_target(args.target)
-    dashboard_app = load_dashboard_module()
-    snapshot = build_observatory_snapshot(target)
-    strategy = snapshot.get("worker_strategy") if isinstance(snapshot.get("worker_strategy"), dict) else {}
-    automation = automation_status_snapshot(target, dashboard_app)
-    controls = run_controls_snapshot(target, dashboard_app, snapshot)
-    prerequisites = automation_prerequisites(target, dashboard_app)
-    environment_blockers = [
-        row for row in prereq_rows(prerequisites)
-        if row["required"] and not row["ok"]
-    ]
-    environment_blockers.extend(baseline_blocker_rows(snapshot))
-    latest_worker_result = dashboard_app.latest_worker_result(target)
-    return {
-        "target": target_metadata(target),
-        "task": snapshot.get("task") or {},
-        "human": snapshot.get("human") or {},
-        "git": snapshot.get("git") or {},
-        "queue": snapshot.get("queue") or {},
-        "conveyor": snapshot.get("conveyor") or {},
-        "state": snapshot.get("state") or {},
-        "progress": snapshot.get("progress") or {},
-        "scorecard": snapshot.get("scorecard") or {},
-        "first_review": snapshot.get("first_review") or {},
-        "follow_through": snapshot.get("follow_through") or {},
-        "recommendation_history": snapshot.get("recommendation_history") or {},
-        "worker_strategy": snapshot.get("worker_strategy") or {},
-        "review": snapshot.get("review") or {},
-        "baseline_verification": snapshot.get("baseline_verification") or {},
-        "progress_recent": snapshot.get("progress_recent"),
-        "empty_states": snapshot.get("empty_states") or {},
-        "logs": snapshot.get("logs") or [],
-        "controls": controls,
-        "automation": automation,
-        "run_log": latest_run_log(target, dashboard_app),
-        "worker_controls": worker_controls_snapshot(target, dashboard_app, strategy),
-        "latest_worker_result": latest_worker_result,
-        "environment_blockers": environment_blockers,
-        "snapshot_generated_at": snapshot.get("generated_at"),
     }
 
 def runtime_script_for_target(target: Path, legacy_rel: str) -> Path:
@@ -802,14 +828,6 @@ def command_blocker_recheck_baseline(args: argparse.Namespace) -> dict[str, Any]
         "result": result,
         "started_at": started_at,
         "finished_at": finished_at,
-    }
-
-def command_run_load_log(args: argparse.Namespace) -> dict[str, Any]:
-    target = resolve_target(args.target)
-    dashboard_app = load_dashboard_module()
-    return {
-        "target": target_metadata(target),
-        "run_log": latest_run_log(target, dashboard_app, max_lines=500),
     }
 
 def command_run_once(args: argparse.Namespace) -> dict[str, Any]:
@@ -990,6 +1008,8 @@ def command_automation_stop(args: argparse.Namespace) -> dict[str, Any]:
     runner["process_sources"] = list(live.get("sources") or [])
     if stopped:
         cleanup_conveyor_lock_if_owned(target, live)
+    mcp_cleanup = cleanup_owned_mcp_processes(target, live) if stopped else {"pids": [], "terminated": False, "killed": False}
+    runner["mcp_cleanup"] = mcp_cleanup
     write_runner_state(target, runner)
     write_dashboard_action_state(target, last_action="automation_stopped" if stopped else "automation_stop_failed")
     return {
@@ -998,4 +1018,5 @@ def command_automation_stop(args: argparse.Namespace) -> dict[str, Any]:
         "runner": runner,
         "stopped": stopped,
         "forced": forced,
+        "mcp_cleanup": mcp_cleanup,
     }

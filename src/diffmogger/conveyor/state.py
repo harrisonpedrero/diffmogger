@@ -20,7 +20,12 @@ ROLES = ("planner", "builder", "hardener", "integrator")
 
 QUEUE_ROLES = ("planner", "builder", "hardener")
 
-ACTIVE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
+ACTIVE_STATUSES = {
+    "ACTIVE",
+    "ACTIVE_WITH_PENDING_USER_INPUT",
+    "BLOCKED_ON_USER",
+    "BLOCKED_ON_ENVIRONMENT",
+}
 
 DEFAULT_AUTOMATION_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 

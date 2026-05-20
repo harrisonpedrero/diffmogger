@@ -27,57 +27,33 @@ function snapshotWith(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot
       dashboard_state_exists: true,
       automation_task_exists: true,
     },
-    brief: {},
-    run: {
-      automation: { state: "stopped" },
-      controls: { is_running: false },
-      conveyor: {},
-      human: {},
-    },
-    files: [],
-    home: {
-      title: "Project",
-      automation_status: "ACTIVE",
-      current_horizon: "demo",
-      next_action: "Keep going.",
-      pending_human_requests: 0,
-      unhandled_inbox: 0,
-      queued_patches: 0,
-      deferred_patches: 0,
-    },
+    setup: { project_name: "Project", status: "ACTIVE", horizon: "demo", files: [] },
+    scheduler: {},
+    dag: {},
+    tickets: {},
+    human_input: {},
+    validation_repair: {},
+    controls: { automation: { state: "stopped" }, is_running: false },
     ...overrides,
   } as ProjectSnapshot;
 }
 
 describe("App shell", () => {
-  it("renders the preserved sidebar routes in order", () => {
+  it("renders the simplified routes in order", () => {
     const html = renderToStaticMarkup(<App />);
-    const labels = ["Home", "Brief", "Run", "Observatory", "Inbox", "Review", "Advanced"];
+    const labels = ["Setup", "Automation"];
     const positions = labels.map((label) => html.indexOf(`data-sidebar-view="${label}"`));
 
     expect(positions.every((position) => position > -1)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
-    expect(html).toContain('aria-label="Home"');
-    expect(html).toContain('title="Home"');
-    expect(html).toContain('aria-label="Run"');
-    expect(html).toContain('aria-label="Inbox"');
-    expect(html).toContain('aria-label="Sidecar"');
+    expect(html).toContain('aria-label="Setup"');
+    expect(html).toContain('aria-label="Automation"');
+    expect(html).not.toContain('data-sidebar-view="Inbox"');
+    expect(html).not.toContain('data-sidebar-view="Review"');
+    expect(html).not.toContain('data-sidebar-view="Advanced"');
   });
 
-  it("exposes display aliases and legacy aliases on the icon-only rail", () => {
-    const html = renderToStaticMarkup(<App />);
-
-    expect(html).toContain('data-testid="primary-icon-rail"');
-    expect(html).toContain('data-testid="sidebar-nav-Home"');
-    expect(html).toContain('data-aliases="Home Control Room"');
-    expect(html).toContain('data-aliases="Setup Brief"');
-    expect(html).toContain('data-aliases="Activity Observatory"');
-    expect(html).toContain('data-aliases="Inbox Handoffs"');
-    expect(html).toContain('data-aliases="Sidecar Advanced"');
-    expect(html).not.toContain('data-sidebar-view="Settings"');
-  });
-
-  it("adds accessible names, titles, and live region hooks for icon-only shell controls", () => {
+  it("adds accessible names, titles, and live region hooks for shell controls", () => {
     const html = renderToStaticMarkup(<App />);
 
     expect(html).toContain('aria-label="Close"');
@@ -92,37 +68,20 @@ describe("App shell", () => {
   it("renders useful no-target startup state without raw UNKNOWN", () => {
     const html = renderToStaticMarkup(<App />);
 
-    expect(html).toContain("No target");
-    expect(html).toContain("Choose project");
+    expect(html).toContain("No project");
+    expect(html).toContain("Choose folder");
     expect(html).toContain("Backend checks");
     expect(html).not.toContain("UNKNOWN");
   });
 
-  it("renders page-specific placeholders when target-required pages are selected without a project", () => {
-    const html = renderToStaticMarkup(<App initialView="Run" />);
+  it("renders the Automation placeholder when no project is selected", () => {
+    const html = renderToStaticMarkup(<App initialView="Automation" />);
 
-    expect(html).toContain("Select a project to run jobs");
-    expect(html).toContain("Choose project");
+    expect(html).toContain("Choose Project");
+    expect(html).toContain("scheduler state");
     expect(html).toContain("Open setup");
-    expect(html).not.toContain("Choose a project to begin");
-    expect(viewRequiresTarget("Run")).toBe(true);
-    expect(viewRequiresTarget("Brief")).toBe(false);
-  });
-
-  it("renders nonblank targetless placeholders for every target-required surface", () => {
-    const expectations = [
-      ["Run", "Select a project to run jobs"],
-      ["Observatory", "Select a project to view activity"],
-      ["Inbox", "Select a project to open Inbox"],
-      ["Review", "Select a project to review a run"],
-      ["Advanced", "Select a project to inspect Sidecar"],
-    ] as const;
-
-    for (const [view, copy] of expectations) {
-      const html = renderToStaticMarkup(<App initialView={view} />);
-      expect(html).toContain(copy);
-      expect(html).toContain("Choose project");
-    }
+    expect(viewRequiresTarget("Automation")).toBe(true);
+    expect(viewRequiresTarget("Setup")).toBe(false);
   });
 
   it("exposes project switch and close actions from the project chip menu", () => {
@@ -137,35 +96,23 @@ describe("App shell", () => {
     expect(autoRefreshIntervalMs(null)).toBe(AUTO_REFRESH_IDLE_INTERVAL_MS);
     expect(autoRefreshIntervalMs(snapshotWith())).toBe(AUTO_REFRESH_IDLE_INTERVAL_MS);
     expect(autoRefreshIntervalMs(snapshotWith({
-      run: {
+      controls: {
         automation: { state: "running" },
-        controls: { is_running: false },
-        conveyor: {},
-        human: {},
+        is_running: false,
       },
     }))).toBe(AUTO_REFRESH_ACTIVE_INTERVAL_MS);
     expect(autoRefreshIntervalMs(snapshotWith({
-      home: {
-        title: "Project",
-        automation_status: "ACTIVE_WITH_PENDING_USER_INPUT",
-        current_horizon: "demo",
-        next_action: "Answer a question.",
-        pending_human_requests: 1,
-        unhandled_inbox: 0,
-        queued_patches: 0,
-        deferred_patches: 0,
-      },
+      setup: { status: "ACTIVE_WITH_PENDING_USER_INPUT" },
+      human_input: { pending_requests: 1 },
     }))).toBe(AUTO_REFRESH_ACTIVE_INTERVAL_MS);
   });
 
   it("waits past the refresh cadence before calling a snapshot overdue", () => {
     expect(autoRefreshOverdueMs(snapshotWith())).toBe(AUTO_REFRESH_IDLE_INTERVAL_MS * 2);
     expect(autoRefreshOverdueMs(snapshotWith({
-      run: {
+      controls: {
         automation: { state: "running" },
-        controls: { is_running: false },
-        conveyor: {},
-        human: {},
+        is_running: false,
       },
     }))).toBe(AUTO_REFRESH_MIN_OVERDUE_MS);
 
@@ -224,8 +171,8 @@ describe("App shell", () => {
   });
 
   it("guards quiet auto-refresh while the dashboard is already busy or locally dirty", () => {
-    expect(hasDirtyRouteState({ Brief: "Unsaved setup changes." })).toBe(true);
-    expect(hasBusyRouteState({ Run: true })).toBe(true);
+    expect(hasDirtyRouteState({ Setup: "Unsaved setup changes." })).toBe(true);
+    expect(hasBusyRouteState({ Automation: true })).toBe(true);
     expect(canAutoRefreshProject({
       hasSelectedTarget: true,
       loadState: "loaded",

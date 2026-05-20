@@ -29,8 +29,10 @@ open src-tauri/target/release/bundle/macos/Diffmogger.app
 
 The Rust layer exposes native folder selection, recent target storage, safe open/reveal helpers, and an allowlisted subprocess wrapper around `scripts/dashboard_backend_cli.py`.
 
-The Advanced page includes a **Canonical state** tab backed by `state.snapshot`. It reads `.diffmogger/runtime/orchestration.sqlite3` through the backend and shows event/checkpoint counts, next actions, database health, and recent event hashes. The backend also exposes `state.brief`, which regenerates `.diffmogger/runtime/canonical_state_brief.md` for agents. JSON and Markdown files are projections or authoring surfaces, not live runtime authority.
+The app has two screens: **Setup** and **Automation**. Setup chooses/configures a target. Automation shows scheduler next action, tickets/actions, generated unblocker work, human input records, and Start/Stop/Safety commands. There is no separate Home, Activity, Review, Inbox, or Advanced page.
 
-Ticket-campaign setup and operations use the Ticket Queue panels in the Brief wizard and Run page. They call structured backend commands backed by SQLite, support Markdown/CSV/JSON import preview/apply, and keep Codex draft candidates review-only until accepted.
+Canonical state is backed by `state.snapshot` and `.diffmogger/runtime/orchestration.sqlite3`. The backend also exposes `state.brief`, which regenerates `.diffmogger/runtime/canonical_state_brief.md` for agents. JSON and Markdown files are projections or authoring surfaces, not live runtime authority.
+
+Ticket-campaign setup and operations use the Ticket Queue panels in Setup and Automation. They call structured backend commands backed by SQLite, support Markdown/CSV/JSON import preview/apply, and keep Codex draft candidates pending until accepted.
 
 The app is source-checkout-backed. Use `DIFFMOGGER_KIT_ROOT=/path/to/Diffmogger` to point the backend at another checkout.

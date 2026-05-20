@@ -135,7 +135,7 @@ Validation fanout classifies commands before launch. Unit tests, lint, typecheck
 
 ## Read-Only Fanout
 
-Diffmogger can launch read-only workers from proposed execution groups. The launcher consumes a read-only dry-run group, checks the typed budget, creates `worker_agents` and `worker_contracts` rows, and writes each worker report under the sidecar-aware `target/agent_runs/<run_id>/` runtime path.
+Diffmogger can launch read-only workers from proposed execution groups. The launcher consumes a read-only dry-run group, checks the typed budget, creates `worker_agents` and `worker_contracts` rows, and writes each worker report under `.diffmogger/runtime/agent_runs/<run_id>/`.
 
 When a ready ticket is too weakly scoped for parallel write work, the scheduler prefers a bounded read-only scope evidence group before serial builder fallback. These workers collect ownership evidence, likely paths, likely symbols, validation hints, and risk notes. The evidence contract lives in typed SQLite execution-group and worker-contract payloads; worker Markdown reports are review artifacts, not canonical state.
 
@@ -158,7 +158,7 @@ Each write worker produces:
 - a typed `worker_agents` row
 - a `worker_contracts` row with ownership scope, allowed paths, denied paths/actions, expected patch output, and verification expectations
 - a `worker_patches` row linked to the worker, leases, base commit, changed files, validation evidence, and any conflict signature
-- a normal integrator queue manifest under `target/automation_queue/builder/<run_id>/`
+- a normal integrator queue manifest under `.diffmogger/runtime/automation_queue/builder/<run_id>/`
 
 The serialized integrator remains the only path that applies patches to the main checkout. Parallel worker patches are visible in `state.snapshot` as queued worker patches, write-worker conflicts, lease conflict summary, and the integration backlog from parallel workers.
 
@@ -203,7 +203,7 @@ Multi-role automation is a project-level role mode, not the same thing as write-
 }
 ```
 
-In multi-role mode, planner, builder, and hardener run in isolated git worktrees and queue patches. The integrator owns the main checkout, applies patches FIFO, verifies, creates local commits, updates typed SQLite state and role manifests, refreshes `.diffmogger/state/MULTI_ROLE_PROGRESS.md` as a generated projection, and manages retention.
+In multi-role mode, planner, builder, and hardener run in isolated git worktrees and queue patches. The integrator owns the main checkout, applies patches FIFO, verifies, creates local commits, updates typed SQLite state and role manifests, refreshes the canonical state brief plus `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`, and manages retention.
 
 The worker-agent rules still matter inside each role: read-only worker reports remain the default for exploration, write workers remain optional, and no role may create unbounded recursive agents. Overlapping write ownership still requires an explicit coordination protocol.
 

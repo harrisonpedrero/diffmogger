@@ -37,7 +37,7 @@ from diffmogger.runtime.state_store import (
 
 def _budget_check_or_raise(target: Path, check_kind: str) -> dict[str, Any]:
     with closing(connect(database_path_for_target(target))) as conn:
-        ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
+        ensure_automation_control_conn(conn, target)
         if check_kind == "read_only":
             check = can_start_worker(conn, "read_only", owner_role="dashboard")
         elif check_kind == "write":
@@ -164,7 +164,7 @@ def command_worker_run_integrator(args: argparse.Namespace) -> dict[str, Any]:
 def command_worker_launch_read_only_group(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     with closing(connect(database_path_for_target(target))) as conn:
-        ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
+        ensure_automation_control_conn(conn, target)
         plan_parallel_execution_groups_conn(conn, target, selected_by="dashboard.worker_fanout")
         result = launch_read_only_execution_group_conn(
             conn,
@@ -187,7 +187,7 @@ def command_worker_launch_read_only_group(args: argparse.Namespace) -> dict[str,
 def command_worker_launch_write_group(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     with closing(connect(database_path_for_target(target))) as conn:
-        ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
+        ensure_automation_control_conn(conn, target)
         plan_parallel_execution_groups_conn(conn, target, selected_by="dashboard.write_worker_fanout")
         result = launch_write_execution_group_conn(
             conn,
@@ -376,7 +376,7 @@ def command_execution_group_load(args: argparse.Namespace) -> dict[str, Any]:
 def command_validation_jobs_load(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     with closing(connect(database_path_for_target(target))) as conn:
-        ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
+        ensure_automation_control_conn(conn, target)
         return {
             "target": target_metadata(target),
             "validation_jobs": validation_job_read_model_conn(conn),
@@ -390,7 +390,7 @@ def command_execution_group_start(args: argparse.Namespace) -> dict[str, Any]:
     mode = str(getattr(args, "mode", "") or "auto").strip().lower()
     max_workers = int(getattr(args, "max_workers", 0) or 0)
     with closing(connect(database_path_for_target(target))) as conn:
-        ensure_automation_control_conn(conn, target, import_legacy_if_empty=True)
+        ensure_automation_control_conn(conn, target)
         if mode == "validation" or (mode == "auto" and not group_id):
             result = run_parallel_validation_conn(conn, target, selected_by="dashboard.validation")
         else:

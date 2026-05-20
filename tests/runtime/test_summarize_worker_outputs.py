@@ -34,6 +34,22 @@ def load_summarizer(path: Path):
     return module
 
 
+def write_sidecar_manifest(target: Path) -> Path:
+    manifest = target / ".diffmogger" / "manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "layout": "sidecar_v1",
+                "path_aliases": {"target/agent_runs": ".diffmogger/runtime/agent_runs"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return target / ".diffmogger" / "runtime" / "agent_runs"
+
+
 class WorkerSummarizerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -50,7 +66,7 @@ class WorkerSummarizerTests(unittest.TestCase):
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
                     target = Path(tmp)
-                    run_dir = target / "target" / "agent_runs" / "run-001"
+                    run_dir = write_sidecar_manifest(target) / "run-001"
                     run_dir.mkdir(parents=True)
                     (run_dir / "worker_review.md").write_text(
                         textwrap.dedent(
@@ -85,42 +101,30 @@ class WorkerSummarizerTests(unittest.TestCase):
                     self.assertLess(findings_index, risks_index)
                     self.assertLess(risks_index, recommendations_index)
 
-    def test_build_summary_ignores_legacy_worker_summary_report(self) -> None:
+    def test_build_summary_ignores_stale_worker_summary_report(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
                     target = Path(tmp)
-                    run_dir = target / "target" / "agent_runs" / "run-legacy"
+                    run_dir = write_sidecar_manifest(target) / "run-001"
                     run_dir.mkdir(parents=True)
                     (run_dir / "worker_summary.md").write_text(
                         "- status: STALE\n\n## Findings\n\n- Old summary file.\n",
                         encoding="utf-8",
                     )
 
-                    _, summary = module.build_summary(target, "run-legacy")
+                    _, summary = module.build_summary(target, "run-001")
 
                     self.assertIn("- worker_reports: 0", summary)
                     self.assertIn("No worker reports were found for this run.", summary)
                     self.assertNotIn("Old summary file.", summary)
 
-    def test_build_summary_prefers_sidecar_run_dir_and_falls_back_to_legacy(self) -> None:
+    def test_build_summary_uses_sidecar_run_dir(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
                     target = Path(tmp)
-                    manifest = target / ".diffmogger" / "manifest.json"
-                    manifest.parent.mkdir(parents=True, exist_ok=True)
-                    manifest.write_text(
-                        json.dumps(
-                            {
-                                "schema_version": 1,
-                                "layout": "sidecar_v1",
-                                "path_aliases": {"target/agent_runs": ".diffmogger/runtime/agent_runs"},
-                            }
-                        ),
-                        encoding="utf-8",
-                    )
-                    sidecar_run = target / ".diffmogger" / "runtime" / "agent_runs" / "run-sidecar"
+                    sidecar_run = write_sidecar_manifest(target) / "run-sidecar"
                     sidecar_run.mkdir(parents=True)
                     (sidecar_run / "worker_planner-ticket.md").write_text(
                         "- status: PASS\n\n## Findings\n\n- Sidecar report.\n",
@@ -130,17 +134,6 @@ class WorkerSummarizerTests(unittest.TestCase):
 
                     self.assertEqual(sidecar_run / "summary.md", output_path)
                     self.assertIn("Sidecar report.", summary)
-
-                    legacy_run = target / "target" / "agent_runs" / "run-legacy-only"
-                    legacy_run.mkdir(parents=True)
-                    (legacy_run / "worker_planner_ticket.md").write_text(
-                        "- status: PASS\n\n## Findings\n\n- Legacy report.\n",
-                        encoding="utf-8",
-                    )
-                    legacy_output, legacy_summary = module.build_summary(target, "run-legacy-only")
-
-                    self.assertEqual(legacy_run / "summary.md", legacy_output)
-                    self.assertIn("Legacy report.", legacy_summary)
 
 
 if __name__ == "__main__":

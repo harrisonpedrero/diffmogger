@@ -10,7 +10,10 @@ from diffmogger.runtime.state_store import automation_control_state
 
 def automation_status(target: Path) -> str:
     control = automation_control_state(target)
-    return str(control.get("status") or "UNKNOWN").strip().upper()
+    status = str(control.get("status") or "").strip().upper()
+    if status == "CRITICAL_STOP" or status in ACTIVE_STATUSES:
+        return status
+    return "ACTIVE"
 
 def verification_config_hash(target: Path) -> str:
     path = dpath(target, ".agentic/verification_commands.txt")

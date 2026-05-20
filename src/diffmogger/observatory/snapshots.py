@@ -9,9 +9,6 @@ from .scoring import action_plan_follow_through, recommendation_history_snapshot
 from .self_review import first_review_snapshot, integration_safety_snapshot, self_review_snapshot, validation_snapshot
 from diffmogger.runtime import ticket_run
 from diffmogger.runtime.state_store import (
-    conveyor_projection_path_for_target,
-    database_path_for_target,
-    load_conveyor_state,
     load_runner_state,
     runner_projection_path_for_target,
     state_snapshot,
@@ -273,16 +270,7 @@ def task_state_from_canonical(target: Path, canonical_state: dict[str, Any]) -> 
 def build_snapshot(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     generated_at = utc_now()
-    legacy_activity_raw: dict[str, Any] = {}
-    legacy_activity_state: dict[str, Any] = {}
-    legacy_activity_path = conveyor_projection_path_for_target(target)
-    if legacy_activity_path.exists():
-        legacy_activity_raw = read_json(legacy_activity_path)
-    if legacy_activity_path.exists() and not database_path_for_target(target).exists():
-        legacy_activity_state = load_conveyor_state(legacy_activity_path)
     canonical_state = state_snapshot(target)
-    if not legacy_activity_state and legacy_activity_path.exists():
-        legacy_activity_state = load_conveyor_state(legacy_activity_path)
     public_state = observatory_safe_state(target, canonical_state)
     activity = canonical_state.get("automation_activity") if isinstance(canonical_state.get("automation_activity"), dict) else {}
     activity_focus = activity.get("active_focus") if isinstance(activity.get("active_focus"), dict) else {}
@@ -306,11 +294,6 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "unhandled_inbox": int(human_counts.get("queued_notes") or 0) + int(human_counts.get("failed_notes") or 0),
         "outbound_records": int(human_counts.get("outbound_records") or 0),
     }
-    legacy_decision_queue = (
-        legacy_activity_state.get("decision_queue")
-        if isinstance(legacy_activity_state.get("decision_queue"), list)
-        else []
-    )
     selected_role = clean_text(selected_candidate.get("role") or "", limit=40)
     selected_reason = clean_text(
         "; ".join(str(item) for item in (selected_candidate.get("reasons") if isinstance(selected_candidate.get("reasons"), list) else [])[:2])
@@ -318,47 +301,22 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         or "",
         limit=220,
     )
-    legacy_no_progress = (
-        legacy_activity_state.get("no_progress")
-        if isinstance(legacy_activity_state.get("no_progress"), dict)
-        else legacy_activity_state.get("integrator_no_progress")
-        if isinstance(legacy_activity_state.get("integrator_no_progress"), dict)
-        else legacy_activity_raw.get("no_progress")
-        if isinstance(legacy_activity_raw.get("no_progress"), dict)
-        else legacy_activity_raw.get("integrator_no_progress")
-        if isinstance(legacy_activity_raw.get("integrator_no_progress"), dict)
-        else {}
-    )
-    legacy_history = (
-        legacy_activity_state.get("history")
-        if isinstance(legacy_activity_state.get("history"), list)
-        else legacy_activity_raw.get("history")
-        if isinstance(legacy_activity_raw.get("history"), list)
-        else []
-    )
+    activity_events = activity.get("events") if isinstance(activity.get("events"), list) else []
     conveyor_state = {
-        "cycles": int(legacy_activity_state.get("cycles") or 0),
+        "cycles": int(canonical_state.get("counts", {}).get("events") or 0) if isinstance(canonical_state.get("counts"), dict) else 0,
         "updated_at": clean_text(
-            legacy_activity_state.get("updated_at")
-            or (
-                canonical_state.get("last_event", {}).get("occurred_at")
-                if isinstance(canonical_state.get("last_event"), dict)
-                else "never"
-            ),
+            canonical_state.get("last_event", {}).get("occurred_at")
+            if isinstance(canonical_state.get("last_event"), dict)
+            else "never",
             limit=80,
         ),
-        "last_decision": selected_candidate or legacy_activity_state.get("last_decision") or {},
-        "active_role_run": active_runner or legacy_activity_state.get("active_role_run") or {},
-        "last_active_role_run": legacy_activity_state.get("last_active_role_run") or {},
-        "decision_queue": legacy_decision_queue
-        or ([{"role": selected_role, "state": "next", "reason": selected_reason}] if selected_role else []),
-        "health": activity.get("health") if isinstance(activity.get("health"), dict) else conveyor_health(legacy_activity_state),
-        "no_progress": legacy_no_progress,
-        "history": legacy_history
-        if legacy_history
-        else activity.get("events")
-        if isinstance(activity.get("events"), list)
-        else [],
+        "last_decision": selected_candidate,
+        "active_role_run": active_runner,
+        "last_active_role_run": {},
+        "decision_queue": [{"role": selected_role, "state": "next", "reason": selected_reason}] if selected_role else [],
+        "health": activity.get("health") if isinstance(activity.get("health"), dict) else conveyor_health({}),
+        "no_progress": {},
+        "history": activity_events,
     }
     conveyor_state["decision_queue"] = decision_queue(conveyor_state, queue)
     first_review = first_review_snapshot(target, task)

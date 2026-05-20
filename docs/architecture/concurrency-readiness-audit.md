@@ -9,7 +9,7 @@ Authority rule: SQLite runtime state is the control plane. Markdown, briefs, wor
 ## Current Concurrency Flow
 
 1. `choose_next_graph_aware` refreshes the runtime view before each decision: capability manifest, codebase graph, automation control, execution DAG, task graph, impact graph, leases, parallel dry-run groups, queued worker patches, integration preflight, and failed validation jobs.
-2. `plan_parallel_execution_groups_conn` derives ready candidates from execution DAG nodes when available, falling back to compatibility task graph inputs only when the DAG is not populated.
+2. `plan_parallel_execution_groups_conn` derives ready candidates from execution DAG nodes; no task-graph compatibility planner runs when the DAG is absent.
 3. Impact scoring separates trusted write evidence from advisory context. Direct path mentions, exact fresh symbol owners, and accepted normalized scope evidence can produce `likely_touches`; keyword matches, import adjacency, stale symbols, and ambiguous ownership stay advisory.
 4. Read-only scope and review groups can fan out without write leases. They produce structured scope evidence, validation hints, risk notes, likely paths, and likely symbols for later normalization.
 5. Write groups remain opt-in and conservative. Candidates need confident `likely_touches` plus compatible lease shapes. Overlap by file, directory, symbol/module/package-style ownership, or active lease blocks same-wave writes.
@@ -30,14 +30,13 @@ Authority rule: SQLite runtime state is the control plane. Markdown, briefs, wor
 | `budget_blocked` | Read-only, write-worker, validation, or global worker budget is exhausted. | Raise budget deliberately or wait for active jobs to finish. |
 | validation backpressure | Failed validation jobs require repair nodes or validation DAG dependencies are pending. | Create targeted repair nodes and rerun only the needed gates. |
 | integration preflight block | Patch metadata is missing, base commit is stale, patches overlap, or integration DAG nodes are not ready. | Reconcile metadata, refresh/rebase patch context, or serialize conflict resolution. |
-| compatibility fallback | Scheduler has no useful DAG-ready node and falls back to legacy task compatibility. | Materialize precise DAG nodes with action capabilities and dependencies. |
 
 ## Missing Evidence Loops
 
-- Stale symbol handling mostly appears as a blocking reason or warning. It should produce a small index-refresh or scope-repair action for only the affected files before serial fallback.
+- Stale symbol handling mostly appears as a blocking reason or warning. It should produce a small index-refresh or scope-repair action for only the affected files before serialized role work.
 - The scope evidence loop normalizes worker reports and can promote accepted evidence, but operators need clearer telemetry for accepted, advisory, and rejected evidence by DAG node and reason.
 - "Why Not Parallel?" aggregates blocked reasons, but the next improvement is still mostly reason-level. The next step should be candidate-level evidence hints, such as exact paths to confirm, stale symbols to refresh, or leases to split.
-- Validation job receipts record command classification and outcomes, but repeated validation failures do not yet strongly feed back into scoping confidence, repair-node priority, or write readiness.
+- Validation job receipts record command classification, automation disposition, recommended DAG actions, and outcomes so repeated failures feed back into repair-node priority, planner reframe/split/defer work, and write-readiness backpressure.
 - Integration preflight is typed and visible, but the serialized integrator should keep proving it only acts on the safe preflight subset selected for that run.
 - Lease grouping is richer, but confidence thresholds for docs-only, tests-only, module, symbol, directory, and package ownership need a compact fixture suite to prevent accidental broadening.
 - Dashboard observability is good for current state; it can be better at showing "next unlock" rows per blocked candidate and per budget.
@@ -82,13 +81,13 @@ Acceptance: independent docs, tests, and module writes can group; overlapping so
 
 ### CONC-AUDIT-007: Distinguish solo-safe from blocked-parallel
 
-Separate "only one safe candidate is ready" from unsafe serial fallback reasons in the read model.
+Separate "only one safe candidate is ready" from unsafe serialized-path reasons in the read model.
 
 Acceptance: a single safe candidate reports low parallel opportunity, not a blocked parallel failure.
 
 ### CONC-AUDIT-008: Add sidecar worker launcher contract matrix
 
-Keep regression coverage for explicit report paths, legacy reported paths, role slug normalization, raw logs, and sidecar-aware canonical run directories.
+Keep regression coverage for explicit report paths, role slug normalization, raw logs, and sidecar-aware canonical run directories.
 
 Acceptance: read-only and write worker launchers record a real reported path instead of creating synthetic failure reports when the helper succeeds.
 
@@ -98,18 +97,18 @@ Record when target-local setup caches or reusable virtual environments are detec
 
 Acceptance: validation snapshots show cache hit, cache miss, and unsafe-cache reasons without reinstalling tooling unnecessarily.
 
-### CONC-AUDIT-010: Warn on unexpected compatibility scheduling
+### CONC-AUDIT-010: Warn on missing DAG materialization
 
-Emit a typed warning when the scheduler falls back to task-graph compatibility after execution DAG materialization should have produced ready nodes.
+Emit a typed warning when execution DAG materialization should have produced ready nodes but did not.
 
-Acceptance: fallback is visible in snapshots and briefs with the missing DAG capability or dependency reason.
+Acceptance: snapshots and briefs show the missing DAG capability or dependency reason and the planner/setup work that should create runnable nodes.
 
 ## Suggested Validation Strategy
 
 - Unit-test impact scoring with path mention, exact fresh symbol, stale symbol, ambiguous symbol, keyword-only, accepted scope evidence, and rejected scope evidence fixtures.
 - Unit-test lease overlap for file, directory, docs-only, tests-only, symbol, module, and package lease shapes.
-- Integration-test scheduler order: validation repair, safe serial integration, worker reconciliation, parallel groups, ready single action, then serial fallback.
-- Test read-only scope fanout as the preferred path before serial fallback when write confidence is missing or insufficient.
+- Integration-test scheduler order: validation repair, safe serial integration, worker reconciliation, parallel groups, ready single action, then serialized role work.
+- Test read-only scope fanout as the preferred path before serialized role work when write confidence is missing or insufficient.
 - Test validation planning with parallel-safe commands, exclusive commands, resource-heavy commands, and validation receipt recording.
 - Test integration preflight for independent patches, overlapping patches, stale bases, missing metadata, and validation-pending patches.
 - Snapshot-test runtime briefs and dashboard state for proposed groups, blocked candidates, why-not-parallel groups, validation jobs, and integration preflight.

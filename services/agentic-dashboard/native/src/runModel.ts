@@ -1,7 +1,7 @@
 import type { ProjectSnapshot } from "./api/backend";
 
 export type RunActionKind = "choose-project" | "navigate" | "backend" | "disabled";
-export type RunRoute = "Brief" | "Review" | "Advanced" | "Run" | "Inbox";
+export type RunRoute = "Setup" | "Automation";
 export type RunTone = "good" | "warn" | "critical" | "info" | "quiet";
 
 export type RunAction = {
@@ -148,7 +148,6 @@ export type RunProgressColumnId = "scope" | "build" | "review" | "validate" | "i
 export type RunProgressRow = {
   taskId: string;
   label: string;
-  compatibility: boolean;
   cells: Record<RunProgressColumnId, RunProgressCell | null>;
   summary: string;
 };
@@ -220,7 +219,6 @@ export type RunModel = {
     startAutomation: RunAction;
     stopAutomation: RunAction;
     safetyCheck: RunAction;
-    exportReview: RunAction;
   };
   automation: {
     state: string;
@@ -337,6 +335,50 @@ function number(value: unknown): number {
   return 0;
 }
 
+function schedulerState(snapshot: ProjectSnapshot | null): Record<string, unknown> {
+  if (!snapshot) return {};
+  return {
+    selected_candidate: snapshot.scheduler.selected_action,
+    selected_scheduler_candidate: snapshot.scheduler.selected_action,
+    next_actions: snapshot.scheduler.next_actions,
+    why_not_parallel: snapshot.scheduler.why_not_parallel,
+    scheduler_parallel_dry_run: snapshot.scheduler.scheduler_parallel_dry_run,
+    blocked_parallel_candidates: snapshot.scheduler.blocked_candidates,
+    skipped_scheduler_candidates: snapshot.scheduler.skipped_candidates,
+    skipped_candidates: snapshot.scheduler.skipped_candidates,
+    active_role_run: snapshot.scheduler.active_role_run,
+  };
+}
+
+function dagState(snapshot: ProjectSnapshot | null): Record<string, unknown> {
+  if (!snapshot) return {};
+  return {
+    execution_dag: snapshot.dag.execution_dag,
+    proposed_execution_groups: snapshot.dag.proposed_execution_groups,
+    active_execution_groups: snapshot.dag.active_execution_groups,
+    recent_execution_groups: snapshot.dag.recent_execution_groups,
+    recently_completed_execution_groups: snapshot.dag.recently_completed_execution_groups,
+    active_read_only_workers: snapshot.dag.active_read_only_workers,
+    active_write_workers: snapshot.dag.active_write_workers,
+    completed_worker_reports: snapshot.dag.completed_worker_reports,
+    queued_worker_patches: snapshot.dag.queued_worker_patches,
+    write_worker_conflicts: snapshot.dag.write_worker_conflicts,
+    integration_backlog_from_parallel_workers: snapshot.dag.integration_backlog_from_parallel_workers,
+    worker_patch_integration_preflight: snapshot.dag.worker_patch_integration_preflight,
+    recent_outcomes: snapshot.dag.recent_outcomes,
+    active_validation_jobs: snapshot.validation_repair.active_validation_jobs,
+    validation_receipts: snapshot.validation_repair.validation_receipts,
+    validation_job_summary: snapshot.validation_repair.validation_job_summary,
+    open_blockers: snapshot.validation_repair.open_blockers,
+    ticket_run: {
+      counts: snapshot.tickets.counts,
+      tickets: snapshot.tickets.items,
+      remaining: snapshot.tickets.remaining,
+    },
+    ...schedulerState(snapshot),
+  };
+}
+
 function makeAction(
   label: string,
   enabled: boolean,
@@ -358,7 +400,7 @@ function routeAction(label: string, route: RunRoute, reason: string): RunAction 
 
 function isScaffolded(snapshot: ProjectSnapshot | null): boolean {
   if (!snapshot) return false;
-  const controls = record(snapshot.run.controls);
+  const controls = record(snapshot.controls);
   return Boolean(controls.is_scaffolded || snapshot.target.automation_task_exists);
 }
 
@@ -372,7 +414,7 @@ function statusTone(status: string, blockers: unknown[]): RunTone {
 
 function bannerTone(title: string, status: string, blockers: unknown[]): RunTone {
   if (title === "Critical stop") return "critical";
-  if (title === "Env blocked" || title === "User input" || title === "Stale") return "warn";
+  if (title === "Stale") return "warn";
   if (title === "Running") return "info";
   if (title === "No target" || title === "Unknown") return "quiet";
   return statusTone(status, blockers);
@@ -387,18 +429,11 @@ function safetyTone(value: unknown): RunTone {
   return "quiet";
 }
 
-function stateTitle(snapshot: ProjectSnapshot | null, scaffolded: boolean, running: boolean, blockers: unknown[], status: string): string {
+function stateTitle(snapshot: ProjectSnapshot | null, scaffolded: boolean, running: boolean, _blockers: unknown[], status: string): string {
   if (!snapshot) return "No target";
   const upper = status.toUpperCase();
-  const human = record(snapshot.run.human);
-  const pendingHuman = number(human.pending_requests) + number(human.unhandled_inbox);
-  const validation = record(record(snapshot.run.task).validation);
-  const validationCounts = record(validation.counts);
-  const integrationSafety = record(record(snapshot.run.task).integration_safety);
   if (upper.includes("STALE")) return "Stale";
   if (upper === "CRITICAL_STOP") return "Critical stop";
-  if (upper === "BLOCKED_ON_USER" || upper === "ACTIVE_WITH_PENDING_USER_INPUT" || pendingHuman > 0) return "User input";
-  if (upper === "BLOCKED_ON_ENVIRONMENT" || blockers.length > 0 || number(validationCounts.fail) > 0 || text(integrationSafety.status, "").toLowerCase() === "fail") return "Env blocked";
   if (running) return "Running";
   if (!scaffolded || upper === "UNKNOWN") return "Unknown";
   if (upper === "STOPPED") return "Stopped";
@@ -451,7 +486,7 @@ function workerRole(strategy: Record<string, unknown>): string {
 }
 
 function runLog(snapshot: ProjectSnapshot | null): RunModel["runLog"] {
-  const raw = record(snapshot?.run.run_log);
+  const raw = record(snapshot?.controls.run_log);
   const lines = list(raw.lines)
     .map(record)
     .map((line) => ({
@@ -502,13 +537,8 @@ const DAG_ACTION_ALIASES: Record<string, string> = {
 const DAG_STATUS_ORDER: RunDagStatusKind[] = ["running", "ready", "blocked", "failed", "pending", "completed", "skipped"];
 
 function executionDagSnapshot(snapshot: ProjectSnapshot | null): Record<string, unknown> {
-  const state = record(snapshot?.run.state);
-  const activity = record(state.automation_activity);
-  if (Array.isArray(activity.nodes)) return activity;
-  const dag = record(state.execution_dag);
+  const dag = record(snapshot?.dag.execution_dag);
   if (Object.keys(dag).length) return dag;
-  const progress = record(state.progress_model);
-  if (text(progress.projection, "") === "execution_dag" || Array.isArray(progress.nodes)) return progress;
   return {};
 }
 
@@ -645,7 +675,7 @@ function groupItemNodeIds(group: Record<string, unknown>, nodes: RunDagNode[]): 
 }
 
 function dagGroups(snapshot: ProjectSnapshot | null, nodes: RunDagNode[]): RunDagGroup[] {
-  const state = record(snapshot?.run.state);
+  const state = dagState(snapshot);
   const proposed = list(state.proposed_execution_groups).map(record);
   const groups: RunDagGroup[] = proposed
     .map((group, index) => {
@@ -1006,7 +1036,7 @@ function executionDagModel(snapshot: ProjectSnapshot | null): RunModel["executio
   };
 }
 
-const COMPATIBILITY_TASK_IDS = new Set(["task:automation", "task:conveyor"]);
+const SYSTEM_TASK_IDS = new Set(["task:automation", "task:conveyor"]);
 const PROGRESS_COLUMNS: RunProgressColumnId[] = ["scope", "build", "review", "validate", "integrate", "done"];
 const PROGRESS_STATUS_PRIORITY: RunDagStatusKind[] = ["failed", "blocked", "running", "ready", "pending", "completed", "skipped"];
 
@@ -1023,7 +1053,7 @@ function operationTone(status: unknown): RunTone {
     "queued",
     "proposed",
     "in_progress",
-    "serial_fallback",
+    "serialized_role_path",
     "awaiting_integrator_reconciliation",
     "awaiting_integrator_review",
     "waiting_validation",
@@ -1083,15 +1113,11 @@ function operationItemFromCandidate(candidate: Record<string, unknown>, fallback
 }
 
 function activeRoleRun(snapshot: ProjectSnapshot | null): Record<string, unknown> {
-  const state = record(snapshot?.run.state);
-  const conveyor = record(snapshot?.run.conveyor);
-  const activity = record(state.automation_activity);
-  const focus = record(activity.active_focus);
-  return record(conveyor.active_role_run || state.active_role_run || focus.runner);
+  return record(snapshot?.scheduler.active_role_run);
 }
 
 function runningNowModel(snapshot: ProjectSnapshot | null, dag: RunModel["executionDag"]): RunOperationItem[] {
-  const state = record(snapshot?.run.state);
+  const state = dagState(snapshot);
   const items: RunOperationItem[] = [];
   const seen = new Set<string>();
   const add = (item: RunOperationItem) => {
@@ -1200,7 +1226,7 @@ function runningNowModel(snapshot: ProjectSnapshot | null, dag: RunModel["execut
 }
 
 function nextUnlockModel(snapshot: ProjectSnapshot | null, dag: RunModel["executionDag"]): RunOperationCallout {
-  const state = record(snapshot?.run.state);
+  const state = schedulerState(snapshot);
   const selected = record(state.selected_candidate);
   if (Object.keys(selected).length) {
     return {
@@ -1298,11 +1324,10 @@ function progressRowsModel(dag: RunModel["executionDag"]): RunProgressRow[] {
     const taskId = node.ticketId || node.id;
     if (!taskId) continue;
     if (!rows.has(taskId)) {
-      const compatibility = COMPATIBILITY_TASK_IDS.has(taskId);
+      const systemWork = SYSTEM_TASK_IDS.has(taskId);
       rows.set(taskId, {
         taskId,
-        label: compatibility ? "Compatibility fallback" : taskId,
-        compatibility,
+        label: systemWork ? "Automation work" : taskId,
         cells: emptyProgressCells(),
         summary: "",
       });
@@ -1328,7 +1353,9 @@ function progressRowsModel(dag: RunModel["executionDag"]): RunProgressRow[] {
       return { ...row, summary };
     })
     .sort((first, second) => {
-      if (first.compatibility !== second.compatibility) return first.compatibility ? 1 : -1;
+      const firstSystem = SYSTEM_TASK_IDS.has(first.taskId);
+      const secondSystem = SYSTEM_TASK_IDS.has(second.taskId);
+      if (firstSystem !== secondSystem) return firstSystem ? 1 : -1;
       return first.taskId.localeCompare(second.taskId);
     })
     .slice(0, 10);
@@ -1371,7 +1398,7 @@ function groupWave(
 }
 
 function concurrencyWavesModel(snapshot: ProjectSnapshot | null, integrationBacklog: RunIntegrationBacklog): RunConcurrencyWave[] {
-  const state = record(snapshot?.run.state);
+  const state = dagState(snapshot);
   const waves: RunConcurrencyWave[] = [];
   const add = (wave: RunConcurrencyWave) => {
     if (waves.some((item) => item.id === wave.id && item.kind === wave.kind)) return;
@@ -1440,7 +1467,7 @@ function concurrencyWavesModel(snapshot: ProjectSnapshot | null, integrationBack
 }
 
 function integrationBacklogModel(snapshot: ProjectSnapshot | null): RunIntegrationBacklog {
-  const state = record(snapshot?.run.state);
+  const state = dagState(snapshot);
   const queued = [
     ...list(state.queued_worker_patches).map(record),
     ...list(state.integration_backlog_from_parallel_workers).map(record),
@@ -1487,7 +1514,7 @@ function operationsModel(snapshot: ProjectSnapshot | null, dag: RunModel["execut
   };
 }
 
-function safetyRows(snapshot: ProjectSnapshot | null, scaffolded: boolean, blockers: Record<string, unknown>[]): RunSafetyRow[] {
+function safetyRows(snapshot: ProjectSnapshot | null, scaffolded: boolean, setupRepairInputs: Record<string, unknown>[]): RunSafetyRow[] {
   if (!snapshot) {
     return [
       {
@@ -1500,25 +1527,23 @@ function safetyRows(snapshot: ProjectSnapshot | null, scaffolded: boolean, block
       },
     ];
   }
-  const task = record(snapshot.run.task);
-  const validation = record(task.validation);
+  const validation = record(snapshot.validation_repair.validation);
   const validationCounts = record(validation.counts);
-  const integrationSafety = record(task.integration_safety);
-  const firstReview = record(snapshot.run.first_review);
-  const controls = record(snapshot.run.controls);
-  const dirtyCount = number(snapshot.run.git?.dirty_count);
-  const pendingHuman = number(snapshot.run.human?.pending_requests) + number(snapshot.run.human?.unhandled_inbox);
+  const integrationSafety = record(snapshot.validation_repair.integration_safety);
+  const controls = record(snapshot.controls);
+  const dirtyCount = number(snapshot.setup.git?.dirty_count);
+  const pendingHuman = number(snapshot.human_input?.pending_requests) + number(snapshot.human_input?.unhandled_records) + number(snapshot.human_input?.unhandled_inbox);
   const validationStatus = number(validationCounts.fail) ? "fail" : number(validationCounts.pending) ? "pending" : number(validationCounts.pass) ? "pass" : "not recorded";
   const integrationSafetyStatus = text(integrationSafety.status, scaffolded ? "pending" : "setup needed");
-  const recheckableBlocker = blockers.find((item) => bool(item.can_recheck) && text(item.recheck_command, ""));
-  const environmentAction = recheckableBlocker
+  const recheckableInput = setupRepairInputs.find((item) => bool(item.can_recheck) && text(item.recheck_command, ""));
+  const setupRepairAction = recheckableInput
     ? makeAction(
-        text(recheckableBlocker.recheck_label, "Recheck blocker"),
+        text(recheckableInput.recheck_label, "Recheck setup"),
         scaffolded,
         "Rerun baseline verification in a freshly loaded automation environment.",
-        text(recheckableBlocker.recheck_command, "blocker.recheck_baseline"),
+        text(recheckableInput.recheck_command, "blocker.recheck_baseline"),
       )
-    : routeAction("Sidecar", "Advanced", "Open diagnostics.");
+    : routeAction("Setup", "Setup", "Check setup, harness, and local environment inputs.");
   return [
     {
       label: "Integration safety",
@@ -1539,52 +1564,46 @@ function safetyRows(snapshot: ProjectSnapshot | null, scaffolded: boolean, block
       summary: text(validation.summary, "No validation result is recorded yet."),
       source: "run.task.validation",
       tone: safetyTone(validationStatus),
-      action: routeAction("Review", "Review", "Open review evidence."),
+      action: routeAction("Automation", "Automation", "View validation and generated repair work."),
     },
     {
       label: "Git state",
       status: `${dirtyCount} dirty`,
-      summary: `Branch ${text(snapshot.run.git?.branch, "unknown")}.`,
-      source: "run.git",
+      summary: `Branch ${text(snapshot.setup.git?.branch, "unknown")}.`,
+      source: "setup.git",
       tone: dirtyCount ? "warn" : "good",
-      action: routeAction("Activity", "Run", "Refresh run state."),
+      action: routeAction("Automation", "Automation", "Refresh automation state."),
     },
     {
-      label: "Environment",
-      status: blockers.length ? `${blockers.length} blocker(s)` : "clear",
-      summary: blockers.length ? blockers.map((item) => text(item.name, "Environment blocker")).join(", ") : "No environment blocker is recorded.",
-      source: "run.environment_blockers",
-      tone: blockers.length ? "warn" : "good",
-      action: environmentAction,
+      label: "Setup / repair inputs",
+      status: setupRepairInputs.length ? `${setupRepairInputs.length} input(s)` : "clear",
+      summary: setupRepairInputs.length ? setupRepairInputs.map((item) => text(item.name, "Setup input")).join(", ") : "No setup or repair input is recorded.",
+      source: "validation_repair.setup_repair_inputs",
+      tone: setupRepairInputs.length ? "warn" : "good",
+      action: setupRepairAction,
     },
     {
       label: "Human input",
       status: pendingHuman ? `${pendingHuman} waiting` : "clear",
-      summary: pendingHuman ? "Inbox has pending work before automation can proceed." : "No human handoff is pending.",
+      summary: pendingHuman
+        ? "Human input is recorded; independent scheduler work should continue while tickets remain."
+        : "No human handoff is pending.",
       source: "run.human",
       tone: pendingHuman ? "warn" : "good",
-      action: routeAction("Inbox", "Inbox", "Open human handoffs."),
-    },
-    {
-      label: "Review bundle",
-      status: text(firstReview.status, "unknown").replace(/_/g, " ").toLowerCase(),
-      summary: text(firstReview.summary, "Review evidence can be exported from Review."),
-      source: "run.first_review",
-      tone: safetyTone(firstReview.status),
-      action: routeAction("Review", "Review", "Open review evidence."),
+      action: routeAction("Automation", "Automation", "View pending input records."),
     },
   ];
 }
 
 export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
   const scaffolded = isScaffolded(snapshot);
-  const task = record(snapshot?.run.task);
-  const controls = record(snapshot?.run.controls);
-  const automation = record(snapshot?.run.automation);
-  const workerStrategy = record(snapshot?.run.worker_strategy);
-  const workerControls = record(snapshot?.run.worker_controls);
-  const latestWorker = record(snapshot?.run.latest_worker_result);
-  const blockers = list(snapshot?.run.environment_blockers).map(record);
+  const task = record(snapshot?.setup.task);
+  const controls = record(snapshot?.controls);
+  const automation = record(snapshot?.controls.automation);
+  const workerStrategy = record(snapshot?.controls.worker_strategy);
+  const workerControls = record(snapshot?.controls.worker_controls);
+  const latestWorker = record(snapshot?.controls.latest_worker_result);
+  const setupRepairInputs = list(snapshot?.validation_repair.setup_repair_inputs).map(record);
   const status = text(task.status, snapshot ? "UNKNOWN" : "NO_TARGET");
   const statusUpper = status.toUpperCase();
   const automationState = text(automation.state, "").toLowerCase();
@@ -1608,11 +1627,7 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
     scaffolded ? "Records the integration safety result." : "Complete setup before running.",
     "safety.run_check",
   );
-  const exportReview = routeAction("Review export", "Review", "Review files live on the Review page.");
-  exportReview.enabled = scaffolded;
-  exportReview.kind = scaffolded ? "navigate" : "disabled";
-
-  const title = stateTitle(snapshot, scaffolded, running, blockers, statusUpper);
+  const title = stateTitle(snapshot, scaffolded, running, setupRepairInputs, statusUpper);
   const executionDag = executionDagModel(snapshot);
   const operations = operationsModel(snapshot, executionDag);
   let headline = title;
@@ -1622,23 +1637,15 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
   if (snapshot && title === "Unknown" && !scaffolded) {
     subheadline = "Complete setup before running.";
     badge = "Setup needed";
-    primaryAction = routeAction("Open setup", "Brief", "Confirm the target setup.");
+    primaryAction = routeAction("Open setup", "Setup", "Confirm the target setup.");
   } else if (snapshot && title === "Critical stop") {
-    subheadline = "Review the stop condition before starting another run.";
+    subheadline = "Unsafe, destructive, or corrupt state was recorded. Inspect before starting another run.";
     badge = "Critical stop";
-    primaryAction = routeAction("Open review", "Review", "Review critical stop evidence.");
-  } else if (snapshot && title === "User input") {
-    subheadline = "A human handoff is waiting before useful progress can continue.";
-    badge = "User input";
-    primaryAction = routeAction("Open Inbox", "Inbox", "Resolve human handoffs.");
-  } else if (snapshot && title === "Env blocked") {
-    subheadline = blockers.length ? blockers.map((item) => text(item.name, "Environment blocker")).join(", ") : "Safety, validation, or environment state needs attention.";
-    badge = "Env blocked";
-    primaryAction = safetyCheck.enabled ? safetyCheck : routeAction("Open sidecar", "Advanced", "Open diagnostics.");
+    primaryAction = routeAction("Open automation", "Automation", "Inspect the recorded stop condition.");
   } else if (snapshot && title === "Running") {
     subheadline = text(automation.message, "Refresh to inspect the latest run state.");
     badge = "Running";
-    primaryAction = routeAction("Refresh", "Run", "Reload the latest run state.");
+    primaryAction = routeAction("Refresh", "Automation", "Reload the latest automation state.");
   } else if (snapshot && startAutomation.enabled) {
     subheadline = "The target files are present and continuous automation can start.";
     badge = "Ready";
@@ -1646,7 +1653,7 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
   } else if (snapshot) {
     subheadline = text(controls.start_automation_reason, text(automation.message, "Refresh diagnostics before running."));
     badge = title;
-    primaryAction = safetyCheck.enabled ? safetyCheck : routeAction("Open setup", "Brief", "Confirm the target setup.");
+    primaryAction = safetyCheck.enabled ? safetyCheck : routeAction("Open setup", "Setup", "Confirm the target setup.");
   }
 
   return {
@@ -1656,14 +1663,13 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
       headline,
       subheadline,
       badge,
-      tone: bannerTone(title, statusUpper, blockers),
+      tone: bannerTone(title, statusUpper, setupRepairInputs),
       primaryAction,
     },
     controls: {
       startAutomation,
       stopAutomation,
       safetyCheck,
-      exportReview,
     },
     automation: {
       state: text(automation.state, "stopped"),
@@ -1675,8 +1681,8 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
     latestRun: {
       status: displayStatus(status),
       horizon: text(task.horizon, "No plan recorded"),
-      lastUpdated: text(task.last_updated, text(snapshot?.run.snapshot_generated_at, "Not recorded")),
-      summary: text(snapshot?.run.progress_recent, text(task.suggested_next_task, "No run has been recorded yet.")),
+      lastUpdated: text(task.last_updated, text(snapshot?.setup.snapshot_generated_at, "Not recorded")),
+      summary: text(task.suggested_next_task, "No run has been recorded yet."),
     },
     executionDag,
     operations,
@@ -1711,14 +1717,14 @@ export function buildRunModel(snapshot: ProjectSnapshot | null): RunModel {
         ),
       },
     },
-    safety: safetyRows(snapshot, scaffolded, blockers),
-    blockers: blockers.map((item) => ({
-      name: text(item.name, "Environment blocker"),
+    safety: safetyRows(snapshot, scaffolded, setupRepairInputs),
+    blockers: setupRepairInputs.map((item) => ({
+      name: text(item.name, "Setup input"),
       detail: text(item.detail, ""),
       required: bool(item.required),
       canRecheck: bool(item.can_recheck),
       recheckCommand: text(item.recheck_command, ""),
-      recheckLabel: text(item.recheck_label, "Recheck blocker"),
+      recheckLabel: text(item.recheck_label, "Recheck setup"),
     })),
   };
 }

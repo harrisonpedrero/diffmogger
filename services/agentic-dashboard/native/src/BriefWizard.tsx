@@ -9,7 +9,6 @@ import {
   Hammer,
   Loader2,
   RefreshCw,
-  SlidersHorizontal,
   Trash2,
   WandSparkles,
 } from "lucide-react";
@@ -42,14 +41,7 @@ import {
   type TicketImportFormat,
 } from "./ticketModel";
 
-export type BriefRoute =
-  | "Home"
-  | "Brief"
-  | "Run"
-  | "Observatory"
-  | "Inbox"
-  | "Review"
-  | "Advanced";
+export type BriefRoute = "Setup" | "Automation";
 
 type StepKey =
   | "project"
@@ -120,7 +112,7 @@ type ContextImportRecord = {
 type ContextImportResponse = {
   records: ContextImportRecord[];
   imported_count: number;
-  project_context_path?: string;
+  context_dir?: string;
   log?: string[];
 };
 
@@ -196,10 +188,10 @@ const steps: Array<{ key: StepKey; label: string }> = [
   { key: "project", label: "Project" },
   { key: "goal", label: "Goal" },
   { key: "stack", label: "Stack" },
-  { key: "mode", label: "Run" },
+  { key: "mode", label: "Automation" },
   { key: "guardrails", label: "Guardrails" },
   { key: "context", label: "Context" },
-  { key: "review", label: "Review" },
+  { key: "review", label: "Confirm" },
 ];
 
 const defaultDraft: IntakeDraft = {
@@ -401,9 +393,9 @@ function draftFromSource(source: Record<string, unknown>, targetName: string): I
 
 function mergeDraft(snapshot: ProjectSnapshot | null): IntakeDraft {
   const source = {
-    ...asRecord(snapshot?.brief?.intake),
-    ...asRecord(snapshot?.brief?.draft_intake),
-    ...asRecord(snapshot?.brief?.dashboard_state),
+    ...asRecord(snapshot?.setup?.intake),
+    ...asRecord(snapshot?.setup?.draft_intake),
+    ...asRecord(snapshot?.setup?.dashboard_state),
   };
   return draftFromSource(source, snapshot?.target.name || defaultDraft.project_name);
 }
@@ -506,8 +498,8 @@ export function setupRunState(
       status: "Choose a target",
     };
   }
-  const task = asRecord(snapshot.run.task);
-  const dashboard = asRecord(snapshot.brief.dashboard_state);
+  const task = asRecord(snapshot.setup.task);
+  const dashboard = asRecord(snapshot.setup.dashboard_state);
   const dashboardPassed =
     normalizedStatus(stringValue(dashboard.initial_bootstrap_status, "")) === "pass" ||
     Boolean(String(dashboard.initial_bootstrap_completed_at ?? "").trim());
@@ -518,7 +510,7 @@ export function setupRunState(
     return {
       enabled: false,
       bootstrapCompleted: false,
-      reason: "Run Scaffold before opening Run.",
+      reason: "Scaffold before opening Automation.",
       status: "Scaffold first",
     };
   }
@@ -565,7 +557,7 @@ export function setupRunState(
   return {
     enabled: true,
     bootstrapCompleted: completed,
-    reason: "Open Run.",
+    reason: "Open Automation.",
     status: "Ready",
   };
 }
@@ -671,7 +663,7 @@ function SetupPlanSummary(props: {
       <div className="setup-summary-ledger">
         <DetailMetric label="Target" value={props.targetPath ? "Selected" : "No target"} />
         <DetailMetric label="Campaign" value={scope === "bounded" ? "Bounded" : "Ongoing"} />
-        <DetailMetric label="Architecture" value="Activity runtime" />
+        <DetailMetric label="Architecture" value="Automation runtime" />
         <DetailMetric label="Context" value={props.contextCount} />
         <DetailMetric label="Guardrails" value={props.draft.safety_constraints.length + props.draft.automation_must_never_do.length} />
         <DetailMetric label="Tickets" value={scope === "bounded" ? props.draft.ticket_run_seed_tickets.length : "Auto"} />
@@ -740,7 +732,7 @@ export function BriefWizard(props: {
   const [lowCortisolBusy, setLowCortisolBusy] = useState(false);
   const lastSavedRef = useRef("");
   const targetPath = props.snapshot?.target.path;
-  const detected = asRecord(props.snapshot?.brief.detected);
+  const detected = asRecord(props.snapshot?.setup.detected);
   const currentStep = steps[activeStep];
   const draftPayload = useMemo(() => JSON.stringify(serializeDraft(draft)), [draft]);
   const ticketIssues = useMemo(() => localTicketIssues(draft.ticket_run_seed_tickets), [draft.ticket_run_seed_tickets]);
@@ -1225,10 +1217,6 @@ export function BriefWizard(props: {
               <RefreshCw size={17} />
               Refresh target
             </button>
-            <button className="secondary-action" disabled={!targetPath} onClick={() => props.onNavigate("Advanced")}>
-              <SlidersHorizontal size={17} />
-              <span title="Open Debug / Sidecar">Open Sidecar</span>
-            </button>
           </div>
           <div className="copyable-path-row">
             <div className="target-path-chip" title={targetPath ?? ""}>
@@ -1421,7 +1409,7 @@ export function BriefWizard(props: {
               onClick={() => setDraft((current) => applyAutomationScope(current, "bounded"))}
             >
               <strong>Bounded campaign</strong>
-              <span>Run the seeded or imported ticket queue, then stop when complete or blocked.</span>
+              <span>Run the seeded or imported ticket queue, then stop only when the bounded campaign is complete.</span>
             </button>
           </div>
         </section>
@@ -1591,14 +1579,14 @@ export function BriefWizard(props: {
           </div>
         </section>
         <section className="brief-section">
-          <h2>Inbox</h2>
+          <h2>Human Input</h2>
           <ToggleRow
             checked={draft.human_bridge_enabled}
-            label="Enable Inbox"
+            label="Enable human input records"
             detail="Generated targets use dashboard-backed typed human-message state."
             onChange={(checked) => updateDraft("human_bridge_enabled", checked)}
           />
-          <FormField label="Inbox mode">
+          <FormField label="Input mode">
             <select
               value={draft.human_bridge_mode}
               onChange={(event) => updateDraft("human_bridge_mode", event.target.value as IntakeDraft["human_bridge_mode"])}
@@ -1666,7 +1654,7 @@ export function BriefWizard(props: {
           </div>
           <div className="context-drop-zone">
             <FolderOpen size={18} />
-            <span>Files are copied to .diffmogger/context/ and indexed in .diffmogger/state/PROJECT_CONTEXT.md.</span>
+            <span>Files are copied to .diffmogger/context/ and tracked in the intake/dashboard state.</span>
           </div>
           {contextFiles.length ? (
             <div className="context-file-list">
@@ -1688,7 +1676,7 @@ export function BriefWizard(props: {
   }
 
   function renderReviewStep() {
-    const modeLabel = `Activity scheduler · ${
+    const modeLabel = `Automation scheduler · ${
       automationScopeForDraft(draft) === "bounded" ? "bounded campaign" : "ongoing campaign"
     }`;
     const reviewTicketIssues = localTicketIssues(draft.ticket_run_seed_tickets);
@@ -1697,18 +1685,18 @@ export function BriefWizard(props: {
     return (
       <div className="brief-step-grid">
         <section className="brief-section span-2">
-          <h2>Review</h2>
+          <h2>Confirm Setup</h2>
           <div className="brief-data-list">
             <div>
               <span>Target path</span>
               <strong>{targetPath ?? "No target selected"}</strong>
             </div>
             <div>
-              <span>Run mode</span>
+              <span>Automation mode</span>
               <strong>{modeLabel}</strong>
             </div>
             <div>
-              <span>Inbox</span>
+              <span>Human input</span>
               <strong>{draft.human_bridge_enabled ? draft.human_bridge_mode : "disabled"}</strong>
             </div>
             <div>
@@ -1720,7 +1708,7 @@ export function BriefWizard(props: {
               <strong>{draft.safety_constraints.length + draft.automation_must_never_do.length} rules</strong>
             </div>
             <div>
-              <span>Run controls</span>
+              <span>Automation controls</span>
               <strong>{scaffoldResult ? "Available now" : "Available after scaffold succeeds"}</strong>
             </div>
             <div>
@@ -1777,10 +1765,7 @@ export function BriefWizard(props: {
                 </span>
                 {scaffoldResult.native_next_state.reason && <small>{scaffoldResult.native_next_state.reason}</small>}
                 <div className="result-actions">
-                  <button className="secondary-action" onClick={() => props.onNavigate("Run")}>Run</button>
-                  {scaffoldResult.native_next_state.state === "FIRST_REVIEW_NEEDED" && (
-                    <button className="secondary-action" onClick={() => props.onNavigate("Review")}>Review</button>
-                  )}
+                  <button className="secondary-action" onClick={() => props.onNavigate("Automation")}>Automation</button>
                 </div>
               </div>
             </div>
@@ -1789,7 +1774,7 @@ export function BriefWizard(props: {
             <div className="brief-failure">
               <strong>{scaffoldFailure.errorType ?? "Scaffold failed"}</strong>
               <p>{scaffoldFailure.message}</p>
-              <button className="secondary-action" title="Debug / Sidecar" onClick={() => props.onNavigate("Advanced")}>Sidecar</button>
+              <button className="secondary-action" onClick={props.onRefresh}>Refresh target</button>
             </div>
           )}
         </section>
@@ -1966,9 +1951,9 @@ export function BriefWizard(props: {
                     <Hammer size={17} />
                     {scaffoldBusy ? "Working" : "Scaffold"}
                   </button>
-                  <button className="primary-action" disabled={!runState.enabled} onClick={() => props.onNavigate("Run")} title={runState.reason}>
+                  <button className="primary-action" disabled={!runState.enabled} onClick={() => props.onNavigate("Automation")} title={runState.reason}>
                     <RefreshCw size={17} />
-                    Run
+                    Automation
                   </button>
                 </div>
               )}

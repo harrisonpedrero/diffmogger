@@ -9,13 +9,6 @@ from typing import Any, Callable
 from .errors import BackendArgumentParser, BackendError
 from .jsonio import emit, emit_jsonl, failure, success
 from .target import load_repo_dotenv_for_backend
-from .commands.advanced import (
-    command_advanced_export_debug_bundle,
-    command_advanced_list_files,
-    command_advanced_load_file,
-    command_advanced_save_file,
-    command_advanced_validate_file,
-)
 from .commands.brief import (
     command_brief_generate_intake,
     command_brief_load,
@@ -25,16 +18,11 @@ from .commands.brief import (
 )
 from .commands.context import command_context_import
 from .commands.diagnostics import command_diagnostics_environment, command_diagnostics_run_checks, command_safety_run_check
-from .commands.inbox import command_inbox_load, command_inbox_reply_request, command_inbox_send_note
-from .commands.observatory import command_observatory_generate_html, command_observatory_load_html, command_observatory_snapshot
 from .commands.project import command_project_list_recent, command_project_load_snapshot
-from .commands.review import command_review_export_bundle, command_review_load, command_review_mark_reviewed
 from .commands.run_control import (
     command_automation_start,
     command_automation_stop,
     command_blocker_recheck_baseline,
-    command_run_load,
-    command_run_load_log,
     command_run_once,
 )
 from .commands.state import command_state_brief, command_state_snapshot, command_state_validate, command_state_watch
@@ -67,9 +55,6 @@ from .commands.workers import (
 def add_target_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target", required=True, help="Target project directory")
 
-def add_review_dir_arg(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--review-dir", required=True, help="Directory for generated review artifacts")
-
 def build_parser() -> argparse.ArgumentParser:
     parser = BackendArgumentParser(description=__doc__)
     parser.add_argument("--stream-jsonl", action="store_true", help=argparse.SUPPRESS)
@@ -83,11 +68,6 @@ def build_parser() -> argparse.ArgumentParser:
         "brief.scaffold_preview": command_brief_scaffold_preview,
         "brief.scaffold": command_brief_scaffold,
         "context.import": command_context_import,
-        "inbox.load": command_inbox_load,
-        "inbox.send_note": command_inbox_send_note,
-        "inbox.reply_request": command_inbox_reply_request,
-        "run.load": command_run_load,
-        "run.load_log": command_run_load_log,
         "run.once": command_run_once,
         "automation.start": command_automation_start,
         "automation.stop": command_automation_stop,
@@ -114,37 +94,18 @@ def build_parser() -> argparse.ArgumentParser:
         "execution_group.export_debug_bundle": command_execution_group_export_debug_bundle,
         "validation_jobs.load": command_validation_jobs_load,
         "lease.release_stale": command_lease_release_stale,
-        "observatory.snapshot": command_observatory_snapshot,
-        "observatory.generate_html": command_observatory_generate_html,
-        "observatory.load_html": command_observatory_load_html,
-        "review.load": command_review_load,
-        "review.export_bundle": command_review_export_bundle,
-        "review.mark_reviewed": command_review_mark_reviewed,
         "state.snapshot": command_state_snapshot,
         "state.brief": command_state_brief,
         "state.validate": command_state_validate,
         "state.watch": command_state_watch,
         "diagnostics.environment": command_diagnostics_environment,
         "diagnostics.run_checks": command_diagnostics_run_checks,
-        "advanced.list_files": command_advanced_list_files,
-        "advanced.load_file": command_advanced_load_file,
-        "advanced.save_file": command_advanced_save_file,
-        "advanced.validate_file": command_advanced_validate_file,
-        "advanced.export_debug_bundle": command_advanced_export_debug_bundle,
     }
     for name, handler in commands.items():
         subparser = subparsers.add_parser(name)
         subparser.set_defaults(handler=handler)
         if name not in {"project.list_recent", "diagnostics.environment"}:
             add_target_arg(subparser)
-        if name in {"observatory.generate_html", "observatory.load_html", "review.export_bundle"}:
-            add_review_dir_arg(subparser)
-        if name in {"advanced.load_file", "advanced.save_file", "advanced.validate_file"}:
-            subparser.add_argument("--file-key", required=True, help="Allowlisted file key")
-        if name == "advanced.save_file":
-            subparser.add_argument("--content", required=True, help="Replacement UTF-8 file content")
-        if name == "advanced.export_debug_bundle":
-            subparser.add_argument("--output-dir", required=True, help="Directory for the generated debug bundle")
         if name == "state.watch":
             subparser.add_argument("--after-event-id", type=int, default=0, help="Only emit runtime events after this event id")
             subparser.add_argument("--poll-interval", type=float, default=0.75, help=argparse.SUPPRESS)
@@ -158,15 +119,6 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "context.import":
             subparser.add_argument("--files-json", required=True, help="JSON list of context file paths")
             subparser.add_argument("--project-name", default="", help="Project name for the context index")
-        if name in {"inbox.send_note", "inbox.reply_request"}:
-            subparser.add_argument("--body", required=True, help="Human message body")
-            subparser.add_argument("--intent", default="info", help="Parsed human intent")
-        if name == "inbox.send_note":
-            subparser.add_argument("--related", default="", help="Optional related request, ticket, file, or run")
-        if name == "inbox.reply_request":
-            subparser.add_argument("--request-id", required=True, help="Automation request id being replied to")
-        if name == "review.mark_reviewed":
-            subparser.add_argument("--note", default="", help="Optional reviewer note")
         if name == "worker.run_write":
             subparser.add_argument("--ownership", required=True, help="Disjoint file or module ownership scope")
         if name == "worker.launch_read_only_group":

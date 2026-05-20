@@ -1916,6 +1916,61 @@ class ImpactGraphTests(unittest.TestCase):
             touches = write_groups[0]["items"][0]["payload"]["likely_touches"]
             self.assertTrue(any(touch["path"] == "src/workspace.js" and touch["signal_kind"] == "exact_symbol" for touch in touches))
 
+    def test_scope_evidence_uses_write_confidence_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_text(target, "src/settings.ts", "export const settings = {};\n")
+            self.write_ticket_run(target, [{"id": "T1", "summary": "Update settings defaults", "status": "pending"}])
+            state_snapshot(target)
+
+            records = self.record_scope_report(
+                target,
+                "T1",
+                [
+                    {
+                        "candidate_path": "src/settings.ts",
+                        "confidence": 0.76,
+                        "reasons": ["read-only inspection found this path owns the setting defaults"],
+                    }
+                ],
+            )
+            accepted = [record for record in records if record["status"] == "accepted"]
+            self.assertEqual(1, len(accepted), records)
+
+            after = state_snapshot(target)
+            write_groups = self.write_execution_groups(after)
+            self.assertEqual(1, len(write_groups), after.get("proposed_execution_groups"))
+
+    def test_missing_path_warning_promotes_safe_creation_path_scope_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.write_ticket_run(target, [{"id": "T1", "summary": "Configure dependency setup", "status": "pending"}])
+            state_snapshot(target)
+
+            records = self.record_scope_report(
+                target,
+                "T1",
+                [
+                    {
+                        "candidate_path": "package.json",
+                        "confidence": 0.78,
+                        "stale_context_warning": "File does not exist yet; dependency metadata should be created for this ticket.",
+                        "reasons": ["package metadata is the narrow dependency setup ownership surface"],
+                    }
+                ],
+            )
+
+            accepted = [record for record in records if record["status"] == "accepted"]
+            self.assertEqual(1, len(accepted), records)
+            self.assertEqual("creation_path", accepted[0]["payload"]["signal_kind"])
+            self.assertTrue(accepted[0]["payload"]["creation_requested"])
+
+            after = state_snapshot(target)
+            write_groups = self.write_execution_groups(after)
+            self.assertEqual(1, len(write_groups), after.get("proposed_execution_groups"))
+            touches = write_groups[0]["items"][0]["payload"]["likely_touches"]
+            self.assertTrue(any(touch["path"] == "package.json" and touch["signal_kind"] == "creation_path" for touch in touches))
+
     def test_ambiguous_scope_evidence_does_not_promote_write_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)

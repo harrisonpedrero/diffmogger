@@ -18,15 +18,6 @@ def project_intake(target: Path) -> dict[str, Any]:
         return {}
     return data if isinstance(data, dict) else {}
 
-def ticket_run_file(target: Path) -> Path:
-    configured = str(project_intake(target).get("ticket_run_file") or "").strip()
-    if configured:
-        return target / configured
-    legacy = dpath(target, "docs/TICKET_RUN.md")
-    if legacy.exists():
-        return legacy
-    return ticket_runtime.ticket_state_path(target)
-
 def load_ticket_run(target: Path) -> dict[str, Any] | None:
     try:
         data, _path, _text = ticket_runtime.load_ticket_run(target)
@@ -181,7 +172,11 @@ def _next_auto_ticket_id(tickets: list[dict[str, Any]]) -> str:
 def _ongoing_campaign_needs_ticket(tickets: list[dict[str, Any]]) -> bool:
     if not tickets:
         return True
-    return all(ticket_status(item) in {"done", "blocked"} for item in tickets)
+    return all(
+        ticket_status(item) == "blocked"
+        or (ticket_status(item) == "done" and ticket_has_evidence(item))
+        for item in tickets
+    )
 
 def _verification_fallback(target: Path) -> list[str]:
     commands = project_intake(target).get("verification_commands")
@@ -191,22 +186,22 @@ def _verification_fallback(target: Path) -> list[str]:
             return normalized
     if isinstance(commands, str) and commands.strip():
         return [line.strip() for line in commands.splitlines() if line.strip()]
-    return ["Run the most relevant local verification command available, or record an honest blocker."]
+    return ["Run the most relevant local verification command available, or create unblocker work if verification cannot run yet."]
 
 def _append_ongoing_campaign_ticket(target: Path, data: dict[str, Any], reason: str) -> dict[str, Any]:
     tickets = [dict(item) for item in data.get("tickets", []) if isinstance(item, dict)]
     ticket_id = _next_auto_ticket_id(tickets)
     if "blocked" in reason:
-        summary = "Resolve or route the next unblocked campaign increment from current blockers"
+        summary = "Create unblocker work from current planning inputs"
         criteria = [
-            "Current blockers are reviewed and either reduced, routed to typed blocker state, or worked around safely.",
-            "A dependency-ready next action is recorded with evidence or an honest blocker.",
+            "Current planning inputs are converted into repair, setup, mock, fixture, defer, split, reframe, review, documentation, or alternate-ticket work.",
+            "A dependency-ready next action is recorded with evidence.",
         ]
     else:
         summary = "Draft and complete the next safe campaign increment"
         criteria = [
             "A small project-agnostic improvement is chosen from intake, runtime state, repo context, validation receipts, or completed work.",
-            "The increment is implemented or explicitly blocked with typed evidence.",
+            "The increment is implemented or converted into follow-up DAG work with typed evidence.",
         ]
     tickets.append(
         {
@@ -245,7 +240,7 @@ def ensure_ongoing_campaign_has_work(target: Path, data: dict[str, Any]) -> tupl
         return data, "ongoing campaign has active tickets"
     statuses = [ticket_status(item) for item in tickets]
     if statuses and any(status == "blocked" for status in statuses):
-        reason = "blocked tickets left no dependency-ready work"
+        reason = "blocked tickets require unblocker work"
     elif statuses:
         reason = "completed ticket set left no dependency-ready work"
     else:
@@ -272,9 +267,8 @@ def ticket_campaign_terminal(target: Path) -> tuple[str | None, str]:
     all_done = all(status == "done" for status in statuses) and all(ticket_has_evidence(item) for item in items)
     if all_done:
         return "complete", "bounded campaign complete"
-    all_terminal = all(status in {"done", "blocked"} for status in statuses)
-    if all_terminal and any(status == "blocked" for status in statuses):
-        return "blocked", "bounded campaign blocked"
+    if all(status in {"done", "blocked"} for status in statuses) and any(status == "blocked" for status in statuses):
+        return None, "bounded campaign has blocked tickets requiring unblocker work"
     return None, "bounded campaign active"
 
 def finalize_ticket_campaign(target: Path) -> None:

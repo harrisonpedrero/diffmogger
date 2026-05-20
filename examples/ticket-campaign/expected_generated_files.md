@@ -65,12 +65,8 @@ AGENTS.md
 .diffmogger/agentic/automation_prompt.md
 .diffmogger/agentic/smoke_commands.txt
 .diffmogger/agentic/verification_commands.txt
-.diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md
-.diffmogger/state/PROJECT_CONTEXT.md
 .diffmogger/state/CODEX_AUTOMATION_TASKS.md
 .diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md
-.diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md
-.diffmogger/state/DAILY_AUTOMATION_REVIEW.md
 .diffmogger/state/DEVELOPMENT.md
 .diffmogger/scripts/acquire_codex_lock.sh
 .diffmogger/scripts/release_codex_lock.sh
@@ -101,6 +97,6 @@ The generated `.diffmogger/agentic/verification_commands.txt` should contain boo
 
 The generated recurring prompt should use bounded ticket-run phases: ticket-run readiness, one dependency-aware ticket implementation per run, verification and hardening, completion report, and stop.
 
-The generated task file should keep `## Product Horizon State` for compatibility, but its current horizon should be a ticket-run phase and its backlog section should be `## Deferred / Follow-Up Tickets`.
+The generated task projection should keep `## Product Horizon State`, but its current horizon should be a ticket-run phase and its backlog section should be `## Deferred / Follow-Up Tickets`.
 
-The generated prompt and task file should not use product-roadmap language such as `MVP`, `Beyond MVP`, or `Ambitious extensions`. The dashboard-backed SQLite ticket queue is the source of truth for scope, optional `depends_on` arrays order dependent tickets, and automation should stop launching new work after all tickets are done or blocked.
+The generated prompt and task file should not use product-roadmap language such as `MVP`, `Beyond MVP`, or `Ambitious extensions`. The dashboard-backed SQLite ticket queue is the source of truth for scope, optional `depends_on` arrays order dependent tickets, and automation should stop launching new work only after all tickets are done with evidence. Blocked tickets should become unblocker DAG work.

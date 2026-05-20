@@ -8,7 +8,7 @@ Usage: .diffmogger/scripts/acquire_codex_lock.sh [context...]
 Acquire a local Codex automation lock.
 
 Environment:
-  CODEX_LOCK_PATH             Lock file path. Default: target/codex_automation.lock
+  CODEX_LOCK_PATH             Lock file path. Default: .diffmogger/runtime/codex_automation.lock
   CODEX_LOCK_STALE_SECONDS    Stale threshold in seconds. Default: 14400
   CODEX_RUN_ID or RUN_ID      Run id to record in the lock. Generated if absent.
   CODEX_LOCK_CONTEXT          Context string to record. Positional args are used if set.
@@ -21,7 +21,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
-lock_path="${CODEX_LOCK_PATH:-target/codex_automation.lock}"
+lock_path="${CODEX_LOCK_PATH:-.diffmogger/runtime/codex_automation.lock}"
 stale_seconds="${CODEX_LOCK_STALE_SECONDS:-14400}"
 run_id="${CODEX_RUN_ID:-${RUN_ID:-}}"
 context="${CODEX_LOCK_CONTEXT:-$*}"

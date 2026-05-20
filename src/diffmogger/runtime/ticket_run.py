@@ -25,7 +25,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
-from diffmogger.runtime.paths import existing_or_target_path, target_path
+from diffmogger.runtime.paths import target_path
 from diffmogger.runtime.state_store import (
     database_path_for_target,
     load_ticket_run_state,
@@ -40,7 +40,7 @@ DEFAULT_TICKET_FILE = "docs/TICKET_RUN.md"
 COMPLETION_STATE = "target/ticket_run_completion.json"
 NOTIFIER_URL = "http://127.0.0.1:8765/api/notify"
 TICKET_STATUSES = {"pending", "in_progress", "candidate_done", "done", "blocked"}
-TERMINAL_STATUSES = {"done", "blocked"}
+TERMINAL_STATUSES = {"done"}
 FENCE_RE = re.compile(r"```(?:json\s+ticket-run|ticket-run-json)\s*\n(.*?)\n```", re.DOTALL)
 PLACEHOLDER_TICKET_ID = "TICKET-001"
 PLACEHOLDER_TICKET_SUMMARY = "Replace this sample with the first startup ticket."
@@ -235,7 +235,7 @@ def load_ticket_run_state_for_staged_role(target: Path) -> dict[str, Any] | None
 
 
 def project_intake(target: Path) -> dict[str, Any]:
-    return read_json(existing_or_target_path(target, ".agentic/project_intake.json"))
+    return read_json(target_path(target, ".agentic/project_intake.json"))
 
 
 def ticket_file_path(target: Path) -> Path:
@@ -243,9 +243,6 @@ def ticket_file_path(target: Path) -> Path:
     configured = str(intake.get("ticket_run_file") or "").strip()
     if configured:
         return target / configured
-    legacy = target_path(target, DEFAULT_TICKET_FILE)
-    if legacy.exists():
-        return legacy
     return ticket_state_path(target)
 
 
@@ -294,7 +291,7 @@ def load_ticket_run(target: Path, ticket_file: Path | None = None) -> tuple[dict
                 target,
                 data,
                 actor_role="ticket-cli",
-                event_type="compatibility.ticket_markdown_imported",
+                event_type="ticket.authored_file_imported",
                 source_path=str(path),
             )
         return data, ticket_state_path(target), text
@@ -311,8 +308,8 @@ def load_ticket_run(target: Path, ticket_file: Path | None = None) -> tuple[dict
         write_ticket_run_state(
             target,
             data,
-            actor_role="migration",
-            event_type="compatibility.legacy_ticket_markdown_imported",
+            actor_role="ticket-cli",
+            event_type="ticket.authored_file_imported",
             source_path=str(path),
         )
     return data, path, text
@@ -456,12 +453,9 @@ def ticket_summary(data: dict[str, Any], target: Path | None = None) -> dict[str
         if status == "done" and not has_verification_evidence(item):
             done_missing_evidence.append(str(item.get("id") or item.get("summary") or "unknown"))
     total = len(items)
-    terminal = counts["done"] + counts["blocked"]
     queued = queued_patch_count(target) if target else 0
     all_done = total > 0 and counts["done"] == total and not done_missing_evidence and queued == 0
-    all_terminal = total > 0 and terminal == total and queued == 0
-    blocked_terminal = all_terminal and counts["blocked"] > 0
-    status = "complete" if all_done else "blocked" if blocked_terminal else "active"
+    status = "complete" if all_done else "active"
     return {
         "run_id": str(data.get("run_id") or "ticket-run"),
         "status": status,
@@ -469,8 +463,8 @@ def ticket_summary(data: dict[str, Any], target: Path | None = None) -> dict[str
         "total": total,
         "queued_patch_count": queued,
         "done_missing_evidence": done_missing_evidence,
-        "should_halt": status in {"complete", "blocked"} and bool_value(data.get("halt_when_complete"), True),
-        "reason": f"ticket campaign {status}" if status in {"complete", "blocked"} else "ticket campaign active",
+        "should_halt": status == "complete" and bool_value(data.get("halt_when_complete"), True),
+        "reason": "ticket campaign complete" if status == "complete" else "ticket campaign active",
     }
 
 
@@ -638,7 +632,7 @@ def ticket_source_state(target: Path, ticket_file: Path | None = None) -> dict[s
     selected_id = str(selected.get("id") or "").strip()
     if actionable:
         start_reason = f"Ready to run ticket campaign starting with {selected_id}." if selected_id else "Ready to run ticket campaign."
-    elif confirmed and summary.get("status") in {"complete", "blocked"}:
+    elif confirmed and summary.get("status") == "complete":
         start_reason = f"Ticket campaign is {summary.get('status')}."
     elif confirmed:
         start_reason = f"Ticket campaign has no actionable ticket: {next_payload.get('reason') or reason}."
@@ -703,6 +697,7 @@ def next_ticket_selection(data: dict[str, Any]) -> dict[str, Any]:
         ("candidate_done", "verify_candidate"),
         ("in_progress", "resume_in_progress"),
         ("pending", "implement_pending"),
+        ("blocked", "create_unblocker_work"),
     ]
     if report["duplicate_ticket_ids"]:
         return {
@@ -746,7 +741,7 @@ def next_ticket_selection(data: dict[str, Any]) -> dict[str, Any]:
             }
 
     summary = ticket_summary(data)
-    if summary["status"] in {"complete", "blocked"}:
+    if summary["status"] == "complete":
         reason = summary["reason"]
         status = summary["status"]
     elif report["missing_dependencies"]:
@@ -902,12 +897,9 @@ def ticket_notification_message(target: Path, data: dict[str, Any], summary: dic
     if summary["status"] == "complete":
         lines.insert(-2, "- Diffmogger has halted this ticket campaign because all tickets are done.")
         lines.append("- Recommended next step: review the diff, rerun the listed verification commands, then push or open a PR.")
-    elif summary["status"] == "blocked":
-        lines.insert(-2, "- Diffmogger has halted this ticket campaign because all remaining tickets are blocked.")
-        lines.append("- Recommended next step: address the blockers above, move those tickets back to `in_progress`, and restart the conveyor.")
     else:
-        lines.insert(-2, "- Diffmogger has not halted this ticket campaign; runnable work remains.")
-        lines.append("- Recommended next step: continue verification and move tickets to `done` only with evidence.")
+        lines.insert(-2, "- Diffmogger has not halted this ticket campaign; tickets that are blocked should create unblocker DAG work.")
+        lines.append("- Recommended next step: continue repair, setup, defer, split, reframe, review, documentation, or alternate-ticket work until every ticket is done.")
     return "\n".join(lines).strip()
 
 

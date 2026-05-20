@@ -154,7 +154,7 @@ describe("Brief automation mode mapping", () => {
   it("hides preserved sidecar files from the setup review file list", () => {
     const visible = visibleScaffoldPreviewFiles([
       {
-        rel_path: ".diffmogger/state/PROJECT_CONTEXT.md",
+        rel_path: ".diffmogger/context/notes.md",
         action: "skip_existing",
         exists: true,
         managed_section: false,
@@ -172,36 +172,45 @@ describe("Brief automation mode mapping", () => {
     expect(visible.map((file) => file.rel_path)).toEqual([".diffmogger/state/AGENTS.md"]);
   });
 
-  it("enables Run directly after scaffold", () => {
+  it("enables Automation directly after scaffold", () => {
     const unscaffolded = setupRunState({
       target: { path: "/tmp/app", name: "app", is_diffmogger_project: false, project_intake_exists: false, dashboard_state_exists: false, automation_task_exists: false },
-      brief: {},
-      run: { task: {} },
-      files: [],
-      home: { title: "app", automation_status: "UNKNOWN", current_horizon: "", next_action: "", pending_human_requests: 0, unhandled_inbox: 0, queued_patches: 0, deferred_patches: 0 },
-    });
+      setup: { task: {}, dashboard_state: {} },
+      scheduler: {},
+      dag: {},
+      tickets: {},
+      human_input: {},
+      validation_repair: {},
+      controls: {},
+    } as any);
     expect(unscaffolded.enabled).toBe(false);
     expect(unscaffolded.reason).toContain("Scaffold");
 
     const pending = setupRunState({
       target: { path: "/tmp/app", name: "app", is_diffmogger_project: true, project_intake_exists: true, dashboard_state_exists: true, automation_task_exists: true },
-      brief: { dashboard_state: {} },
-      run: { task: { bootstrap_status: "pending" } },
-      files: [],
-      home: { title: "app", automation_status: "ACTIVE", current_horizon: "", next_action: "", pending_human_requests: 0, unhandled_inbox: 0, queued_patches: 0, deferred_patches: 0 },
-    });
+      setup: { dashboard_state: {}, task: { bootstrap_status: "pending" } },
+      scheduler: {},
+      dag: {},
+      tickets: {},
+      human_input: {},
+      validation_repair: {},
+      controls: {},
+    } as any);
     expect(pending.enabled).toBe(true);
     expect(pending.bootstrapCompleted).toBe(true);
     expect(pending.status).toBe("Ready");
-    expect(pending.reason).toBe("Open Run.");
+    expect(pending.reason).toBe("Open Automation.");
 
     const completed = setupRunState({
       target: { path: "/tmp/app", name: "app", is_diffmogger_project: true, project_intake_exists: true, dashboard_state_exists: true, automation_task_exists: true },
-      brief: { dashboard_state: { initial_bootstrap_status: "pass" } },
-      run: { task: { bootstrap_status: "bootstrapped" } },
-      files: [],
-      home: { title: "app", automation_status: "ACTIVE", current_horizon: "", next_action: "", pending_human_requests: 0, unhandled_inbox: 0, queued_patches: 0, deferred_patches: 0 },
-    });
+      setup: { dashboard_state: { initial_bootstrap_status: "pass" }, task: { bootstrap_status: "bootstrapped" } },
+      scheduler: {},
+      dag: {},
+      tickets: {},
+      human_input: {},
+      validation_repair: {},
+      controls: {},
+    } as any);
     expect(completed.enabled).toBe(true);
     expect(completed.bootstrapCompleted).toBe(true);
     expect(completed.status).toBe("Ready");

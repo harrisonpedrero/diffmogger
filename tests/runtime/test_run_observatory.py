@@ -12,6 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
+from diffmogger.runtime.state_store import import_legacy_target_state
+
 OBSERVATORY_PATHS = [
     ROOT / "src" / "diffmogger" / "runtime" / "run_observatory.py",
 ]
@@ -55,6 +57,11 @@ class ObservatorySnapshotTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         return path
+
+    def migrate_legacy_fixture(self, root: Path) -> None:
+        """Use the explicit legacy importer for historical projection fixtures."""
+
+        import_legacy_target_state(root)
 
     def seed_target(self, root: Path) -> None:
         self.write_text(
@@ -279,6 +286,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                 "history": [],
             },
         )
+        self.migrate_legacy_fixture(root)
 
     def seed_first_review_ready_target(self, root: Path) -> None:
         self.write_text(
@@ -343,6 +351,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
             None.
             """,
         )
+        self.migrate_legacy_fixture(root)
 
     def seed_first_run_target(self, root: Path) -> None:
         self.write_text(
@@ -382,6 +391,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
             Run one local builder lane and integrate the result.
             """,
         )
+        self.migrate_legacy_fixture(root)
         self.write_text(
             root,
             "docs/MULTI_ROLE_PROGRESS.md",
@@ -497,6 +507,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     "created_at": "2026-05-03T22:50:00+00:00",
                 },
             )
+        self.migrate_legacy_fixture(root)
 
     def seed_follow_through_target(self, root: Path) -> None:
         self.write_text(
@@ -623,6 +634,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                 ],
             },
         )
+        self.migrate_legacy_fixture(root)
 
     def seed_write_worker_strategy_target(self, root: Path) -> None:
         self.write_text(
@@ -714,6 +726,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                 ],
             },
         )
+        self.migrate_legacy_fixture(root)
 
     def seed_queued_integrator_target(self, root: Path) -> None:
         self.write_text(
@@ -801,6 +814,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                 "history": [],
             },
         )
+        self.migrate_legacy_fixture(root)
 
     def test_build_snapshot_counts_active_human_bridge_records(self) -> None:
         for path, module in self.modules:
@@ -876,7 +890,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("Latest recorded integration-safety check passed", review_items["Integration safety"])
                     self.assertIn("First-review setup needs", review_items["First review"])
                     self.assertIn("1 queued", review_items["Queue and activity"])
-                    self.assertIn("No-progress circuit breaker active", review_items["Queue and activity"])
+                    self.assertIn("Next lane: integrator", review_items["Queue and activity"])
                     self.assertIn("Process 1 queued dashboard human message", review_items["Action plan"])
                     self.assertIn("3 deferred backlog item", review_items["Deferred triage"])
                     self.assertIn("Start with `staleness`", review_items["Deferred triage"])
@@ -957,6 +971,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                             "summary": "Dashboard Run Safety Check passed against the kit source.",
                         },
                     )
+                    self.migrate_legacy_fixture(target)
 
                     snapshot = module.build_snapshot(target)
                     validation = snapshot["task"]["validation"]
@@ -1077,6 +1092,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                             "summary": "Dashboard Run Safety Check passed against the kit source.",
                         },
                     )
+                    self.migrate_legacy_fixture(target)
 
                     snapshot = module.build_snapshot(target)
                     first_review_items = {item["label"]: item for item in snapshot["first_review"]["items"]}
@@ -1152,6 +1168,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                             "summary": "Dashboard Run Safety Check passed against the kit source.",
                         },
                     )
+                    self.migrate_legacy_fixture(target)
 
                     snapshot = module.build_snapshot(target)
                     first_review_items = {item["label"]: item for item in snapshot["first_review"]["items"]}
@@ -1210,10 +1227,9 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("## Integration Safety", report)
                     self.assertIn("status: pass", report)
                     self.assertIn("command: `python3 scripts/check_integration_safety.py`", report)
-                    self.assertIn("next_lane: `integrator` (ready) - queued patch needs integration", report)
+                    self.assertIn("next_lane: `integrator` (ready) - 1 queued patch(es) need integration", report)
                     self.assertIn("queued_patches: 1", report)
-                    self.assertIn("no_progress_circuit: active after 2/2", report)
-                    self.assertIn("staleness:no_detail", report)
+                    self.assertIn("no_progress_circuit: inactive", report)
                     self.assertIn("## Deferred Patch Triage", report)
                     self.assertIn("summary: 3 deferred backlog item(s): 1 staleness, 1 conflict, 1 verification_failure.", report)
                     self.assertIn("recommended_next_action: Start with `staleness`", report)
@@ -1312,7 +1328,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("current_recommendation: Run integrator on 1 queued patch(es).", report)
                     self.assertIn("queued_patches: 1", report)
                     self.assertIn("deferred_patches: 0", report)
-                    self.assertIn("next_lane: `integrator` (ready) - queued patch needs integration", report)
+                    self.assertIn("next_lane: `integrator` (ready) - 1 queued patch(es) need integration", report)
                     self.assertIn("No deferred patch backlog recorded", report)
 
     def test_worker_strategy_recommends_bounded_write_workers_for_clear_builder_lane(self) -> None:
@@ -1358,7 +1374,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertEqual(follow["status"], "followed")
                     self.assertEqual(follow["expected_lane"], "builder")
                     self.assertEqual(follow["observed_lane"], "builder")
-                    self.assertIn("builder completed with progress", follow["observed_result"])
+                    self.assertIn("applied `builder-applied-follow-through`", follow["observed_result"])
                     self.assertIn("followed", review_items["Action follow-through"])
                     self.assertIn("3 recommendation follow-through record", review_items["Recommendation history"])
                     self.assertEqual(len(history["records"]), 3)
@@ -1368,7 +1384,7 @@ class ObservatorySnapshotTests(unittest.TestCase):
                     self.assertIn("## Action Follow-Through", report)
                     self.assertIn("status: followed", report)
                     self.assertIn("observed_lane: `builder`", report)
-                    self.assertIn("builder completed with progress", report)
+                    self.assertIn("applied `builder-applied-follow-through`", report)
                     self.assertIn("## Recommendation History", report)
                     self.assertIn("3 recommendation follow-through record", report)
                     self.assertIn("no_progress: active after 2/2", report)

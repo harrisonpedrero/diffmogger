@@ -10,15 +10,13 @@ NEVER push to a remote. NEVER configure a remote. NEVER set up upstream tracking
 
 ```text
 AGENTS.md
-target/canonical_state_brief.md
-docs/CODEX_AUTOMATION_TASKS.md
-docs/CODEX_AUTOMATION_GUARDRAILS.md
-docs/MULTI_ROLE_PROGRESS.md
-docs/PROJECT_CONTEXT.md
+.diffmogger/runtime/canonical_state_brief.md
+.diffmogger/state/CODEX_AUTOMATION_TASKS.md
+.diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md
 {{HUMAN_FILE_READS}}
 ```
 
-Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/DAG authority.
+Canonical run state lives in `.diffmogger/runtime/orchestration.sqlite3`; `.diffmogger/runtime/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/DAG authority.
 
 ## Mission
 
@@ -27,12 +25,12 @@ Improve reliability, tests, validation, docs, safety, or automation clarity with
 ## Responsibilities
 
 - Prefer tests, validation, bug fixes, docs, fixtures, smoke checks, or small reliability improvements.
-- If Playwright MCP is mounted, use it for local browser validation only. On any UI or browser-backed failure that you defer for Builder follow-up, call `browser_take_screenshot` before deferring, save the PNG under `docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png`, and link it from `summary.md`, `docs/CODEX_AUTOMATION_TASKS.md`, and `docs/MULTI_ROLE_PROGRESS.md` with concise repro notes.
-- For frontend-touching hardener work, a cancelled or failed Playwright navigation is a validation issue. Report success only after successful Playwright snapshot/console validation, or record an explicit deferred validation blocker explaining why browser validation could not run.
+- If Playwright MCP is mounted, use it for local browser validation only. On any UI or browser-backed failure that you defer for Builder follow-up, capture concise local evidence when available and link it from `summary.md` and `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
+- For frontend-touching hardener work, a cancelled or failed Playwright navigation is a validation issue. Report success only after successful Playwright snapshot/console validation, or create explicit deferred validation work explaining why browser validation could not run.
 - You may add tests, rewrite brittle or stale tests, broaden meaningful coverage, update fixtures/mocks, and remove tests for obsolete behavior when that improves verification quality.
 - Do not remove or weaken tests merely to make checks pass; removed or substantially rewritten tests must preserve or improve meaningful coverage.
 - When adding, removing, substantially rewriting, broadening, or otherwise touching tests, include `Test change rationale: <one concise reason this preserves or improves meaningful coverage>` in `summary.md`. This is cheap, harmless, and required for guardrail-compliant hardener patches.
-- When retrying after a deferred hardener patch, repair the listed deferral reason first. If you cannot produce a corrected patch, skip or defer that ticket/cluster with a concise blocker instead of repeating the same attempt.
+- When retrying after a deferred hardener patch, repair the listed deferral reason first. If you cannot produce a corrected patch, split, reframe, or defer that ticket/cluster with follow-up DAG work instead of repeating the same attempt.
 - When repairing a pre-existing clean-HEAD full-suite failure, include `Verification scope: baseline_repair` in `summary.md`.
 - For repairable local-service baselines, you may add or refine harness smoke tests, DB setup checks, fixtures, mocks, wait scripts, and docs so future full-suite runs are repeatable without manual babysitting.
 - Use deferred-patch information to harden around repeated failure modes.
@@ -43,7 +41,7 @@ Improve reliability, tests, validation, docs, safety, or automation clarity with
 - Prefer hardening only the ticket(s) marked `candidate_done` by that builder patch. If multiple `candidate_done` tickets came from the same builder patch, harden that coherent cluster together.
 - For catch-up work created before hardener scheduling was fixed, pick the oldest `candidate_done` ticket or coherent builder-slice cluster that lacks hardener/final verification evidence.
 - Do not sweep every `candidate_done` ticket in the campaign unless this is an explicit finalization/final hardening run or planner asks for a broader verification pass.
-- Mark tickets `done` only with evidence for the tickets actually verified. Mark only the verified ticket(s) `blocked` when a concise blocker prevents safe local verification.
+- Mark tickets `done` only with evidence for the tickets actually verified. Mark a verified ticket `blocked` only when you also create follow-up repair, setup, mock, fixture, defer, split, reframe, review, documentation, or alternate-ticket work.
 
 ## Worktree Behavior
 
@@ -54,9 +52,9 @@ This role starts from the latest main `HEAD` at run start. You may see partially
 The runtime wrapper will emit:
 
 ```text
-target/automation_queue/hardener/<run_id>/manifest.json
-target/automation_queue/hardener/<run_id>/changes.patch
-target/automation_queue/hardener/<run_id>/summary.md
+.diffmogger/runtime/automation_queue/hardener/<run_id>/manifest.json
+.diffmogger/runtime/automation_queue/hardener/<run_id>/changes.patch
+.diffmogger/runtime/automation_queue/hardener/<run_id>/summary.md
 ```
 
 When writing `summary.md`, start with:
@@ -75,6 +73,6 @@ Include an MCP decision note in `summary.md`:
 MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reason>
 ```
 
-Use `playwright used` when validating browser-facing changes. Use `skipped` only with a concrete reason such as backend-only change, docs-only change, not mounted for this role, MCP unavailable, or an explicit deferred validation blocker.
+Use `playwright used` when validating browser-facing changes. Use `skipped` only with a concrete reason such as backend-only change, docs-only change, not mounted for this role, MCP unavailable, or explicit deferred validation work.
 
 Do not mutate the main checkout directly.

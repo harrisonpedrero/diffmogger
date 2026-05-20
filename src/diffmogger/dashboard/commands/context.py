@@ -56,21 +56,6 @@ def merge_context_files(existing: Any, additions: list[str]) -> list[str]:
             merged.append(value)
     return merged
 
-def update_context_index(target: Path, project_name: str, records: list[Any], *, force: bool = False) -> Path | None:
-    if not records:
-        return None
-    dashboard_app = load_dashboard_module()
-    context_path = preferred_target_path(target, "docs/PROJECT_CONTEXT.md")
-    context_index_existed = context_path.exists()
-    if force or not context_index_existed:
-        context_text = dashboard_app.render_project_context(project_name, records)
-    else:
-        existing_context = context_path.read_text(encoding="utf-8", errors="replace") if context_path.exists() else ""
-        context_text = dashboard_app.upsert_context_imports(existing_context, project_name, records)
-    context_path.parent.mkdir(parents=True, exist_ok=True)
-    context_path.write_text(context_text, encoding="utf-8")
-    return context_path
-
 def command_context_import(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     context_sources = resolve_context_sources(args.files_json)
@@ -86,7 +71,6 @@ def command_context_import(args: argparse.Namespace) -> dict[str, Any]:
     project_name = str(args.project_name or draft_intake.get("project_name") or target.name or "New Project")
     if not draft_intake:
         draft_intake = {"project_name": project_name, "additional_context_files": []}
-    context_path = update_context_index(target, project_name, records)
 
     intake_path = preferred_target_path(target, ".agentic/project_intake.json")
     if intake_path.exists():
@@ -101,7 +85,7 @@ def command_context_import(args: argparse.Namespace) -> dict[str, Any]:
         "target": target_metadata(target),
         "records": [context_record_to_dict(record) for record in records],
         "imported_count": len(records),
-        "project_context_path": str(context_path) if context_path else None,
+        "context_dir": str((target / ".diffmogger" / "context").resolve()),
         "dashboard_state_path": str(preferred_target_path(target, ".agentic/dashboard_state.json")),
         "log": logs,
     }

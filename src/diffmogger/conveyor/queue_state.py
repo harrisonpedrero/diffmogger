@@ -17,7 +17,7 @@ def target_has_multi_role(target: Path) -> bool:
 
 
 def target_role_profile(target: Path) -> str:
-    control = automation_control_state(target, import_legacy_if_empty=True)
+    control = automation_control_state(target)
     payload = control.get("payload") if isinstance(control.get("payload"), dict) else {}
     profile = str(payload.get("role_profile") or "").strip()
     if profile == "planner_builder_hardener_integrator":

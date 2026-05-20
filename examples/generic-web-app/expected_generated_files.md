@@ -65,13 +65,8 @@ AGENTS.md
 .diffmogger/agentic/automation_prompt.md
 .diffmogger/agentic/smoke_commands.txt
 .diffmogger/agentic/verification_commands.txt
-.diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md
-.diffmogger/state/PROJECT_CONTEXT.md
 .diffmogger/state/CODEX_AUTOMATION_TASKS.md
 .diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md
-.diffmogger/state/HUMAN_BRIDGE_SETUP.md
-.diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md
-.diffmogger/state/DAILY_AUTOMATION_REVIEW.md
 .diffmogger/state/DEVELOPMENT.md
 .diffmogger/scripts/acquire_codex_lock.sh
 .diffmogger/scripts/release_codex_lock.sh

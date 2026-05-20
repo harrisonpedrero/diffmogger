@@ -49,7 +49,6 @@ RUNTIME_STATE_WHITELIST = {
     ".agentic/roles/hardener.md",
     ".agentic/roles/integrator.md",
     "docs/CODEX_AUTOMATION_TASKS.md",
-    "docs/MULTI_ROLE_PROGRESS.md",
     "target/automation_conveyor_state.json",
     "target/automation_runner.json",
 }
@@ -163,9 +162,7 @@ SEMANTIC_COMMIT_TYPES = {"feat", "fix", "docs", "test", "refactor", "chore", "bu
 
 AUTOMATION_BOOKKEEPING_FILES = {
     "docs/CODEX_AUTOMATION_TASKS.md",
-    "docs/MULTI_ROLE_PROGRESS.md",
     sidecar_rel("docs/CODEX_AUTOMATION_TASKS.md"),
-    sidecar_rel("docs/MULTI_ROLE_PROGRESS.md"),
     sidecar_rel("target/automation_runner.json"),
 }
 

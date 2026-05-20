@@ -13,14 +13,10 @@ from diffmogger.dashboard.jsonio import *  # noqa: F401,F403
 from diffmogger.dashboard.target import *  # noqa: F401,F403
 from diffmogger.dashboard import target as _target
 from diffmogger.dashboard.commands import run_control as _run_control
-from diffmogger.dashboard.commands.advanced import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.brief import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.context import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.diagnostics import *  # noqa: F401,F403
-from diffmogger.dashboard.commands.inbox import *  # noqa: F401,F403
-from diffmogger.dashboard.commands.observatory import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.project import *  # noqa: F401,F403
-from diffmogger.dashboard.commands.review import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.run_control import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.state import *  # noqa: F401,F403
 from diffmogger.dashboard.commands.tickets import *  # noqa: F401,F403

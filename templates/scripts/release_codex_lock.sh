@@ -8,7 +8,7 @@ Usage: .diffmogger/scripts/release_codex_lock.sh
 Release the local Codex automation lock when it appears to belong to this run.
 
 Environment:
-  CODEX_LOCK_PATH          Lock file path. Default: target/codex_automation.lock
+  CODEX_LOCK_PATH          Lock file path. Default: .diffmogger/runtime/codex_automation.lock
   CODEX_RUN_ID or RUN_ID   Current run id. Preferred release identity.
   CODEX_LOCK_OWNER_PID     Owner PID. Default: parent shell PID.
   CODEX_LOCK_FORCE_RELEASE Set true to remove without identity match.
@@ -20,7 +20,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
-lock_path="${CODEX_LOCK_PATH:-target/codex_automation.lock}"
+lock_path="${CODEX_LOCK_PATH:-.diffmogger/runtime/codex_automation.lock}"
 current_run_id="${CODEX_RUN_ID:-${RUN_ID:-}}"
 current_owner_pid="${CODEX_LOCK_OWNER_PID:-${PPID:-$$}}"
 force="${CODEX_LOCK_FORCE_RELEASE:-false}"

@@ -5,21 +5,21 @@ import type { PaletteCommand } from "./commandPaletteModel";
 
 const commands: PaletteCommand[] = [
   {
-    id: "open-control-room",
-    title: "Open Home",
+    id: "open-setup",
+    title: "Open Setup",
     section: "Navigation",
-    description: "Open the Home overview.",
-    keywords: ["home", "control room"],
-    routesTo: "Home",
+    description: "Open project selection and setup.",
+    keywords: ["setup", "project"],
+    routesTo: "Setup",
   },
   {
     id: "start-automation",
-    title: "Start",
-    section: "Run",
-    description: "Start automation.",
+    title: "Start automation",
+    section: "Automation",
+    description: "Start the scheduler.",
     keywords: ["start"],
     dangerous: true,
-    disabledReason: "Run Safety Check before starting.",
+    disabledReason: "Safety check before starting.",
   },
 ];
 
@@ -42,6 +42,6 @@ describe("CommandPalette", () => {
     expect(html).toContain('role="listbox"');
     expect(html).toContain('role="option"');
     expect(html).toContain('aria-live="polite"');
-    expect(html).toContain("Run Safety Check before starting.");
+    expect(html).toContain("Safety check before starting.");
   });
 });

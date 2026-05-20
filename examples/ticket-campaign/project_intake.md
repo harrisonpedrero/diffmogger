@@ -57,7 +57,7 @@ project_commands_only
 
 ## Automation Mode
 
-Continuous execution DAG scheduler with planner/builder/hardener/integrator roles until the ticket run is complete or blocked.
+Continuous execution DAG scheduler with planner/builder/hardener/integrator roles until every ticket is done with evidence. Blocked tickets become unblocker DAG work.
 
 ## DAG Scheduler Config
 
@@ -116,11 +116,11 @@ Allowed for read-only test-gap and risk reviews.
 
 ## Meaningful Deliverable
 
-A completed or honestly blocked selected ticket with evidence and verification notes.
+A completed selected ticket with evidence and verification notes, or unblocker work that moves a remaining ticket forward.
 
 ## Long-Run Direction
 
-None. Stop when the bounded ticket run is complete or fully blocked.
+None. Stop only when the bounded ticket run is complete with evidence; blocked tickets become unblocker work.
 
 ## Assumptions
 

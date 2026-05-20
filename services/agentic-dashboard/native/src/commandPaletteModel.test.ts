@@ -20,67 +20,64 @@ function snapshot(overrides: DeepPartial<ProjectSnapshot> = {}): ProjectSnapshot
       dashboard_state_exists: true,
       automation_task_exists: true,
     },
-    brief: { project_name: "Project", project_mode: "fresh_project" },
-    run: {
-      controls: {
-        is_scaffolded: true,
-        can_start_automation: true,
-        start_automation_reason: "Automation ready.",
-        can_stop_automation: false,
-        stop_automation_reason: "No automation is running.",
-        can_run_safety_check: true,
-        can_export_review: true,
-      },
-      automation: { state: "stopped", message: "Continuous automation is ready to start." },
+    setup: {
+      project_name: "Project",
+      project_mode: "fresh_project",
+      files: [
+        {
+          key: "monitor.automation_tasks",
+          label: "Automation Tasks",
+          rel_path: "docs/CODEX_AUTOMATION_TASKS.md",
+          group: "monitor",
+          exists: true,
+          size_bytes: 120,
+          modified_at: "2026-05-06T12:00:00+00:00",
+        },
+      ],
     },
-    files: [
-      {
-        key: "monitor.automation_tasks",
-        label: "Automation Tasks",
-        rel_path: "docs/CODEX_AUTOMATION_TASKS.md",
-        group: "monitor",
-        exists: true,
-        size_bytes: 120,
-        modified_at: "2026-05-06T12:00:00+00:00",
-      },
-    ],
-    home: {
-      title: "Project",
-      automation_status: "ACTIVE",
-      current_horizon: "H1",
-      next_action: "Run.",
-      pending_human_requests: 0,
-      unhandled_inbox: 0,
-      queued_patches: 0,
-      deferred_patches: 0,
+    scheduler: {},
+    dag: {},
+    tickets: {},
+    human_input: {},
+    validation_repair: {},
+    controls: {
+      is_scaffolded: true,
+      can_start_automation: true,
+      start_automation_reason: "Automation ready.",
+      can_stop_automation: false,
+      stop_automation_reason: "No automation is running.",
+      can_run_safety_check: true,
+      automation: { state: "stopped", message: "Continuous automation is ready to start." },
     },
   };
   return {
     ...base,
     ...overrides,
     target: { ...base.target, ...overrides.target },
-    run: { ...base.run, ...overrides.run },
-    home: { ...base.home, ...overrides.home },
-    files: overrides.files ?? base.files,
+    setup: { ...base.setup, ...overrides.setup },
+    controls: { ...base.controls, ...overrides.controls },
   } as ProjectSnapshot;
 }
 
 describe("command palette model", () => {
-  it("includes the required command surface", () => {
+  it("includes the simplified command surface", () => {
     const ids = buildCommandPaletteModel({ snapshot: snapshot() }).map((command) => command.id);
 
-    expect(ids).toContain("open-project");
-    expect(ids).toContain("open-control-room");
-    expect(ids).toContain("open-run-control");
-    expect(ids).toContain("open-human-bridge");
-    expect(ids).toContain("open-sidecar");
-    expect(ids).toContain("open-canonical-state");
-    expect(ids).toContain("create-new-project");
-    expect(ids).toContain("close-project");
-    expect(ids).toContain("start-automation");
-    expect(ids).toContain("stop-automation");
-    expect(ids).toContain("export-debug-bundle");
-    expect(ids).toHaveLength(23);
+    expect(ids).toEqual([
+      "open-setup",
+      "open-automation",
+      "open-project",
+      "create-new-project",
+      "close-project",
+      "reveal-project",
+      "open-project-editor",
+      "import-context-files",
+      "scaffold-project",
+      "start-automation",
+      "stop-automation",
+      "run-safety-check",
+      "open-raw-automation-tasks",
+    ]);
   });
 
   it("explains disabled target-scoped commands without a selected target", () => {
@@ -98,15 +95,12 @@ describe("command palette model", () => {
   it("uses run-control reasons for gated automation commands", () => {
     const commands = buildCommandPaletteModel({
       snapshot: snapshot({
-        run: {
-          controls: {
-            is_scaffolded: true,
-            can_start_automation: false,
-            start_automation_reason: "Fix prerequisites first.",
-            can_stop_automation: true,
-            can_run_safety_check: true,
-            can_export_review: true,
-          },
+        controls: {
+          is_scaffolded: true,
+          can_start_automation: false,
+          start_automation_reason: "Fix prerequisites first.",
+          can_stop_automation: true,
+          can_run_safety_check: true,
           automation: { state: "running", message: "Continuous automation is running." },
         },
       }),
@@ -119,12 +113,10 @@ describe("command palette model", () => {
   it("disables Stop when automation is not running", () => {
     const commands = buildCommandPaletteModel({
       snapshot: snapshot({
-        run: {
-          controls: {
-            is_scaffolded: true,
-            can_stop_automation: false,
-            stop_automation_reason: "No automation is running.",
-          },
+        controls: {
+          is_scaffolded: true,
+          can_stop_automation: false,
+          stop_automation_reason: "No automation is running.",
           automation: { state: "stopped", message: "Continuous automation is ready to start." },
         },
       }),
@@ -136,41 +128,33 @@ describe("command palette model", () => {
   it("does not route Start through retired first-run preparation", () => {
     const start = buildCommandPaletteModel({
       snapshot: snapshot({
-        run: {
-          controls: {
-            is_scaffolded: true,
-            can_start_automation: false,
-            start_automation_reason: "Automation is not ready.",
-            can_bootstrap_and_start: true,
-          },
+        controls: {
+          is_scaffolded: true,
+          can_start_automation: false,
+          start_automation_reason: "Automation is not ready.",
+          can_bootstrap_and_start: true,
         },
       }),
     }).find((command) => command.id === "start-automation");
 
-    expect(start?.title).toBe("Start");
+    expect(start?.title).toBe("Start automation");
     expect(start?.disabledReason).toBe("Automation is not ready.");
-    expect(start?.description).toBe("Start automation.");
+    expect(start?.description).toBe("Start the scheduler.");
   });
 
   it("searches command title, section, description, and keywords", () => {
     const commands = buildCommandPaletteModel({ snapshot: snapshot() });
 
-    expect(filterPaletteCommands(commands, "activity").map((command) => command.id)).toEqual(["open-observatory"]);
-    expect(filterPaletteCommands(commands, "home").map((command) => command.id)).toContain("open-control-room");
-    expect(filterPaletteCommands(commands, "control room").map((command) => command.id)).toContain("open-control-room");
-    expect(filterPaletteCommands(commands, "brief").map((command) => command.id)).toContain("continue-brief");
-    expect(filterPaletteCommands(commands, "setup").map((command) => command.id)).toContain("continue-brief");
-    expect(filterPaletteCommands(commands, "run control").map((command) => command.id)).toContain("open-run-control");
-    expect(filterPaletteCommands(commands, "human bridge").map((command) => command.id)).toContain("open-human-bridge");
-    expect(filterPaletteCommands(commands, "inbox").map((command) => command.id)).toContain("open-human-bridge");
-    expect(filterPaletteCommands(commands, "advanced").map((command) => command.id)).toContain("open-sidecar");
-    expect(filterPaletteCommands(commands, "sidecar").map((command) => command.id)).toContain("open-sidecar");
-    expect(filterPaletteCommands(commands, "sqlite state").map((command) => command.id)).toContain("open-canonical-state");
-    expect(filterPaletteCommands(commands, "debug bundle").map((command) => command.id)).toContain("export-debug-bundle");
-    expect(filterPaletteCommands(commands, "inbox note").map((command) => command.id)).toContain("send-note-next-run");
+    expect(filterPaletteCommands(commands, "setup").map((command) => command.id)).toContain("open-setup");
+    expect(filterPaletteCommands(commands, "project").map((command) => command.id)).toContain("open-project");
+    expect(filterPaletteCommands(commands, "scheduler").map((command) => command.id)).toContain("open-automation");
+    expect(filterPaletteCommands(commands, "safety").map((command) => command.id)).toEqual(["run-safety-check"]);
     expect(filterPaletteCommands(commands, "raw tasks").map((command) => command.id)).toEqual([
       "open-raw-automation-tasks",
     ]);
+    expect(filterPaletteCommands(commands, "review")).toEqual([]);
+    expect(filterPaletteCommands(commands, "inbox")).toEqual([]);
+    expect(filterPaletteCommands(commands, "sidecar")).toEqual([]);
   });
 
   it("covers representative start gating states", () => {
@@ -187,15 +171,16 @@ describe("command palette model", () => {
             is_diffmogger_project: false,
             automation_task_exists: false,
           },
-          run: { controls: { can_start_automation: false, start_automation_reason: "Target sidecar is missing. Complete setup first." } },
+          controls: { can_start_automation: false, start_automation_reason: "Target sidecar is missing. Complete setup first." },
         }),
         reason: "Target sidecar is missing",
       },
       {
         name: "running",
         snapshot: snapshot({
-          run: {
-            controls: { can_start_automation: false, start_automation_reason: "Automation is already running." },
+          controls: {
+            can_start_automation: false,
+            start_automation_reason: "Automation is already running.",
             automation: { state: "running" },
           },
         }),
@@ -204,8 +189,8 @@ describe("command palette model", () => {
       {
         name: "critical stop",
         snapshot: snapshot({
-          home: { automation_status: "CRITICAL_STOP" },
-          run: { controls: { can_start_automation: false, start_automation_reason: "Critical stop recorded. Review before continuing." } },
+          setup: { status: "CRITICAL_STOP" },
+          controls: { can_start_automation: false, start_automation_reason: "Critical stop recorded before continuing." },
         }),
         reason: "Critical stop recorded",
       },

@@ -142,7 +142,7 @@ def baseline_next_action(status: str, result: VerificationResult) -> str:
             "for the failing verification command, then rerun the full suite."
         )
     if status == "blocked_environment":
-        return "Safe local repair was not available or did not clear the environment blocker; record the blocker before requiring full-suite integration."
+        return "Safe local repair was not available or did not clear the environment issue; create setup, harness, mock, fixture, or deferred validation work before requiring full-suite integration."
     if status == "failing_source":
         return "Route a baseline repair patch through planner/builder/hardener with verification_scope baseline_repair."
     return result.root_cause or "Inspect baseline verification output before running full-suite-required integration."

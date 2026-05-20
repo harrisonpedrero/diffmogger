@@ -34,7 +34,7 @@ def _role_run_status(target: Path, exit_code: int) -> str:
     if exit_code == 0:
         return "ACTIVE"
     try:
-        human = human_messages_snapshot(target, import_legacy=False)
+        human = human_messages_snapshot(target)
     except Exception:
         return "ACTIVE"
     counts = human.get("counts") if isinstance(human.get("counts"), dict) else {}
@@ -163,7 +163,7 @@ def main() -> int:
             print(f"CONVEYOR_DECISION role={role or 'idle'} reason={reason}", flush=True)
 
             if stop:
-                if reason in {"bounded campaign complete", "bounded campaign blocked"}:
+                if reason == "bounded campaign complete":
                     finalize_ticket_campaign(target)
                 return 0
             if role is None:

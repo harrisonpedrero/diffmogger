@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
-from diffmogger.runtime.state_store import human_messages_snapshot
+from diffmogger.runtime.state_store import human_messages_snapshot, write_ticket_run_state
 TICKET_RUN_PATHS = [
     ROOT / "src" / "diffmogger" / "runtime" / "ticket_run.py",
 ]
@@ -37,6 +37,16 @@ class TicketRunTests(unittest.TestCase):
         cls.modules = [(path, load_ticket_run(path)) for path in TICKET_RUN_PATHS]
 
     def write_ticket_run(self, root: Path, payload: dict[str, object]) -> Path:
+        write_ticket_run_state(
+            root,
+            payload,
+            actor_role="test",
+            event_type="ticket.run_test",
+            source_path="sqlite",
+        )
+        return root / ".diffmogger" / "runtime" / "orchestration.sqlite3"
+
+    def write_ticket_run_markdown(self, root: Path, payload: dict[str, object]) -> Path:
         path = root / "docs" / "TICKET_RUN.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -490,7 +500,7 @@ class TicketRunTests(unittest.TestCase):
                     self.assertIn("T-1 [DONE] Finish ticket", outbox[0]["body"])
                     self.assertIn("Evidence: pytest passed", outbox[0]["body"])
 
-    def test_malformed_ticket_block_fails_loudly(self) -> None:
+    def test_malformed_explicit_ticket_file_fails_loudly(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -511,7 +521,7 @@ class TicketRunTests(unittest.TestCase):
                     )
 
                     with self.assertRaises(SystemExit):
-                        module.load_ticket_run(target)
+                        module.load_ticket_run(target, ticket_path)
 
     def run_next_json(self, script_path: Path, target: Path) -> dict[str, object]:
         result = subprocess.run(
@@ -774,7 +784,7 @@ class TicketRunTests(unittest.TestCase):
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
                     target = Path(tmp)
-                    ticket_path = self.write_ticket_run(
+                    ticket_path = self.write_ticket_run_markdown(
                         target,
                         {
                             "run_id": "preserve-wrapper",
@@ -789,7 +799,7 @@ class TicketRunTests(unittest.TestCase):
 
                     module.write_ticket_run_data(ticket_path, original, next_data)
                     updated = ticket_path.read_text(encoding="utf-8")
-                    loaded, _path, _text = module.load_ticket_run(target)
+                    loaded, _path, _text = module.load_ticket_run(target, ticket_path)
 
                     self.assertTrue(updated.startswith("# Ticket Run\n\n```json ticket-run\n"))
                     self.assertTrue(updated.endswith("\n```\n"))

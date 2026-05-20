@@ -10,15 +10,13 @@ NEVER push to a remote. NEVER configure a remote. NEVER set up upstream tracking
 
 ```text
 AGENTS.md
-target/canonical_state_brief.md
-docs/CODEX_AUTOMATION_TASKS.md
-docs/CODEX_AUTOMATION_GUARDRAILS.md
-docs/MULTI_ROLE_PROGRESS.md
-docs/PROJECT_CONTEXT.md
+.diffmogger/runtime/canonical_state_brief.md
+.diffmogger/state/CODEX_AUTOMATION_TASKS.md
+.diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md
 {{HUMAN_FILE_READS}}
 ```
 
-Canonical run state lives in `target/orchestration.sqlite3`; `target/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/DAG authority.
+Canonical run state lives in `.diffmogger/runtime/orchestration.sqlite3`; `.diffmogger/runtime/canonical_state_brief.md` is the generated bounded view for agents. Read the brief instead of inspecting SQLite manually. The Markdown files above are prompt inputs, handoffs, authored surfaces, or generated projections; do not treat them as dashboard/DAG authority.
 
 ## Mission
 
@@ -45,9 +43,9 @@ This role starts from the latest main `HEAD` at run start. You may see partially
 The runtime wrapper will emit:
 
 ```text
-target/automation_queue/builder/<run_id>/manifest.json
-target/automation_queue/builder/<run_id>/changes.patch
-target/automation_queue/builder/<run_id>/summary.md
+.diffmogger/runtime/automation_queue/builder/<run_id>/manifest.json
+.diffmogger/runtime/automation_queue/builder/<run_id>/changes.patch
+.diffmogger/runtime/automation_queue/builder/<run_id>/summary.md
 ```
 
 When writing `summary.md`, start with:

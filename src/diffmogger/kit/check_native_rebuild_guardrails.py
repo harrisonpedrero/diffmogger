@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Guardrails for the Diffmogger native dashboard preservation inventory.
+"""Guardrails for the simplified Diffmogger native dashboard inventory.
 
-This check intentionally couples the archived migration inventory to the backend
-command surface. If a future edit removes or renames a preserved feature command,
-this script fails before dashboard behavior silently disappears from the native
-app path.
+This check couples the native dashboard command inventory to the backend command
+surface. If a future edit removes or renames a required Setup/Automation command,
+this script fails before dashboard behavior silently disappears.
 """
 
 from __future__ import annotations
@@ -34,26 +33,43 @@ FEATURE_COMMAND_REQUIREMENTS: dict[str, list[str]] = {
     "prerequisite checks": ["diagnostics.environment", "diagnostics.run_checks"],
     "fresh-project setup": ["brief.load", "brief.save_draft", "brief.scaffold_preview", "brief.scaffold"],
     "existing-project setup": ["brief.scaffold_preview", "brief.scaffold"],
-    "project intake fields": ["brief.load", "brief.save_draft", "brief.scaffold"],
+    "project intake fields": ["brief.load", "brief.generate_intake", "brief.save_draft", "brief.scaffold"],
     "context-file import": ["context.import"],
     "project-context generation": ["context.import"],
     "scaffold/start": ["brief.scaffold_preview", "brief.scaffold", "automation.start"],
-    "continuous automation start/stop": ["run.load", "automation.start", "automation.stop"],
+    "continuous automation start/stop": ["project.load_snapshot", "automation.start", "automation.stop"],
     "run safety check": ["safety.run_check"],
-    "review export": ["review.load", "review.export_bundle", "review.mark_reviewed"],
-    "observatory launch": ["observatory.snapshot", "observatory.generate_html", "observatory.load_html"],
-    "worker strategy controls": ["run.load", "worker.run_read_only", "worker.run_write", "worker.run_integrator"],
-    "Human bridge and file-only messaging": ["inbox.load", "inbox.send_note", "inbox.reply_request"],
-    "markdown file monitor/editor": [
-        "advanced.list_files",
-        "advanced.load_file",
-        "advanced.save_file",
-        "advanced.validate_file",
+    "ticket queue": [
+        "ticket.load",
+        "ticket.add",
+        "ticket.update",
+        "ticket.delete",
+        "ticket.import",
+        "ticket.draft_from_intake",
+        "ticket.accept_draft",
+        "ticket.split_preview",
+        "ticket.accept_split",
     ],
-    "Multi-role and DAG scheduler intake settings": ["brief.save_draft", "brief.scaffold", "run.load"],
+    "runtime state": ["state.snapshot", "state.brief", "state.validate", "state.watch"],
+    "worker and parallel controls": [
+        "worker.run_read_only",
+        "worker.run_write",
+        "worker.run_integrator",
+        "worker.launch_read_only_group",
+        "worker.launch_write_group",
+        "execution_group.load",
+        "execution_group.start",
+        "execution_group.cancel",
+        "execution_group.retry_failed",
+        "execution_group.export_debug_bundle",
+        "validation_jobs.load",
+        "lease.release_stale",
+    ],
+    "human input records": ["project.load_snapshot", "state.snapshot"],
+    "Multi-role and DAG scheduler intake settings": ["brief.save_draft", "brief.scaffold", "project.load_snapshot", "state.snapshot"],
     "Context7 and Playwright MCP options": ["brief.load", "brief.save_draft", "brief.scaffold"],
     "dashboard state persistence": ["project.load_snapshot", "brief.load", "brief.save_draft"],
-    "debug bundle": ["advanced.export_debug_bundle"],
+    "parallel debug bundle": ["execution_group.export_debug_bundle"],
 }
 
 
@@ -91,7 +107,8 @@ def check_guardrails() -> list[str]:
     for required_phrase in [
         "services/agentic-dashboard/native",
         "scripts/dashboard_backend_cli.py",
-        "Diffmogger Autonomous Build Log",
+        "Setup",
+        "Automation",
     ]:
         if required_phrase not in inventory_text:
             failures.append(f"Inventory is missing migration anchor: {required_phrase}")

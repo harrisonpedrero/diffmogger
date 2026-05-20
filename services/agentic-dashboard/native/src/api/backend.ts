@@ -28,17 +28,6 @@ export type TargetMetadata = {
   automation_task_exists: boolean;
 };
 
-export type HomeSnapshot = {
-  title: string;
-  automation_status: string;
-  current_horizon: string;
-  next_action: string;
-  pending_human_requests: number;
-  unhandled_inbox: number;
-  queued_patches: number;
-  deferred_patches: number;
-};
-
 export type RegisteredFile = {
   key: string;
   label: string;
@@ -88,7 +77,6 @@ export type CanonicalStateSnapshot = {
   scheduling_candidates?: Array<Record<string, unknown>>;
   selected_candidate?: Record<string, unknown>;
   skipped_candidates?: Array<Record<string, unknown>>;
-  scheduler_fallback_used?: boolean;
   proposed_execution_groups?: Array<Record<string, unknown>>;
   parallelization_summary?: Record<string, unknown>;
   blocked_parallel_candidates?: Array<Record<string, unknown>>;
@@ -146,259 +134,94 @@ export type ConveyorMachineSnapshot = {
 
 export type ProjectSnapshot = {
   target: TargetMetadata;
-  brief: {
+  setup: {
+    [key: string]: unknown;
     project_name?: string;
     project_mode?: string;
-    context_files?: unknown[];
-    intake?: Record<string, unknown>;
-    draft_intake?: Record<string, unknown>;
-    dashboard_state?: Record<string, unknown>;
-    detected?: Record<string, unknown>;
-  };
-  run: {
+    configured?: boolean;
+    status?: string;
+    horizon?: string;
     task?: Record<string, unknown>;
-    human?: Record<string, unknown>;
     git?: {
       branch?: string;
       dirty_count?: number;
       recent_commits?: string[];
       commits?: Array<Record<string, unknown>>;
     };
-    queue?: Record<string, unknown>;
-    conveyor?: Record<string, unknown>;
-    state?: CanonicalStateSnapshot | Record<string, unknown>;
-    progress?: Record<string, unknown>;
-    scorecard?: Record<string, unknown>;
-    first_review?: Record<string, unknown>;
-    follow_through?: Record<string, unknown>;
-    recommendation_history?: Record<string, unknown>;
-    worker_strategy?: Record<string, unknown>;
-    review?: Record<string, unknown>;
-    baseline_verification?: Record<string, unknown>;
-    progress_recent?: string;
-    empty_states?: Record<string, unknown>;
-    logs?: Array<Record<string, unknown>>;
-    controls?: Record<string, unknown>;
-    automation?: Record<string, unknown>;
-    run_log?: Record<string, unknown>;
-    worker_controls?: Record<string, unknown>;
-    latest_worker_result?: Record<string, unknown>;
-    environment_blockers?: Array<Record<string, unknown>>;
+    files?: RegisteredFile[];
+    context_files?: unknown[];
+    intake?: Record<string, unknown>;
+    draft_intake?: Record<string, unknown>;
+    dashboard_state?: Record<string, unknown>;
+    detected?: Record<string, unknown>;
     snapshot_generated_at?: string;
   };
-  files: RegisteredFile[];
-  home: HomeSnapshot;
-};
-
-export type ObservatoryBadge = {
-  label: string;
-  value: string;
-  tone: "good" | "warn" | "critical" | "info" | "quiet" | string;
-};
-
-export type ObservatoryRoleCard = {
-  role: "planner" | "builder" | "hardener" | "integrator" | string;
-  status: string;
-  badge: string;
-  tone: string;
-  reason: string;
-  counts: Record<string, number>;
-};
-
-export type ObservatoryCommit = {
-  hash?: string;
-  time?: string;
-  subject?: string;
-  role?: string;
-  summary?: string;
-  file_count?: number;
-  additions?: number;
-  deletions?: number;
-  files?: Array<Record<string, unknown>>;
-};
-
-export type ObservatorySnapshot = {
-  schema_version: number;
-  generated_at?: string;
-  target: TargetMetadata;
-  title: string;
-  subtitle: string;
-  mission: {
-    project_name: string;
-    automation_status: string;
-    current_horizon: string;
-    mission_text: string;
-    best_next_milestone: string;
-    known_issue: string;
-    tags: ObservatoryBadge[];
-  };
-  scorecard: {
-    status: string;
-    summary: string;
-    counts: Array<Record<string, unknown>>;
-  };
-  conveyor: {
-    cycles: number;
-    updated_at?: string;
-    roles: ObservatoryRoleCard[];
-    state_machine?: ConveyorMachineSnapshot | Record<string, unknown>;
-    active_run?: Record<string, unknown>;
+  scheduler: {
+    selected_action?: Record<string, unknown>;
+    next_actions?: Array<Record<string, unknown>>;
     decision_queue?: Array<Record<string, unknown>>;
-    health?: Record<string, unknown>;
-    no_progress?: Record<string, unknown>;
+    active_role_run?: Record<string, unknown>;
+    why_not_parallel?: Record<string, unknown>;
+    scheduler_parallel_dry_run?: Record<string, unknown>;
+    blocked_candidates?: Array<Record<string, unknown>>;
+    skipped_candidates?: Array<Record<string, unknown>>;
   };
-  automation_activity?: Record<string, unknown>;
-  progress: {
-    story: string;
-    latest_landed_work?: ObservatoryCommit;
-    landed_work_feed: ObservatoryCommit[];
-    recent_outcomes: Array<Record<string, unknown>>;
+  dag: {
+    summary?: Record<string, number>;
+    execution_dag?: Record<string, unknown>;
+    proposed_execution_groups?: Array<Record<string, unknown>>;
+    active_execution_groups?: Array<Record<string, unknown>>;
+    recent_execution_groups?: Array<Record<string, unknown>>;
+    recently_completed_execution_groups?: Array<Record<string, unknown>>;
+    active_read_only_workers?: Array<Record<string, unknown>>;
+    active_write_workers?: Array<Record<string, unknown>>;
+    completed_worker_reports?: Array<Record<string, unknown>>;
+    queued_worker_patches?: Array<Record<string, unknown>>;
+    write_worker_conflicts?: Array<Record<string, unknown>>;
+    integration_backlog_from_parallel_workers?: Array<Record<string, unknown>>;
+    worker_patch_integration_preflight?: Record<string, unknown>;
+    recent_outcomes?: Array<Record<string, unknown>>;
+    queue?: Record<string, unknown>;
   };
-  validation_safety: {
+  tickets: {
+    counts?: Record<string, unknown>;
+    items?: Array<Record<string, unknown>>;
+    remaining?: Array<Record<string, unknown>>;
+    remaining_count?: number;
+    source?: string;
+  };
+  human_input: {
+    pending_requests?: number;
+    unhandled_records?: number;
+    unhandled_inbox?: number;
+    outbound_records?: number;
+    summary?: string;
+  };
+  validation_repair: {
     validation?: Record<string, unknown>;
     integration_safety?: Record<string, unknown>;
-    baseline_verification?: Record<string, unknown>;
-    first_review?: Record<string, unknown>;
+    active_validation_jobs?: Array<Record<string, unknown>>;
+    validation_job_summary?: Record<string, unknown>;
+    validation_receipts?: Array<Record<string, unknown>>;
+    repair_actions?: Array<Record<string, unknown>>;
+    open_blockers?: Array<Record<string, unknown>>;
+    setup_repair_inputs?: Array<Record<string, unknown>>;
   };
-  patches: {
-    queue_totals: Record<string, number>;
-    manifests: Array<Record<string, unknown>>;
-    deferred_backlog: Array<Record<string, unknown>>;
-    deferred_triage?: Record<string, unknown>;
-    recent_outcomes: Array<Record<string, unknown>>;
+  controls: {
+    [key: string]: unknown;
+    is_scaffolded?: boolean;
+    is_running?: boolean;
+    can_start_automation?: boolean;
+    start_automation_reason?: string;
+    can_stop_automation?: boolean;
+    stop_automation_reason?: string;
+    can_run_safety_check?: boolean;
+    automation?: Record<string, unknown>;
+    worker_strategy?: Record<string, unknown>;
+    worker_controls?: Record<string, unknown>;
+    latest_worker_result?: Record<string, unknown>;
+    run_log?: Record<string, unknown>;
   };
-  timeline: Array<Record<string, unknown>>;
-  metrics: Record<string, number>;
-  review?: {
-    items?: Array<Record<string, unknown>>;
-    known_issues?: Array<Record<string, unknown>>;
-  };
-};
-
-export type InboxMessage = {
-  id: string;
-  title: string;
-  status: string;
-  status_label: string;
-  ui_state: "pending" | "handled" | "queued" | "consumed" | "archived" | "failed" | "sent" | "unknown" | string;
-  timestamp?: string;
-  request_id?: string;
-  source_inbox_id?: string;
-  intent?: string;
-  channel?: string;
-  from?: string;
-  to?: string;
-  related?: {
-    request?: string;
-    ticket?: string;
-    run?: string;
-    file?: string;
-  };
-  metadata?: Record<string, string>;
-  body: string;
-  summary: string;
-  kind: "request" | "note" | "archive" | "outbound" | string;
-  source_file_key?: string;
-  truncated?: boolean;
-};
-
-export type InboxSnapshot = {
-  target: TargetMetadata;
-  bridge_mode: string;
-  requests: InboxMessage[];
-  active_requests: InboxMessage[];
-  notes: InboxMessage[];
-  active_notes: InboxMessage[];
-  archive: InboxMessage[];
-  outbox: InboxMessage[];
-  counts: {
-    pending_requests: number;
-    queued_notes: number;
-    failed_notes: number;
-    archived_items: number;
-    outbound_records: number;
-  };
-  raw_file_keys: string[];
-};
-
-export type ReviewChangedFile = {
-  path: string;
-  status: string;
-  kind: string;
-  summary: string;
-};
-
-export type ReviewSnapshot = {
-  target: TargetMetadata;
-  generated_at?: string;
-  review_fingerprint?: string;
-  latest_run: {
-    status: string;
-    horizon: string;
-    summary: string;
-    log?: Record<string, unknown>;
-    action_plan?: Record<string, unknown>;
-  };
-  changed_files: ReviewChangedFile[];
-  changed_files_source: string;
-  latest_commits: ObservatoryCommit[];
-  verification: {
-    summary: string;
-    counts: Record<string, number>;
-    items: Array<Record<string, unknown>>;
-    baseline?: Record<string, unknown>;
-  };
-  safety: Record<string, unknown>;
-  limitations: Array<Record<string, unknown>>;
-  self_review: {
-    markdown_preview: string;
-    truncated: boolean;
-    default_markdown_path: string;
-  };
-  bundle: {
-    review_dir: string;
-    html_path: string;
-    markdown_path: string;
-  };
-  review?: Record<string, unknown>;
-  reviewed: {
-    exists: boolean;
-    path: string;
-    reviewed_at?: string;
-    note?: string;
-    snapshot_generated_at?: string;
-    review_fingerprint?: string;
-    is_current_snapshot?: boolean;
-  };
-  empty_states?: Record<string, unknown>;
-};
-
-export type AdvancedFilesSnapshot = {
-  target: TargetMetadata;
-  files: RegisteredFile[];
-  categories: Record<string, number>;
-};
-
-export type AdvancedLoadedFile = {
-  target: TargetMetadata;
-  file: RegisteredFile;
-  content: string;
-  truncated: boolean;
-};
-
-export type AdvancedValidationResult = {
-  target: TargetMetadata;
-  file: RegisteredFile;
-  status: "pass" | "fail" | "missing" | "not_available" | string;
-  items: Array<{ ok: boolean; detail: string }>;
-  result?: Record<string, unknown>;
-};
-
-export type AdvancedDebugBundleResult = {
-  target: TargetMetadata;
-  bundle_path: string;
-  included: string[];
-  omitted: string[];
 };
 
 export type StateSnapshotResult = {
@@ -460,14 +283,6 @@ export type EnvironmentDiagnosticsSnapshot = {
   setup_mode: string;
 };
 
-export type AdvancedSettings = {
-  reviewExportDir: string;
-  preferredEditorCommand: string;
-  humanBridgeMode: string;
-  appearance: "system" | "light" | "dark" | string;
-  density: "compact" | "comfortable" | string;
-};
-
 export type ProjectLoadResult = {
   target: RecentTarget;
   snapshot: BackendEnvelope<ProjectSnapshot>;
@@ -486,17 +301,6 @@ export type BackendLogEvent = {
   stage: string;
   level: "info" | "warning" | "error" | string;
   message: string;
-  data?: Record<string, unknown>;
-};
-
-export type RuntimeStateEvent = {
-  watchId: string;
-  target: string;
-  event: "runtime_state" | "runtime_state_heartbeat" | "runtime_state_error" | "runtime_state_closed" | string;
-  runtimeEvent?: Record<string, unknown>;
-  afterEventId?: number;
-  emittedAt?: string;
-  message?: string;
   data?: Record<string, unknown>;
 };
 
@@ -593,18 +397,6 @@ export function runBackendCommandStreamed<T = unknown>(request: {
   return invoke<BackendEnvelope<T>>("run_backend_command_streamed", request);
 }
 
-export function openObservatoryFile(path: string): Promise<void> {
-  return invoke<void>("open_observatory_file", { path });
-}
-
-export function openReviewArtifact(path: string): Promise<void> {
-  return invoke<void>("open_review_artifact", { path });
-}
-
-export function revealReviewArtifact(path: string): Promise<void> {
-  return invoke<void>("reveal_review_artifact", { path });
-}
-
 export function openManagedFile(target: string, fileKey: string): Promise<void> {
   return invoke<void>("open_managed_file", { target, fileKey });
 }
@@ -621,20 +413,6 @@ export function openProjectInEditor(target: string): Promise<void> {
   return invoke<void>("open_project_in_editor", { target });
 }
 
-export function getAdvancedSettings(): Promise<AdvancedSettings> {
-  return invoke<AdvancedSettings>("get_advanced_settings");
-}
-
-export function updateAdvancedSettings(
-  settings: AdvancedSettings,
-): Promise<AdvancedSettings> {
-  return invoke<AdvancedSettings>("update_advanced_settings", { settings });
-}
-
-export function selectSettingsDirectory(): Promise<string | null> {
-  return invoke<string | null>("select_settings_directory");
-}
-
 export function listenBackendLogs(
   runId: string,
   onLog: (event: BackendLogEvent) => void,
@@ -642,33 +420,6 @@ export function listenBackendLogs(
   return listen<BackendLogEvent>("backend-log", (event) => {
     if (event.payload.runId === runId) {
       onLog(event.payload);
-    }
-  });
-}
-
-export function startRuntimeStateWatch(request: {
-  watchId: string;
-  target: string;
-  afterEventId?: number;
-}): Promise<void> {
-  return invoke<void>("start_runtime_state_watch", {
-    watchId: request.watchId,
-    target: request.target,
-    afterEventId: request.afterEventId ?? 0,
-  });
-}
-
-export function stopRuntimeStateWatch(watchId: string): Promise<void> {
-  return invoke<void>("stop_runtime_state_watch", { watchId });
-}
-
-export function listenRuntimeStateEvents(
-  watchId: string,
-  onEvent: (event: RuntimeStateEvent) => void,
-): Promise<UnlistenFn> {
-  return listen<RuntimeStateEvent>("runtime-state-watch", (event) => {
-    if (event.payload.watchId === watchId) {
-      onEvent(event.payload);
     }
   });
 }

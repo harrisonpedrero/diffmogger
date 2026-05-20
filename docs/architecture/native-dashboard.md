@@ -1,15 +1,23 @@
 # Native Dashboard Architecture
 
-Diffmogger's primary dashboard is the native Tauri v2 app. The Python backend command layer remains
-the source of truth for scaffold, automation runner lifecycle, human bridge, Observatory, review, and validation
-behavior.
+Diffmogger's primary dashboard is the native Tauri v2 app. It is a thin operational shell over the Python backend and the target-local SQLite runtime control plane.
 
-Generated sidecar targets resolve managed paths through `.diffmogger/manifest.json` and store
-Diffmogger-owned files under `.diffmogger/`. Runtime helpers still tolerate earlier generated
-target layouts where required for compatibility.
+Generated sidecar targets resolve canonical files under `.diffmogger/`. Historical layouts are handled through explicit import/migration paths, not scattered dashboard reads.
 
-The goal is better UX without losing the dashboard's automation controls, Observatory export,
-file-only human bridge, scaffold flow, and Markdown-first operating model.
+## Information Architecture
+
+The dashboard has only two screens:
+
+- **Setup**: choose project, inspect setup status, edit intake, import context, manage seed tickets, scaffold, and run setup checks.
+- **Automation**: show scheduler next action, queued/running/done DAG work, tickets, generated unblocker work, human input records, command output, and Start/Stop/Safety controls.
+
+Removed surfaces:
+
+- Home is folded into Setup.
+- Run and Activity are folded into Automation.
+- Review is removed from the native app.
+- Inbox is a compact human-input panel/badge.
+- Advanced/Sidecar controls are folded into Setup or Automation when still necessary.
 
 ## Entry Points
 
@@ -25,32 +33,16 @@ Backend command smoke:
 
 ```bash
 python3 scripts/dashboard_backend_cli.py diagnostics.environment
+python3 scripts/dashboard_backend_cli.py state.snapshot --target /path/to/target
 ```
-
-Observatory export/server:
-
-```bash
-python3 scripts/runtime/run_observatory.py --target /path/to/target --review-dir /path/to/target/.diffmogger/runtime/first-review
-```
-
-Source-checkout packaged app:
-
-```bash
-git clone <diffmogger-repo-url>
-cd Diffmogger/services/agentic-dashboard/native
-npm install
-npm run tauri build
-open src-tauri/target/release/bundle/macos/Diffmogger.app
-```
-
-The packaged app is source-checkout-backed, not a standalone binary distribution yet. The built app uses
-the cloned Diffmogger kit as its backend/script root. For debugging alternate checkouts, launch the
-app with `DIFFMOGGER_KIT_ROOT=/path/to/Diffmogger`.
 
 Native validation:
 
 ```bash
-bash scripts/validate_native_app.sh
+cd services/agentic-dashboard/native
+npm test
+npm run build
+cd src-tauri && cargo test
 ```
 
 Full starter-kit validation:
@@ -61,17 +53,14 @@ bash scripts/validate_starter_kit.sh
 
 ## Architecture
 
-The native app is intentionally thin:
+The native app stays intentionally thin:
 
-- React/TypeScript renders the shell and pages in `services/agentic-dashboard/native/src/`.
-- Tauri/Rust owns native folder selection, recent-project config, path validation, safe open/reveal
-  actions, and the allowlisted subprocess boundary.
+- React/TypeScript renders Setup, Automation, the command palette, and dense operational panels.
+- Tauri/Rust owns native folder selection, recent-project config, path validation, safe open/reveal actions, and the allowlisted subprocess boundary.
 - Python remains the backend source of truth through `scripts/dashboard_backend_cli.py`.
-- Existing scaffold, dashboard helper, automation runner, human bridge, Observatory, review export, and
-  validation functions are reused rather than duplicated in TypeScript.
+- SQLite runtime state is canonical. Markdown and JSON are projections or authored inputs.
 
-The frontend must not scrape Markdown files for core state. It calls backend commands and receives
-JSON snapshots. Raw Markdown editing remains available in Advanced through allowlisted file keys.
+The frontend must not scrape Markdown files for scheduler state. It calls backend commands and receives JSON snapshots. The only managed file opener retained by the shell is the canonical generated task projection, `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
 
 ## Backend Command Contract
 
@@ -86,160 +75,49 @@ All backend CLI commands return JSON on stdout:
 }
 ```
 
-Errors also return JSON and use non-zero exit codes:
+Current native command groups:
 
-```json
-{
-  "schema_version": 1,
-  "ok": false,
-  "command": "project.load_snapshot",
-  "message": "Target path does not exist.",
-  "error": {
-    "type": "invalid_target",
-    "details": {}
-  }
-}
-```
+- Project/setup: `project.load_snapshot`, `project.list_recent`, `brief.load`, `brief.generate_intake`, `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold`, `context.import`.
+- Automation: `project.load_snapshot`, `run.once`, `automation.start`, `automation.stop`, `blocker.recheck_baseline`, `safety.run_check`.
+- Runtime state: `state.snapshot`, `state.brief`, `state.validate`, `state.watch`.
+- Tickets: `ticket.load`, `ticket.add`, `ticket.update`, `ticket.delete`, `ticket.import`, `ticket.draft_from_intake`, `ticket.accept_draft`, `ticket.split_preview`, `ticket.accept_split`.
+- Worker/parallel controls: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`, `worker.launch_read_only_group`, `worker.launch_write_group`, `execution_group.load`, `execution_group.start`, `execution_group.cancel`, `execution_group.retry_failed`, `execution_group.export_debug_bundle`, `validation_jobs.load`, `lease.release_stale`.
+- Diagnostics: `diagnostics.environment`, `diagnostics.run_checks`.
 
-Current command groups:
-
-- Project and Brief: `project.load_snapshot`, `project.list_recent`, `brief.load`,
-  `brief.save_draft`, `brief.scaffold_preview`, `brief.scaffold`.
-- Context: `context.import`.
-- Run and automation: `run.load`, `run.load_log`, `automation.start`,
-  `automation.stop`, `safety.run_check`.
-- Workers: `worker.run_read_only`, `worker.run_write`, `worker.run_integrator`.
-- Observatory and Review: `observatory.snapshot`, `observatory.generate_html`,
-  `observatory.load_html`, `review.load`, `review.export_bundle`, `review.mark_reviewed`.
-- Inbox: `inbox.load`, `inbox.send_note`, `inbox.reply_request`.
-- Advanced and setup doctor: `diagnostics.environment`, `diagnostics.run_checks`,
-  `advanced.list_files`, `advanced.load_file`, `advanced.save_file`, `advanced.validate_file`,
-  `advanced.export_debug_bundle`.
-
-Path rules:
-
-- Commands validate target paths before reading or writing.
-- The native Rust layer allowlists backend command names.
-- Advanced file access uses file keys, not arbitrary paths.
-- Generated artifacts opened or revealed by the native app are validated as Diffmogger review
-  artifacts.
-- Destructive operations must be explicit in the command name and should remain rare.
+Native page-only commands for Inbox, Review, Activity/Observatory, and Advanced are not allowlisted.
 
 ## UI State Model
 
-The native app uses backend snapshots to derive page state:
+The dashboard answers six questions:
 
-- No target selected: Home offers native folder selection and recent projects.
-- Unconfigured target: Home and Run point to Brief. Run controls remain disabled.
-- Scaffolded target with no runs: Home routes to Run; Run presents **Start**. When initial
-  preparation is pending, Start performs the guarded first-run preparation before launching
-  continuous automation, while Observatory and Review show honest empty states.
-- Running target: Home/Run show running status, sidebar running badge, and log controls.
-- Human input pending: Home routes to Inbox and the sidebar shows an input badge.
-- Environment blocked or critical stop: Home/Run/Observatory use warning or critical tones and route
-  toward Review, Diagnostics, or Inbox based on backend state.
+1. What project is selected?
+2. Is Diffmogger installed/configured?
+3. What is the scheduler doing next?
+4. What tickets/actions are queued, running, done, or needing generated unblocker work?
+5. What human input exists?
+6. What command can the user run/start/stop?
 
-State derivation lives in small testable frontend model files:
+State derivation lives in small testable frontend files:
 
-- `homeModel.ts`: Home headline, primary CTA, safety/readiness, progress, and human bridge.
-- `runModel.ts`: Run page readiness, control enablement, automation runner status, log state, worker strategy.
-- `observatoryModel.ts`: Observatory headline/tone from snapshot mission, active role, queue, human
-  input, and critical stop state.
+- `BriefWizard.tsx`: project intake, scaffold preview/execution, context import, seed tickets, setup checks entry.
+- `runModel.ts`: scheduler/automation read model, control enablement, DAG summaries, action rows, liveness copy.
+- `AutomationPage.tsx`: dense operational rendering of scheduler next action, tickets/actions, human input, unblocker work, and command output.
 - `commandPaletteModel.ts`: state-gated command palette commands and disabled reasons.
-- `advancedModel.ts`: Advanced file editor dirty/save/open/reveal state.
 
-## Native Backend Parity
+Status values remain compatible (`ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, `CRITICAL_STOP`), but only `CRITICAL_STOP` is a safety stop. User and environment statuses annotate planning inputs and should not halt normal scheduling while unfinished work can continue.
 
-Keep native behavior and test coverage aligned with the backend contracts for:
+## Guardrails
 
-- prerequisite checks
-- fresh and existing project setup
-- project intake fields
-- context-file import and `.diffmogger/state/PROJECT_CONTEXT.md` updates
-- scaffold preview and execution
-- continuous automation start/stop
-- run safety checks
-- review bundle export
-- Observatory launch/export and native snapshot rendering
-- worker strategy controls
-- file-only human bridge messaging
-- Markdown file monitor/editor
-- multi-role DAG scheduler settings
-- Context7 and Playwright MCP intake options
-- dashboard state persistence in `.diffmogger/agentic/dashboard_state.json`
+Keep native behavior and test coverage aligned with:
 
-`docs/archive/native-dashboard-command-inventory.md` is the compact command inventory used by the guardrail script.
-`scripts/validation/check_native_rebuild_guardrails.py` verifies preserved feature groups still have backend
-commands and that those commands remain available through the native Rust allowlist.
+- project selection and recent targets
+- setup/scaffold preview and execution
+- context import
+- ticket import/add/update/delete/draft/split/accept
+- automation start/stop
+- safety checks
+- scheduler-selected action and DAG state
+- generated repair/setup/mock/fixture/defer/split/reframe/unblocker work
+- human input records without a separate Inbox page
 
-## Regression Guardrails
-
-Backend tests:
-
-```bash
-python3 -m unittest tests.dashboard.test_dashboard_backend_cli tests.kit.test_native_rebuild_guardrails
-```
-
-Frontend/native tests:
-
-```bash
-cd services/agentic-dashboard/native
-npm test
-npm run build
-cd src-tauri && cargo test
-```
-
-Packaged native build:
-
-```bash
-cd services/agentic-dashboard/native
-npm run tauri build
-```
-
-## Clone / Build / Run Troubleshooting
-
-The native app launches backend commands with the same practical automation PATH used by generated
-automation runs: `CODEX_AUTOMATION_PATH` when set, otherwise
-`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`, followed by the app's original GUI
-PATH. This avoids the common macOS GUI issue where a packaged app only sees `/usr/bin/python3`.
-
-Use the targetless setup doctor before opening a project:
-
-```bash
-python3 scripts/dashboard_backend_cli.py diagnostics.environment
-```
-
-Use the target-scoped doctor after choosing a project:
-
-```bash
-python3 scripts/dashboard_backend_cli.py diagnostics.run_checks --target /path/to/project
-```
-
-Common fixes:
-
-- Install a Homebrew Python 3.10+ if the backend resolves `/usr/bin/python3` 3.9.
-- Install/sign in to Codex CLI, then run `codex` once in Terminal so `~/.codex` exists.
-- Install Node with `brew install node` only when optional Context7/Playwright MCP integration needs
-  `node`, `npm`, or `npx`.
-- macOS targets under `~/Documents` may need Full Disk Access for `/bin/bash` and the Node
-  executable used by continuous Codex runs. This is advisory unless automation jobs fail to access the
-  target.
-
-The setup doctor shows copyable commands and rerun checks. It does not auto-install tools or print
-secret values loaded from `.env`.
-
-Full validation:
-
-```bash
-bash scripts/validate_starter_kit.sh
-```
-
-When adding, renaming, or removing a backend command, update all of:
-
-- `src/diffmogger/dashboard/cli.py` and the relevant module under `src/diffmogger/dashboard/commands/`
-- `src/diffmogger/dashboard/backend_cli.py` only when the compatibility facade needs a new public re-export
-- `scripts/dashboard_backend_cli.py`
-- the Rust allowlist in `services/agentic-dashboard/native/src-tauri/src/lib.rs`
-- `docs/archive/native-dashboard-command-inventory.md`
-- `scripts/validation/check_native_rebuild_guardrails.py`
-- backend and frontend regression tests
+`scripts/validation/check_native_rebuild_guardrails.py` keeps broad feature groups honest. `scripts/validate_starter_kit.sh` checks the simplified native file set and command surface.

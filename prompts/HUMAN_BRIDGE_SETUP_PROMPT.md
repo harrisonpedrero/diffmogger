@@ -50,7 +50,7 @@ The notifier should bridge inbound replies into typed human-message state.
 
 The target project must not read notifier `.env` files or handle Discord credentials.
 
-The target automation must fall back to typed human-message state if the notifier is unavailable, use `ACTIVE_WITH_PENDING_USER_INPUT` when useful work remains, and use `BLOCKED_ON_USER` only when no useful work remains.
+The target automation must fall back to typed human-message state if the notifier is unavailable, use `ACTIVE_WITH_PENDING_USER_INPUT` when human input is pending and independent work remains, and use `BLOCKED_ON_USER` only when no repair, setup, mock, defer, split, reframe, review, documentation, or alternate-ticket work can continue.
 
 For human-unlock requests, document the structured request payload. For direct human-requested status/update responses, document the optional `message_body` and `expects_reply: false` payload. If the notifier is unavailable, require the automation to record the intended outbound message in typed human-message state with status `NOTIFIER_UNREACHABLE` and not claim delivery.
 

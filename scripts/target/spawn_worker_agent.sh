@@ -18,7 +18,7 @@ Options:
   --ownership TEXT           Required ownership scope for --mode write
   --prompt TEXT              Worker assignment
   --prompt-file PATH         Read worker assignment from a file
-  --report-path PATH         Exact worker report path. Default: target/agent_runs/<run_id>/worker_<role>.md
+  --report-path PATH         Exact worker report path. Default: .diffmogger/runtime/agent_runs/<run_id>/worker_<role>.md
   --output-path PATH         Alias for --report-path
   --max-prompt-chars N       Bound assignment text. Default: 12000
   -h, --help                 Show this help
@@ -144,7 +144,7 @@ if [[ -n "$report_path" ]]; then
   fi
   run_dir="$(dirname "$output_path")"
 else
-  run_dir="$target_abs/target/agent_runs/$run_id"
+  run_dir="$target_abs/.diffmogger/runtime/agent_runs/$run_id"
   output_path="$run_dir/worker_${role_slug}.md"
 fi
 output_name="$(basename "$output_path")"
@@ -291,6 +291,8 @@ codex exec \
   --disable plugins \
   --ephemeral \
   --dangerously-bypass-approvals-and-sandbox \
+  -c 'mcp_servers.context7.enabled=false' \
+  -c 'mcp_servers.playwright.enabled=false' \
   -C "$target_abs" \
   "$worker_prompt" >"$raw_log" 2>&1
 status=$?

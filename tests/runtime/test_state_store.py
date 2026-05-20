@@ -39,6 +39,7 @@ from diffmogger.runtime.state_store import (
     execution_dag_edges_conn,
     execution_dag_read_model,
     failed_validation_jobs_requiring_dag_action_conn,
+    import_legacy_target_state,
     load_conveyor_state,
     load_runner_state,
     materialize_execution_dag_conn,
@@ -379,6 +380,471 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(1, preflight["protected_path_count"])
             self.assertEqual([], preflight["safe_patch_ids"])
 
+    def test_integrated_worker_patch_advances_ticket_to_candidate_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "ticket-run",
+                    "tickets": [
+                        {
+                            "id": "TICKET-001",
+                            "summary": "Create repository skeleton",
+                            "status": "pending",
+                        }
+                    ],
+                },
+                actor_role="test",
+                event_type="ticket.run_seeded",
+            )
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:ticket",
+                        changed_files=["src/app.py"],
+                        payload={"task_id": "TICKET-001", "dag_node_id": "dag-node:test:build"},
+                    )
+                    upsert_worker_patch_lineage_conn(
+                        conn,
+                        patch_id="patch:ticket",
+                        worker_id="worker:patch:ticket",
+                        execution_group_id="execution-group:test",
+                        task_id="TICKET-001",
+                        source_dag_node_id="dag-node:test:build",
+                        status="queued",
+                    )
+                    self._seed_ready_integration_node(conn, "patch:ticket")
+
+                result = state_store_module.mark_worker_patches_integrated_conn(
+                    conn,
+                    target=target,
+                    patch_ids=["patch:ticket"],
+                    selected_by="test.integration",
+                )
+                ticket_row = conn.execute(
+                    "SELECT status, payload_json FROM ticket_items WHERE ticket_id = 'TICKET-001'",
+                ).fetchone()
+
+            payload = json.loads(ticket_row["payload_json"])
+            self.assertEqual("integrated", result["status"])
+            self.assertEqual(["TICKET-001"], result["ticket_state"]["updated_ticket_ids"])
+            self.assertEqual("candidate_done", ticket_row["status"])
+            self.assertEqual("candidate_done", payload["status"])
+            self.assertIn("Integrated validated worker patch patch:ticket for TICKET-001.", payload["evidence"])
+            self.assertIn("Changed files: src/app.py.", payload["evidence"])
+            loaded = state_store_module.load_ticket_run_state(target)
+            self.assertEqual("candidate_done", loaded["tickets"][0]["status"])
+
+    def test_role_manifest_sync_excludes_runtime_state_paths_from_patch_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            queue_dir = target / "target" / "automation_queue" / "builder" / "run-runtime"
+            queue_dir.mkdir(parents=True)
+            manifest_path = queue_dir / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "role": "builder",
+                        "run_id": "run-runtime",
+                        "status": "queued",
+                        "patch_path": "target/automation_queue/builder/run-runtime/changes.patch",
+                        "changed_files": ["src/app.js"],
+                        "runtime_state_changed_files": [".diffmogger/agentic/verification_commands.txt"],
+                        "runtime_state_action_count": 1,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = state_store_module.sync_queued_role_manifests_into_worker_patches_conn(conn, target)
+                patch_id = result["patch_ids"][0]
+                row = conn.execute("SELECT changed_files_json, payload_json FROM worker_patches WHERE patch_id = ?", (patch_id,)).fetchone()
+                self._seed_ready_integration_node(conn, patch_id)
+
+                preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
+
+            payload = json.loads(row["payload_json"])
+            record = preflight["records"][0]
+            self.assertEqual(["src/app.js"], json.loads(row["changed_files_json"]))
+            self.assertEqual(["src/app.js"], payload["patch_cluster_changed_files"])
+            self.assertEqual([".diffmogger/agentic/verification_commands.txt"], payload["runtime_state_changed_files"])
+            self.assertNotEqual("protected_path", record["status"])
+            self.assertEqual(0, preflight["protected_path_count"])
+
+    def test_role_manifest_sync_recovers_parallel_worker_attribution_from_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            queue_dir = target / "target" / "automation_queue" / "builder" / "write-workers-sync-builder-auto-002"
+            queue_dir.mkdir(parents=True)
+            manifest_path = queue_dir / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "role": "builder",
+                        "run_id": "write-workers-sync-builder-auto-002",
+                        "patch_id": "worker-patch:sync",
+                        "status": "queued",
+                        "source": "parallel_write_worker",
+                        "worker_id": "worker-agent:sync",
+                        "execution_group_id": "execution-group:sync",
+                        "patch_path": "target/automation_queue/builder/write-workers-sync-builder-auto-002/changes.patch",
+                        "changed_files": ["src/planner.js"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            now = "2026-05-15T00:00:00+00:00"
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO worker_agents(
+                            worker_id, execution_group_id, run_id, mode, role, status,
+                            context_pack_id, started_at, finished_at, payload_json
+                        )
+                        VALUES('worker-agent:sync', 'execution-group:sync',
+                               'write-workers-sync-builder-auto-002', 'write', 'builder',
+                               'completed', '', ?, ?, '{}')
+                        """,
+                        (now, now),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_patches(
+                            patch_id, worker_id, execution_group_id, status, manifest_path,
+                            patch_path, changed_files_json, base_commit, leases_json,
+                            validation_evidence_json, conflict_signature, created_at,
+                            queued_at, integrated_at, payload_json
+                        )
+                        VALUES('worker-patch:sync', 'worker-agent:sync',
+                               'execution-group:sync', 'queued',
+                               'target/automation_queue/builder/write-workers-sync-builder-auto-002/manifest.json',
+                               'target/automation_queue/builder/write-workers-sync-builder-auto-002/changes.patch',
+                               ?, '', '[]', '[]', '', ?, ?, '', '{}')
+                        """,
+                        (json.dumps(["src/planner.js"]), now, now),
+                    )
+                    upsert_worker_patch_lineage_conn(
+                        conn,
+                        patch_id="worker-patch:sync",
+                        worker_id="worker-agent:sync",
+                        execution_group_id="execution-group:sync",
+                        task_id="AUTO-002",
+                        source_dag_node_id="dag-node:auto-002-build",
+                        status="queued",
+                    )
+
+                result = state_store_module.sync_queued_role_manifests_into_worker_patches_conn(conn, target)
+                patch_row = conn.execute(
+                    "SELECT payload_json FROM worker_patches WHERE patch_id = 'worker-patch:sync'",
+                ).fetchone()
+                worker_row = conn.execute(
+                    "SELECT payload_json FROM worker_agents WHERE worker_id = 'worker-agent:sync'",
+                ).fetchone()
+
+            self.assertEqual(["worker-patch:sync"], result["patch_ids"])
+            patch_payload = json.loads(patch_row["payload_json"])
+            worker_payload = json.loads(worker_row["payload_json"])
+            self.assertEqual("AUTO-002", patch_payload["task_id"])
+            self.assertEqual("dag-node:auto-002-build", patch_payload["dag_node_id"])
+            self.assertEqual("AUTO-002", worker_payload["task_id"])
+            self.assertEqual("dag-node:auto-002-build", worker_payload["dag_node_id"])
+            self.assertEqual("parallel_write_worker", patch_payload["source"])
+
+    def test_role_manifest_sync_clears_deferred_manifest_from_queued_worker_patches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            run_id = "run-deferred"
+            queue_dir = target / "target" / "automation_queue" / "builder" / run_id
+            queue_dir.mkdir(parents=True)
+            manifest_path = queue_dir / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "role": "builder",
+                        "run_id": run_id,
+                        "patch_id": "patch:stale-deferred",
+                        "status": "deferred",
+                        "patch_path": f"target/automation_queue/builder/{run_id}/changes.patch",
+                        "changed_files": ["src/app.py"],
+                        "deferral_reason": "verification_failure",
+                        "deferral_detail": "Required verification failed after integration attempt.",
+                        "integrated_at": "2026-05-20T15:37:25+00:00",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            manifest_path.with_name("changes.patch").write_text("diff --git a/src/app.py b/src/app.py\n", encoding="utf-8")
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:stale-deferred",
+                        changed_files=["src/app.py"],
+                        patch_path=f"target/automation_queue/builder/{run_id}/changes.patch",
+                        payload={"task_id": "TICKET-001", "dag_node_id": "dag-node:test:build"},
+                    )
+                    self._seed_ready_integration_node(conn, "patch:stale-deferred")
+
+                result = state_store_module.sync_queued_role_manifests_into_worker_patches_conn(conn, target, selected_by="test")
+                patch_row = conn.execute("SELECT status, queued_at, payload_json FROM worker_patches WHERE patch_id = ?", ("patch:stale-deferred",)).fetchone()
+                integration_row = conn.execute(
+                    "SELECT status, blocker_reason FROM execution_dag_nodes WHERE patch_id = ? AND action_type = 'integrate'",
+                    ("patch:stale-deferred",),
+                ).fetchone()
+                lineages = worker_patch_lineage_conn(conn, patch_id="patch:stale-deferred")
+
+            payload = json.loads(patch_row["payload_json"])
+            self.assertEqual(["patch:stale-deferred"], result["terminal_patch_ids"])
+            self.assertEqual("deferred", patch_row["status"])
+            self.assertEqual("", patch_row["queued_at"])
+            self.assertEqual("verification_failure", payload["deferral_reason"])
+            self.assertEqual("superseded", integration_row["status"])
+            self.assertIn("deferred queued patch", integration_row["blocker_reason"])
+            self.assertEqual("deferred", lineages[0]["status"])
+            self.assertEqual("deferred", lineages[0]["integration_result"])
+
+    def test_role_manifest_sync_clears_applied_manifest_from_queued_worker_patches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            run_id = "run-applied"
+            queue_dir = target / "target" / "automation_queue" / "hardener" / run_id
+            queue_dir.mkdir(parents=True)
+            manifest_path = queue_dir / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "role": "hardener",
+                        "run_id": run_id,
+                        "patch_id": "patch:stale-applied",
+                        "status": "applied",
+                        "patch_path": f"target/automation_queue/hardener/{run_id}/changes.patch",
+                        "changed_files": ["tests/app.test.py"],
+                        "integrated_at": "2026-05-20T15:40:00+00:00",
+                        "accepted_commit": "abc123",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            manifest_path.with_name("changes.patch").write_text("diff --git a/tests/app.test.py b/tests/app.test.py\n", encoding="utf-8")
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:stale-applied",
+                        changed_files=["tests/app.test.py"],
+                        patch_path=f"target/automation_queue/hardener/{run_id}/changes.patch",
+                        payload={"task_id": "TICKET-002", "dag_node_id": "dag-node:test:harden"},
+                    )
+                    self._seed_ready_integration_node(conn, "patch:stale-applied")
+
+                result = state_store_module.sync_queued_role_manifests_into_worker_patches_conn(conn, target, selected_by="test")
+                patch_row = conn.execute(
+                    "SELECT status, queued_at, integrated_at, payload_json FROM worker_patches WHERE patch_id = ?",
+                    ("patch:stale-applied",),
+                ).fetchone()
+                integration_row = conn.execute(
+                    "SELECT status FROM execution_dag_nodes WHERE patch_id = ? AND action_type = 'integrate'",
+                    ("patch:stale-applied",),
+                ).fetchone()
+                lineages = worker_patch_lineage_conn(conn, patch_id="patch:stale-applied")
+
+            payload = json.loads(patch_row["payload_json"])
+            self.assertEqual(["patch:stale-applied"], result["terminal_patch_ids"])
+            self.assertEqual("integrated", patch_row["status"])
+            self.assertEqual("", patch_row["queued_at"])
+            self.assertEqual("2026-05-20T15:40:00+00:00", patch_row["integrated_at"])
+            self.assertEqual("abc123", payload["accepted_commit"])
+            self.assertEqual("done", integration_row["status"])
+            self.assertEqual("integrated", lineages[0]["status"])
+            self.assertEqual("integrated", lineages[0]["integration_result"])
+
+    def test_reconciling_worker_patch_handoff_preserves_completed_review_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:test:build",
+                        task_id="TICKET-001",
+                        action_type="build",
+                        status="done",
+                        owner_role="builder",
+                        confidence=0.91,
+                        metadata={"summary": "Build input action state"},
+                    )
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:handoff",
+                        changed_files=["src/input.ts"],
+                        payload={"task_id": "TICKET-001", "dag_node_id": "dag-node:test:build"},
+                    )
+
+                first = reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="test")
+                review_node_id = str(first["review_nodes"][0]["node_id"])
+                validation_node_id = str(first["validation_nodes"][0]["node_id"])
+                state_store_module.update_execution_dag_node_status_conn(
+                    conn,
+                    review_node_id,
+                    status="done",
+                    selected_by="test.review",
+                )
+
+                second = reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="test")
+                model = execution_dag_read_model(conn)
+                review_row = conn.execute(
+                    "SELECT status, attempt_count, finished_at FROM execution_dag_nodes WHERE node_id = ?",
+                    (review_node_id,),
+                ).fetchone()
+                validation_row = conn.execute(
+                    "SELECT status FROM execution_dag_nodes WHERE node_id = ?",
+                    (validation_node_id,),
+                ).fetchone()
+
+            ready_ids = {str(node.get("node_id") or "") for node in model["all_ready_nodes"]}
+            self.assertEqual("done", second["review_nodes"][0]["status"])
+            self.assertEqual("done", review_row["status"])
+            self.assertEqual(1, review_row["attempt_count"])
+            self.assertTrue(review_row["finished_at"])
+            self.assertEqual("ready", validation_row["status"])
+            self.assertNotIn(review_node_id, ready_ids)
+            self.assertIn(validation_node_id, ready_ids)
+
+    def test_reconcile_reopens_blocked_worker_validation_after_completed_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:test:build",
+                        task_id="TICKET-031",
+                        action_type="build",
+                        status="done",
+                        owner_role="builder",
+                        confidence=0.91,
+                        metadata={"summary": "Build input action state"},
+                    )
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:needs-validation-retry",
+                        changed_files=["src/input.ts", "tests/input.test.ts"],
+                        payload={"task_id": "TICKET-031", "dag_node_id": "dag-node:test:build"},
+                    )
+
+                first = reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="test")
+                review_node_id = str(first["review_nodes"][0]["node_id"])
+                validation_node_id = str(first["validation_nodes"][0]["node_id"])
+                state_store_module.update_execution_dag_node_status_conn(
+                    conn,
+                    review_node_id,
+                    status="done",
+                    selected_by="test.review",
+                )
+                validation_node = next(
+                    node
+                    for node in execution_dag_read_model(conn)["nodes"]
+                    if node["node_id"] == validation_node_id
+                )
+                metadata = dict(validation_node["metadata"])
+                metadata["retry_limit"] = 3
+                with conn:
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id=validation_node_id,
+                        task_id=str(validation_node["task_id"]),
+                        action_type="validate",
+                        status="blocked",
+                        owner_role="hardener",
+                        confidence=0.88,
+                        attempt_count=2,
+                        blocker_reason="failed validation: npm run test",
+                        validation_receipt_refs=["receipt:validation-job:test"],
+                        metadata=metadata,
+                    )
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:validation-harness:test",
+                        task_id="gate:test",
+                        action_type="harness",
+                        status="done",
+                        owner_role="builder",
+                        confidence=0.96,
+                        blocker_reason="validation harness work needed",
+                        metadata={
+                            "source": "validation_jobs",
+                            "scheduler_action": "create_repair_nodes",
+                            "summary": "Create harness work for failed validation `npm run test`",
+                            "attempt_count": 2,
+                            "retry_limit": 3,
+                            "patch_ids": ["patch:needs-validation-retry"],
+                            "validation_node_ids": [validation_node_id],
+                        },
+                    )
+                    upsert_execution_dag_edge(
+                        conn,
+                        source_node_id="dag-node:validation-harness:test",
+                        target_node_id=validation_node_id,
+                        dependency_kind="repairs",
+                        reason="validation harness work must run before retrying validation",
+                        confidence=0.94,
+                    )
+
+                second = reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="test.retry")
+                model = execution_dag_read_model(conn)
+                validation_row = conn.execute(
+                    "SELECT status, attempt_count, blocker_reason, metadata_json FROM execution_dag_nodes WHERE node_id = ?",
+                    (validation_node_id,),
+                ).fetchone()
+
+            ready_ids = {str(node.get("node_id") or "") for node in model["all_ready_nodes"]}
+            validation_metadata = json.loads(validation_row["metadata_json"])
+            self.assertEqual("reconciled", second["status"])
+            self.assertEqual(1, second["unblocked_validation_node_count"])
+            self.assertEqual("ready", validation_row["status"])
+            self.assertEqual(2, validation_row["attempt_count"])
+            self.assertEqual("", validation_row["blocker_reason"])
+            self.assertEqual("dag-node:validation-harness:test", validation_metadata["last_validation_unblocker_node_id"])
+            self.assertEqual(2, validation_metadata["last_validation_unblocked_attempt"])
+            self.assertIn(validation_node_id, ready_ids)
+
+    def test_worker_patch_preflight_allows_metadata_only_runtime_state_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            patch_path = target / "target" / "automation_queue" / "planner" / "run-metadata" / "changes.patch"
+            patch_path.parent.mkdir(parents=True)
+            patch_path.write_text("", encoding="utf-8")
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:metadata",
+                        changed_files=[],
+                        patch_path="target/automation_queue/planner/run-metadata/changes.patch",
+                        payload={"runtime_state_action_count": 1},
+                    )
+                    self._seed_ready_integration_node(conn, "patch:metadata")
+
+                preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
+
+            record = preflight["records"][0]
+            self.assertEqual("direct_apply", record["status"])
+            self.assertEqual(["patch:metadata"], preflight["safe_patch_ids"])
+            self.assertEqual(0, preflight["protected_path_count"])
+            self.assertEqual(0, preflight["missing_metadata_count"])
+
     def test_review_dag_node_derives_scope_from_worker_patch_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -582,6 +1048,12 @@ class StateStoreTests(unittest.TestCase):
             "review",
             "validate",
             "repair",
+            "setup",
+            "harness",
+            "mock",
+            "defer",
+            "reframe",
+            "split",
             "refresh_index",
             "integrate",
             "audit",
@@ -788,68 +1260,71 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual("in_progress", ticket_row["status"])
             self.assertEqual("role-patch:test", build_node["metadata"]["worker_patch_handoffs"][0]["patch_id"])
 
-    def test_integrated_builder_patch_does_not_materialize_in_progress_build_as_done(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp)
-            write_ticket_run_state(
-                target,
-                {
-                    "run_id": "dag-handoff",
-                    "tickets": [
+    def test_integrated_builder_patch_materializes_ticket_build_as_done(self) -> None:
+        for ticket_status in ("pending", "in_progress"):
+            with self.subTest(ticket_status=ticket_status):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    write_ticket_run_state(
+                        target,
                         {
-                            "id": "TICKET-001",
-                            "summary": "Create repository skeleton",
-                            "status": "in_progress",
-                        }
-                    ],
-                },
-                actor_role="test",
-                event_type="ticket.run_seeded",
-            )
-            now = "2026-05-15T00:00:00+00:00"
-            with closing(connect(database_path_for_target(target))) as conn:
-                with conn:
-                    conn.execute(
-                        """
-                        INSERT INTO worker_agents(
-                            worker_id, execution_group_id, run_id, mode, role, status,
-                            context_pack_id, started_at, finished_at, payload_json
-                        )
-                        VALUES('role-manifest:builder:run-001', 'serial-role:builder:run-001',
-                               'run-001', 'write', 'builder', 'completed', '', ?, ?, ?)
-                        """,
-                        (
-                            now,
-                            now,
-                            stable_json({"task_id": "TICKET-001", "dag_node_id": "dag-node:test:build"}),
-                        ),
+                            "run_id": "dag-handoff",
+                            "tickets": [
+                                {
+                                    "id": "TICKET-001",
+                                    "summary": "Create repository skeleton",
+                                    "status": ticket_status,
+                                }
+                            ],
+                        },
+                        actor_role="test",
+                        event_type="ticket.run_seeded",
                     )
-                    conn.execute(
-                        """
-                        INSERT INTO worker_patches(
-                            patch_id, worker_id, execution_group_id, status, manifest_path,
-                            patch_path, changed_files_json, base_commit, leases_json,
-                            validation_evidence_json, conflict_signature, created_at,
-                            queued_at, integrated_at, payload_json
-                        )
-                        VALUES('role-patch:test', 'role-manifest:builder:run-001',
-                               'serial-role:builder:run-001', 'integrated',
-                               'target/automation_queue/builder/run-001/manifest.json',
-                               'target/automation_queue/builder/run-001/changes.patch',
-                               ?, '', '[]', '[]', '', ?, ?, ?, '{}')
-                        """,
-                        (json.dumps(["src/app.py"]), now, now, now),
-                    )
-                    materialize_execution_dag_conn(conn, target, {}, event_type="test.materialize")
-                    model = execution_dag_read_model(conn)
-                    ticket_row = conn.execute(
-                        "SELECT status FROM ticket_items WHERE ticket_id = 'TICKET-001'",
-                    ).fetchone()
+                    now = "2026-05-15T00:00:00+00:00"
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        with conn:
+                            conn.execute(
+                                """
+                                INSERT INTO worker_agents(
+                                    worker_id, execution_group_id, run_id, mode, role, status,
+                                    context_pack_id, started_at, finished_at, payload_json
+                                )
+                                VALUES('role-manifest:builder:run-001', 'serial-role:builder:run-001',
+                                       'run-001', 'write', 'builder', 'completed', '', ?, ?, ?)
+                                """,
+                                (
+                                    now,
+                                    now,
+                                    stable_json({"task_id": "TICKET-001", "dag_node_id": "dag-node:test:build"}),
+                                ),
+                            )
+                            conn.execute(
+                                """
+                                INSERT INTO worker_patches(
+                                    patch_id, worker_id, execution_group_id, status, manifest_path,
+                                    patch_path, changed_files_json, base_commit, leases_json,
+                                    validation_evidence_json, conflict_signature, created_at,
+                                    queued_at, integrated_at, payload_json
+                                )
+                                VALUES('role-patch:test', 'role-manifest:builder:run-001',
+                                       'serial-role:builder:run-001', 'integrated',
+                                       'target/automation_queue/builder/run-001/manifest.json',
+                                       'target/automation_queue/builder/run-001/changes.patch',
+                                       ?, '', '[]', '[]', '', ?, ?, ?, '{}')
+                                """,
+                                (json.dumps(["src/app.py"]), now, now, now),
+                            )
+                            materialize_execution_dag_conn(conn, target, {}, event_type="test.materialize")
+                            model = execution_dag_read_model(conn)
+                            ticket_row = conn.execute(
+                                "SELECT status FROM ticket_items WHERE ticket_id = 'TICKET-001'",
+                            ).fetchone()
 
-            build_node = next(node for node in model["nodes"] if node["task_id"] == "TICKET-001" and node["action_type"] == "build")
-            self.assertEqual("running", build_node["status"])
-            self.assertEqual("in_progress", ticket_row["status"])
-            self.assertEqual([], build_node["metadata"]["worker_patch_handoffs"])
+                    build_node = next(node for node in model["nodes"] if node["task_id"] == "TICKET-001" and node["action_type"] == "build")
+                    self.assertEqual("done", build_node["status"])
+                    self.assertEqual(ticket_status, ticket_row["status"])
+                    self.assertEqual("role-patch:test", build_node["metadata"]["worker_patch_handoffs"][0]["patch_id"])
+                    self.assertEqual("integrated", build_node["metadata"]["worker_patch_handoffs"][0]["status"])
 
     def test_parallelism_budget_ignores_disabled_legacy_write_worker_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1049,7 +1524,7 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(1, model["proposed_group_count"])
         self.assertEqual("Planning preview has proposed group(s) and no candidate reason groups.", model["summary"])
 
-    def test_parallel_display_mode_preserves_raw_dry_run_compatibility(self) -> None:
+    def test_parallel_display_mode_hides_raw_dry_run_wording(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             group = state_store_module.decorate_execution_group_for_display(
@@ -1127,7 +1602,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(["execution-group:completed-validation"], [item["execution_group_id"] for item in recent])
             self.assertEqual("Validation jobs", recent[0]["display_mode_label"])
 
-    def test_scope_fanout_exhausted_uses_serial_fallback_summary(self) -> None:
+    def test_scope_fanout_exhausted_uses_serialized_role_summary(self) -> None:
         model = state_store_module.why_not_parallel_read_model(
             [
                 {
@@ -1140,10 +1615,10 @@ class StateStoreTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual("serial_fallback", model["status"])
+        self.assertEqual("serialized_role_path", model["status"])
         self.assertIn("serialized or waiting paths", model["summary"])
-        self.assertEqual("serial_fallback", model["reason_groups"][0]["reason_kind"])
-        self.assertEqual("No promotable ownership evidence; using serial fallback.", model["reason_groups"][0]["human_summary"])
+        self.assertEqual("serialized_role_path", model["reason_groups"][0]["reason_kind"])
+        self.assertEqual("No promotable ownership evidence; continuing with serialized role work.", model["reason_groups"][0]["human_summary"])
         self.assertEqual("scope_fanout_exhausted", model["reason_groups"][0]["examples"][0]["debug_reason_kind"])
 
     def test_worker_report_disposition_display_is_reconciled(self) -> None:
@@ -1262,6 +1737,49 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual("browser", classify("npx playwright test"))
         self.assertEqual("environment_repair", classify("npm ci"))
         self.assertEqual("exclusive", classify("python3 manage.py migrate deploy"))
+        self.assertEqual("unit_test", classify("npm run test"))
+
+    def test_vitest_package_validation_excludes_diffmogger_runtime_worktrees(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "package.json").write_text(
+                json.dumps({"scripts": {"test": "vitest run"}}),
+                encoding="utf-8",
+            )
+
+            spec = state_store_module._validation_command_spec(  # type: ignore[attr-defined]
+                "npm run test",
+                index=1,
+                target=target,
+                default_plan_id="plan:vitest",
+            )
+
+        self.assertEqual("unit_test", spec["classification"])
+        self.assertEqual("javascript_tests", spec["command_family"])
+        self.assertIn("--exclude", spec["command"])
+        self.assertIn(".diffmogger/**", spec["command"])
+        runtime_exclusion = spec["planning_evidence"]["runtime_exclusion"]
+        self.assertEqual([".diffmogger/**"], runtime_exclusion["excluded_globs"])
+        self.assertEqual("vitest", runtime_exclusion["runner"])
+
+    def test_jest_package_validation_does_not_get_vitest_exclude_args(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "package.json").write_text(
+                json.dumps({"scripts": {"test": "jest"}}),
+                encoding="utf-8",
+            )
+
+            spec = state_store_module._validation_command_spec(  # type: ignore[attr-defined]
+                "npm run test",
+                index=1,
+                target=target,
+                default_plan_id="plan:jest",
+            )
+
+        self.assertEqual("javascript_tests", spec["command_family"])
+        self.assertEqual("npm run test", spec["command"])
+        self.assertNotIn("runtime_exclusion", spec["planning_evidence"])
 
     def test_parallel_validation_splits_safe_checks_from_resource_heavy_serial_lane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1442,7 +1960,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertIn("No module named pytest", log_text)
             self.assertIn("1 passed", log_text)
 
-    def test_unrepaired_environment_validation_failure_creates_single_blocker_by_signature(self) -> None:
+    def test_unrepaired_environment_validation_failure_creates_single_setup_node_by_signature(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             now = "2026-05-15T00:00:00+00:00"
@@ -1513,23 +2031,103 @@ class StateStoreTests(unittest.TestCase):
                 edges = execution_dag_edges_conn(conn)
 
             self.assertEqual(0, created["repair_node_count"])
-            self.assertEqual(1, created["blocker_node_count"])
+            self.assertEqual(1, created["unblocker_node_count"])
+            self.assertEqual(0, created["blocker_node_count"])
             self.assertEqual("skipped", skipped["status"])
             self.assertEqual([], remaining)
-            env_blockers = [
+            env_setup_nodes = [
                 node
                 for node in model["nodes"]
-                if node["action_type"] == "blocker" and node["status"] == "blocked_on_environment"
+                if node["action_type"] == "setup" and node["status"] == "ready"
             ]
-            self.assertEqual(1, len(env_blockers))
-            blocker = env_blockers[0]
-            self.assertIn("Missing pytest", blocker["blocker_reason"])
-            self.assertEqual(signature, blocker["metadata"]["failure_signature"])
+            self.assertEqual(1, len(env_setup_nodes))
+            setup = env_setup_nodes[0]
+            self.assertIn("Missing pytest", setup["blocker_reason"])
+            self.assertEqual(signature, setup["metadata"]["failure_signature"])
+            self.assertEqual("validation_setup", setup["metadata"]["unblocker_kind"])
+            self.assertEqual("create_setup_work", setup["metadata"]["automation_disposition"])
             self.assertEqual([], [node for node in model["nodes"] if node["action_type"] == "repair"])
             self.assertIn(
-                (blocker["node_id"], "dag-node:test:env-validation", "blocks"),
+                (setup["node_id"], "dag-node:test:env-validation", "repairs"),
                 {(edge["source"], edge["target"], edge["dependency_kind"]) for edge in edges},
             )
+
+    def test_generic_validation_repair_dedupes_active_nodes_by_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            now = "2026-05-15T00:00:00+00:00"
+            signature = "verification_failure:runtime_anchor:deadbeef1234"
+            payload = {
+                "required": True,
+                "classification": "test",
+                "failure_reason": "verification_failure",
+                "failure_category": "runtime_anchor",
+                "failure_root_cause": "PlaceholderScene is missing the required runtime anchor.",
+                "validation_failure_signature": signature,
+            }
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:test:runtime-validation",
+                        task_id="T-runtime",
+                        action_type="validate",
+                        status="blocked",
+                        owner_role="hardener",
+                        confidence=0.9,
+                        attempt_count=1,
+                        metadata={"paths": ["src/scenes/PlaceholderScene.ts"]},
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO execution_groups(
+                            execution_group_id, status, mode, created_at, started_at, finished_at,
+                            selected_by, reason, payload_json
+                        )
+                        VALUES('validation-group:runtime', 'failed', 'validation', ?, ?, ?, 'test', 'validation failed', '{}')
+                        """,
+                        (now, now, now),
+                    )
+                    for index in (1, 2):
+                        conn.execute(
+                            """
+                            INSERT INTO validation_jobs(
+                                job_id, execution_group_id, plan_id, gate_id, command, cwd,
+                                status, started_at, finished_at, exit_code, log_artifact_id,
+                                resource_profile, payload_json
+                            )
+                            VALUES(?, 'validation-group:runtime', 'validation-group:runtime', 'T-runtime',
+                                   'python3 scripts/validate_runtime_entrypoint.py', ?, 'failed', ?, ?, 1, ?, 'cpu', ?)
+                            """,
+                            (
+                                f"validation-job:runtime-{index}",
+                                str(target),
+                                now,
+                                now,
+                                f"artifact:validation-log:runtime-{index}",
+                                stable_json(payload),
+                            ),
+                        )
+
+                jobs = validation_jobs_conn(conn, statuses={"failed"}, limit=10)
+                self.assertEqual(2, len(failed_validation_jobs_requiring_dag_action_conn(conn, jobs)))
+                created = create_repair_nodes_for_failed_validation_conn(conn, selected_by="test")
+                skipped = create_repair_nodes_for_failed_validation_conn(conn, selected_by="test")
+                remaining = failed_validation_jobs_requiring_dag_action_conn(conn, jobs)
+                model = execution_dag_read_model(conn)
+
+            self.assertEqual(1, created["repair_node_count"])
+            self.assertEqual(0, created["unblocker_node_count"])
+            self.assertEqual("skipped", skipped["status"])
+            self.assertEqual([], remaining)
+            repair_nodes = [
+                node
+                for node in model["nodes"]
+                if node["action_type"] == "repair" and node["status"] == "ready"
+            ]
+            self.assertEqual(1, len(repair_nodes))
+            self.assertEqual(signature, repair_nodes[0]["metadata"]["failure_signature"])
+            self.assertEqual("validation_jobs", repair_nodes[0]["metadata"]["source"])
 
     def test_validation_backpressure_blocks_same_ownership_surface(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1712,7 +2310,7 @@ class StateStoreTests(unittest.TestCase):
             ]
             self.assertNotIn("python3 -m pytest", required_commands)
 
-    def test_required_missing_validation_tool_is_classified_for_environment_blocker(self) -> None:
+    def test_required_missing_validation_tool_is_classified_for_environment_setup_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
 
@@ -1735,15 +2333,110 @@ class StateStoreTests(unittest.TestCase):
                 )
                 jobs = validation_jobs_conn(conn, statuses={"failed"}, limit=5)
                 repair = create_repair_nodes_for_failed_validation_conn(conn, selected_by="test")
+                receipt = conn.execute(
+                    "SELECT payload_json FROM validation_receipts WHERE run_id = ?",
+                    (result["execution_group_id"],),
+                ).fetchone()
 
             self.assertEqual("failed", result["status"])
             payload = result["jobs"][0]["payload"]
             self.assertTrue(payload["required"])
             self.assertEqual("missing_declared_dependency", payload["control_plane_classification"])
             self.assertEqual("verification_environment_failure", payload["failure_reason"])
+            self.assertEqual("create_setup_work", payload["automation_disposition"])
+            self.assertEqual(["setup", "harness"], payload["recommended_dag_actions"])
+            self.assertFalse(payload["critical_stop_allowed"])
+            self.assertIsNotNone(receipt)
+            receipt_payload = json.loads(receipt["payload_json"])
+            self.assertEqual("create_setup_work", receipt_payload["automation_disposition"])
             self.assertTrue(jobs)
             self.assertEqual(0, repair["repair_node_count"])
-            self.assertEqual(1, repair["blocker_node_count"])
+            self.assertEqual(1, repair["unblocker_node_count"])
+            self.assertEqual(0, repair["blocker_node_count"])
+
+    def test_external_service_validation_failure_creates_mock_or_fixture_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            command = (
+                f"{sys.executable} -c \"import sys; "
+                "print('External API returned 503 Service Unavailable', file=sys.stderr); "
+                "sys.exit(1)\""
+            )
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = run_parallel_validation_conn(
+                    conn,
+                    target,
+                    [
+                        {
+                            "command": command,
+                            "classification": "smoke",
+                            "required": True,
+                            "gate_id": "gate:external-service",
+                        }
+                    ],
+                    selected_by="test",
+                    plan_id="plan:external-service",
+                )
+                repair = create_repair_nodes_for_failed_validation_conn(conn, selected_by="test")
+                model = execution_dag_read_model(conn)
+
+            self.assertEqual("failed", result["status"])
+            payload = result["jobs"][0]["payload"]
+            self.assertEqual("external_service_needs_mock_or_fixture", payload["control_plane_classification"])
+            self.assertEqual("create_mock_or_fixture_work", payload["automation_disposition"])
+            self.assertEqual(["mock", "defer"], payload["recommended_dag_actions"])
+            self.assertEqual(0, repair["repair_node_count"])
+            self.assertEqual(1, repair["unblocker_node_count"])
+            mock_node = next(node for node in model["ready_nodes"] if node["action_type"] == "mock")
+            mock_metadata = next(node["metadata"] for node in model["nodes"] if node["node_id"] == mock_node["node_id"])
+            self.assertEqual("builder", mock_node["owner_role"])
+            self.assertIn("mock", mock_metadata["candidate_unblocker_actions"])
+            self.assertIn("defer", mock_metadata["candidate_unblocker_actions"])
+
+    def test_browser_mcp_validation_failure_creates_deferred_qa_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            command = (
+                f"{sys.executable} -c \"import sys; "
+                "print('Playwright MCP browser navigation failed before DevTools was ready', file=sys.stderr); "
+                "sys.exit(1)\""
+            )
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = run_parallel_validation_conn(
+                    conn,
+                    target,
+                    [
+                        {
+                            "command": command,
+                            "classification": "browser",
+                            "required": True,
+                            "gate_id": "gate:browser-qa",
+                        }
+                    ],
+                    selected_by="test",
+                    plan_id="plan:browser-qa",
+                )
+                jobs = validation_jobs_conn(conn, statuses={"failed"}, limit=5)
+                self.assertEqual(1, len(failed_validation_jobs_requiring_dag_action_conn(conn, jobs)))
+                repair = create_repair_nodes_for_failed_validation_conn(conn, selected_by="test")
+                remaining = failed_validation_jobs_requiring_dag_action_conn(conn, jobs)
+                model = execution_dag_read_model(conn)
+
+            self.assertEqual("failed", result["status"])
+            payload = result["jobs"][0]["payload"]
+            self.assertEqual("browser_or_mcp_deferred_qa", payload["control_plane_classification"])
+            self.assertEqual("create_deferred_or_alternate_validation_work", payload["automation_disposition"])
+            self.assertEqual(["defer", "validate", "harness"], payload["recommended_dag_actions"])
+            self.assertEqual([], remaining)
+            self.assertEqual(0, repair["repair_node_count"])
+            self.assertEqual(1, repair["unblocker_node_count"])
+            defer_node = next(node for node in model["ready_nodes"] if node["action_type"] == "defer")
+            defer_metadata = next(node["metadata"] for node in model["nodes"] if node["node_id"] == defer_node["node_id"])
+            self.assertEqual("planner", defer_node["owner_role"])
+            self.assertIn("defer", defer_metadata["candidate_unblocker_actions"])
+            self.assertIn("validate", defer_metadata["candidate_unblocker_actions"])
 
     def test_parallel_validation_records_log_artifact_and_snapshot_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1963,6 +2656,204 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual("superseded", lineages[0]["status"])
             self.assertEqual("superseded", lineages[0]["integration_result"])
             self.assertIn("superseded_reason", json.loads(patch_row["payload_json"]))
+
+    def test_reconcile_supersedes_duplicate_queued_patch_cluster(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            old_manifest = target / "target" / "automation_queue" / "builder" / "run-old" / "manifest.json"
+            new_manifest = target / "target" / "automation_queue" / "builder" / "run-new" / "manifest.json"
+            old_manifest.parent.mkdir(parents=True, exist_ok=True)
+            new_manifest.parent.mkdir(parents=True, exist_ok=True)
+            old_manifest.write_text(json.dumps({"status": "queued", "patch_id": "patch:old"}) + "\n", encoding="utf-8")
+            new_manifest.write_text(json.dumps({"status": "queued", "patch_id": "patch:new"}) + "\n", encoding="utf-8")
+            old_manifest.with_name("changes.patch").write_text("old\n", encoding="utf-8")
+            new_manifest.with_name("changes.patch").write_text("new\n", encoding="utf-8")
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:test:build",
+                        task_id="AUTO-002",
+                        action_type="build",
+                        status="done",
+                        owner_role="builder",
+                        confidence=0.9,
+                        metadata={"summary": "Build AUTO-002"},
+                    )
+                    for patch_id, run_id, created_at, manifest_path in (
+                        ("patch:old", "run-old", "2026-05-19T17:30:00+00:00", old_manifest),
+                        ("patch:new", "run-new", "2026-05-19T18:01:00+00:00", new_manifest),
+                    ):
+                        conn.execute(
+                            """
+                            INSERT INTO worker_agents(worker_id, execution_group_id, run_id, mode, role, status,
+                                                       started_at, finished_at, payload_json)
+                            VALUES(?, 'execution-group:auto-002', ?, 'write', 'builder', 'completed', ?, ?, ?)
+                            """,
+                            (
+                                f"worker:{run_id}",
+                                run_id,
+                                created_at,
+                                created_at,
+                                stable_json({"task_id": "AUTO-002", "dag_node_id": "dag-node:test:build"}),
+                            ),
+                        )
+                        conn.execute(
+                            """
+                            INSERT INTO worker_patches(
+                                patch_id, worker_id, execution_group_id, status, manifest_path,
+                                patch_path, changed_files_json, base_commit, leases_json,
+                                validation_evidence_json, conflict_signature, created_at,
+                                queued_at, integrated_at, payload_json
+                            )
+                            VALUES(?, ?, 'execution-group:auto-002', 'queued', ?, ?, ?,
+                                   '', '[]', '[]', '', ?, ?, '', '{}')
+                            """,
+                            (
+                                patch_id,
+                                f"worker:{run_id}",
+                                str(manifest_path.relative_to(target)),
+                                str(manifest_path.with_name("changes.patch").relative_to(target)),
+                                json.dumps(["src/app.js", ".diffmogger/state/CODEX_AUTOMATION_TASKS.md"]),
+                                created_at,
+                                created_at,
+                            ),
+                        )
+                original_preflight = state_store_module.worker_patch_integration_preflight_conn
+                try:
+                    state_store_module.worker_patch_integration_preflight_conn = lambda conn, target=None, limit=20, persist=True: {"records": []}  # type: ignore[assignment]
+                    result = reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="test")
+                finally:
+                    state_store_module.worker_patch_integration_preflight_conn = original_preflight  # type: ignore[assignment]
+                statuses = {
+                    str(row["patch_id"]): str(row["status"])
+                    for row in conn.execute("SELECT patch_id, status FROM worker_patches").fetchall()
+                }
+                integration_patch_ids = [
+                    str(row["patch_id"])
+                    for row in conn.execute("SELECT patch_id FROM execution_dag_nodes WHERE action_type = 'integrate'").fetchall()
+                ]
+                read_model = state_store_module.worker_patch_read_model_conn(conn, target=target)
+
+            self.assertEqual("reconciled", result["status"])
+            self.assertEqual(["patch:old"], result["superseded_patch_ids"])
+            self.assertEqual({"patch:old": "superseded", "patch:new": "queued"}, statuses)
+            self.assertEqual(["patch:new"], integration_patch_ids)
+            self.assertEqual("superseded", json.loads(old_manifest.read_text(encoding="utf-8"))["status"])
+            self.assertEqual(1, read_model["patch_backlog_summary"]["queued_patch_count"])
+            self.assertEqual(0, read_model["patch_backlog_summary"]["repeated_repair_count"])
+
+    def test_reconcile_defers_true_conflict_worker_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            manifest_path = target / "target" / "automation_queue" / "builder" / "run-conflict" / "manifest.json"
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps({"status": "queued", "patch_id": "patch:conflict"}) + "\n", encoding="utf-8")
+            manifest_path.with_name("changes.patch").write_text("conflict\n", encoding="utf-8")
+            now = "2026-05-19T18:00:00+00:00"
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:test:conflict-build",
+                        task_id="AUTO-002",
+                        action_type="build",
+                        status="done",
+                        owner_role="builder",
+                        confidence=0.9,
+                        metadata={"summary": "Build AUTO-002"},
+                    )
+                    upsert_execution_dag_node(
+                        conn,
+                        node_id="dag-node:worker-preflight-repair:conflict",
+                        task_id="AUTO-002",
+                        action_type="repair",
+                        status="ready",
+                        owner_role="builder",
+                        patch_id="patch:conflict",
+                        patch_path="target/automation_queue/builder/run-conflict/changes.patch",
+                        blocker_reason="true conflict",
+                        confidence=0.86,
+                        metadata={"source": "worker_patch_integration_preflight", "summary": "Repair conflict"},
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_agents(worker_id, execution_group_id, run_id, mode, role, status,
+                                                   started_at, finished_at, payload_json)
+                        VALUES('worker:conflict', 'execution-group:conflict', 'run-conflict',
+                               'write', 'builder', 'completed', ?, ?, ?)
+                        """,
+                        (
+                            now,
+                            now,
+                            stable_json({"task_id": "AUTO-002", "dag_node_id": "dag-node:test:conflict-build"}),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO worker_patches(
+                            patch_id, worker_id, execution_group_id, status, manifest_path,
+                            patch_path, changed_files_json, base_commit, leases_json,
+                            validation_evidence_json, conflict_signature, created_at,
+                            queued_at, integrated_at, payload_json
+                        )
+                        VALUES('patch:conflict', 'worker:conflict', 'execution-group:conflict', 'queued',
+                               ?, ?, ?, '', '[]', '[]', '', ?, ?, '', '{}')
+                        """,
+                        (
+                            str(manifest_path.relative_to(target)),
+                            str(manifest_path.with_name("changes.patch").relative_to(target)),
+                            json.dumps(["src/app.js"]),
+                            now,
+                            now,
+                        ),
+                    )
+
+                original_preflight = state_store_module.worker_patch_integration_preflight_conn
+
+                def fake_preflight(conn, target=None, limit: int = 20, persist: bool = True):
+                    return {
+                        "records": [
+                            {
+                                "patch_id": "patch:conflict",
+                                "status": "true_conflict",
+                                "reason_kind": "integration_reconciliation_true_conflict",
+                                "integration_resolution_detail": "Patch no longer applies to current files.",
+                                "reasons": [
+                                    {
+                                        "kind": "integration_reconciliation_true_conflict",
+                                        "severity": "block",
+                                        "reason": "Patch no longer applies to current files.",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+
+                try:
+                    state_store_module.worker_patch_integration_preflight_conn = fake_preflight
+                    result = reconcile_worker_results_into_execution_dag_conn(conn, target=target, selected_by="test")
+                finally:
+                    state_store_module.worker_patch_integration_preflight_conn = original_preflight
+                patch_row = conn.execute("SELECT status, payload_json FROM worker_patches WHERE patch_id = 'patch:conflict'").fetchone()
+                defer_nodes = [
+                    row["action_type"]
+                    for row in conn.execute("SELECT action_type FROM execution_dag_nodes WHERE patch_id = 'patch:conflict' AND action_type = 'defer'").fetchall()
+                ]
+                repair_status = conn.execute(
+                    "SELECT status FROM execution_dag_nodes WHERE node_id = 'dag-node:worker-preflight-repair:conflict'"
+                ).fetchone()["status"]
+                lineages = worker_patch_lineage_conn(conn, patch_id="patch:conflict")
+
+            self.assertEqual(["patch:conflict"], result["deferred_patch_ids"])
+            self.assertEqual(1, result["defer_node_count"])
+            self.assertEqual("deferred", patch_row["status"])
+            self.assertEqual("deferred", json.loads(manifest_path.read_text(encoding="utf-8"))["status"])
+            self.assertEqual(["defer"], defer_nodes)
+            self.assertEqual("superseded", repair_status)
+            self.assertEqual("deferred", lineages[0]["status"])
+            self.assertEqual("deferred", lineages[0]["integration_result"])
+            self.assertIn("integration_reconciliation_true_conflict", json.loads(patch_row["payload_json"])["deferral_reason"])
 
     def test_parallel_validation_uses_dag_node_validation_plan_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2279,7 +3170,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertIn("events.hash_chain", invariant_names)
             self.assertIn("projections.event_id_exists", invariant_names)
 
-    def test_legacy_json_is_imported_once_as_compatibility_migration(self) -> None:
+    def test_legacy_json_is_ignored_until_explicit_migration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             projection_path = target / "target" / "automation_conveyor_state.json"
@@ -2297,15 +3188,17 @@ class StateStoreTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            imported = load_conveyor_state(projection_path)
-            first_snapshot = state_snapshot(target)
+            ignored = load_conveyor_state(projection_path)
+            pre_migration = state_snapshot(target)
+            migration = import_legacy_target_state(target)
             loaded_again = load_conveyor_state(projection_path)
-            second_snapshot = state_snapshot(target)
+            post_migration = state_snapshot(target)
 
-            self.assertEqual(7, imported["cycles"])
+            self.assertEqual(0, ignored["cycles"])
+            self.assertEqual(1, migration["conveyor_projection"])
             self.assertEqual(7, loaded_again["cycles"])
-            self.assertEqual(first_snapshot["counts"]["events"], second_snapshot["counts"]["events"])
-            self.assertEqual("compatibility.legacy_conveyor_json_imported", first_snapshot["last_event"]["event_type"])
+            self.assertLess(pre_migration["counts"]["events"], post_migration["counts"]["events"])
+            self.assertEqual("migration.legacy_conveyor_json_imported", post_migration["last_event"]["event_type"])
 
     def test_conveyor_write_state_materializes_typed_next_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2529,9 +3422,15 @@ class StateStoreTests(unittest.TestCase):
             self.assertFalse(review["is_blocker"])
             self.assertTrue(review["rerun_recommended"])
 
-    def test_task_markdown_seeds_control_once_but_is_not_live_authority(self) -> None:
+    def test_task_markdown_projection_is_not_runtime_authority(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
+            agentic = target / ".agentic"
+            agentic.mkdir(parents=True)
+            (agentic / "project_intake.json").write_text(
+                json.dumps({"project_name": "Typed Control Demo", "campaign_mode": "ongoing"}),
+                encoding="utf-8",
+            )
             task = target / "docs" / "CODEX_AUTOMATION_TASKS.md"
             task.parent.mkdir(parents=True)
             task.write_text(
@@ -2652,7 +3551,7 @@ class StateStoreTests(unittest.TestCase):
                 {
                     "run_id": "ticket-campaign-demo",
                     "tickets": [
-                        {"id": "TICKET-001", "summary": "First increment", "status": "done"},
+                        {"id": "TICKET-001", "summary": "First increment", "status": "done", "evidence": ["accepted by integrator"]},
                         {"id": "TICKET-002", "summary": "Candidate increment", "status": "candidate_done"},
                         {"id": "TICKET-003", "summary": "Next increment", "status": "pending"},
                     ],
@@ -2669,8 +3568,8 @@ class StateStoreTests(unittest.TestCase):
                 {
                     "run_id": "ticket-campaign-demo",
                     "tickets": [
-                        {"id": "TICKET-001", "summary": "First increment", "status": "done"},
-                        {"id": "TICKET-002", "summary": "Second increment", "status": "done"},
+                        {"id": "TICKET-001", "summary": "First increment", "status": "done", "evidence": ["accepted by integrator"]},
+                        {"id": "TICKET-002", "summary": "Second increment", "status": "done", "evidence": ["verified by hardener"]},
                     ],
                 },
                 actor_role="integrator",

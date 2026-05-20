@@ -54,7 +54,7 @@ class RequiredFilesCheckTests(unittest.TestCase):
             capture_output=True,
         )
 
-    def test_scaffolded_target_keeps_first_review_checklist_contract(self) -> None:
+    def test_scaffolded_target_uses_lean_state_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self.scaffold_target(target)
@@ -63,6 +63,28 @@ class RequiredFilesCheckTests(unittest.TestCase):
             result = self.run_check(target)
 
             self.assertIn("AGENTS.md", manifest["worktree_seed_paths"])
+            state_files = {
+                path.relative_to(target).as_posix()
+                for path in (target / ".diffmogger" / "state").rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(
+                {
+                    ".diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md",
+                    ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+                    ".diffmogger/state/DEVELOPMENT.md",
+                },
+                state_files,
+            )
+            for stale in [
+                ".diffmogger/state/PROJECT_CONTEXT.md",
+                ".diffmogger/state/MULTI_ROLE_PROGRESS.md",
+                ".diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md",
+                ".diffmogger/state/DAILY_AUTOMATION_REVIEW.md",
+                ".diffmogger/state/HUMAN_BRIDGE_SETUP.md",
+                ".diffmogger/state/MCP_INTEGRATIONS.md",
+            ]:
+                self.assertNotIn(stale, manifest["owned_paths"])
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
 
@@ -73,8 +95,6 @@ class RequiredFilesCheckTests(unittest.TestCase):
 
             for rel in [
                 ".codex/config.toml",
-                "docs/MCP_INTEGRATIONS.md",
-                "docs/backlog/README.md",
             ]:
                 self.assertTrue(generated_path(target, rel).exists(), rel)
             self.assertTrue(generated_path(target, "scripts/run_playwright_mcp.sh").exists())
@@ -184,6 +204,9 @@ class RequiredFilesCheckTests(unittest.TestCase):
             self.assertIn('mcp_servers.playwright.disabled_tools=["browser_run_code_unsafe","browser_file_upload"]', role_runner)
             self.assertIn('mcp_servers.context7.enabled=false', role_runner)
             self.assertIn('mcp_servers.playwright.enabled=false', role_runner)
+            self.assertIn("codex exec --sandbox danger-full-access", role_runner)
+            self.assertIn('approval_policy="never"', role_runner)
+            self.assertNotIn("--full-auto", role_runner)
             self.assertIn("PLAYWRIGHT_MCP_OUTPUT_DIR", role_runner)
             self.assertIn("--codegen", helper)
 
@@ -193,8 +216,8 @@ class RequiredFilesCheckTests(unittest.TestCase):
             integrator = generated_path(target, ".agentic/roles/integrator.md").read_text(encoding="utf-8")
             self.assertIn("auth errors", planner)
             self.assertIn("do not halt", builder)
-            self.assertIn("browser_take_screenshot", hardener)
-            self.assertIn("docs/backlog/ui_artifacts", integrator)
+            self.assertIn("local browser validation", hardener)
+            self.assertIn("CODEX_AUTOMATION_TASKS", integrator)
 
             result = subprocess.run(
                 [
@@ -241,7 +264,6 @@ class RequiredFilesCheckTests(unittest.TestCase):
                 ".agentic/roles/builder.md",
                 ".agentic/roles/hardener.md",
                 ".agentic/roles/integrator.md",
-                "docs/MULTI_ROLE_PROGRESS.md",
                 "scripts/run_role_automation.sh",
                 "scripts/integrate_role_outputs.py",
                 "scripts/list_deferred_patches.py",
@@ -252,10 +274,10 @@ class RequiredFilesCheckTests(unittest.TestCase):
             task = generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
             guardrails = generated_path(target, "docs/CODEX_AUTOMATION_GUARDRAILS.md").read_text(encoding="utf-8")
             manifest = (target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8")
-            self.assertIn("Automation role profile: planner_builder_hardener_integrator", agents)
-            self.assertIn("Role profile: `planner_builder_hardener_integrator`", task)
-            self.assertIn("integration safety (`python3 scripts/check_integration_safety.py`)", task)
-            self.assertIn("Multi-role automation", guardrails)
+            self.assertIn("Blockers are node metadata", agents)
+            self.assertIn("## Scheduler Work", task)
+            self.assertIn("Only unsafe corruption or destructive risk", task)
+            self.assertIn("Diffmogger is a work generator", guardrails)
             self.assertIn('"automation_role_profile": "planner_builder_hardener_integrator"', manifest)
 
             result = subprocess.run(
@@ -273,29 +295,31 @@ class RequiredFilesCheckTests(unittest.TestCase):
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
 
-    def test_continuous_scaffold_uses_intake_specific_horizons(self) -> None:
+    def test_continuous_scaffold_uses_intake_specific_brief(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self.scaffold_target(target)
             prompt = generated_path(target, ".agentic/automation_prompt.md").read_text(encoding="utf-8")
             task = generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
+            combined = prompt + "\n" + task
 
-            self.assertIn("H2 Local-first demo", prompt)
-            self.assertIn("weekly board", prompt)
-            self.assertIn("recurring review capsules", prompt)
+            self.assertIn("weekly board", combined)
+            self.assertIn("recurring review capsules", combined)
             self.assertIn("## Improvement Backlog", task)
-            self.assertNotIn("H2 Offline/local demo", prompt)
+            self.assertNotIn("H2 Offline/local demo", combined)
 
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self.scaffold_target(target, TRENDLAB_INTAKE)
             prompt = generated_path(target, ".agentic/automation_prompt.md").read_text(encoding="utf-8")
+            task = generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
+            combined = prompt + "\n" + task
 
-            self.assertIn("scored signals", prompt)
-            self.assertIn("generated brief", prompt)
-            self.assertIn("source-quality attribution", prompt)
+            self.assertIn("scored signals", combined)
+            self.assertIn("generated brief", combined)
+            self.assertIn("source-quality attribution", combined)
 
-    def test_ticket_campaign_scaffold_uses_ticket_phases_without_product_roadmap_language(self) -> None:
+    def test_ticket_campaign_scaffold_uses_lean_ticket_guidance_without_product_roadmap_language(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.NamedTemporaryFile("w", suffix=".json") as intake:
             target = Path(tmp)
             intake.write(
@@ -319,12 +343,12 @@ class RequiredFilesCheckTests(unittest.TestCase):
             task = generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
             combined = prompt + "\n" + task
 
-            self.assertIn("T1 Ticket-run readiness", combined)
-            self.assertIn("T4 Completion report and stop", combined)
+            self.assertIn("Campaign mode: `bounded`", combined)
+            self.assertIn("Halt only when every ticket is done with evidence", combined)
             self.assertFalse(generated_path(target, "docs/INITIAL_BOOTSTRAP_PROMPT.md").exists())
             self.assertIn("Scaffold seeds and validates the ticket queue", combined)
             self.assertIn("python3 .diffmogger/scripts/ticket_run.py . next --json", prompt)
-            self.assertIn("let execution DAG dependencies, confidence, and ownership scopes determine", prompt)
+            self.assertIn("execution DAG", prompt)
             self.assertIn("## Deferred / Follow-Up Tickets", task)
             for forbidden in ["MVP", "Beyond MVP", "Ambitious extensions"]:
                 self.assertNotIn(forbidden, combined)
@@ -369,15 +393,15 @@ class RequiredFilesCheckTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn(f"{sidecar_rel('docs/DEVELOPMENT.md')}: missing", result.stderr)
 
-    def test_development_checklist_marker_regression_fails_required_files_check(self) -> None:
+    def test_development_verification_marker_regression_fails_required_files_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self.scaffold_target(target)
             development = generated_path(target, "docs/DEVELOPMENT.md")
             development.write_text(
                 development.read_text(encoding="utf-8").replace(
-                    "Run Safety Check",
-                    "Run local checks",
+                    "## Verification",
+                    "## Checks",
                 ),
                 encoding="utf-8",
             )
@@ -385,17 +409,17 @@ class RequiredFilesCheckTests(unittest.TestCase):
             result = self.run_check(target)
 
             self.assertNotEqual(0, result.returncode)
-            self.assertIn(f"{sidecar_rel('docs/DEVELOPMENT.md')}: missing marker 'Run Safety Check'", result.stderr)
+            self.assertIn(f"{sidecar_rel('docs/DEVELOPMENT.md')}: missing marker '## Verification'", result.stderr)
 
-    def test_development_review_bundle_command_regression_fails_required_files_check(self) -> None:
+    def test_development_browser_helper_regression_fails_required_files_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self.scaffold_target(target)
             development = generated_path(target, "docs/DEVELOPMENT.md")
             development.write_text(
                 development.read_text(encoding="utf-8").replace(
-                    "--review-dir /tmp/Diffmogger-review",
-                    "--review-output /tmp/Diffmogger-self-review.md",
+                    "python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch",
+                    "python3 .diffmogger/scripts/diffmogger_browser.py env",
                 ),
                 encoding="utf-8",
             )
@@ -404,7 +428,7 @@ class RequiredFilesCheckTests(unittest.TestCase):
 
             self.assertNotEqual(0, result.returncode)
             self.assertIn(
-                f"{sidecar_rel('docs/DEVELOPMENT.md')}: missing marker 'python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review'",
+                f"{sidecar_rel('docs/DEVELOPMENT.md')}: missing marker 'python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch'",
                 result.stderr,
             )
 

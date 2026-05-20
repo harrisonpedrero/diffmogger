@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
+from diffmogger.conveyor import scheduler as scheduler_module
 from diffmogger.conveyor import runner as conveyor_runner
 from diffmogger.conveyor.scheduler import DAG_RUNNER_ACTIONS
 from diffmogger.runtime.state_store import (
@@ -32,6 +33,7 @@ from diffmogger.runtime.state_store import (
     state_snapshot,
     update_execution_dag_node_status_conn,
     update_execution_group_dag_nodes_conn,
+    upsert_execution_dag_edge,
     upsert_execution_dag_node,
     worker_patches_conn,
     write_ticket_run_state,
@@ -257,17 +259,28 @@ class DagSchedulerRunnerTests(unittest.TestCase):
             if isinstance(item, dict) and item.get("action_type") == action_type
         ]
 
-    def run_fake_review_action(self, target: Path, candidate: dict[str, object]) -> int:
+    def run_fake_review_action(
+        self,
+        target: Path,
+        candidate: dict[str, object],
+        *,
+        require_execution_group_id: bool = False,
+    ) -> int:
         original_launch = conveyor_runner.launch_read_only_execution_group_conn
+        launched: dict[str, str] = {}
 
         def fake_launch(conn, target_arg, *, execution_group_id: str = "", selected_by: str = ""):
+            launched["execution_group_id"] = execution_group_id
             return {"status": "completed", "execution_group_id": execution_group_id, "target": str(target_arg)}
 
         try:
             conveyor_runner.launch_read_only_execution_group_conn = fake_launch
-            return conveyor_runner.run_scheduler_action(target, candidate, False)
+            exit_code = conveyor_runner.run_scheduler_action(target, candidate, False)
         finally:
             conveyor_runner.launch_read_only_execution_group_conn = original_launch
+        if require_execution_group_id:
+            self.assertTrue(launched.get("execution_group_id"))
+        return exit_code
 
     def fake_scope_report_without_promotable_evidence(self, command: list[str], *, cwd: Path, timeout: int):
         report_path = Path(command[command.index("--report-path") + 1])
@@ -315,7 +328,7 @@ class DagSchedulerRunnerTests(unittest.TestCase):
             }.issubset(DAG_RUNNER_ACTIONS)
         )
 
-    def test_dependency_ready_ticket_uses_scope_fanout_before_serial_role_fallback(self) -> None:
+    def test_dependency_ready_ticket_uses_scope_fanout_before_serial_role_work(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -371,7 +384,90 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                     exit_code = self.run_fake_review_action(target, candidate)
                     self.assertEqual(0, exit_code)
 
-    def test_scope_fanout_exhaustion_falls_back_to_serial_role(self) -> None:
+    def test_noncritical_status_annotations_still_schedule_unfinished_ticket_work(self) -> None:
+        for path, module in self.modules:
+            for automation_status in ("ACTIVE_WITH_PENDING_USER_INPUT", "BLOCKED_ON_USER", "BLOCKED_ON_ENVIRONMENT", "PAUSED"):
+                with self.subTest(path=path.relative_to(ROOT), automation_status=automation_status):
+                    with tempfile.TemporaryDirectory() as tmp:
+                        target = Path(tmp)
+                        self.seed_target(target)
+                        self.write_text(
+                            target,
+                            "docs/CODEX_AUTOMATION_TASKS.md",
+                            f"""
+                            # Codex Automation Tasks
+
+                            AUTOMATION_STATUS: {automation_status}
+                            """,
+                        )
+                        write_ticket_run_state(
+                            target,
+                            {
+                                "run_id": "ticket-run",
+                                "halt_when_complete": True,
+                                "notify_on_complete": False,
+                                "tickets": [
+                                    {
+                                        "id": "TICKET-001",
+                                        "summary": "Create local project directory layout",
+                                        "status": "pending",
+                                        "depends_on": [],
+                                    }
+                                ],
+                            },
+                            actor_role="test",
+                            event_type="ticket.run_test",
+                        )
+
+                        role, reason, stop = module.choose_next(target, {}, 2)
+                        candidate = self.latest_candidate(target)
+
+                        self.assertEqual("planner", role)
+                        self.assertFalse(stop)
+                        self.assertNotIn("waiting", reason)
+                        self.assertIn(candidate["action_kind"], {"launch_scope_group", "run_serial_role"})
+                        self.assertNotEqual("idle", candidate["action_kind"])
+
+    def test_all_visible_blocked_tickets_create_unblocker_work(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    write_ticket_run_state(
+                        target,
+                        {
+                            "run_id": "ticket-run",
+                            "halt_when_complete": True,
+                            "notify_on_complete": False,
+                            "tickets": [
+                                {
+                                    "id": "TICKET-001",
+                                    "summary": "Continue without remote credentials",
+                                    "status": "blocked",
+                                    "blocker": "Remote credentials are unavailable.",
+                                    "depends_on": [],
+                                }
+                            ],
+                        },
+                        actor_role="test",
+                        event_type="ticket.run_test",
+                    )
+
+                    role, reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+
+                    self.assertEqual("builder", role)
+                    self.assertFalse(stop)
+                    self.assertIn("unblocker", reason)
+                    self.assertEqual("run_serial_role", candidate["action_kind"])
+                    self.assertEqual("TICKET-001", candidate["task_id"])
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        model = execution_dag_read_model(conn)
+                    repair = next(item for item in model["ready_nodes"] if item["action_type"] == "repair")
+                    self.assertIn("Create unblocker work", repair["summary"])
+
+    def test_scope_fanout_exhaustion_yields_serialized_role_work(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -427,7 +523,7 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                         for group in snapshot["why_not_parallel"]["reason_groups"]
                         if isinstance(group, dict)
                     ]
-                    self.assertIn("serial_fallback", rendered_reasons)
+                    self.assertIn("serialized_role_path", rendered_reasons)
                     raw_reason_kinds = [
                         raw
                         for group in snapshot["why_not_parallel"]["reason_groups"]
@@ -444,8 +540,8 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                     self.assertEqual("run_serial_role", second["action_kind"])
                     self.assertEqual("TICKET-001", second["task_id"])
                     self.assertEqual("scope_fanout_exhausted", second["parallel_block_reason_kind"])
-                    self.assertEqual("serial_fallback", second["parallel_block_display_reason_kind"])
-                    self.assertIn("serial_fallback", reason)
+                    self.assertEqual("serialized_role_path", second["parallel_block_display_reason_kind"])
+                    self.assertIn("serialized_role_path", reason)
 
     def test_queued_serial_role_manifest_reconciles_into_dag_handoff(self) -> None:
         for path, module in self.modules:
@@ -531,7 +627,7 @@ class DagSchedulerRunnerTests(unittest.TestCase):
 
                     self.assertEqual("hardener", role)
                     self.assertFalse(stop)
-                    self.assertNotIn("no DAG-ready scheduler action", reason)
+                    self.assertNotIn("idle", reason.lower())
                     self.assertIn("queued worker patch", reason)
                     self.assertEqual("launch_review_group", candidate["action_kind"])
                     with closing(connect(database_path_for_target(target))) as conn:
@@ -717,7 +813,7 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                     self.assertEqual("hardener", role)
                     self.assertFalse(stop)
                     self.assertEqual("launch_review_group", candidate["action_kind"])
-                    self.assertEqual(0, self.run_fake_review_action(target, candidate))
+                    self.assertEqual(0, self.run_fake_review_action(target, candidate, require_execution_group_id=True))
 
                     role, _reason, stop = module.choose_next(target, {}, 2)
                     candidate = self.latest_candidate(target)
@@ -766,6 +862,207 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                     self.assertEqual("integrated", patch["status"])
                     self.assertTrue(patch["integrated_at"])
                     self.assertTrue(integration_node_id.startswith("dag-node:worker-integration:"))
+
+    def test_queued_patch_handoff_preempts_duplicate_validation_repair(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.seed_worker_patch(target, patch_id="patch:test-worker", source_node_id="dag-node:test:worker-build")
+
+                    role, _reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+                    self.assertEqual("integrator", role)
+                    self.assertFalse(stop)
+                    self.assertEqual("reconcile_worker_results", candidate["action_kind"])
+                    self.assertEqual(0, conveyor_runner.run_scheduler_action(target, candidate, False))
+
+                    repair_node_id = "dag-node:validation-repair:test-duplicate"
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        with conn:
+                            upsert_execution_dag_node(
+                                conn,
+                                node_id=repair_node_id,
+                                task_id="T1",
+                                action_type="repair",
+                                status="ready",
+                                owner_role="builder",
+                                confidence=0.86,
+                                blocker_reason="failed validation: python3 scripts/validate_runtime_entrypoint.py",
+                                metadata={
+                                    "source": "validation_jobs",
+                                    "scheduler_action": "create_repair_nodes",
+                                    "summary": "Repair failed validation `python3 scripts/validate_runtime_entrypoint.py`",
+                                    "failure_signature": "validation-failure:test-runtime-anchor",
+                                },
+                            )
+
+                    role, _reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        decision = latest_scheduler_decision_conn(conn)
+
+                    self.assertEqual("hardener", role)
+                    self.assertFalse(stop)
+                    self.assertEqual("launch_review_group", candidate["action_kind"])
+                    skipped_repairs = [
+                        item
+                        for item in decision["scheduling_candidates"]
+                        if item["dag_node_id"] == repair_node_id
+                    ]
+                    self.assertEqual(1, len(skipped_repairs))
+                    self.assertEqual("skipped", skipped_repairs[0]["state"])
+                    self.assertIn("queued patch handoff", skipped_repairs[0]["skipped_reason"])
+
+                    self.assertEqual(0, self.run_fake_review_action(target, candidate))
+                    role, _reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+
+                    self.assertEqual("hardener", role)
+                    self.assertFalse(stop)
+                    self.assertEqual("launch_validation_group", candidate["action_kind"])
+
+    def test_queued_patch_backlog_preempts_unrelated_review_fanout(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.seed_worker_patch(target, patch_id="patch:test-worker", source_node_id="dag-node:test:worker-build")
+
+                    module.choose_next(target, {}, 2)
+                    self.assertEqual(0, conveyor_runner.run_scheduler_action(target, self.latest_candidate(target), False))
+
+                    primary_review_id = "dag-node:test:primary-review"
+                    primary_validate_id = "dag-node:test:primary-validate"
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        with conn:
+                            for row in conn.execute(
+                                """
+                                SELECT node_id
+                                FROM execution_dag_nodes
+                                WHERE action_type = 'review'
+                                  AND json_extract(metadata_json, '$.source') = 'worker_patches'
+                                """
+                            ).fetchall():
+                                update_execution_dag_node_status_conn(
+                                    conn,
+                                    str(row["node_id"]),
+                                    status="done",
+                                    selected_by="test.backlog",
+                                )
+                            upsert_execution_dag_node(
+                                conn,
+                                node_id=primary_review_id,
+                                task_id="T-review",
+                                action_type="review",
+                                status="ready",
+                                owner_role="hardener",
+                                confidence=0.9,
+                                metadata={"source": "test.unrelated_review", "paths": ["docs/notes.md"]},
+                            )
+                            upsert_execution_dag_node(
+                                conn,
+                                node_id=primary_validate_id,
+                                task_id="T-validate",
+                                action_type="validate",
+                                status="ready",
+                                owner_role="hardener",
+                                confidence=0.9,
+                                metadata={"source": "test.validation_gate", "paths": ["src/app.py"]},
+                            )
+
+                    role, _reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        decision = latest_scheduler_decision_conn(conn)
+
+                    self.assertEqual("hardener", role)
+                    self.assertFalse(stop)
+                    self.assertEqual("launch_validation_group", candidate["action_kind"])
+                    skipped_reviews = [
+                        item
+                        for item in decision["scheduling_candidates"]
+                        if item["dag_node_id"] == primary_review_id
+                    ]
+                    self.assertEqual(1, len(skipped_reviews))
+                    self.assertEqual("skipped", skipped_reviews[0]["state"])
+                    self.assertIn("queued patch handoff", skipped_reviews[0]["skipped_reason"])
+
+    def test_queued_patch_backlog_preempts_new_write_group(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.seed_worker_patch(target, patch_id="patch:test-worker", source_node_id="dag-node:test:worker-build")
+
+                    module.choose_next(target, {}, 2)
+                    self.assertEqual(0, conveyor_runner.run_scheduler_action(target, self.latest_candidate(target), False))
+
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        with conn:
+                            for row in conn.execute(
+                                """
+                                SELECT node_id, action_type
+                                FROM execution_dag_nodes
+                                WHERE json_extract(metadata_json, '$.source') = 'worker_patches'
+                                """
+                            ).fetchall():
+                                update_execution_dag_node_status_conn(
+                                    conn,
+                                    str(row["node_id"]),
+                                    status="done" if str(row["action_type"]) == "review" else "blocked",
+                                    selected_by="test.write_preempt",
+                                )
+                            upsert_execution_dag_node(
+                                conn,
+                                node_id="dag-node:test:new-write",
+                                task_id="T2",
+                                action_type="build",
+                                status="ready",
+                                owner_role="builder",
+                                confidence=0.9,
+                                metadata={
+                                    "source": "test.new_write",
+                                    "summary": "New write work should wait for queued patch handoff",
+                                    "paths": ["src/new_feature.py"],
+                                },
+                            )
+
+                    original_plan = scheduler_module.plan_parallel_execution_groups_conn
+
+                    def fake_plan(conn, target_arg, *, selected_by: str = "state.snapshot", persist: bool = True):
+                        result = original_plan(conn, target_arg, selected_by=selected_by, persist=persist)
+                        groups = result.get("proposed_execution_groups") if isinstance(result.get("proposed_execution_groups"), list) else []
+                        groups.append(
+                            {
+                                "execution_group_id": "execution-group:test-new-write",
+                                "payload": {"execution_mode": "write_workers"},
+                                "items": [
+                                    {
+                                        "task_id": "T2",
+                                        "payload": {
+                                            "dag_node_id": "dag-node:test:new-write",
+                                            "action_type": "build",
+                                        },
+                                    }
+                                ],
+                            }
+                        )
+                        result["proposed_execution_groups"] = groups
+                        return result
+
+                    try:
+                        scheduler_module.plan_parallel_execution_groups_conn = fake_plan
+                        role, _reason, stop = module.choose_next(target, {}, 2)
+                        candidate = self.latest_candidate(target)
+                    finally:
+                        scheduler_module.plan_parallel_execution_groups_conn = original_plan
+
+                    self.assertFalse(stop)
+                    self.assertNotEqual("launch_write_group", candidate["action_kind"])
 
     def test_scheduler_uses_preflight_safe_patch_subset_for_serial_integration(self) -> None:
         for path, module in self.modules:
@@ -840,6 +1137,398 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                     self.assertEqual(0, candidate["integration_preflight"]["likely_conflict_count"])
                     self.assertEqual(1, candidate["integration_preflight"]["reconcilable_overlap_count"])
 
+    def test_scheduler_routes_blocked_integration_preflight_to_repair_before_planner_liveness(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.seed_worker_patch(
+                        target,
+                        patch_id="patch:blocked",
+                        worker_id="worker:blocked",
+                        run_id="run:blocked",
+                        source_node_id="dag-node:test:build-blocked",
+                        task_id="T1",
+                        changed_files=["src/app.py"],
+                    )
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        with conn:
+                            upsert_execution_dag_node(
+                                conn,
+                                node_id="dag-node:test:integrate-blocked",
+                                task_id="T1",
+                                action_type="integrate",
+                                status="ready",
+                                owner_role="integrator",
+                                patch_id="patch:blocked",
+                                patch_path="target/automation_queue/builder/run:blocked/changes.patch",
+                                confidence=0.9,
+                                metadata={"source": "test.blocked_preflight"},
+                            )
+
+                    original_preflight = scheduler_module.worker_patch_integration_preflight_conn
+
+                    def fake_blocked_preflight(conn, target=None, limit: int = 20):
+                        return {
+                            "schema_version": 1,
+                            "safe_patch_ids": [],
+                            "ready_patch_ids": ["patch:blocked"],
+                            "blocked_patch_ids": ["patch:blocked"],
+                            "safe_count": 0,
+                            "likely_conflict_count": 0,
+                            "reconcilable_overlap_count": 0,
+                            "already_applied_count": 0,
+                            "rebaseable_count": 0,
+                            "true_conflict_count": 1,
+                            "needs_reconciliation_count": 0,
+                            "missing_metadata_count": 0,
+                            "records": [
+                                {
+                                    "patch_id": "patch:blocked",
+                                    "status": "true_conflict",
+                                    "changed_files": ["src/app.py"],
+                                    "reason_kind": "integration_reconciliation_true_conflict",
+                                }
+                            ],
+                        }
+
+                    try:
+                        scheduler_module.worker_patch_integration_preflight_conn = fake_blocked_preflight
+                        role, _reason, stop = module.choose_next(target, {}, 2)
+                        candidate = self.latest_candidate(target)
+                    finally:
+                        scheduler_module.worker_patch_integration_preflight_conn = original_preflight
+
+                    self.assertEqual("integrator", role)
+                    self.assertFalse(stop)
+                    self.assertEqual("reconcile_worker_results", candidate["action_kind"])
+                    self.assertEqual(["patch:blocked"], candidate["patch_ids"])
+                    self.assertEqual(1, candidate["integration_preflight"]["true_conflict_count"])
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        repair_nodes = [
+                            item
+                            for item in execution_dag_read_model(conn)["nodes"]
+                            if item["action_type"] == "repair"
+                            and isinstance(item.get("patch"), dict)
+                            and item["patch"]["id"] == "patch:blocked"
+                        ]
+                    self.assertEqual(1, len(repair_nodes))
+
+    def test_scheduler_routes_apply_clean_overlap_without_ready_integration_to_serial_integration(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.seed_worker_patch(
+                        target,
+                        patch_id="patch:blocked-waiting",
+                        worker_id="worker:blocked-waiting",
+                        run_id="run:blocked-waiting",
+                        source_node_id="dag-node:test:build-blocked-waiting",
+                        task_id="T1",
+                        changed_files=["src/app.py"],
+                    )
+
+                    role, _reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+                    self.assertEqual("integrator", role)
+                    self.assertFalse(stop)
+                    self.assertEqual("reconcile_worker_results", candidate["action_kind"])
+                    self.assertEqual(0, conveyor_runner.run_scheduler_action(target, candidate, False))
+
+                    original_preflight = scheduler_module.worker_patch_integration_preflight_conn
+
+                    def fake_blocked_preflight(conn, target=None, limit: int = 20):
+                        return {
+                            "schema_version": 1,
+                            "safe_patch_ids": [],
+                            "ready_patch_ids": [],
+                            "blocked_patch_ids": ["patch:blocked-waiting"],
+                            "safe_count": 0,
+                            "likely_conflict_count": 1,
+                            "reconcilable_overlap_count": 0,
+                            "already_applied_count": 0,
+                            "rebaseable_count": 0,
+                            "true_conflict_count": 0,
+                            "needs_reconciliation_count": 0,
+                            "missing_metadata_count": 0,
+                            "records": [
+                                {
+                                    "patch_id": "patch:blocked-waiting",
+                                    "status": "likely_conflict",
+                                    "changed_files": ["src/app.py"],
+                                    "integration_resolution": "direct_apply",
+                                    "reason_kind": "overlapping_worker_patch_surface",
+                                }
+                            ],
+                        }
+
+                    try:
+                        scheduler_module.worker_patch_integration_preflight_conn = fake_blocked_preflight
+                        role, _reason, stop = module.choose_next(target, {}, 2)
+                        candidate = self.latest_candidate(target)
+                    finally:
+                        scheduler_module.worker_patch_integration_preflight_conn = original_preflight
+
+                    self.assertEqual("integrator", role)
+                    self.assertFalse(stop)
+                    self.assertEqual("run_serial_integration", candidate["action_kind"])
+                    self.assertEqual(["patch:blocked-waiting"], candidate["patch_ids"])
+                    self.assertEqual(1, candidate["integration_preflight"]["likely_conflict_count"])
+
+    def test_scheduler_skips_stale_worker_preflight_repair_when_handoff_is_current(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    self.seed_worker_patch(
+                        target,
+                        patch_id="patch:already-applied",
+                        worker_id="worker:already-applied",
+                        run_id="run:already-applied",
+                        source_node_id="dag-node:test:build-already-applied",
+                        task_id="T1",
+                        changed_files=["src/app.py"],
+                    )
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        with conn:
+                            reconcile_worker_results_into_execution_dag_conn(
+                                conn,
+                                target=target,
+                                selected_by="test.stale_preflight_repair",
+                            )
+                            upsert_execution_dag_node(
+                                conn,
+                                node_id="dag-node:worker-preflight-repair:stale",
+                                task_id="T1",
+                                action_type="repair",
+                                status="ready",
+                                owner_role="builder",
+                                patch_id="patch:already-applied",
+                                patch_path="target/automation_queue/builder/run:already-applied/changes.patch",
+                                confidence=0.86,
+                                metadata={
+                                    "source": "worker_patch_integration_preflight",
+                                    "scheduler_action": "repair_blocked_worker_patch_preflight",
+                                    "patch_id": "patch:already-applied",
+                                    "preflight_status": "likely_conflict",
+                                    "summary": "Repair worker patch patch:already-applied: likely_conflict",
+                                    "integration_resolution": "already_applied",
+                                },
+                            )
+
+                    original_preflight = scheduler_module.worker_patch_integration_preflight_conn
+
+                    def fake_waiting_handoff_preflight(conn, target=None, limit: int = 20):
+                        return {
+                            "schema_version": 1,
+                            "safe_patch_ids": [],
+                            "ready_patch_ids": [],
+                            "blocked_patch_ids": [],
+                            "safe_count": 0,
+                            "likely_conflict_count": 0,
+                            "reconcilable_overlap_count": 0,
+                            "already_applied_count": 1,
+                            "rebaseable_count": 0,
+                            "true_conflict_count": 0,
+                            "needs_reconciliation_count": 0,
+                            "missing_metadata_count": 0,
+                            "records": [
+                                {
+                                    "patch_id": "patch:already-applied",
+                                    "status": "waiting_validation",
+                                    "changed_files": ["src/app.py"],
+                                    "integration_resolution": "already_applied",
+                                    "reason_kind": "dag_dependencies_pending",
+                                }
+                            ],
+                        }
+
+                    try:
+                        scheduler_module.worker_patch_integration_preflight_conn = fake_waiting_handoff_preflight
+                        role, _reason, stop = module.choose_next(target, {}, 2)
+                        candidate = self.latest_candidate(target)
+                        with closing(connect(database_path_for_target(target))) as conn:
+                            decision = latest_scheduler_decision_conn(conn)
+                    finally:
+                        scheduler_module.worker_patch_integration_preflight_conn = original_preflight
+
+                    self.assertEqual("hardener", role)
+                    self.assertFalse(stop)
+                    self.assertEqual("launch_review_group", candidate["action_kind"])
+                    stale_candidates = [
+                        item
+                        for item in decision["scheduling_candidates"]
+                        if item["dag_node_id"] == "dag-node:worker-preflight-repair:stale"
+                    ]
+                    self.assertEqual(1, len(stale_candidates))
+                    self.assertEqual("skipped", stale_candidates[0]["state"])
+                    self.assertIn("current preflight is waiting on patch review or validation", stale_candidates[0]["skipped_reason"])
+
+    def test_scheduler_refreshes_waiting_patch_handoff_before_planner_liveness(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    write_ticket_run_state(
+                        target,
+                        {
+                            "run_id": "ticket-run",
+                            "tickets": [
+                                {
+                                    "id": "TICKET-005",
+                                    "summary": "Wire development scripts",
+                                    "status": "pending",
+                                }
+                            ],
+                        },
+                        actor_role="test",
+                        event_type="ticket.run_test",
+                    )
+                    self.seed_worker_patch(
+                        target,
+                        patch_id="patch:waiting-handoff",
+                        worker_id="worker:waiting-handoff",
+                        run_id="run:waiting-handoff",
+                        source_node_id="dag-node:test:build-waiting-handoff",
+                        task_id="TICKET-005",
+                        changed_files=["package.json"],
+                    )
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        handoff = reconcile_worker_results_into_execution_dag_conn(
+                            conn,
+                            target=target,
+                            selected_by="test.waiting_handoff",
+                        )
+                        review_node_id = str(handoff["review_nodes"][0]["node_id"])
+                        validation_node_id = str(handoff["validation_nodes"][0]["node_id"])
+                        integration_node_id = str(handoff["integration_nodes"][0]["node_id"])
+                        update_execution_dag_node_status_conn(
+                            conn,
+                            review_node_id,
+                            status="done",
+                            selected_by="test.waiting_handoff",
+                        )
+                        update_execution_dag_node_status_conn(
+                            conn,
+                            validation_node_id,
+                            status="blocked",
+                            selected_by="test.waiting_handoff",
+                        )
+                        update_execution_dag_node_status_conn(
+                            conn,
+                            integration_node_id,
+                            status="ready",
+                            selected_by="test.waiting_handoff",
+                        )
+
+                    role, reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+
+                    self.assertEqual("integrator", role)
+                    self.assertFalse(stop)
+                    self.assertEqual("reconcile_worker_results", candidate["action_kind"])
+                    self.assertIn("refresh queued patch handoff", reason)
+                    self.assertEqual(["patch:waiting-handoff"], candidate["patch_ids"])
+                    self.assertEqual(
+                        ["patch:waiting-handoff"],
+                        candidate["integration_preflight"]["waiting_patch_ids"],
+                    )
+
+    def test_scheduler_runs_queued_patch_validation_followup_beyond_ready_projection_limit(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    write_ticket_run_state(
+                        target,
+                        {
+                            "run_id": "ticket-run",
+                            "tickets": [
+                                {
+                                    "id": "TICKET-031",
+                                    "summary": "Create input action state",
+                                    "status": "pending",
+                                }
+                            ],
+                        },
+                        actor_role="test",
+                        event_type="ticket.run_test",
+                    )
+                    self.seed_worker_patch(
+                        target,
+                        patch_id="patch:needs-harness",
+                        worker_id="worker:needs-harness",
+                        run_id="run:needs-harness",
+                        source_node_id="dag-node:test:build-needs-harness",
+                        task_id="TICKET-031",
+                        changed_files=["src/input.ts", "tests/input.test.ts"],
+                    )
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        handoff = reconcile_worker_results_into_execution_dag_conn(
+                            conn,
+                            target=target,
+                            selected_by="test.needs_harness",
+                        )
+                        review_node_id = str(handoff["review_nodes"][0]["node_id"])
+                        validation_node_id = str(handoff["validation_nodes"][0]["node_id"])
+                        update_execution_dag_node_status_conn(
+                            conn,
+                            review_node_id,
+                            status="done",
+                            selected_by="test.needs_harness",
+                        )
+                        with conn:
+                            for index in range(30):
+                                upsert_execution_dag_node(
+                                    conn,
+                                    node_id=f"dag-node:test:scope:{index:02d}",
+                                    task_id=f"TICKET-{100 + index}",
+                                    action_type="scope",
+                                    status="ready",
+                                    owner_role="planner",
+                                    confidence=0.7,
+                                    metadata={"summary": f"Scope unrelated ticket {index}"},
+                                )
+                            upsert_execution_dag_node(
+                                conn,
+                                node_id="dag-node:validation-harness:test",
+                                task_id="gate:queued-patch-harness",
+                                action_type="harness",
+                                status="ready",
+                                owner_role="builder",
+                                confidence=0.86,
+                                metadata={
+                                    "source": "validation_jobs",
+                                    "scheduler_action": "create_repair_nodes",
+                                    "summary": "Create harness work for queued patch validation",
+                                    "patch_ids": ["patch:needs-harness"],
+                                    "validation_node_ids": [validation_node_id],
+                                },
+                            )
+                            upsert_execution_dag_edge(
+                                conn,
+                                source_node_id="dag-node:validation-harness:test",
+                                target_node_id=validation_node_id,
+                                dependency_kind="repairs",
+                                reason="validation harness work must run before retrying validation",
+                                confidence=0.94,
+                            )
+
+                    role, reason, stop = module.choose_next(target, {}, 2)
+                    candidate = self.latest_candidate(target)
+
+                    self.assertEqual("builder", role)
+                    self.assertFalse(stop)
+                    self.assertEqual("run_serial_role", candidate["action_kind"])
+                    self.assertEqual("dag-node:validation-harness:test", candidate["dag_node_id"])
+                    self.assertIn("harness", reason)
+
     def test_multi_builder_wave_converges_into_compatible_review_node(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
@@ -874,21 +1563,21 @@ class DagSchedulerRunnerTests(unittest.TestCase):
 
                     with closing(connect(database_path_for_target(target))) as conn:
                         model = execution_dag_read_model(conn)
-                    compatibility_task_ids = {"task:conveyor", "task:automation"}
+                    default_activity_task_ids = {"task:conveyor", "task:automation"}
                     review_nodes = [
                         item
                         for item in model["nodes"]
-                        if item["action_type"] == "review" and item["task_id"] not in compatibility_task_ids
+                        if item["action_type"] == "review" and item["task_id"] not in default_activity_task_ids
                     ]
                     validation_nodes = [
                         item
                         for item in model["nodes"]
-                        if item["action_type"] == "validate" and item["task_id"] not in compatibility_task_ids
+                        if item["action_type"] == "validate" and item["task_id"] not in default_activity_task_ids
                     ]
                     integration_nodes = [
                         item
                         for item in model["nodes"]
-                        if item["action_type"] == "integrate" and item["task_id"] not in compatibility_task_ids
+                        if item["action_type"] == "integrate" and item["task_id"] not in default_activity_task_ids
                     ]
                     self.assertEqual(1, len(review_nodes))
                     self.assertEqual(1, len(validation_nodes))
@@ -902,6 +1591,63 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                     )
                     self.assertEqual(["src/app.py", "src/util.py"], review_metadata["paths"])
                     self.assertEqual(review["node_id"], validation_nodes[0]["metadata"]["review_node_id"])
+
+    def test_failed_validation_job_yields_scheduler_repair_action(self) -> None:
+        for path, module in self.modules:
+            with self.subTest(path=path.relative_to(ROOT)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp)
+                    self.seed_target(target)
+                    now = "2026-05-15T00:00:00+00:00"
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        with conn:
+                            conn.execute(
+                                """
+                                INSERT INTO execution_groups(
+                                    execution_group_id, status, mode, created_at, started_at, finished_at,
+                                    selected_by, reason, payload_json
+                                )
+                                VALUES('validation-group:source', 'failed', 'validation', ?, ?, ?, 'test', 'validation failed', '{}')
+                                """,
+                                (now, now, now),
+                            )
+                            conn.execute(
+                                """
+                                INSERT INTO validation_jobs(
+                                    job_id, execution_group_id, plan_id, gate_id, command, cwd,
+                                    status, started_at, finished_at, exit_code, log_artifact_id,
+                                    resource_profile, payload_json
+                                )
+                                VALUES('validation-job:source', 'validation-group:source', 'plan:source', 'T1',
+                                       'python3 -m unittest', ?, 'failed', ?, ?, 1,
+                                       'log:validation-job:source', 'cpu', ?)
+                                """,
+                                (
+                                    str(target),
+                                    now,
+                                    now,
+                                    stable_json(
+                                        {
+                                            "required": True,
+                                            "classification": "unit_test",
+                                            "failure_reason": "verification_failure",
+                                            "failure_category": "test_assertion_failure",
+                                            "automation_disposition": "create_repair_work",
+                                            "recommended_dag_actions": ["repair"],
+                                        }
+                                    ),
+                                ),
+                            )
+
+                    role, reason, stop = module.choose_next(target, {}, 2)
+                    with closing(connect(database_path_for_target(target))) as conn:
+                        decision = latest_scheduler_decision_conn(conn)
+
+                    self.assertEqual("builder", role)
+                    self.assertFalse(stop)
+                    self.assertIn("failed validation", reason)
+                    self.assertEqual("create_repair_nodes", decision["selected_candidate"]["action_kind"])
+                    self.assertFalse(decision["selected_candidate"]["stop"])
 
     def test_failed_validation_creates_targeted_repair_node_from_receipt(self) -> None:
         for path, module in self.modules:
@@ -1003,11 +1749,15 @@ class DagSchedulerRunnerTests(unittest.TestCase):
 
                     module.choose_next(target, {}, 2)
                     candidate = self.latest_candidate(target)
+                    snapshot = state_snapshot(target)
                     self.assertEqual("run_serial_role", candidate.get("action_kind"))
                     self.assertEqual("builder", candidate.get("role"))
                     self.assertEqual(repair["node_id"], candidate.get("dag_node_id"))
+                    self.assertIn(snapshot["automation_activity"]["health"]["status"], {"active", "ready"})
+                    self.assertNotEqual("blocked", snapshot["automation_activity"]["health"]["status"])
+                    self.assertEqual("run_serial_role", snapshot["automation_activity"]["health"]["selected_action_kind"])
 
-    def test_repeated_validation_failures_create_explicit_blocker_after_retry_limit(self) -> None:
+    def test_repeated_validation_failures_create_reframe_work_after_retry_limit(self) -> None:
         for path, _module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -1100,17 +1850,24 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                             edges = execution_dag_edges_conn(conn)
 
                     self.assertEqual(0, created["repair_node_count"])
-                    self.assertEqual(1, created["blocker_node_count"])
+                    self.assertEqual(1, created["unblocker_node_count"])
+                    self.assertEqual(0, created["blocker_node_count"])
                     self.assertEqual("skipped", skipped["status"])
-                    blocker = next(item for item in model["blocked_nodes"] if item["action_type"] == "blocker")
-                    self.assertIn("retry limit exhausted", blocker["blocker_reason"])
-                    self.assertIn("receipt:validation-job:retry-limit", blocker["validation_receipt_refs"])
+                    reframe = next(item for item in model["ready_nodes"] if item["action_type"] == "reframe")
+                    reframe_metadata = next(
+                        item["metadata"]
+                        for item in model["nodes"]
+                        if item["node_id"] == reframe["node_id"]
+                    )
+                    self.assertIn("retry limit exhausted", reframe["blocker_reason"])
+                    self.assertIn("receipt:validation-job:retry-limit", reframe["validation_receipt_refs"])
+                    self.assertIn("split", reframe_metadata["candidate_unblocker_actions"])
                     self.assertIn(
-                        (blocker["node_id"], validation_node_id, "blocks"),
+                        (validation_node_id, reframe["node_id"], "repairs"),
                         {(edge["source"], edge["target"], edge["dependency_kind"]) for edge in edges},
                     )
 
-    def test_scheduler_decision_does_not_fall_back_to_stage_rotation(self) -> None:
+    def test_scheduler_decision_creates_planner_liveness_work_instead_of_stage_rotation(self) -> None:
         for path, module in self.modules:
             with self.subTest(path=path.relative_to(ROOT)):
                 for last_completed_role in ("", "planner", "builder", "hardener", "integrator"):
@@ -1124,14 +1881,12 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                         with closing(connect(database_path_for_target(target))) as conn:
                             decision = latest_scheduler_decision_conn(conn)
 
-                        self.assertIsNone(role)
+                        self.assertEqual("planner", role)
                         self.assertFalse(stop)
-                        self.assertIn("no DAG-ready scheduler action", reason)
-                        self.assertFalse(decision["scheduler_fallback_used"])
-                        self.assertFalse(decision["legacy_result"])
-                        self.assertEqual("idle", decision["selected_candidate"]["action_kind"])
-                        self.assertEqual("idle", queue[0]["role"])
-                        self.assertEqual("idle", queue[0]["action_kind"])
+                        self.assertIn("ticket queue", reason)
+                        self.assertEqual("run_serial_role", decision["selected_candidate"]["action_kind"])
+                        self.assertEqual("planner", queue[0]["role"])
+                        self.assertEqual("run_serial_role", queue[0]["action_kind"])
 
 
 if __name__ == "__main__":

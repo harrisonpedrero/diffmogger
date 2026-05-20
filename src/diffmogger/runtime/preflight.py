@@ -314,7 +314,7 @@ def _serialized_tasks(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
         if action_type == "integrate" and status not in {"completed", "done", "skipped"}:
             add(node, "integration_serialized", "Integration nodes remain serialized by policy.")
         if status in {"blocked", "blocked_on_user", "blocked_on_environment"}:
-            add(node, "blocked_node_not_parallelized", "Blocked human or environment nodes are not parallelized.")
+            add(node, "blocked_node_not_parallelized", "Human or environment annotations route through serial unblocker work, not parallel workers.")
     return serialized
 
 

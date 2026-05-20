@@ -86,7 +86,6 @@ def commit_automation_state(target: Path, run_id: str, *, dry_run: bool) -> str 
         return "DRY-RUN-STATE-COMMIT"
     paths = [
         "docs/CODEX_AUTOMATION_TASKS.md",
-        "docs/MULTI_ROLE_PROGRESS.md",
     ]
     existing = [dpath(target, path).relative_to(target).as_posix() for path in paths if dpath(target, path).exists()]
     if not existing:

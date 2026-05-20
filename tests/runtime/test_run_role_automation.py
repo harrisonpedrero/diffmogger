@@ -99,6 +99,22 @@ class RunRoleAutomationTests(unittest.TestCase):
             + "\n",
         )
 
+    def assert_mcp_enabled_flag_once(self, args: str, server: str) -> None:
+        true_flag = f"mcp_servers.{server}.enabled=true"
+        false_flag = f"mcp_servers.{server}.enabled=false"
+        self.assertEqual(
+            1,
+            args.count(true_flag) + args.count(false_flag),
+            f"{server} should have exactly one enabled flag in Codex args:\n{args}",
+        )
+
+    def assert_role_exec_allows_mcp_tools(self, args: str) -> None:
+        arg_list = args.splitlines()
+        self.assertIn("--sandbox", arg_list)
+        self.assertIn("danger-full-access", arg_list)
+        self.assertIn('approval_policy="never"', arg_list)
+        self.assertNotIn("--full-auto", arg_list)
+
     def write_fake_codex(self, root: Path) -> Path:
         bin_dir = root / "bin"
         codex = bin_dir / "codex"
@@ -375,6 +391,17 @@ class RunRoleAutomationTests(unittest.TestCase):
                 """,
             )
             self.write_text(target, "scripts/run_playwright_mcp.sh", "#!/usr/bin/env bash\nexit 0\n")
+            self.write_text(
+                target,
+                ".agentic/project_intake.json",
+                json.dumps(
+                    {
+                        "optional_mcp_servers": ["context7", "playwright"],
+                        "product_goal": "Build a browser UI that integrates a package SDK and external API docs.",
+                    }
+                )
+                + "\n",
+            )
             fake_bin = self.write_fake_codex(tmp_path)
 
             env = os.environ.copy()
@@ -399,6 +426,9 @@ class RunRoleAutomationTests(unittest.TestCase):
             self.assertIn('mcp_servers.context7.env_vars=["CONTEXT7_API_KEY"]', builder_args)
             self.assertIn("mcp_servers.playwright.enabled=false", builder_args)
             self.assertNotIn('mcp_servers.playwright.command="bash"', builder_args)
+            self.assert_role_exec_allows_mcp_tools(builder_args)
+            self.assert_mcp_enabled_flag_once(builder_args, "context7")
+            self.assert_mcp_enabled_flag_once(builder_args, "playwright")
 
             hardener_log = tmp_path / "hardener-args.txt"
             hardener_env = env.copy()
@@ -419,6 +449,54 @@ class RunRoleAutomationTests(unittest.TestCase):
             self.assertIn("PLAYWRIGHT_MCP_OUTPUT_DIR", hardener_args)
             self.assertNotIn('mcp_servers.context7.command="npx"', hardener_args)
             self.assertNotIn('mcp_servers.context7.env_vars=["CONTEXT7_API_KEY"]', hardener_args)
+            self.assert_role_exec_allows_mcp_tools(hardener_args)
+            self.assert_mcp_enabled_flag_once(hardener_args, "context7")
+            self.assert_mcp_enabled_flag_once(hardener_args, "playwright")
+
+            backend_log = tmp_path / "backend-builder-args.txt"
+            backend_target = tmp_path / "backend-target"
+            backend_target.mkdir()
+            self.seed_git_target(backend_target)
+            self.write_text(
+                backend_target,
+                ".codex/config.toml",
+                """
+                [mcp_servers.context7]
+                command = "npx"
+                args = ["-y", "@upstash/context7-mcp"]
+                enabled = false
+
+                [mcp_servers.playwright]
+                command = "bash"
+                args = ["scripts/run_playwright_mcp.sh"]
+                enabled = false
+                """,
+            )
+            self.write_text(backend_target, "scripts/run_playwright_mcp.sh", "#!/usr/bin/env bash\nexit 0\n")
+            backend_env = env.copy()
+            backend_env["CODEX_RUN_ID"] = "mcp-backend-builder"
+            backend_env["FAKE_CODEX_ARG_LOG"] = str(backend_log)
+            self.write_text(
+                backend_target,
+                ".agentic/project_intake.json",
+                json.dumps({"optional_mcp_servers": ["context7", "playwright"], "product_goal": "Maintain backend CLI fixtures."}) + "\n",
+            )
+            backend_result = subprocess.run(
+                ["bash", str(ROLE_RUNNER_PATHS[0]), "--target", str(backend_target), "--role", "builder"],
+                cwd=ROOT,
+                env=backend_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(backend_result.returncode, 0, backend_result.stdout + backend_result.stderr)
+            backend_args = backend_log.read_text(encoding="utf-8")
+            self.assertIn("mcp_servers.context7.enabled=false", backend_args)
+            self.assertIn("mcp_servers.playwright.enabled=false", backend_args)
+            self.assertNotIn('mcp_servers.context7.command="npx"', backend_args)
+            self.assertNotIn('mcp_servers.playwright.command="bash"', backend_args)
+            self.assert_mcp_enabled_flag_once(backend_args, "context7")
+            self.assert_mcp_enabled_flag_once(backend_args, "playwright")
 
     def test_optional_mcp_role_args_do_not_require_codex_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -429,7 +507,7 @@ class RunRoleAutomationTests(unittest.TestCase):
             self.write_text(
                 target,
                 ".agentic/project_intake.json",
-                json.dumps({"optional_mcp_servers": ["context7", "playwright"]}) + "\n",
+                json.dumps({"optional_mcp_servers": ["context7", "playwright"], "product_goal": "Plan package SDK and external API documentation work."}) + "\n",
             )
             self.write_text(target, "scripts/run_playwright_mcp.sh", "#!/usr/bin/env bash\nexit 0\n")
             fake_bin = self.write_fake_codex(tmp_path)
@@ -454,7 +532,14 @@ class RunRoleAutomationTests(unittest.TestCase):
             planner_args = planner_log.read_text(encoding="utf-8")
             self.assertIn('mcp_servers.context7.command="npx"', planner_args)
             self.assertNotIn('mcp_servers.playwright.command="bash"', planner_args)
+            self.assert_mcp_enabled_flag_once(planner_args, "context7")
+            self.assert_mcp_enabled_flag_once(planner_args, "playwright")
 
+            self.write_text(
+                target,
+                ".agentic/project_intake.json",
+                json.dumps({"optional_mcp_servers": ["context7", "playwright"], "product_goal": "Validate a browser UI."}) + "\n",
+            )
             hardener_log = tmp_path / "hardener-args.txt"
             hardener_env = env.copy()
             hardener_env["CODEX_RUN_ID"] = "mcp-no-config-hardener"
@@ -471,6 +556,9 @@ class RunRoleAutomationTests(unittest.TestCase):
             hardener_args = hardener_log.read_text(encoding="utf-8")
             self.assertIn('mcp_servers.playwright.command="bash"', hardener_args)
             self.assertIn('mcp_servers.playwright.required=false', hardener_args)
+            self.assert_role_exec_allows_mcp_tools(hardener_args)
+            self.assert_mcp_enabled_flag_once(hardener_args, "context7")
+            self.assert_mcp_enabled_flag_once(hardener_args, "playwright")
             manifest = json.loads((target / "target" / "automation_queue" / "hardener" / "mcp-no-config-hardener" / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(["context7", "playwright"], manifest["mcp_enabled_servers"])
             self.assertEqual(["playwright"], manifest["mcp_requested_servers"])

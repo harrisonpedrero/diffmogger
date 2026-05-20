@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 from diffmogger.dashboard.shared import PrerequisiteItem as SharedPrerequisiteItem
-from diffmogger.runtime.paths import sidecar_rel
-from diffmogger.runtime.state_store import automation_control_state, connect, database_path_for_target, load_ticket_run_state, write_ticket_run_state
+from diffmogger.runtime.paths import PATH_ALIASES, sidecar_rel
+from diffmogger.runtime.state_store import automation_control_state, connect, database_path_for_target, load_ticket_run_state, record_human_message, write_automation_control_state, write_ticket_run_state
 
 CLI = ROOT / "scripts" / "dashboard_backend_cli.py"
 CLI_MODULE = ROOT / "src" / "diffmogger" / "dashboard" / "backend_cli.py"
@@ -31,7 +31,20 @@ GENERIC_INTAKE = ROOT / "examples" / "generic-web-app" / "project_intake.md"
 
 
 def generated_path(target: Path, legacy_rel: str) -> Path:
+    if legacy_rel.startswith("scripts/"):
+        return target / ".diffmogger" / legacy_rel
     return target / sidecar_rel(legacy_rel)
+
+
+def write_sidecar_manifest(target: Path) -> None:
+    manifest = {
+        "schema_version": 1,
+        "layout": "sidecar_v1",
+        "path_aliases": {**PATH_ALIASES, "scripts": ".diffmogger/scripts"},
+    }
+    path = target / ".diffmogger" / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 class DashboardBackendCliTests(unittest.TestCase):
@@ -399,6 +412,7 @@ class DashboardBackendCliTests(unittest.TestCase):
                     os.environ["DIFFMOGGER_DOTENV_EXISTING_VALUE"] = old_existing_value
 
     def write_ready_automation_target(self, target: Path) -> None:
+        write_sidecar_manifest(target)
         files = {
             ".agentic/project_intake.json": '{"multi_role_automations_allowed": true, "automation_role_profile": "planner_builder_hardener_integrator"}\n',
             ".agentic/automation_prompt.md": "# Automation\n",
@@ -407,7 +421,6 @@ class DashboardBackendCliTests(unittest.TestCase):
             ".agentic/roles/hardener.md": "# Hardener\n",
             ".agentic/roles/integrator.md": "# Integrator\n",
             "docs/CODEX_AUTOMATION_TASKS.md": "AUTOMATION_STATUS: ACTIVE\n\nCurrent baseline: bootstrapped.\n",
-            "docs/MULTI_ROLE_PROGRESS.md": "# Progress\n",
             "scripts/run_role_automation.sh": "#!/usr/bin/env bash\nexit 0\n",
             "scripts/integrate_role_outputs.py": "print('integrate')\n",
             "scripts/list_deferred_patches.py": "print('list')\n",
@@ -523,7 +536,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertTrue(controls["can_start_automation"])
             self.assertFalse(controls["can_bootstrap_and_start"])
             self.assertNotIn("Ticket queue still needs to be populated or confirmed.", snapshot["task"]["known_issues"])
-            self.assertEqual("Verification commands may need adjustment after the first automation run.", snapshot["task"]["known_issue"])
+            self.assertEqual("No active issue summary.", snapshot["task"]["known_issue"])
 
     def test_automation_ready_uses_typed_status_not_task_markdown(self) -> None:
         module, fake_dashboard = self.fake_dashboard_for_automation()
@@ -542,6 +555,44 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertTrue(first_ready)
             self.assertTrue(second_ready)
             self.assertEqual("Ready.", second_reason)
+
+    def test_automation_ready_treats_noncritical_statuses_as_annotations(self) -> None:
+        module, fake_dashboard = self.fake_dashboard_for_automation()
+        for status in ("ACTIVE_WITH_PENDING_USER_INPUT", "BLOCKED_ON_USER", "BLOCKED_ON_ENVIRONMENT"):
+            with self.subTest(status=status):
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp) / "target"
+                    target.mkdir()
+                    self.write_ready_automation_target(target)
+                    generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md").write_text(
+                        f"AUTOMATION_STATUS: {status}\n",
+                        encoding="utf-8",
+                    )
+
+                    write_automation_control_state(target, {"status": status}, actor_role="test")
+                    ready, reason = module.automation_ready(target, fake_dashboard)
+                    once_ready, once_reason = module.run_once_ready(target, fake_dashboard)
+
+                    self.assertTrue(ready)
+                    self.assertEqual("Ready.", reason)
+                    self.assertTrue(once_ready)
+                    self.assertEqual("Ready.", once_reason)
+
+    def test_automation_ready_still_rejects_critical_stop(self) -> None:
+        module, fake_dashboard = self.fake_dashboard_for_automation()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            self.write_ready_automation_target(target)
+            write_automation_control_state(target, {"status": "CRITICAL_STOP"}, actor_role="test")
+
+            ready, reason = module.automation_ready(target, fake_dashboard)
+            once_ready, once_reason = module.run_once_ready(target, fake_dashboard)
+
+            self.assertFalse(ready)
+            self.assertIn("CRITICAL_STOP", reason)
+            self.assertFalse(once_ready)
+            self.assertIn("CRITICAL_STOP", once_reason)
 
     def test_resolved_role_worktree_ticket_issue_is_filtered(self) -> None:
         from diffmogger.observatory.snapshots import build_snapshot
@@ -610,7 +661,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertNotIn("role worktrees cannot currently mutate", " ".join(snapshot["task"]["known_issues"]))
             self.assertNotIn("Canonical ticket helper read-only commands", " ".join(snapshot["task"]["known_issues"]))
             self.assertNotIn("worktrees cannot currently run canonical", " ".join(snapshot["task"]["known_issues"]))
-            self.assertEqual("Verification commands may need adjustment after the first automation run.", snapshot["task"]["known_issue"])
+            self.assertEqual("No active issue summary.", snapshot["task"]["known_issue"])
 
     def test_automation_start_stop_and_idempotent_running_state(self) -> None:
         module, fake_dashboard = self.fake_dashboard_for_automation()
@@ -630,7 +681,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual(started["runner"]["pid"], second["runner"]["pid"])
             self.assertTrue(stopped["stopped"])
             self.assertEqual("stopped", stopped["runner"]["state"])
-            self.assertTrue((target / "target/automation_logs/conveyor.runner.stdout.log").exists())
+            self.assertTrue((generated_path(target, "target/automation_logs") / "conveyor.runner.stdout.log").exists())
 
     def test_automation_start_recovers_stale_runner_pid(self) -> None:
         module, fake_dashboard = self.fake_dashboard_for_automation()
@@ -663,7 +714,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertFalse(payload["stopped"])
             self.assertEqual("automation_stop_noop", json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))["last_action"])
 
-    def test_automation_start_attaches_to_live_conveyor_lock(self) -> None:
+    def test_automation_start_attaches_to_live_runner_projection(self) -> None:
         module, fake_dashboard = self.fake_dashboard_for_automation()
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "target"
@@ -674,11 +725,14 @@ class DashboardBackendCliTests(unittest.TestCase):
                 start_new_session=True,
             )
             try:
-                lock = target / "target" / "automation_conveyor.lock"
-                lock.parent.mkdir(parents=True, exist_ok=True)
-                lock.write_text(
-                    json.dumps({"pid": process.pid, "created_at": "2026-05-16T00:00:00+00:00", "command": "run_conveyor_automation.py"}) + "\n",
-                    encoding="utf-8",
+                module.write_runner_state(
+                    target,
+                    {
+                        "state": "running",
+                        "pid": process.pid,
+                        "target": str(target),
+                        "started_at": "2026-05-16T00:00:00+00:00",
+                    },
                 )
                 args = argparse.Namespace(target=str(target), stream_jsonl=False)
 
@@ -748,7 +802,7 @@ class DashboardBackendCliTests(unittest.TestCase):
                         except OSError:
                             pass
 
-    def test_run_load_exposes_baseline_recheck_blocker_action(self) -> None:
+    def test_project_snapshot_exposes_baseline_recheck_blocker_action(self) -> None:
         module, fake_dashboard = self.fake_dashboard_for_automation()
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "target"
@@ -773,10 +827,10 @@ class DashboardBackendCliTests(unittest.TestCase):
             args = argparse.Namespace(target=str(target), stream_jsonl=False)
 
             with mock.patch.object(module, "load_dashboard_module", return_value=fake_dashboard):
-                payload = module.command_run_load(args)
+                payload = module.command_project_load_snapshot(args)
 
-            blockers = payload["environment_blockers"]
-            baseline = next(item for item in blockers if item.get("kind") == "baseline_verification")
+            inputs = payload["validation_repair"]["setup_repair_inputs"]
+            baseline = next(item for item in inputs if item.get("kind") == "baseline_verification")
             self.assertEqual("Recheck blocker", baseline["recheck_label"])
             self.assertEqual("blocker.recheck_baseline", baseline["recheck_command"])
             self.assertTrue(baseline["can_recheck"])
@@ -791,7 +845,7 @@ class DashboardBackendCliTests(unittest.TestCase):
 
             def fake_run_subprocess(args, command, *, cwd, stage, env=None):
                 calls.append({"command": command, "cwd": cwd, "stage": stage, "env": env})
-                baseline_path = target / "target" / "baseline_verification.json"
+                baseline_path = generated_path(target, "target/baseline_verification.json")
                 baseline_path.parent.mkdir(parents=True, exist_ok=True)
                 baseline_path.write_text(
                     json.dumps(
@@ -869,24 +923,68 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual(0, result.returncode)
             self.assertTrue(payload["ok"])
             data = payload["data"]
+            self.assertEqual(
+                {"target", "setup", "scheduler", "dag", "tickets", "human_input", "validation_repair", "controls"},
+                set(data),
+            )
             self.assertEqual(Path(tmp).resolve().name, data["target"]["name"])
             self.assertFalse(data["target"]["is_diffmogger_project"])
-            self.assertEqual("UNKNOWN", data["home"]["automation_status"])
-            self.assertIn("run", data)
-            self.assertFalse(data["run"]["controls"]["is_scaffolded"])
-            self.assertNotIn("can_run_now", data["run"]["controls"])
-            self.assertEqual("not_ready", data["run"]["automation"]["state"])
+            self.assertEqual("UNKNOWN", data["setup"]["status"])
+            self.assertNotIn("home", data)
+            self.assertNotIn("run", data)
+            self.assertFalse(data["controls"]["is_scaffolded"])
+            self.assertNotIn("can_run_now", data["controls"])
+            self.assertEqual("not_ready", data["controls"]["automation"]["state"])
+
+    def test_project_snapshot_hydrates_ticket_items_when_projection_has_counts_only(self) -> None:
+        module, fake_dashboard = self.fake_dashboard_for_automation()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            self.write_ready_automation_target(target)
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "ticket-run",
+                    "halt_when_complete": True,
+                    "tickets": [
+                        {"id": "TICKET-001", "summary": "Start work", "status": "pending"},
+                        {"id": "TICKET-030", "summary": "Keyboard mapping", "status": "done", "evidence": ["verified"]},
+                    ],
+                },
+                actor_role="test",
+                event_type="ticket.run_seeded",
+            )
+            raw_snapshot = {
+                "state": {
+                    "ticket_run": {"counts": {"pending": 1, "done": 1}, "tickets": []},
+                    "execution_dag": {"nodes": [], "edges": []},
+                },
+                "task": {"status": "ACTIVE", "horizon": "ticket-run"},
+                "human": {},
+                "queue": {},
+                "conveyor": {},
+                "git": {},
+                "worker_strategy": {},
+            }
+            args = argparse.Namespace(target=str(target), stream_jsonl=False)
+
+            with (
+                mock.patch.object(module, "load_dashboard_module", return_value=fake_dashboard),
+                mock.patch.object(module, "build_observatory_snapshot", return_value=raw_snapshot),
+            ):
+                payload = module.command_project_load_snapshot(args)
+
+            tickets = payload["tickets"]["items"]
+            self.assertEqual(["TICKET-001", "TICKET-030"], [ticket["id"] for ticket in tickets])
+            self.assertEqual(["TICKET-001"], [ticket["id"] for ticket in payload["tickets"]["remaining"]])
+            self.assertEqual({"pending": 1, "done": 1}, payload["tickets"]["counts"])
 
     def test_unconfigured_target_smoke_supports_initial_native_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _brief_result, brief = self.run_cli("brief.load", "--target", tmp)
             self.assertTrue(brief["ok"])
             self.assertFalse(brief["data"]["target"]["is_diffmogger_project"])
-
-            _run_result, run = self.run_cli("run.load", "--target", tmp)
-            self.assertTrue(run["ok"])
-            self.assertFalse(run["data"]["controls"]["is_scaffolded"])
-            self.assertNotIn("can_run_now", run["data"]["controls"])
 
             _diagnostics_result, diagnostics = self.run_cli("diagnostics.run_checks", "--target", tmp)
             self.assertTrue(diagnostics["ok"])
@@ -897,33 +995,13 @@ class DashboardBackendCliTests(unittest.TestCase):
             prereq_items = diagnostics["data"]["prerequisites"]["items"]
             self.assertFalse(any("retired dashboard" in item["name"].lower() for item in prereq_items))
 
-            _list_result, files = self.run_cli("advanced.list_files", "--target", tmp)
-            self.assertTrue(files["ok"])
-            file_keys = {item["key"] for item in files["data"]["files"]}
+            _snapshot_result, snapshot = self.run_cli("project.load_snapshot", "--target", tmp)
+            self.assertTrue(snapshot["ok"])
+            self.assertFalse(snapshot["data"]["controls"]["is_scaffolded"])
+            self.assertNotIn("can_run_now", snapshot["data"]["controls"])
+            file_keys = {item["key"] for item in snapshot["data"]["setup"]["files"]}
             self.assertIn("state.dashboard", file_keys)
             self.assertIn("monitor.automation_tasks", file_keys)
-
-            save_result, save_payload = self.run_cli(
-                "advanced.save_file",
-                "--target",
-                tmp,
-                "--file-key",
-                "state.dashboard",
-                "--content",
-                "{}\n",
-            )
-            self.assertEqual(0, save_result.returncode)
-            self.assertTrue(save_payload["ok"])
-
-            _load_result, loaded = self.run_cli(
-                "advanced.load_file",
-                "--target",
-                tmp,
-                "--file-key",
-                "state.dashboard",
-            )
-            self.assertTrue(loaded["ok"])
-            self.assertEqual("{}\n", loaded["data"]["content"])
 
     def test_brief_draft_save_and_load_round_trips_dashboard_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1043,7 +1121,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertIn("Ticket generation policy", prompts[0])
             self.assertIn("Generate a whole execution queue for the full requested scope", prompts[1])
             self.assertNotIn("2-3 tickets", prompts[1])
-            dashboard_state = json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
+            dashboard_state = json.loads((target / ".agentic" / "dashboard_state.json").read_text(encoding="utf-8"))
             self.assertEqual("low_cortisol_intake_generated", dashboard_state["last_action"])
             self.assertEqual("Gentle Intake", dashboard_state["brief_draft_intake"]["project_name"])
 
@@ -1384,7 +1462,7 @@ class DashboardBackendCliTests(unittest.TestCase):
         self.assertFalse(gate["passed"])
         self.assertIn("under_decomposed_queue", {item["type"] for item in gate["warnings"]})
 
-    def test_context_import_copies_files_and_updates_project_context(self) -> None:
+    def test_context_import_copies_files_and_updates_intake_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as source_tmp:
             source = Path(source_tmp) / "Research Notes.md"
             source.write_text("# Research\n\nReusable context.\n", encoding="utf-8")
@@ -1421,11 +1499,9 @@ class DashboardBackendCliTests(unittest.TestCase):
             copied = Path(tmp) / records[0]["rel_path"]
             self.assertTrue(copied.exists())
             self.assertEqual("# Research\n\nReusable context.\n", copied.read_text(encoding="utf-8"))
-            context_index = generated_path(Path(tmp), "docs/PROJECT_CONTEXT.md")
-            self.assertTrue(context_index.exists())
-            index_text = context_index.read_text(encoding="utf-8")
-            self.assertIn("Research Notes.md", index_text)
-            self.assertIn(records[0]["rel_path"], index_text)
+            self.assertEqual(str((Path(tmp) / ".diffmogger" / "context").resolve()), import_payload["data"]["context_dir"])
+            self.assertFalse((Path(tmp) / "docs" / "PROJECT_CONTEXT.md").exists())
+            self.assertFalse((Path(tmp) / ".diffmogger" / "state" / "PROJECT_CONTEXT.md").exists())
 
             _load_result, load_payload = self.run_cli("brief.load", "--target", tmp)
             self.assertIn(records[0]["rel_path"], load_payload["data"]["draft_intake"]["additional_context_files"])
@@ -1488,15 +1564,12 @@ class DashboardBackendCliTests(unittest.TestCase):
             dashboard_state = json.loads(generated_path(Path(tmp), ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
             self.assertEqual("planner_builder_hardener_integrator", dashboard_state["automation_role_profile"])
             self.assertTrue(dashboard_state["multi_role_automations_allowed"])
-            _run_result, run_payload = self.run_cli("run.load", "--target", tmp)
-            self.assertNotIn("can_run_now", run_payload["data"]["controls"])
+            _snapshot_result, snapshot_payload = self.run_cli("project.load_snapshot", "--target", tmp)
+            self.assertNotIn("can_run_now", snapshot_payload["data"]["controls"])
 
-    def test_brief_scaffold_repairs_mcp_drift_from_dashboard_state(self) -> None:
+    def test_brief_scaffold_uses_explicit_mcp_intake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
-            dashboard_path = generated_path(target, ".agentic/dashboard_state.json")
-            dashboard_path.parent.mkdir(parents=True, exist_ok=True)
-            dashboard_path.write_text(json.dumps({"optional_mcp_servers": ["context7"]}) + "\n", encoding="utf-8")
             intake = {
                 "project_name": "MCP Drift",
                 "project_mode": "fresh_project",
@@ -1507,6 +1580,7 @@ class DashboardBackendCliTests(unittest.TestCase):
                 "human_bridge_mode": "disabled",
                 "automation_role_profile": "planner_builder_hardener_integrator",
                 "campaign_mode": "ongoing",
+                "optional_mcp_servers": ["context7"],
                 "additional_context_files": [],
             }
 
@@ -1570,7 +1644,6 @@ class DashboardBackendCliTests(unittest.TestCase):
             (target / "docs").mkdir()
             (target / "AGENTS.md").write_text("# Existing guidance\n", encoding="utf-8")
             (target / "docs" / "DEVELOPMENT.md").write_text("# Existing dev docs\n", encoding="utf-8")
-            (target / "docs" / "PROJECT_CONTEXT.md").write_text("# Project Context\n\nExisting notes.\n", encoding="utf-8")
             (target / "package.json").write_text('{"scripts":{"test":"echo ok"}}\n', encoding="utf-8")
             subprocess.run(["git", "init"], cwd=target, check=True, text=True, capture_output=True)
             intake = {
@@ -1599,7 +1672,7 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual("managed_section_update", files["AGENTS.md"]["action"])
             self.assertTrue(files["AGENTS.md"]["managed_section"])
             self.assertEqual("create", files[sidecar_rel("docs/DEVELOPMENT.md")]["action"])
-            self.assertEqual("create", files[sidecar_rel("docs/PROJECT_CONTEXT.md")]["action"])
+            self.assertNotIn(sidecar_rel("docs/PROJECT_CONTEXT.md"), files)
             self.assertIn("update_local_exclude", preview_payload["data"]["summary"])
             self.assertTrue(any(item["type"] == "dirty_git" for item in preview_payload["data"]["warnings"]))
 
@@ -1642,7 +1715,8 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertIn("Keep this.", agents_text)
             self.assertIn("DIFFMOGGER:START AGENTS", agents_text)
             self.assertIn("Keep this too.", dev_text)
-            self.assertIn("First Review Checklist", sidecar_dev_text)
+            self.assertIn("## Verification", sidecar_dev_text)
+            self.assertIn("Failed validation creates work", sidecar_dev_text)
 
     def test_scaffold_streams_jsonl_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1689,34 +1763,28 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertTrue(brief["ok"])
             self.assertEqual(target.resolve().name, brief["data"]["target"]["name"])
 
-            _run_result, run = self.run_cli("run.load", "--target", tmp)
-            self.assertTrue(run["ok"])
-            self.assertEqual("ACTIVE", run["data"]["task"]["status"])
-            self.assertIn("worker_strategy", run["data"])
-            self.assertIn("controls", run["data"])
-            self.assertIn("automation", run["data"])
-            self.assertIn("run_log", run["data"])
-            self.assertIn("worker_controls", run["data"])
-            self.assertTrue(run["data"]["controls"]["is_scaffolded"])
-            self.assertNotIn("can_run_now", run["data"]["controls"])
-            self.assertIn("can_start", run["data"]["automation"])
-            self.assertIn("git", run["data"])
-            self.assertIn("progress", run["data"])
-            self.assertIn("first_review", run["data"])
-
-            _list_result, files = self.run_cli("advanced.list_files", "--target", tmp)
-            file_keys = {item["key"]: item for item in files["data"]["files"]}
-            self.assertTrue(file_keys["monitor.automation_tasks"]["exists"])
-
-            _load_result, loaded = self.run_cli(
-                "advanced.load_file",
-                "--target",
-                tmp,
-                "--file-key",
-                "monitor.automation_tasks",
+            _snapshot_result, snapshot = self.run_cli("project.load_snapshot", "--target", tmp)
+            self.assertTrue(snapshot["ok"])
+            data = snapshot["data"]
+            self.assertEqual(
+                {"target", "setup", "scheduler", "dag", "tickets", "human_input", "validation_repair", "controls"},
+                set(data),
             )
-            self.assertTrue(loaded["ok"])
-            self.assertIn("AUTOMATION_STATUS: ACTIVE", loaded["data"]["content"])
+            self.assertEqual("ACTIVE", data["setup"]["task"]["status"])
+            self.assertIn("worker_strategy", data["controls"])
+            self.assertIn("automation", data["controls"])
+            self.assertIn("run_log", data["controls"])
+            self.assertIn("worker_controls", data["controls"])
+            self.assertTrue(data["controls"]["is_scaffolded"])
+            self.assertNotIn("can_run_now", data["controls"])
+            self.assertIn("can_start", data["controls"]["automation"])
+            self.assertIn("git", data["setup"])
+            self.assertIn("dag", data)
+            self.assertNotIn("first_review", data)
+            file_keys = {item["key"]: item for item in data["setup"]["files"]}
+            self.assertTrue(file_keys["monitor.automation_tasks"]["exists"])
+            task_path = generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md")
+            self.assertIn("AUTOMATION_STATUS: ACTIVE", task_path.read_text(encoding="utf-8"))
 
             _diagnostics_result, diagnostics = self.run_cli("diagnostics.run_checks", "--target", tmp)
             self.assertTrue(diagnostics["ok"])
@@ -1799,8 +1867,8 @@ class DashboardBackendCliTests(unittest.TestCase):
             self.assertEqual(0, delete_result.returncode)
             self.assertEqual(3, len(delete_payload["data"]["tickets"]))
 
-            _list_result, files = self.run_cli("advanced.list_files", "--target", tmp)
-            file_keys = {item["key"] for item in files["data"]["files"]}
+            _snapshot_result, snapshot = self.run_cli("project.load_snapshot", "--target", tmp)
+            file_keys = {item["key"] for item in snapshot["data"]["setup"]["files"]}
             self.assertNotIn("monitor.ticket_run", file_keys)
 
     def test_ticket_draft_from_intake_is_review_only_append_only_and_accepts_candidates(self) -> None:
@@ -2073,352 +2141,72 @@ class DashboardBackendCliTests(unittest.TestCase):
             state = json.loads(generated_path(target, ".agentic/dashboard_state.json").read_text(encoding="utf-8"))
             self.assertIn(state["last_action"], {"safety_check_completed", "safety_check_failed"})
 
-    def test_inbox_load_parses_human_bridge_records(self) -> None:
+    def test_project_snapshot_surfaces_human_input_without_inbox_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
-            docs = target / "docs"
-            docs.mkdir()
-            (target / ".agentic").mkdir()
-            (target / ".agentic" / "project_intake.json").write_text(
-                json.dumps({"human_bridge_enabled": True, "human_bridge_mode": "file_only"}) + "\n",
-                encoding="utf-8",
+            record_human_message(
+                target,
+                kind="request",
+                message_id="HR-2026-05-03-001",
+                status="active",
+                body="Please confirm whether ticket T-7 can use mock data.",
+                summary="Confirm mock data",
+                actor_role="test",
             )
-            (docs / "HUMAN_REQUESTS.md").write_text(
-                """# Human Requests
-
-## HR-2026-05-03-001
-
-- status: active
-- requested_at: 2026-05-03T12:00:00+00:00
-- run_id: builder-17
-- ticket_id: T-7
-
-### Body
-
-Please confirm whether ticket T-7 can use mock data.
-
-## HR-2026-05-03-002
-
-- status: resolved
-- resolved_at: 2026-05-04T12:00:00+00:00
-
-### Body
-
-The API key question was answered.
-""",
-                encoding="utf-8",
-            )
-            (docs / "HUMAN_INBOX.md").write_text(
-                """# Human Inbox
-
-## INBOX-2026-05-03-001
-
-- received_at: 2026-05-03T13:00:00+00:00
-- request_id: HR-2026-05-03-001
-- parsed_intent: info
-- status: unhandled
-
-### Body
-
-Use mocked data for now.
-""",
-                encoding="utf-8",
-            )
-            (docs / "HUMAN_RESPONSES_ARCHIVE.md").write_text(
-                """# Human Responses Archive
-
-## HR-2026-05-03-002 resolved
-
-- resolved_at: 2026-05-04T12:00:00+00:00
-- source_inbox_id: INBOX-2026-05-02-001
-- parsed_intent: done
-- action_taken: Marked the API key request resolved.
-""",
-                encoding="utf-8",
-            )
-            (docs / "HUMAN_OUTBOX.md").write_text(
-                """# Human Outbox
-
-## OUTBOX-2026-05-03-001
-
-- status: sent
-""",
-                encoding="utf-8",
+            record_human_message(
+                target,
+                kind="note",
+                message_id="INPUT-2026-05-03-001",
+                request_id="HR-2026-05-03-001",
+                intent="info",
+                status="unhandled",
+                body="Use mocked data for now.",
+                actor_role="test",
             )
 
-            result, payload = self.run_cli("inbox.load", "--target", tmp)
+            result, payload = self.run_cli("project.load_snapshot", "--target", tmp)
 
             self.assertEqual(0, result.returncode)
             self.assertTrue(payload["ok"])
-            data = payload["data"]
-            self.assertEqual("file_only", data["bridge_mode"])
-            self.assertEqual(1, data["counts"]["pending_requests"])
-            self.assertEqual(1, data["counts"]["queued_notes"])
-            self.assertEqual(1, data["counts"]["outbound_records"])
-            self.assertEqual("HR-2026-05-03-001", data["active_requests"][0]["id"])
-            self.assertEqual("builder-17", data["active_requests"][0]["related"]["run"])
-            self.assertIn("mock data", data["active_requests"][0]["body"])
-            self.assertTrue(any(item["id"] == "HR-2026-05-03-002" for item in data["archive"]))
+            self.assertEqual(1, payload["data"]["human_input"]["pending_requests"])
+            self.assertEqual(1, payload["data"]["human_input"]["unhandled_records"])
+            self.assertNotIn("home", payload["data"])
+            self.assertNotIn("run", payload["data"])
 
-    def test_inbox_send_note_and_reply_write_old_dashboard_queue_entries(self) -> None:
+    def test_removed_native_page_backend_commands_are_not_exposed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp)
-            docs = target / "docs"
-            docs.mkdir()
-            (docs / "HUMAN_REQUESTS.md").write_text(
-                """# Human Requests
-
-## HR-2026-05-03-001
-
-- status: active
-
-### Body
-
-Need a decision.
-""",
-                encoding="utf-8",
-            )
-
-            note_result, note_payload = self.run_cli(
+            for command in [
+                "inbox.load",
                 "inbox.send_note",
-                "--target",
-                tmp,
-                "--body",
-                "Please focus on the local demo next.",
-                "--intent",
-                "info",
-                "--related",
-                "demo-polish",
-            )
-            self.assertEqual(0, note_result.returncode)
-            self.assertTrue(note_payload["ok"])
-            self.assertEqual("queued", note_payload["data"]["status"])
-
-            reply_result, reply_payload = self.run_cli(
                 "inbox.reply_request",
-                "--target",
-                tmp,
-                "--request-id",
-                "HR-2026-05-03-001",
-                "--body",
-                "Approved. Use mock data for the next run.",
-                "--intent",
-                "approve",
-            )
-            self.assertEqual(0, reply_result.returncode)
-            self.assertTrue(reply_payload["ok"])
-
-            _load_result, load_payload = self.run_cli("inbox.load", "--target", tmp)
-            self.assertEqual(2, load_payload["data"]["counts"]["queued_notes"])
-            note_bodies = "\n".join(item["body"] for item in load_payload["data"]["active_notes"])
-            self.assertIn("Please focus on the local demo next.", note_bodies)
-            self.assertIn("Approved. Use mock data for the next run.", note_bodies)
-
-    def test_observatory_html_and_review_bundle_generation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as review_tmp:
-            target = Path(tmp)
-            review_dir = Path(review_tmp) / "review"
-            self.scaffold_target(target)
-
-            html_result, html_payload = self.run_cli(
+                "observatory.snapshot",
                 "observatory.generate_html",
-                "--target",
-                tmp,
-                "--review-dir",
-                str(review_dir),
-            )
-            self.assertEqual(0, html_result.returncode)
-            html_path = Path(html_payload["data"]["html_path"])
-            self.assertTrue(html_path.exists())
-            self.assertIn("Diffmogger Autonomous Build Log", html_path.read_text(encoding="utf-8"))
-
-            load_result, load_payload = self.run_cli(
                 "observatory.load_html",
-                "--target",
-                tmp,
-                "--review-dir",
-                str(review_dir),
-            )
-            self.assertEqual(0, load_result.returncode)
-            self.assertTrue(load_payload["ok"])
-            self.assertTrue(load_payload["data"]["embeddable"])
-            self.assertTrue(load_payload["data"]["title_marker_present"])
-            self.assertTrue(load_payload["data"]["visual_markers_present"])
-            self.assertIn("Diffmogger Autonomous Build Log", load_payload["data"]["html"])
-
-            snapshot_result, snapshot_payload = self.run_cli("observatory.snapshot", "--target", tmp)
-            self.assertEqual(0, snapshot_result.returncode)
-            self.assertTrue(snapshot_payload["ok"])
-            snapshot = snapshot_payload["data"]
-            self.assertEqual("Diffmogger Autonomous Build Log", snapshot["title"])
-            self.assertEqual("ACTIVE", snapshot["mission"]["automation_status"])
-            self.assertEqual(4, len(snapshot["conveyor"]["roles"]))
-            self.assertIn("queued", snapshot["patches"]["queue_totals"])
-            self.assertIn("validation", snapshot["validation_safety"])
-            self.assertNotIn("signals", snapshot)
-
-            bundle_result, bundle_payload = self.run_cli(
+                "review.load",
                 "review.export_bundle",
-                "--target",
-                tmp,
-                "--review-dir",
-                str(review_dir),
-            )
-            self.assertEqual(0, bundle_result.returncode)
-            self.assertTrue(Path(bundle_payload["data"]["html_path"]).exists())
-            markdown_path = Path(bundle_payload["data"]["markdown_path"])
-            self.assertTrue(markdown_path.exists())
-            self.assertIn("# Diffmogger Self-Review Snapshot", markdown_path.read_text(encoding="utf-8"))
-
-    def test_review_load_and_mark_reviewed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp)
-            self.scaffold_target(target)
-
-            load_result, load_payload = self.run_cli("review.load", "--target", tmp)
-
-            self.assertEqual(0, load_result.returncode)
-            self.assertTrue(load_payload["ok"])
-            data = load_payload["data"]
-            self.assertIn("latest_run", data)
-            self.assertIn("changed_files", data)
-            self.assertGreater(len(data["changed_files"]), 0)
-            self.assertIn("verification", data)
-            self.assertIn("safety", data)
-            self.assertIn("review_fingerprint", data)
-            self.assertIn("# Diffmogger Self-Review Snapshot", data["self_review"]["markdown_preview"])
-            self.assertFalse(data["reviewed"]["exists"])
-
-            mark_result, mark_payload = self.run_cli(
                 "review.mark_reviewed",
-                "--target",
-                tmp,
-                "--note",
-                "Looks trustworthy enough for the next run.",
-            )
+                "advanced.list_files",
+                "advanced.load_file",
+                "advanced.save_file",
+                "advanced.validate_file",
+                "advanced.export_debug_bundle",
+                "run.load",
+                "run.load_log",
+            ]:
+                result, payload = self.run_cli(command, "--target", tmp)
+                self.assertNotEqual(0, result.returncode, command)
+                self.assertFalse(payload["ok"], command)
 
-            self.assertEqual(0, mark_result.returncode)
-            self.assertTrue(mark_payload["ok"])
-            marker_path = Path(mark_payload["data"]["marker_path"])
-            self.assertTrue(marker_path.exists())
-            marker = json.loads(marker_path.read_text(encoding="utf-8"))
-            self.assertEqual("native_review_page", marker["source"])
-            self.assertIn("trustworthy", marker["note"])
-            self.assertEqual(data["review_fingerprint"], marker["review_fingerprint"])
-
-            reload_result, reload_payload = self.run_cli("review.load", "--target", tmp)
-            self.assertEqual(0, reload_result.returncode)
-            self.assertTrue(reload_payload["ok"])
-            self.assertTrue(reload_payload["data"]["reviewed"]["is_current_snapshot"])
-
-    def test_review_load_suppresses_stale_pending_integration_safety_when_safety_passed(self) -> None:
+    def test_execution_group_debug_bundle_is_the_remaining_dashboard_debug_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             self.scaffold_target(target)
-            task_path = generated_path(target, "docs/CODEX_AUTOMATION_TASKS.md")
-            task_path.write_text(
-                """
-                # Codex Automation Tasks
-
-                AUTOMATION_STATUS: ACTIVE
-
-                ## Current Project State
-
-                - Current assessment: Local checks passed.
-
-                ## Product Horizon State
-
-                - Current horizon: H1
-
-                ## Checks From Last Run
-
-                - `python3 -m pytest` passed.
-                - Not run: integration safety (`python3 scripts/check_integration_safety.py`) because no such project script exists yet.
-                """,
-                encoding="utf-8",
-            )
-            safety_path = generated_path(target, "target/integration_safety_check.json")
-            safety_path.parent.mkdir(parents=True, exist_ok=True)
-            safety_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "checked_at": "2026-05-10T22:12:32+00:00",
-                        "source": "dashboard_run_safety_check",
-                        "status": "pass",
-                        "exit_code": 0,
-                        "command": "python3 scripts/check_integration_safety.py .",
-                        "summary": "Dashboard Run Safety Check passed.",
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            result, payload = self.run_cli("review.load", "--target", tmp)
-
-            self.assertEqual(0, result.returncode)
-            self.assertEqual("pass", payload["data"]["safety"]["status"])
-            limitation_text = "\n".join(item.get("text", "") for item in payload["data"]["limitations"])
-            self.assertNotIn("Not run: integration safety", limitation_text)
-            verification_text = "\n".join(item.get("text", "") for item in payload["data"]["verification"]["items"])
-            self.assertNotIn("Not run: integration safety", verification_text)
-
-    def test_advanced_save_validate_and_debug_bundle_are_allowlisted(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as bundle_tmp:
-            target = Path(tmp)
             (target / ".env").write_text("API_TOKEN=do-not-ship\n", encoding="utf-8")
 
-            save_result, save_payload = self.run_cli(
-                "advanced.save_file",
-                "--target",
-                tmp,
-                "--file-key",
-                "state.dashboard",
-                "--content",
-                json.dumps({"normal": "ok", "discord_webhook": "https://secret.example/hook"}) + "\n",
-            )
-            self.assertEqual(0, save_result.returncode)
-            self.assertTrue(save_payload["ok"])
-            self.assertTrue(Path(save_payload["data"]["file"]["path"]).exists())
-
-            _load_result, load_payload = self.run_cli(
-                "advanced.load_file",
-                "--target",
-                tmp,
-                "--file-key",
-                "state.dashboard",
-            )
-            self.assertIn("discord_webhook", load_payload["data"]["content"])
-
-            validate_result, validate_payload = self.run_cli(
-                "advanced.validate_file",
-                "--target",
-                tmp,
-                "--file-key",
-                "state.dashboard",
-            )
-            self.assertEqual(0, validate_result.returncode)
-            self.assertEqual("pass", validate_payload["data"]["status"])
-
-            invalid_result, invalid_payload = self.run_cli(
-                "advanced.save_file",
-                "--target",
-                tmp,
-                "--file-key",
-                "review.observatory_html",
-                "--content",
-                "<html></html>",
-            )
-            self.assertNotEqual(0, invalid_result.returncode)
-            self.assertFalse(invalid_payload["ok"])
-            self.assertEqual("file_read_only", invalid_payload["error"]["type"])
-
             bundle_result, bundle_payload = self.run_cli(
-                "advanced.export_debug_bundle",
+                "execution_group.export_debug_bundle",
                 "--target",
                 tmp,
-                "--output-dir",
-                bundle_tmp,
             )
             self.assertEqual(0, bundle_result.returncode)
             self.assertTrue(bundle_payload["ok"])
@@ -2428,15 +2216,12 @@ Need a decision.
             with zipfile.ZipFile(bundle_path) as archive:
                 names = set(archive.namelist())
                 self.assertNotIn(".env", names)
-                self.assertIn("debug-summary.json", names)
-                self.assertIn("dashboard-state.json", names)
+                self.assertIn("parallel-state.json", names)
                 combined = "\n".join(
                     archive.read(name).decode("utf-8", errors="replace")
                     for name in names
                 )
             self.assertNotIn("do-not-ship", combined)
-            self.assertNotIn("https://secret.example/hook", combined)
-            self.assertIn("[REDACTED]", combined)
 
     def test_project_list_recent_returns_stable_shape(self) -> None:
         result, payload = self.run_cli("project.list_recent")

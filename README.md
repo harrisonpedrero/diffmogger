@@ -12,11 +12,11 @@ Diffmogger is not a hosted agent platform or a product-specific app. It is reusa
 
 Diffmogger gives a target repo:
 
-- a native dashboard for setup, run control, ticket queues, inbox messages, safety checks, review exports, and runtime inspection
+- a native dashboard for project setup, automation control, ticket/action queues, human input records, safety checks, and scheduler inspection
 - a `.diffmogger/` sidecar for automation-owned prompts, runtime state, logs, queues, worktrees, schemas, manifests, and generated projections
 - a canonical SQLite state store at `.diffmogger/runtime/orchestration.sqlite3`
 - target-local wrappers under `.diffmogger/scripts/` and a bundled runtime under `.diffmogger/lib/diffmogger/`
-- optional worker fanout, notifier integration, Context7/Playwright MCP setup, and review bundle exports
+- optional worker fanout, notifier integration, Context7/Playwright MCP setup, and local observatory exports
 
 Generated Markdown and JSON files are projections. The SQLite graph is the runtime authority.
 
@@ -36,8 +36,8 @@ In the dashboard:
 2. Fill in the project intake.
 3. Add optional context files.
 4. Run **Scaffold**.
-5. Open **Run** and click **Start**.
-6. Use **Run Safety Check** and **Export Review Bundle** after the first run.
+5. Open **Automation** and click **Start**.
+6. Use **Run Safety Check** and the target-local observatory helper when you need review artifacts.
 
 CLI scaffold path:
 
@@ -54,13 +54,13 @@ Scaffold initializes git and creates a local `chore: initial commit` automatical
 
 ## Execution Model
 
-Diffmogger materializes target automation state into a directed execution graph stored in SQLite. Runtime inputs include tickets, dependencies, blockers, human messages, validation receipts, worker outputs, repository capability data, codebase graph signals, active leases, and execution budgets.
+Diffmogger materializes target automation state into a directed execution graph stored in SQLite. It is a work generator, not a blocker detector. Runtime inputs include tickets, dependencies, blockers, human messages, validation receipts, worker outputs, repository capability data, codebase graph signals, active leases, and execution budgets.
 
 Those inputs become typed DAG nodes and edges. Common node types include `orchestrate`, `decompose`, `scope`, `build`, `review`, `validate`, `repair`, `integrate`, `audit`, `calibrate`, `blocker`, and `completion`.
 
-Hard edges block downstream work until satisfied. Advisory edges preserve context without stopping execution.
+Hard edges block only the downstream node they guard. Advisory edges preserve context without stopping execution. Blockers are planning inputs that should create repair, setup, mock, fixture, defer, split, reframe, review, documentation, or alternate-ticket DAG work while tickets remain.
 
-On each scheduler cycle, Diffmogger refreshes the graph, computes runnable nodes, records scheduler candidates, and selects the next execution action. Actions can launch read-only scope work, launch write work with leases, run validation groups, review queued patches, create repair nodes, reconcile worker outputs, or integrate accepted patches.
+On each scheduler cycle, Diffmogger refreshes the graph, computes runnable nodes, records scheduler candidates, and selects the next execution action. If tickets remain, the scheduler should produce work. Actions can launch read-only scope work, launch write work with leases, run validation groups, review queued patches, create repair/setup/harness/mock/defer nodes, reconcile worker outputs, or integrate accepted patches.
 
 Parallel write execution is gated by typed ownership. Diffmogger only launches write groups when it can derive non-overlapping resource leases from direct paths, exact symbol ownership, or accepted scope evidence. Integration remains serialized so the main checkout stays coherent.
 
@@ -83,7 +83,7 @@ The generated target repo should not need the Diffmogger source checkout at runt
 
 ## Dashboard
 
-The native dashboard lives in `services/agentic-dashboard/native/` and calls `scripts/dashboard_backend_cli.py`. The backend exposes allowlisted JSON commands for project setup, scaffold, run control, ticket queues, inbox replies, canonical state snapshots, execution graph progress, worker controls, validation jobs, safety checks, Observatory snapshots, review bundles, and redacted debug bundles.
+The native dashboard lives in `services/agentic-dashboard/native/` and calls `scripts/dashboard_backend_cli.py`. The app has two surfaces: **Setup** for choosing/configuring a target and **Automation** for scheduler next action, tickets/actions, generated unblocker work, human input records, and Start/Stop/Safety commands. The backend exposes allowlisted JSON commands for project setup, scaffold, run control, ticket queues, canonical state snapshots, execution graph progress, worker controls, validation jobs, safety checks, execution-group debug bundles, and task projection opening.
 
 Useful dashboard commands:
 
@@ -102,7 +102,7 @@ python3 scripts/dashboard_backend_cli.py diagnostics.environment
 python3 scripts/dashboard_backend_cli.py state.snapshot --target /path/to/target
 ```
 
-First Review Checklist: after scaffold, run **Run Safety Check** and export a review bundle. The bundle writes `Diffmogger-observatory.html` and `Diffmogger-self-review.md`.
+First review checklist: after scaffold, run **Run Safety Check** and render observatory artifacts from the target helper when needed. The helper writes `Diffmogger-observatory.html` and `Diffmogger-self-review.md`.
 
 ```bash
 python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review
@@ -135,7 +135,9 @@ tests/{kit,runtime,dashboard}/  Source-kit, runtime, and dashboard test groups
 - Keep automation local-only unless a target explicitly opts into local runs with configured remotes.
 - Review diffs before trusting autonomous changes.
 
-Status values are `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`.
+Status values are `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`. `BLOCKED_ON_USER` and `BLOCKED_ON_ENVIRONMENT` do not pause automation while any independent or unblocker work can continue; only complete ticket exhaustion stops automation.
+
+Failed validation is scheduler input, not a stop state. Required check failures create repair work; missing tools create setup/harness work; external services create mock, local-fixture, or defer work; browser/MCP failures create alternate validation or deferred QA work; repeated failures create planner split/reframe/defer work. Only unsafe, destructive, or corrupt states may become `CRITICAL_STOP`.
 
 ## Validation
 

@@ -45,17 +45,17 @@ python3 scripts/dashboard_backend_cli.py diagnostics.environment
 python3 scripts/dashboard_backend_cli.py state.snapshot --target /path/to/target
 ```
 
-Backend commands cover setup doctor, project snapshots, canonical SQLite state snapshots, intake draft/scaffold, context import, ticket queue load/add/update/delete/import/draft/accept, run controls, safety checks, Observatory snapshots, review bundles, inbox messages, worker controls, managed file editing, and redacted debug bundles.
+Backend commands cover setup doctor, project snapshots, canonical SQLite state snapshots, intake draft/scaffold, context import, ticket queue load/add/update/delete/import/draft/accept, run controls, safety checks, worker controls, execution groups, validation jobs, lease cleanup, and the task projection opener.
 
-The app supports **Scaffold**, direct **Start**, **Open Diffmogger Project**, **Ticket Queue**, **Run Safety Check**, **Export Review Bundle**, **Canonical state**, and **Worker Strategy Controls**. Target-local dashboard preferences live at `.diffmogger/agentic/dashboard_state.json`; canonical orchestration state lives at `.diffmogger/runtime/orchestration.sqlite3`; the generated agent state view lives at `.diffmogger/runtime/canonical_state_brief.md`; context imports go to `.diffmogger/context/` and update `.diffmogger/state/PROJECT_CONTEXT.md`. Ticket-campaign targets use the dashboard-backed SQLite ticket queue; draft candidates live in `.diffmogger/runtime/ticket_drafts/` until accepted. Setup checks include whether the Codex CLI installed and signed in state is usable.
+The app has two surfaces: **Setup** for choosing/configuring a project and **Automation** for scheduler next action, queued/running/done work, generated unblocker work, human input records, and Start/Stop/Safety commands. Target-local dashboard preferences live at `.diffmogger/agentic/dashboard_state.json`; canonical orchestration state lives at `.diffmogger/runtime/orchestration.sqlite3`; the generated agent state view lives at `.diffmogger/runtime/canonical_state_brief.md`; context imports are copied to `.diffmogger/context/` and tracked in the intake/dashboard state. Ticket-campaign targets use the dashboard-backed SQLite ticket queue; draft candidates live in `.diffmogger/runtime/ticket_drafts/` until accepted. Setup checks include whether the Codex CLI installed and signed in state is usable.
 
-## First Review Checklist
+## Smoke Checklist
 
 1. Run `bash scripts/validate_starter_kit.sh` in the Diffmogger source checkout.
-2. Open the target with **Open Diffmogger Project**.
-3. Run **Run Safety Check**.
-4. Use **Export Review Bundle** or run `python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
-5. Inspect `/tmp/Diffmogger-review/Diffmogger-observatory.html` and `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
+2. Open the target with **Choose project** on Setup.
+3. Confirm Diffmogger is configured or run **Scaffold**.
+4. Open **Automation** and run **Run Safety Check**.
+5. Start or stop automation from the Automation command row.
 
 ## Validation
 

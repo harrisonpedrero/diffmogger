@@ -32,7 +32,11 @@ def latest_observed_lane_result(queue: dict[str, Any], conveyor: dict[str, Any])
             "completed": False,
         }
 
-    history = [item for item in list(conveyor.get("history") or []) if isinstance(item, dict)]
+    history = [
+        item
+        for item in list(conveyor.get("history") or [])
+        if isinstance(item, dict) and str(item.get("role") or "").strip()
+    ]
     if history:
         entry = history[-1]
         role = clean_text(entry.get("role") or "unknown", limit=40)

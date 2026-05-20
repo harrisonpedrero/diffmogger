@@ -42,7 +42,12 @@ OBSERVATORY_SCRIPT = RUNTIME_SCRIPTS_DIR / "run_observatory.py"
 INTEGRATION_SAFETY_SCRIPT = SCRIPTS_DIR / "check_integration_safety.py"
 DEFAULT_REVIEW_BUNDLE_DIR = Path("/tmp/Diffmogger-review")
 INTEGRATION_SAFETY_RECORD_RELATIVE = Path("target/integration_safety_check.json")
-STARTABLE_STATUSES = {"ACTIVE", "ACTIVE_WITH_PENDING_USER_INPUT"}
+STARTABLE_STATUSES = {
+    "ACTIVE",
+    "ACTIVE_WITH_PENDING_USER_INPUT",
+    "BLOCKED_ON_USER",
+    "BLOCKED_ON_ENVIRONMENT",
+}
 MAX_WRITE_WORKER_COUNT = 10
 DEFAULT_WRITE_WORKER_COUNT = 3
 DEFAULT_AUTOMATION_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -58,17 +63,11 @@ ENV_ACCESS_LABELS = {
 }
 ENV_ACCESS_BY_LABEL = {label: key for key, label in ENV_ACCESS_LABELS.items()}
 DASHBOARD_STATE_FILE = sidecar_rel(".agentic/dashboard_state.json")
-CONTEXT_IMPORTS_START = "<!-- DIFFMOGGER:CONTEXT-IMPORTS:START -->"
-CONTEXT_IMPORTS_END = "<!-- DIFFMOGGER:CONTEXT-IMPORTS:END -->"
 WORKER_STRATEGY_NAMES = {"NO_WORKERS", "READ_ONLY_REPORTS", "WRITE_WORKERS", "INTEGRATION_ONLY"}
 WORKER_REPORT_STRATEGIES = {"READ_ONLY_REPORTS", "WRITE_WORKERS"}
 
 DOC_CHOICES = {
     "Automation Tasks": sidecar_rel("docs/CODEX_AUTOMATION_TASKS.md"),
-    "Multi-Role Progress": sidecar_rel("docs/MULTI_ROLE_PROGRESS.md"),
-    "Project Context": sidecar_rel("docs/PROJECT_CONTEXT.md"),
-    "Daily Review": sidecar_rel("docs/DAILY_AUTOMATION_REVIEW.md"),
-    "Experiment Log": sidecar_rel("docs/AUTONOMY_EXPERIMENT_LOG.md"),
     "Automation Prompt": sidecar_rel(".agentic/automation_prompt.md"),
 }
 
@@ -403,47 +402,6 @@ def target_has_initial_commit(target: Path) -> bool:
     except FileNotFoundError:
         return False
     return result.returncode == 0 and bool(result.stdout.strip())
-
-
-def context_record_line(record: ContextRecord) -> str:
-    return f"- `{record.rel_path}` ({record.original_name}, {record.size_bytes} bytes)"
-
-
-def render_context_imports_section(project_name: str, lines: list[str]) -> str:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    body = "\n".join(lines) if lines else "- No imported context files are currently indexed."
-    return f"""{CONTEXT_IMPORTS_START}
-## Diffmogger Imported Context Files
-
-Managed context index for `{project_name}`. Do not place secrets, credentials, paid-account exports, or private production data here.
-
-Generated at: {now}
-
-{body}
-{CONTEXT_IMPORTS_END}
-"""
-
-
-def upsert_context_imports(existing: str, project_name: str, records: list[ContextRecord]) -> str:
-    lines_by_rel: dict[str, str] = {}
-    pattern = re.compile(
-        rf"{re.escape(CONTEXT_IMPORTS_START)}(?P<body>.*?){re.escape(CONTEXT_IMPORTS_END)}",
-        re.DOTALL,
-    )
-    match = pattern.search(existing)
-    if match:
-        for line in match.group("body").splitlines():
-            line = line.strip()
-            rel_match = re.match(r"- `([^`]+)`", line)
-            if rel_match:
-                lines_by_rel[rel_match.group(1)] = line
-    for record in records:
-        lines_by_rel[record.rel_path] = context_record_line(record)
-    section = render_context_imports_section(project_name, list(lines_by_rel.values()))
-    if match:
-        return pattern.sub(section.rstrip(), existing).rstrip() + "\n"
-    separator = "\n\n" if existing.rstrip() else ""
-    return existing.rstrip() + separator + section
 
 
 def fetch_notifier_health(timeout: float = 0.6) -> tuple[bool, str]:
@@ -978,33 +936,6 @@ def copy_context_files(
         )
 
     return records
-
-
-def render_project_context(project_name: str, records: list[ContextRecord]) -> str:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    file_lines = (
-        "\n".join(context_record_line(record) for record in records)
-        if records
-        else "- No additional context files were provided during scaffolding."
-    )
-    return f"""# Project Context
-
-Additional reusable context for `{project_name}`.
-
-Generated at: {now}
-
-Use this file as an index for supplemental research, PDFs, notes, designs, and other source material copied into this target project. Do not place secrets, credentials, paid-account exports, or private production data here.
-
-## Context Files
-
-{file_lines}
-
-## Automation Notes
-
-- During automation runs, inspect relevant context files when they help clarify the product goal, constraints, domain, or desired demo.
-- Prefer concise summaries in task files instead of copying long passages from context sources.
-- Treat binary context such as PDFs as reference material, not as executable input.
-"""
 
 
 def next_inbox_id(inbox_path: Path, now: datetime) -> str:

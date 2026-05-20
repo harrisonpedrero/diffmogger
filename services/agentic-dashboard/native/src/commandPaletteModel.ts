@@ -1,39 +1,31 @@
 import type { ProjectSnapshot } from "./api/backend";
 
 export type PaletteCommandId =
-  | "open-control-room"
-  | "open-run-control"
-  | "open-human-bridge"
-  | "open-review"
-  | "open-sidecar"
+  | "open-setup"
+  | "open-automation"
   | "open-project"
   | "create-new-project"
   | "close-project"
   | "reveal-project"
   | "open-project-editor"
-  | "continue-brief"
   | "import-context-files"
   | "scaffold-project"
   | "start-automation"
   | "stop-automation"
   | "run-safety-check"
-  | "open-observatory"
-  | "export-review-bundle"
-  | "send-note-next-run"
-  | "open-raw-automation-tasks"
-  | "open-canonical-state"
-  | "open-diagnostics"
-  | "export-debug-bundle";
+  | "open-raw-automation-tasks";
+
+export type PaletteSection = "Navigation" | "Project" | "Setup" | "Automation";
 
 export type PaletteCommand = {
   id: PaletteCommandId;
   title: string;
-  section: "Navigation" | "Project" | "Setup" | "Run" | "Activity" | "Review" | "Inbox" | "Debug";
+  section: PaletteSection;
   description: string;
   keywords: string[];
   disabledReason?: string;
   dangerous?: boolean;
-  routesTo?: string;
+  routesTo?: "Setup" | "Automation";
 };
 
 export type PaletteState = {
@@ -51,108 +43,54 @@ function reasonWhenLoading(state: PaletteState): string | undefined {
 }
 
 function runControlReason(snapshot: ProjectSnapshot | null, key: string, fallback: string): string | undefined {
-  const controls = snapshot?.run.controls ?? {};
+  const controls = snapshot?.controls ?? {};
   const value = controls[key];
   return value === true ? undefined : String(controls[`${key.replace(/^can_/, "").replace(/_/g, "_")}_reason`] ?? fallback);
 }
 
 function automationState(snapshot: ProjectSnapshot | null): string {
-  const value = snapshot?.run.automation?.state;
+  const value = snapshot?.controls.automation?.state;
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
 function rawAutomationTasksReason(snapshot: ProjectSnapshot | null): string | undefined {
   const targetReason = reasonForTarget(snapshot);
   if (targetReason) return targetReason;
-  const file = snapshot?.files.find((item) => item.key === "monitor.automation_tasks");
-  return file?.exists ? undefined : "Task file does not exist yet. Complete setup first.";
-}
-
-function reviewExportReason(snapshot: ProjectSnapshot | null): string | undefined {
-  const targetReason = reasonForTarget(snapshot);
-  if (targetReason) return targetReason;
-  const controls = snapshot?.run.controls ?? {};
-  return controls.can_export_review === true
-    ? undefined
-    : "Complete setup before exporting review files.";
+  const file = snapshot?.setup.files?.find((item) => item.key === "monitor.automation_tasks");
+  return file?.exists ? undefined : "Task projection does not exist yet. Complete setup first.";
 }
 
 export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] {
   const snapshot = state.snapshot;
   const targetReason = reasonForTarget(snapshot);
   const busyReason = reasonWhenLoading(state);
-  const scaffolded = snapshot?.run.controls?.is_scaffolded === true || snapshot?.target.automation_task_exists === true;
+  const scaffolded = snapshot?.controls.is_scaffolded === true || snapshot?.target.automation_task_exists === true;
 
   return [
     {
-      id: "open-control-room",
-      title: "Open Home",
+      id: "open-setup",
+      title: "Open Setup",
       section: "Navigation",
-      description: "Open the Home overview.",
-      keywords: ["home", "control room", "overview", "ready"],
-      routesTo: "Home",
+      description: "Open project selection and setup.",
+      keywords: ["setup", "project", "brief", "intake"],
+      routesTo: "Setup",
       disabledReason: busyReason,
     },
     {
-      id: "continue-brief",
-      title: "Open setup",
+      id: "open-automation",
+      title: "Open Automation",
       section: "Navigation",
-      description: "Return to setup.",
-      keywords: ["brief", "setup", "intake", "wizard"],
-      routesTo: "Brief",
-      disabledReason: busyReason,
-    },
-    {
-      id: "open-run-control",
-      title: "Open Run",
-      section: "Navigation",
-      description: "Open the Run page.",
-      keywords: ["run", "run control", "automation", "start", "stop"],
-      routesTo: "Run",
-      disabledReason: busyReason,
-    },
-    {
-      id: "open-observatory",
-      title: "Open activity",
-      section: "Navigation",
-      description: "Open Activity.",
-      keywords: ["observatory", "activity", "log", "build"],
-      routesTo: "Observatory",
-      disabledReason: busyReason,
-    },
-    {
-      id: "open-human-bridge",
-      title: "Open Inbox",
-      section: "Navigation",
-      description: "Open the Inbox handoff surface.",
-      keywords: ["inbox", "human bridge", "bridge", "note", "request"],
-      routesTo: "Inbox",
-      disabledReason: busyReason,
-    },
-    {
-      id: "open-review",
-      title: "Open review",
-      section: "Navigation",
-      description: "Open Review.",
-      keywords: ["review", "evidence", "export"],
-      routesTo: "Review",
-      disabledReason: busyReason,
-    },
-    {
-      id: "open-sidecar",
-      title: "Open Sidecar",
-      section: "Navigation",
-      description: "Open Advanced managed files, diagnostics, settings, and debug tools.",
-      keywords: ["advanced", "debug", "sidecar", "settings", "files", "diagnostics"],
-      routesTo: "Advanced",
-      disabledReason: busyReason,
+      description: "Open scheduler state, queued work, input records, and run controls.",
+      keywords: ["automation", "run", "scheduler", "activity", "tickets"],
+      routesTo: "Automation",
+      disabledReason: busyReason ?? targetReason,
     },
     {
       id: "open-project",
-      title: "Open project",
+      title: "Choose project",
       section: "Project",
       description: "Choose a Diffmogger target folder.",
-      keywords: ["folder", "target", "choose"],
+      keywords: ["folder", "target", "choose", "switch"],
       disabledReason: busyReason,
     },
     {
@@ -160,8 +98,8 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       title: "New project",
       section: "Project",
       description: "Open setup for a fresh target folder.",
-      keywords: ["fresh", "new", "brief"],
-      routesTo: "Brief",
+      keywords: ["fresh", "new", "setup", "brief"],
+      routesTo: "Setup",
       disabledReason: busyReason,
     },
     {
@@ -201,45 +139,45 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
       title: "Scaffold",
       section: "Setup",
       description: scaffolded
-        ? "Open setup to review scaffold settings before running this again."
-        : "Open setup review before writing generated project files.",
-      keywords: ["scaffold", "setup"],
+        ? "Open setup to inspect scaffold settings before running this again."
+        : "Open setup before writing generated project files.",
+      keywords: ["scaffold", "setup", "install", "configure"],
       dangerous: true,
-      routesTo: "Brief",
+      routesTo: "Setup",
       disabledReason: busyReason ?? targetReason,
     },
     {
       id: "start-automation",
-      title: "Start",
-      section: "Run",
-      description: "Start automation.",
-      keywords: ["automation", "run", "start"],
+      title: "Start automation",
+      section: "Automation",
+      description: "Start the scheduler.",
+      keywords: ["automation", "run", "start", "scheduler"],
       dangerous: true,
       disabledReason:
         busyReason ??
         targetReason ??
-        (snapshot?.run.controls?.can_start_automation === true
+        (snapshot?.controls.can_start_automation === true
           ? undefined
-          : String(snapshot?.run.controls?.start_automation_reason ?? "Automation is not ready to start.")),
+          : String(snapshot?.controls.start_automation_reason ?? "Automation is not ready to start.")),
     },
     {
       id: "stop-automation",
-      title: "Stop",
-      section: "Run",
-      description: "Stop automation.",
-      keywords: ["automation", "run", "stop"],
+      title: "Stop automation",
+      section: "Automation",
+      description: "Stop the scheduler process.",
+      keywords: ["automation", "run", "stop", "scheduler"],
       dangerous: true,
       disabledReason:
         busyReason ??
         targetReason ??
-        (snapshot?.run.controls?.can_stop_automation === true && automationState(snapshot) === "running"
+        (snapshot?.controls.can_stop_automation === true && automationState(snapshot) === "running"
           ? undefined
-          : String(snapshot?.run.controls?.stop_automation_reason ?? "No automation is running.")),
+          : String(snapshot?.controls.stop_automation_reason ?? "No automation is running.")),
     },
     {
       id: "run-safety-check",
       title: "Run safety check",
-      section: "Run",
+      section: "Automation",
       description: "Run and record the integration safety check.",
       keywords: ["safety", "diagnostics", "check"],
       disabledReason:
@@ -248,55 +186,12 @@ export function buildCommandPaletteModel(state: PaletteState): PaletteCommand[] 
         runControlReason(snapshot, "can_run_safety_check", "Safety check is not available."),
     },
     {
-      id: "export-review-bundle",
-      title: "Export review",
-      section: "Review",
-      description: "Export review files.",
-      keywords: ["review", "bundle", "export"],
-      disabledReason: busyReason ?? reviewExportReason(snapshot),
-    },
-    {
-      id: "send-note-next-run",
-      title: "Send note to next run",
-      section: "Inbox",
-      description: "Queue a typed dashboard note for the next run.",
-      keywords: ["inbox", "human bridge", "bridge", "note"],
-      routesTo: "Inbox",
-      disabledReason: busyReason ?? targetReason,
-    },
-    {
       id: "open-raw-automation-tasks",
-      title: "Open task state",
-      section: "Debug",
+      title: "Open task projection",
+      section: "Automation",
       description: "Open .diffmogger/state/CODEX_AUTOMATION_TASKS.md through the managed file allowlist.",
       keywords: ["raw", "tasks", "markdown", "projection"],
       disabledReason: busyReason ?? rawAutomationTasksReason(snapshot),
-    },
-    {
-      id: "open-canonical-state",
-      title: "Open canonical state",
-      section: "Debug",
-      description: "Open the SQLite orchestration state dashboard.",
-      keywords: ["state", "sqlite", "canonical", "ledger", "database", "control plane"],
-      routesTo: "Advanced",
-      disabledReason: busyReason ?? targetReason,
-    },
-    {
-      id: "open-diagnostics",
-      title: "Open diagnostics",
-      section: "Debug",
-      description: "Open diagnostics.",
-      keywords: ["sidecar", "advanced", "doctor", "checks", "diagnostics"],
-      routesTo: "Advanced",
-      disabledReason: busyReason ?? targetReason,
-    },
-    {
-      id: "export-debug-bundle",
-      title: "Export debug",
-      section: "Debug",
-      description: "Export a redacted debug bundle without .env contents.",
-      keywords: ["debug", "bundle", "support", "zip", "diagnostics", "sidecar"],
-      disabledReason: busyReason ?? targetReason,
     },
   ];
 }

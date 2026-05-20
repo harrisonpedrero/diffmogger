@@ -22,13 +22,13 @@ Capture:
 10. Verification commands or expected checks.
 11. Environment access policy: project commands only, or direct local `.env*` reads allowed.
 12. Whether a human bridge is enabled.
-13. Human bridge mode: file-only dashboard Inbox, local notifier, Discord notifier, or disabled.
+13. Human bridge mode: dashboard/SQLite records only, local notifier, Discord notifier, or disabled.
 14. Whether freeform human requests should receive direct notifier messages when the notifier is available.
 15. Whether read-only worker agents are allowed and whether Codex CLI worker reports are expected on broad runs.
 16. Maximum write-worker count from 1-10 and guidance for using always-available write workers as bounded acceleration when work splits into reviewable lanes.
 17. Checkpoint-commit preference and local-only remote opt-in for the typed execution DAG scheduler.
 18. DAG scheduler config: `parallel_execution_mode`, `symbol_graph_languages`, `parallel_write_min_confidence`, `parallel_write_direct_confidence`, `max_parallel_write_workers`, and `max_parallel_scope_workers`.
-19. Campaign mode: `bounded` for a seeded/imported ticket queue that stops when complete or blocked, or `ongoing` for automatic generic ticket drafting and continued DAG-scheduled work.
+19. Campaign mode: `bounded` for a seeded/imported ticket queue that stops only when all tickets are done with evidence, or `ongoing` for automatic generic ticket drafting and continued DAG-scheduled work.
 20. Optional MCP servers: Context7 and/or Playwright, only when useful.
 21. Seed tickets for a bounded ticket campaign, if any.
 22. What counts as a meaningful integrated deliverable.

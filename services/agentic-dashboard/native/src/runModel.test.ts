@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ProjectSnapshot } from "./api/backend";
 import { buildRunModel } from "./runModel";
 
-function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
+function snapshot(overrides: Record<string, any> = {}): ProjectSnapshot {
   const base: ProjectSnapshot = {
     target: {
       path: "/tmp/project",
@@ -12,20 +12,30 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
       dashboard_state_exists: true,
       automation_task_exists: true,
     },
-    brief: { project_name: "Project", project_mode: "fresh_project" },
-    run: {
+    setup: {
+      project_name: "Project",
+      project_mode: "fresh_project",
+      status: "ACTIVE",
+      horizon: "H1 Runnable baseline",
       task: {
         status: "ACTIVE",
         horizon: "H1 Runnable baseline",
         last_updated: "2026-05-06T12:00:00+00:00",
       },
-      controls: {
-        is_scaffolded: true,
-        is_running: false,
-        can_start_automation: true,
-        can_stop_automation: false,
-        can_run_safety_check: true,
-      },
+      git: {},
+      files: [],
+    },
+    scheduler: {},
+    dag: {},
+    tickets: {},
+    human_input: {},
+    validation_repair: { setup_repair_inputs: [] },
+    controls: {
+      is_scaffolded: true,
+      is_running: false,
+      can_start_automation: true,
+      can_stop_automation: false,
+      can_run_safety_check: true,
       automation: {
         state: "stopped",
         message: "Continuous automation is ready to start.",
@@ -41,26 +51,77 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
         can_run_integrator: false,
       },
       latest_worker_result: { label: "Latest worker result: none yet." },
-      environment_blockers: [],
-    },
-    files: [],
-    home: {
-      title: "Project",
-      automation_status: "ACTIVE",
-      current_horizon: "H1 Runnable baseline",
-      next_action: "Continue builder work.",
-      pending_human_requests: 0,
-      unhandled_inbox: 0,
-      queued_patches: 0,
-      deferred_patches: 0,
     },
   };
+  const legacyRun = overrides.run ?? {};
+  const legacyState = legacyRun.state ?? {};
+  const setupOverride = {
+    ...(overrides.setup ?? {}),
+    task: { ...base.setup.task, ...(legacyRun.task ?? {}), ...(overrides.setup?.task ?? {}) },
+    git: { ...(base.setup.git ?? {}), ...(legacyRun.git ?? {}), ...(overrides.setup?.git ?? {}) },
+  };
+  const schedulerOverride = {
+    ...(overrides.scheduler ?? {}),
+    selected_action: legacyState.selected_candidate ?? legacyState.selected_scheduler_candidate ?? overrides.scheduler?.selected_action,
+    next_actions: legacyState.next_actions ?? overrides.scheduler?.next_actions,
+    decision_queue: legacyRun.conveyor?.decision_queue ?? overrides.scheduler?.decision_queue,
+    active_role_run: legacyRun.conveyor?.active_role_run ?? legacyState.active_role_run ?? overrides.scheduler?.active_role_run,
+    why_not_parallel: legacyState.why_not_parallel ?? overrides.scheduler?.why_not_parallel,
+    scheduler_parallel_dry_run: legacyState.scheduler_parallel_dry_run ?? overrides.scheduler?.scheduler_parallel_dry_run,
+    blocked_candidates: legacyState.blocked_parallel_candidates ?? overrides.scheduler?.blocked_candidates,
+    skipped_candidates: legacyState.skipped_scheduler_candidates ?? legacyState.skipped_candidates ?? overrides.scheduler?.skipped_candidates,
+  };
+  const dagOverride = {
+    ...(overrides.dag ?? {}),
+    execution_dag: legacyState.execution_dag ?? overrides.dag?.execution_dag,
+    proposed_execution_groups: legacyState.proposed_execution_groups ?? overrides.dag?.proposed_execution_groups,
+    active_execution_groups: legacyState.active_execution_groups ?? overrides.dag?.active_execution_groups,
+    recent_execution_groups: legacyState.recent_execution_groups ?? overrides.dag?.recent_execution_groups,
+    recently_completed_execution_groups: legacyState.recently_completed_execution_groups ?? overrides.dag?.recently_completed_execution_groups,
+    active_read_only_workers: legacyState.active_read_only_workers ?? overrides.dag?.active_read_only_workers,
+    active_write_workers: legacyState.active_write_workers ?? overrides.dag?.active_write_workers,
+    completed_worker_reports: legacyState.completed_worker_reports ?? overrides.dag?.completed_worker_reports,
+    queued_worker_patches: legacyState.queued_worker_patches ?? overrides.dag?.queued_worker_patches,
+    write_worker_conflicts: legacyState.write_worker_conflicts ?? overrides.dag?.write_worker_conflicts,
+    integration_backlog_from_parallel_workers: legacyState.integration_backlog_from_parallel_workers ?? overrides.dag?.integration_backlog_from_parallel_workers,
+    worker_patch_integration_preflight: legacyState.worker_patch_integration_preflight ?? overrides.dag?.worker_patch_integration_preflight,
+    queue: legacyRun.queue ?? overrides.dag?.queue,
+  };
+  const ticketRun = legacyState.ticket_run ?? {};
   return {
     ...base,
     ...overrides,
     target: { ...base.target, ...overrides.target },
-    run: { ...base.run, ...overrides.run },
-    home: { ...base.home, ...overrides.home },
+    setup: { ...base.setup, ...setupOverride },
+    scheduler: { ...base.scheduler, ...schedulerOverride },
+    dag: { ...base.dag, ...dagOverride },
+    tickets: {
+      ...base.tickets,
+      ...(overrides.tickets ?? {}),
+      counts: ticketRun.counts ?? overrides.tickets?.counts,
+      items: ticketRun.tickets ?? overrides.tickets?.items,
+      remaining: ticketRun.tickets ?? overrides.tickets?.remaining,
+    },
+    human_input: { ...base.human_input, ...(legacyRun.human ?? {}), ...(overrides.human_input ?? {}) },
+    validation_repair: {
+      ...base.validation_repair,
+      ...(overrides.validation_repair ?? {}),
+      validation: legacyRun.task?.validation ?? overrides.validation_repair?.validation,
+      integration_safety: legacyRun.task?.integration_safety ?? overrides.validation_repair?.integration_safety,
+      active_validation_jobs: legacyState.active_validation_jobs ?? overrides.validation_repair?.active_validation_jobs,
+      validation_receipts: legacyState.validation_receipts ?? overrides.validation_repair?.validation_receipts,
+      open_blockers: legacyState.open_blockers ?? overrides.validation_repair?.open_blockers,
+      setup_repair_inputs: overrides.validation_repair?.setup_repair_inputs ?? [],
+    },
+    controls: {
+      ...base.controls,
+      ...(legacyRun.controls ?? {}),
+      ...(overrides.controls ?? {}),
+      automation: { ...base.controls.automation, ...(legacyRun.automation ?? {}), ...(overrides.controls?.automation ?? {}) },
+      worker_strategy: { ...base.controls.worker_strategy, ...(legacyRun.worker_strategy ?? {}), ...(overrides.controls?.worker_strategy ?? {}) },
+      worker_controls: { ...base.controls.worker_controls, ...(legacyRun.worker_controls ?? {}), ...(overrides.controls?.worker_controls ?? {}) },
+      latest_worker_result: { ...base.controls.latest_worker_result, ...(legacyRun.latest_worker_result ?? {}), ...(overrides.controls?.latest_worker_result ?? {}) },
+    },
   };
 }
 
@@ -73,7 +134,7 @@ describe("buildRunModel", () => {
     expect(model.controls.stopAutomation.enabled).toBe(false);
   });
 
-  it("maps unscaffolded targets to the Brief gate", () => {
+  it("maps unscaffolded targets to the Setup gate", () => {
     const model = buildRunModel(
       snapshot({
         target: {
@@ -153,7 +214,7 @@ describe("buildRunModel", () => {
     });
   });
 
-  it("uses warning banner color when active work is environment blocked", () => {
+  it("does not classify validation failures as an env-blocked idle state", () => {
     const model = buildRunModel(
       snapshot({
         run: {
@@ -177,9 +238,13 @@ describe("buildRunModel", () => {
       }),
     );
 
-    expect(model.banner.headline).toBe("Env blocked");
-    expect(model.banner.badge).toBe("Env blocked");
-    expect(model.banner.tone).toBe("warn");
+    expect(model.banner.headline).toBe("Ready");
+    expect(model.banner.badge).toBe("Ready");
+    expect(model.banner.primaryAction.label).toBe("Run safety check");
+    expect(model.safety.find((row) => row.label === "Validation")).toMatchObject({
+      status: "6 pass / 1 fail",
+      action: { route: "Automation" },
+    });
   });
 
   it("disables start controls while automation is active", () => {
@@ -558,7 +623,7 @@ describe("buildRunModel", () => {
     expect(model.operations.concurrencyWaves.some((wave) => wave.kind === "blocked" && wave.id === "candidate:T9")).toBe(true);
   });
 
-  it("labels default compatibility task progress as fallback", () => {
+  it("labels scheduler task progress as automation work", () => {
     const model = buildRunModel(
       snapshot({
         run: {
@@ -582,8 +647,7 @@ describe("buildRunModel", () => {
 
     expect(model.operations.progressRows[0]).toMatchObject({
       taskId: "task:automation",
-      label: "Compatibility fallback",
-      compatibility: true,
+      label: "Automation work",
     });
     expect(model.operations.progressRows[0].cells.build?.statusKind).toBe("running");
   });
@@ -723,7 +787,9 @@ describe("buildRunModel", () => {
             can_stop_automation: false,
             can_run_safety_check: true,
           },
-          environment_blockers: [
+        },
+        validation_repair: {
+          setup_repair_inputs: [
             {
               name: "Baseline verification",
               detail: "Baseline requires DATABASE_URL.",
@@ -737,9 +803,9 @@ describe("buildRunModel", () => {
       }),
     );
 
-    const environment = model.safety.find((row) => row.label === "Environment");
-    expect(environment?.action.label).toBe("Recheck blocker");
-    expect(environment?.action.command).toBe("blocker.recheck_baseline");
+    const setupRepair = model.safety.find((row) => row.label === "Setup / repair inputs");
+    expect(setupRepair?.action.label).toBe("Recheck blocker");
+    expect(setupRepair?.action.command).toBe("blocker.recheck_baseline");
     expect(model.blockers[0]).toMatchObject({ canRecheck: true, recheckLabel: "Recheck blocker" });
   });
 });

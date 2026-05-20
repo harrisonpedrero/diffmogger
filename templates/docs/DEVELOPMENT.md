@@ -2,32 +2,24 @@
 
 Project: `{{PROJECT_NAME}}`
 
-Mode: {{PROJECT_MODE_LABEL}}
-
 Goal: {{PRODUCT_GOAL}}
-
-{{PROJECT_MODE_GUIDANCE}}
 
 ## Setup
 
-Document local setup here as the first automation run discovers or creates it.
+Keep setup notes short and executable. Prefer project-local dependencies, fixtures, mocks, and seed data.
 
 ## Verification
 
-Full-suite commands are stored in:
+Full-suite commands:
 
 ```text
-.agentic/verification_commands.txt
+.diffmogger/agentic/verification_commands.txt
 ```
 
-The commands in that file are the clean-HEAD baseline gate. They must pass on
-the current checkout; keep future desired commands out of this file until the
-corresponding scripts, packages, services, or Make targets exist.
-
-Patch-scoped or sprint-scoped smoke checks may be configured in:
+Smoke commands:
 
 ```text
-.agentic/smoke_commands.txt
+.diffmogger/agentic/smoke_commands.txt
 ```
 
 Preferred commands:
@@ -36,200 +28,43 @@ Preferred commands:
 {{VERIFICATION_COMMANDS}}
 ```
 
-Baseline verification commands:
+If validation fails, create work instead of stopping automation. Failed validation creates work:
 
-```text
-{{BOOTSTRAP_BASELINE_COMMANDS}}
-```
-
-Update this section and `.agentic/verification_commands.txt` when full-suite commands change.
-
-The integrator records clean-HEAD full-suite baseline verification in `target/baseline_verification.json`. If that baseline fails before a queued patch is applied, normal hardener/finalization patches are deferred as `baseline_verification_blocker`; builder/planner patches can still integrate when focused checks pass and the failure is unrelated. Baseline repair patches should include `Verification scope: baseline_repair` in the role summary. Local service failures that the repo can reasonably repair, such as a missing local PostgreSQL test database with Prisma/Postgres configuration, should be classified as `repairable_local_service` and routed to a harness/setup patch before `BLOCKED_ON_ENVIRONMENT`.
-
-Frontend or static targets should add a deterministic browser smoke command once the boot/render path exists:
-
-```bash
-npm run browser-smoke
-```
-
-Use it as the fallback browser-facing validation path when Playwright MCP is unavailable.
+- required check failure -> repair work
+- missing tool -> setup or harness work
+- external service failure -> mock, local fixture, or defer work
+- browser/MCP failure -> alternate validation or deferred QA work
+- repeated failure -> split, reframe, or planner work
 
 ## Automation
 
-Recurring automation prompt:
+Canonical state lives in `.diffmogger/runtime/orchestration.sqlite3`.
+Read `.diffmogger/runtime/canonical_state_brief.md`; use `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` as the generated handoff projection.
 
-```text
-.agentic/automation_prompt.md
-```
-
-Generated task handoff projection:
-
-```text
-docs/CODEX_AUTOMATION_TASKS.md
-```
-
-Guardrails:
-
-```text
-docs/CODEX_AUTOMATION_GUARDRAILS.md
-```
-
-Project context:
-
-```text
-docs/PROJECT_CONTEXT.md
-```
-
-Scheduled runs should use the local wrapper:
-
-```bash
-bash .diffmogger/scripts/run_conveyor_automation.sh --once
-```
-
-The wrapper sets `CODEX_RUN_ID`, acquires `target/codex_automation.lock`, runs `codex exec --full-auto --skip-git-repo-check` through `.diffmogger/scripts/run_process_watchdog.py`, grants `$HOME/.codex` access for nested Codex CLI startup, and releases the lock when the run exits. Set `CODEX_ROLE_TIMEOUT_SECONDS` to override the 90-minute hard timeout, `CODEX_ROLE_IDLE_TIMEOUT_SECONDS` to override the 10-minute no-progress timeout, and `CODEX_ROLE_TERMINATION_GRACE_SECONDS` to tune graceful shutdown. Idle progress is detected from stdout/stderr plus role worktree and queue file changes; set the idle timeout to `0` to disable it for a run.
-
-## Automation Environment Loading
-
-The local wrappers load target env files into the automation process before launching Codex, the DAG scheduler, role worktrees, or child workers. Values are inherited through the process environment; `.env*` files are not copied into isolated worktrees or queued patches.
-
-Default env files include root `.env`, `.env.local`, `.env.development`, `.env.development.local`, and matching `apps/*/.env*` development files. Already-exported shell variables win over file values.
-
-Use `CODEX_AUTOMATION_ENV_FILES` for an explicit comma- or colon-separated file list. Use `CODEX_AUTOMATION_ENV_DENYLIST` for comma- or colon-separated variable names that should not be inherited. Never print, summarize, commit, or copy secret values.
-
-Continuous DAG scheduler automation uses:
+Run the scheduler:
 
 ```bash
 bash .diffmogger/scripts/run_conveyor_automation.sh --dry-run
 bash .diffmogger/scripts/run_conveyor_automation.sh --once
-python3 .diffmogger/scripts/run_observatory.py --open
 ```
 
-Continuous DAG scheduler automation requires this target to be an initialized git repo with an initial commit. Diffmogger scaffold creates the local repo and first `chore: initial commit` automatically when `HEAD` is missing.
-
-The runner records canonical activity and execution state in `target/orchestration.sqlite3`, including typed automation control, activity graph nodes/edges, repository capability manifest, validation receipts, blockers, human messages, and next actions. It regenerates `target/canonical_state_brief.md` before Codex runs, keeps `target/automation_runner.json` as a generated runner projection, uses a target automation lock to avoid duplicate dispatchers, and delegates actual work to target-local planner, builder, hardener, and integrator role wrappers. The observatory reads canonical state plus `target/baseline_verification.json` to show runner state, automation control, activity progress, baseline verification state, scheduler health, no-progress circuit breaker state, deferred-patch triage reasons with local next actions, an explicit next-lane action plan, action-plan follow-through status from recent scheduler or queue outcomes, bounded recommendation-history records, a next-run worker strategy recommendation, the active role, upcoming activity lanes, queued/deferred patches, recent outcomes, and timeline events.
-
-DAG scheduler config:
-
-```text
-parallel_execution_mode={{PARALLEL_EXECUTION_MODE}}
-symbol_graph_languages={{SYMBOL_GRAPH_LANGUAGES_INLINE}}
-parallel_write_min_confidence={{PARALLEL_WRITE_MIN_CONFIDENCE}}
-parallel_write_direct_confidence={{PARALLEL_WRITE_DIRECT_CONFIDENCE}}
-max_parallel_write_workers={{MAX_PARALLEL_WRITE_WORKERS}}
-max_parallel_scope_workers={{MAX_PARALLEL_SCOPE_WORKERS}}
-```
-
-Before the first long DAG run, generate a preflight report:
+Useful runtime helpers:
 
 ```bash
-python3 .diffmogger/scripts/preflight_parallelization_readiness.py --target . --json
+python3 .diffmogger/scripts/state_brief.py .
+python3 .diffmogger/scripts/ticket_run.py . status --json
+python3 .diffmogger/scripts/ticket_run.py . next --json
+python3 .diffmogger/scripts/repair_environment.py --target .
 ```
 
-The report returns `ready`, `warn`, or `block`, lists expected parallel and serialized tasks with reasons, and calls out symbol, scheduler, lease, validation, dashboard, and telemetry risks.
-
-## Managed Browser Runtime
-
-Browser-backed automation should prefer Diffmogger's managed local browser over ambient system Chrome:
+Browser-backed checks should prefer the managed browser helper:
 
 ```bash
 python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch
-python3 .diffmogger/scripts/diffmogger_browser.py install
-python3 .diffmogger/scripts/diffmogger_browser.py env
 ```
 
-The helper checks `DIFFMOGGER_BROWSER_PATH`, `CHROME_PATH`, and the managed cache at
-`DIFFMOGGER_BROWSER_CACHE` or `~/.cache/diffmogger/browsers`. Automation wrappers export
-the managed path for child Codex runs when it exists. Do not make browser smoke checks depend only on system
-Chrome; use `python3 .diffmogger/scripts/diffmogger_browser.py resolve` or the exported `CHROME_PATH`.
-
-## Optional MCP Integrations
-
-Optional MCP servers:
-
-```text
-{{OPTIONAL_MCP_SERVERS}}
-```
-
-When optional MCP is enabled, project-scoped config lives in `.codex/config.toml` for compatibility. Role wrappers mount MCPs from resolved intake/dashboard/manifest state and do not require a worktree `.codex/config.toml`. Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config.
-
-Context7 is documentation-only and should fall back to normal web search, repo docs, package metadata, or existing knowledge on auth errors, startup failures, timeouts, empty results, or tool errors. The generated MCP config inherits `CONTEXT7_API_KEY` when it is present for higher rate limits, but never stores the key.
-
-Playwright MCP uses Diffmogger's managed browser when available. UI failure screenshots should be saved under:
-
-```text
-docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png
-```
-
-Every role summary should include:
-
-```text
-MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reason>
-```
+Wrappers load target env files into process environment when allowed. Never print, summarize, commit, or copy secret values.
 
 ## Ticket Campaigns
 
 {{TICKET_CAMPAIGN_DEVELOPMENT_SECTION}}
-
-For a durable first-run review bundle, render the same local state to HTML and Markdown:
-
-```bash
-python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review
-```
-
-This writes `/tmp/Diffmogger-review/Diffmogger-observatory.html` and
-`/tmp/Diffmogger-review/Diffmogger-self-review.md`. Markdown review exports update
-`target/action_plan_history.json` so repeated recommendations and follow-through outcomes
-remain visible across local DAG scheduler cycles.
-
-### First Review Checklist
-
-After the first automation run, use one local review path:
-
-1. In the Diffmogger starter-kit source, run `bash scripts/validate_starter_kit.sh` when reviewing kit or scaffold behavior.
-2. Open the native dashboard from the Diffmogger checkout, reopen this target, and click **Run Safety Check** on the Run page.
-3. Click **Export Review Bundle** or, from this target repo, run `python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review`.
-4. Open `/tmp/Diffmogger-review/Diffmogger-observatory.html` and inspect `/tmp/Diffmogger-review/Diffmogger-self-review.md`.
-5. Confirm the review shows first-review readiness, safety status, validation state, active role or queue, known issues, the next sprint recommendation, and the next-run worker strategy.
-
-The dashboard writes the safety-check result to `.diffmogger/runtime/integration_safety_check.json`
-before the export reads it. That file is runtime state, not source.
-
-## Human Bridge
-
-{{HUMAN_DEVELOPMENT_SECTION}}
-
-## Worker Agents
-
-Worker agents allowed: {{WORKER_AGENTS_ALLOWED}}
-
-{{WRITE_WORKER_DEVELOPMENT_SECTION}}
-
-Use read-only worker reports first and record outputs under `target/agent_runs/<run_id>/`.
-
-Local helpers:
-
-```bash
-bash .diffmogger/scripts/spawn_worker_agent.sh --target . --run-id "$CODEX_RUN_ID" --role review --prompt "Write a concise read-only review report."
-python3 .diffmogger/scripts/summarize_worker_outputs.py . --run-id "$CODEX_RUN_ID"
-```
-
-Every automation run should record:
-
-```text
-Codex CLI worker decision: USE / SKIP / UNAVAILABLE
-Reason: <one sentence>
-```
-
-## Multi-Role Automation
-
-{{MULTI_ROLE_DEVELOPMENT_SECTION}}
-
-## State Compaction
-
-Use the local state compaction helper when Markdown handoff files become long:
-
-```bash
-python3 .diffmogger/scripts/compact_agent_state.py --dry-run .
-```
-
-Review the diff before running without `--dry-run`; unresolved human requests must stay active.

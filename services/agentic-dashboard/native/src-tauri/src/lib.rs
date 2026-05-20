@@ -25,20 +25,13 @@ const READ_ONLY_BACKEND_COMMANDS: &[&str] = &[
     "brief.load",
     "brief.scaffold_preview",
     "ticket.load",
-    "inbox.load",
-    "run.load",
-    "run.load_log",
     "state.snapshot",
+    "state.brief",
     "state.validate",
     "state.watch",
     "execution_group.load",
     "validation_jobs.load",
-    "observatory.snapshot",
-    "review.load",
     "diagnostics.run_checks",
-    "advanced.list_files",
-    "advanced.load_file",
-    "advanced.validate_file",
 ];
 
 const MUTATING_BACKEND_COMMANDS: &[&str] = &[
@@ -54,8 +47,6 @@ const MUTATING_BACKEND_COMMANDS: &[&str] = &[
     "ticket.accept_draft",
     "ticket.split_preview",
     "ticket.accept_split",
-    "inbox.send_note",
-    "inbox.reply_request",
     "automation.start",
     "automation.stop",
     "blocker.recheck_baseline",
@@ -68,12 +59,6 @@ const MUTATING_BACKEND_COMMANDS: &[&str] = &[
     "execution_group.retry_failed",
     "execution_group.export_debug_bundle",
     "lease.release_stale",
-    "observatory.generate_html",
-    "observatory.load_html",
-    "review.export_bundle",
-    "review.mark_reviewed",
-    "advanced.save_file",
-    "advanced.export_debug_bundle",
 ];
 
 #[derive(Debug, Serialize)]
@@ -109,35 +94,11 @@ struct RecentTarget {
     last_opened_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AdvancedSettings {
-    review_export_dir: String,
-    preferred_editor_command: String,
-    human_bridge_mode: String,
-    appearance: String,
-    density: String,
-}
-
-impl Default for AdvancedSettings {
-    fn default() -> Self {
-        Self {
-            review_export_dir: String::new(),
-            preferred_editor_command: String::new(),
-            human_bridge_mode: "file_only".to_string(),
-            appearance: "system".to_string(),
-            density: "comfortable".to_string(),
-        }
-    }
-}
-
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NativeConfig {
     #[serde(default)]
     recent_targets: Vec<RecentTarget>,
-    #[serde(default)]
-    advanced_settings: AdvancedSettings,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,134 +158,6 @@ fn validate_target_path(raw: &str) -> Result<PathBuf, CommandError> {
         ));
     }
 
-    Ok(resolved)
-}
-
-fn validate_review_dir(raw: &str) -> Result<PathBuf, CommandError> {
-    if raw.trim().is_empty() {
-        return Err(CommandError::new(
-            "invalid_review_dir",
-            "A review directory is required.",
-            json!({}),
-        ));
-    }
-
-    let path = PathBuf::from(raw);
-    if path.exists() && !path.is_dir() {
-        return Err(CommandError::new(
-            "invalid_review_dir",
-            "Review path exists but is not a directory.",
-            json!({ "reviewDir": raw }),
-        ));
-    }
-
-    fs::create_dir_all(&path)
-        .map_err(|error| CommandError::io("Could not create review directory.", error))?;
-    path.canonicalize().map_err(|error| {
-        CommandError::new(
-            "invalid_review_dir",
-            "Could not resolve review directory.",
-            json!({ "reviewDir": raw, "exception": error.to_string() }),
-        )
-    })
-}
-
-fn validate_output_dir(raw: &str) -> Result<PathBuf, CommandError> {
-    if raw.trim().is_empty() {
-        return Err(CommandError::new(
-            "invalid_output_dir",
-            "An output directory is required.",
-            json!({}),
-        ));
-    }
-
-    let path = PathBuf::from(raw);
-    if path.exists() && !path.is_dir() {
-        return Err(CommandError::new(
-            "invalid_output_dir",
-            "Output path exists but is not a directory.",
-            json!({ "outputDir": raw }),
-        ));
-    }
-
-    fs::create_dir_all(&path)
-        .map_err(|error| CommandError::io("Could not create output directory.", error))?;
-    path.canonicalize().map_err(|error| {
-        CommandError::new(
-            "invalid_output_dir",
-            "Could not resolve output directory.",
-            json!({ "outputDir": raw, "exception": error.to_string() }),
-        )
-    })
-}
-
-fn validate_observatory_html_path(raw: &str) -> Result<PathBuf, CommandError> {
-    if raw.trim().is_empty() {
-        return Err(CommandError::new(
-            "invalid_observatory_path",
-            "An Observatory HTML path is required.",
-            json!({}),
-        ));
-    }
-    let path = PathBuf::from(raw);
-    let resolved = path.canonicalize().map_err(|error| {
-        CommandError::new(
-            "invalid_observatory_path",
-            "Could not resolve Observatory HTML path.",
-            json!({ "path": raw, "exception": error.to_string() }),
-        )
-    })?;
-    if !resolved.is_file() {
-        return Err(CommandError::new(
-            "invalid_observatory_path",
-            "Observatory path must be a file.",
-            json!({ "path": resolved }),
-        ));
-    }
-    if resolved.file_name().and_then(|name| name.to_str()) != Some("Diffmogger-observatory.html") {
-        return Err(CommandError::new(
-            "invalid_observatory_path",
-            "Only generated Diffmogger Observatory HTML files can be opened.",
-            json!({ "path": resolved }),
-        ));
-    }
-    Ok(resolved)
-}
-
-fn validate_review_artifact_path(raw: &str) -> Result<PathBuf, CommandError> {
-    if raw.trim().is_empty() {
-        return Err(CommandError::new(
-            "invalid_review_artifact",
-            "A review artifact path is required.",
-            json!({}),
-        ));
-    }
-    let path = PathBuf::from(raw);
-    let resolved = path.canonicalize().map_err(|error| {
-        CommandError::new(
-            "invalid_review_artifact",
-            "Could not resolve review artifact path.",
-            json!({ "path": raw, "exception": error.to_string() }),
-        )
-    })?;
-    if !resolved.is_file() {
-        return Err(CommandError::new(
-            "invalid_review_artifact",
-            "Review artifact path must be a file.",
-            json!({ "path": resolved }),
-        ));
-    }
-    let allowed = matches!(
-        resolved.file_name().and_then(|name| name.to_str()),
-        Some("Diffmogger-observatory.html") | Some("Diffmogger-self-review.md")
-    );
-    if !allowed {
-        return Err(CommandError::new(
-            "invalid_review_artifact",
-            "Only generated Diffmogger review artifacts can be opened.",
-            json!({ "path": resolved }),
-        ));
-    }
     Ok(resolved)
 }
 
@@ -413,45 +246,6 @@ fn write_native_config(app: &AppHandle, config: &NativeConfig) -> Result<(), Com
     Ok(())
 }
 
-fn sanitize_advanced_settings(settings: AdvancedSettings) -> Result<AdvancedSettings, CommandError> {
-    if settings.preferred_editor_command.contains('\n') || settings.preferred_editor_command.contains('\r') {
-        return Err(CommandError::new(
-            "invalid_settings",
-            "Preferred editor command must be a single line.",
-            json!({}),
-        ));
-    }
-    if !settings.review_export_dir.trim().is_empty() {
-        let path = PathBuf::from(settings.review_export_dir.trim());
-        if path.exists() && !path.is_dir() {
-            return Err(CommandError::new(
-                "invalid_settings",
-                "Review export directory must be a directory.",
-                json!({ "reviewExportDir": settings.review_export_dir }),
-            ));
-        }
-    }
-    let human_bridge_mode = match settings.human_bridge_mode.as_str() {
-        "file_only" | "local_notifier" | "discord_notifier" | "disabled" => settings.human_bridge_mode,
-        _ => "file_only".to_string(),
-    };
-    let appearance = match settings.appearance.as_str() {
-        "system" | "light" | "dark" => settings.appearance,
-        _ => "system".to_string(),
-    };
-    let density = match settings.density.as_str() {
-        "compact" | "comfortable" => settings.density,
-        _ => "comfortable".to_string(),
-    };
-    Ok(AdvancedSettings {
-        review_export_dir: settings.review_export_dir.trim().to_string(),
-        preferred_editor_command: settings.preferred_editor_command.trim().to_string(),
-        human_bridge_mode,
-        appearance,
-        density,
-    })
-}
-
 fn add_recent_target(app: &AppHandle, target: &Path) -> Result<RecentTarget, CommandError> {
     let target = validate_target_path(&target.display().to_string())?;
     let canonical = target.display().to_string();
@@ -478,40 +272,12 @@ fn add_recent_target(app: &AppHandle, target: &Path) -> Result<RecentTarget, Com
     Ok(recent)
 }
 
-#[tauri::command]
-fn get_advanced_settings(app: AppHandle) -> Result<AdvancedSettings, CommandError> {
-    Ok(read_native_config(&app)?.advanced_settings)
-}
-
-#[tauri::command]
-fn update_advanced_settings(
-    app: AppHandle,
-    settings: AdvancedSettings,
-) -> Result<AdvancedSettings, CommandError> {
-    let sanitized = sanitize_advanced_settings(settings)?;
-    let mut config = read_native_config(&app)?;
-    config.advanced_settings = sanitized.clone();
-    write_native_config(&app, &config)?;
-    Ok(sanitized)
-}
-
 fn backend_command_allowed(command: &str) -> bool {
     READ_ONLY_BACKEND_COMMANDS.contains(&command) || MUTATING_BACKEND_COMMANDS.contains(&command)
 }
 
 fn backend_command_requires_target(command: &str) -> bool {
     !matches!(command, "project.list_recent" | "diagnostics.environment")
-}
-
-fn backend_command_requires_review_dir(command: &str) -> bool {
-    matches!(
-        command,
-        "observatory.generate_html" | "observatory.load_html" | "review.export_bundle"
-    )
-}
-
-fn backend_command_requires_output_dir(command: &str) -> bool {
-    command == "advanced.export_debug_bundle"
 }
 
 fn path_with_native_toolchain() -> (String, String) {
@@ -577,9 +343,9 @@ fn prepare_backend_process(args: &[String]) -> ProcessCommand {
 fn build_backend_args(
     command: &str,
     target: Option<&str>,
-    review_dir: Option<&str>,
-    output_dir: Option<&str>,
-    file_key: Option<&str>,
+    _review_dir: Option<&str>,
+    _output_dir: Option<&str>,
+    _file_key: Option<&str>,
     intake_json: Option<&str>,
     files_json: Option<&str>,
     project_name: Option<&str>,
@@ -588,10 +354,10 @@ fn build_backend_args(
     lease_id: Option<&str>,
     group_mode: Option<&str>,
     max_workers: Option<u32>,
-    request_id: Option<&str>,
+    _request_id: Option<&str>,
     body: Option<&str>,
-    intent: Option<&str>,
-    related: Option<&str>,
+    _intent: Option<&str>,
+    _related: Option<&str>,
     force: Option<bool>,
     _run_codex: Option<bool>,
     ticket_json: Option<&str>,
@@ -633,56 +399,6 @@ fn build_backend_args(
         let resolved = validate_target_path(raw_target)?;
         args.push("--target".to_string());
         args.push(resolved.display().to_string());
-    }
-
-    if backend_command_requires_review_dir(command) {
-        let raw_review_dir = review_dir.ok_or_else(|| {
-            CommandError::new(
-                "invalid_review_dir",
-                "A review directory is required for this backend command.",
-                json!({ "command": command }),
-            )
-        })?;
-        let resolved = validate_review_dir(raw_review_dir)?;
-        args.push("--review-dir".to_string());
-        args.push(resolved.display().to_string());
-    }
-
-    if backend_command_requires_output_dir(command) {
-        let raw_output_dir = output_dir.ok_or_else(|| {
-            CommandError::new(
-                "invalid_output_dir",
-                "An output directory is required for this backend command.",
-                json!({ "command": command }),
-            )
-        })?;
-        let resolved = validate_output_dir(raw_output_dir)?;
-        args.push("--output-dir".to_string());
-        args.push(resolved.display().to_string());
-    }
-
-    if matches!(command, "advanced.load_file" | "advanced.save_file" | "advanced.validate_file") {
-        let key = file_key.ok_or_else(|| {
-            CommandError::new(
-                "invalid_file_key",
-                "A file key is required for this Advanced file command.",
-                json!({ "command": command }),
-            )
-        })?;
-        args.push("--file-key".to_string());
-        args.push(key.to_string());
-    }
-
-    if command == "advanced.save_file" {
-        let content = body.ok_or_else(|| {
-            CommandError::new(
-                "missing_content",
-                "Replacement file content is required for advanced.save_file.",
-                json!({ "command": command }),
-            )
-        })?;
-        args.push("--content".to_string());
-        args.push(content.to_string());
     }
 
     if command == "brief.generate_intake" {
@@ -782,48 +498,6 @@ fn build_backend_args(
         })?;
         args.push("--lease-id".to_string());
         args.push(id.to_string());
-    }
-
-    if matches!(command, "inbox.send_note" | "inbox.reply_request") {
-        let message = body.ok_or_else(|| {
-            CommandError::new(
-                "missing_body",
-                "A message body is required for this inbox command.",
-                json!({ "command": command }),
-            )
-        })?;
-        args.push("--body".to_string());
-        args.push(message.to_string());
-        if let Some(value) = intent.filter(|value| !value.trim().is_empty()) {
-            args.push("--intent".to_string());
-            args.push(value.to_string());
-        }
-    }
-
-    if command == "inbox.send_note" {
-        if let Some(value) = related.filter(|value| !value.trim().is_empty()) {
-            args.push("--related".to_string());
-            args.push(value.to_string());
-        }
-    }
-
-    if command == "inbox.reply_request" {
-        let id = request_id.ok_or_else(|| {
-            CommandError::new(
-                "missing_request_id",
-                "A request id is required for inbox.reply_request.",
-                json!({ "command": command }),
-            )
-        })?;
-        args.push("--request-id".to_string());
-        args.push(id.to_string());
-    }
-
-    if command == "review.mark_reviewed" {
-        if let Some(note) = body.filter(|value| !value.trim().is_empty()) {
-            args.push("--note".to_string());
-            args.push(note.to_string());
-        }
     }
 
     if matches!(
@@ -1529,24 +1203,6 @@ fn stop_runtime_state_watch(watch_id: String) -> Result<(), CommandError> {
     stop_runtime_state_watch_inner(&watch_id)
 }
 
-#[tauri::command]
-fn open_observatory_file(path: String) -> Result<(), CommandError> {
-    let resolved = validate_observatory_html_path(&path)?;
-    open_path(&resolved, "Could not open the generated Observatory HTML in the default browser.")
-}
-
-#[tauri::command]
-fn open_review_artifact(path: String) -> Result<(), CommandError> {
-    let resolved = validate_review_artifact_path(&path)?;
-    open_path(&resolved, "Could not open the generated review artifact.")
-}
-
-#[tauri::command]
-fn reveal_review_artifact(path: String) -> Result<(), CommandError> {
-    let resolved = validate_review_artifact_path(&path)?;
-    reveal_path(&resolved)
-}
-
 fn open_path(resolved: &Path, message: &str) -> Result<(), CommandError> {
     #[cfg(target_os = "macos")]
     let mut command = {
@@ -1609,26 +1265,6 @@ fn run_editor_command(binary: &str, target: &Path) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn editor_binary_from_settings(settings: &AdvancedSettings) -> Option<String> {
-    let first_token = settings
-        .preferred_editor_command
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .trim();
-    if first_token.is_empty() {
-        return None;
-    }
-    let name = Path::new(first_token)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(first_token);
-    if ALLOWED_EDITOR_COMMANDS.contains(&name) {
-        return Some(first_token.to_string());
-    }
-    None
-}
-
 fn reveal_path(resolved: &Path) -> Result<(), CommandError> {
     #[cfg(target_os = "macos")]
     let mut command = {
@@ -1667,38 +1303,18 @@ fn reveal_path(resolved: &Path) -> Result<(), CommandError> {
 
 fn managed_file_path(target: &str, file_key: &str) -> Result<PathBuf, CommandError> {
     let resolved_target = validate_target_path(target)?;
-    let target_text = resolved_target.display().to_string();
-    let payload = run_python_backend(
-        "advanced.load_file",
-        BackendArgs {
-            target: Some(&target_text),
-            file_key: Some(file_key),
-            ..Default::default()
-        },
-    )?;
-    if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        return Err(CommandError::new(
-            "managed_file_lookup_failed",
-            payload
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("Could not resolve managed file."),
-            json!({ "payload": payload }),
-        ));
-    }
-    let raw_path = payload
-        .get("data")
-        .and_then(|data| data.get("file"))
-        .and_then(|file| file.get("path"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            CommandError::new(
+    let rel_path = match file_key {
+        "monitor.automation_tasks" => ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+        _ => {
+            return Err(CommandError::new(
                 "managed_file_lookup_failed",
-                "Backend did not return a managed file path.",
+                "This managed file key is not exposed by the simplified dashboard.",
                 json!({ "fileKey": file_key }),
-            )
-        })?;
-    let resolved = PathBuf::from(raw_path).canonicalize().map_err(|error| {
+            ))
+        }
+    };
+    let raw_path = resolved_target.join(rel_path);
+    let resolved = raw_path.canonicalize().map_err(|error| {
         CommandError::new(
             "managed_file_missing",
             "Managed file does not exist yet.",
@@ -1734,12 +1350,8 @@ fn reveal_project(target: String) -> Result<(), CommandError> {
 }
 
 #[tauri::command]
-fn open_project_in_editor(app: AppHandle, target: String) -> Result<(), CommandError> {
+fn open_project_in_editor(target: String) -> Result<(), CommandError> {
     let resolved = validate_target_path(&target)?;
-    let settings = read_native_config(&app)?.advanced_settings;
-    if let Some(binary) = editor_binary_from_settings(&settings) {
-        return run_editor_command(&binary, &resolved);
-    }
     for binary in ALLOWED_EDITOR_COMMANDS {
         if which_on_path(binary).is_some() {
             return run_editor_command(binary, &resolved);
@@ -1837,31 +1449,6 @@ fn select_ticket_import_file() -> Result<Option<String>, CommandError> {
     Ok(Some(resolved.display().to_string()))
 }
 
-#[tauri::command]
-fn select_settings_directory() -> Result<Option<String>, CommandError> {
-    let picked = rfd::FileDialog::new()
-        .set_title("Choose directory")
-        .pick_folder();
-    let Some(folder) = picked else {
-        return Ok(None);
-    };
-    let resolved = folder.canonicalize().map_err(|error| {
-        CommandError::new(
-            "invalid_settings_directory",
-            "Could not resolve selected directory.",
-            json!({ "path": folder, "exception": error.to_string() }),
-        )
-    })?;
-    if !resolved.is_dir() {
-        return Err(CommandError::new(
-            "invalid_settings_directory",
-            "Selected path must be a directory.",
-            json!({ "path": resolved }),
-        ));
-    }
-    Ok(Some(resolved.display().to_string()))
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1871,16 +1458,10 @@ pub fn run() {
             select_project_folder,
             select_context_files,
             select_ticket_import_file,
-            select_settings_directory,
-            get_advanced_settings,
-            update_advanced_settings,
             run_backend_command_streamed,
             run_backend_command,
             start_runtime_state_watch,
             stop_runtime_state_watch,
-            open_observatory_file,
-            open_review_artifact,
-            reveal_review_artifact,
             open_managed_file,
             reveal_managed_file,
             reveal_project,
@@ -1959,42 +1540,6 @@ mod tests {
         assert_eq!(payload["ok"], true);
         assert_eq!(payload["command"], "project.load_snapshot");
         assert!(payload["data"]["target"]["path"].as_str().is_some());
-    }
-
-    #[test]
-    fn validates_only_generated_observatory_html_paths() {
-        let root = kit_root().expect("Diffmogger kit root should resolve during native tests");
-        let valid_dir = root.join("target").join("native-test-observatory");
-        fs::create_dir_all(&valid_dir).expect("test directory should be created");
-        let valid = valid_dir.join("Diffmogger-observatory.html");
-        fs::write(&valid, "<html></html>").expect("test html should be written");
-
-        assert!(validate_observatory_html_path(&valid.display().to_string()).is_ok());
-        assert!(
-            validate_observatory_html_path(&root.join("README.md").display().to_string()).is_err()
-        );
-
-        let _ = fs::remove_file(valid);
-        let _ = fs::remove_dir_all(valid_dir);
-    }
-
-    #[test]
-    fn validates_only_generated_review_artifacts() {
-        let root = kit_root().expect("Diffmogger kit root should resolve during native tests");
-        let valid_dir = root.join("target").join("native-test-review");
-        fs::create_dir_all(&valid_dir).expect("test directory should be created");
-        let markdown = valid_dir.join("Diffmogger-self-review.md");
-        let html = valid_dir.join("Diffmogger-observatory.html");
-        let other = valid_dir.join("notes.md");
-        fs::write(&markdown, "# Review\n").expect("test markdown should be written");
-        fs::write(&html, "<html></html>").expect("test html should be written");
-        fs::write(&other, "# Notes\n").expect("test notes should be written");
-
-        assert!(validate_review_artifact_path(&markdown.display().to_string()).is_ok());
-        assert!(validate_review_artifact_path(&html.display().to_string()).is_ok());
-        assert!(validate_review_artifact_path(&other.display().to_string()).is_err());
-
-        let _ = fs::remove_dir_all(valid_dir);
     }
 
     #[test]

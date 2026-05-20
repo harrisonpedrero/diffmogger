@@ -172,94 +172,9 @@ def update_progress(
     cleanup_summary: list[str],
     dry_run: bool,
 ) -> None:
-    progress = dpath(target, "docs/MULTI_ROLE_PROGRESS.md")
-    sqlite_rel = target_rel(target, "target/orchestration.sqlite3")
-    header = "\n\n".join(
-        [
-            "# Multi-Role Progress",
-            f"Generated dashboard/export projection for optional multi-role automation. SQLite in `{sqlite_rel}` is the live state authority.",
-            "Continuous DAG scheduler mode prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning after planner deferral changes, review/hardening, validation, targeted repairs, and compatible build waves.",
-        ]
-    )
-    sections: dict[str, str] = {}
-    accepted_counts, deferred_counts, integrator_runs = progress_counts(target)
-    deferred_items = deferred_manifests(target)
-    control = automation_control_state(target)
-    baseline = read_baseline_record(target)
-    baseline_status = progress_inline(str(baseline.get("status") or "not_recorded"), target, limit=80)
-    baseline_root = progress_inline(str(baseline.get("root_cause") or "No baseline verification recorded."), target)
-    baseline_next = progress_inline(str(baseline.get("next_action") or "Run integrator baseline preflight."), target)
-    accepted_lines = [
-        f"- {progress_inline(str(manifest.get('role') or 'role'), target)} `{progress_inline(str(manifest.get('run_id') or 'unknown'), target, limit=80)}` -> {commit or 'no commit'}: {progress_inline(first_summary_line(str(manifest.get('summary') or '')) or 'No summary.', target)}"
-        for _, manifest, commit in committed
-    ] or ["- None."]
-    backlog_lines = [
-        f"- {progress_inline(str(item.get('role') or 'role'), target)} `{progress_inline(str(item.get('run_id') or 'unknown'), target, limit=80)}`: {progress_inline(str(item.get('deferral_reason') or 'other'), target, limit=80)}; {summarize_deferral_for_progress(item, target)}"
-        for item in deferred_items
-    ] or ["- None."]
-    changed_files = sorted(
-        {progress_inline(str(file), target, limit=160) for _, manifest, _ in committed for file in (manifest.get("changed_files") or [])}
-    )
-    recent_body = ""
-    entry_lines = [
-        f"### {utc_now().isoformat(timespec='seconds')} {run_id}",
-        "",
-        f"- verification: {progress_inline(verification_status, target)}",
-        f"- baseline_verification: {baseline_status}; {baseline_root}",
-        f"- accepted_patches: {len(committed)}",
-        f"- deferred_patches: {deferred_count}",
-        f"- checkpoint_commit: {checkpoint_commit or 'none'}",
-        "- accepted:",
-        *accepted_lines,
-        "- files_changed:",
-        *([f"  - {file}" for file in changed_files] or ["  - none"]),
-    ]
-    if cleanup_summary:
-        entry_lines.extend(["- cleanup:", *[f"  - {line}" for line in cleanup_summary]])
-    recent_body = (recent_body.rstrip() + "\n\n" + "\n".join(entry_lines)).strip()
-    sections["Project State At Last Integration"] = "\n".join(
-        [
-            f"- Current product horizon: {progress_inline(str(control.get('horizon') or 'unknown'), target)}",
-            f"- Horizon decision: {progress_inline(str(control.get('horizon_decision') or 'unknown'), target, limit=120)}",
-            f"- Latest evidence: integrator run `{run_id}` accepted {len(committed)} patches and deferred {deferred_count}.",
-            f"- Last integrator run: {utc_now().isoformat(timespec='seconds')}",
-            f"- Last verification status: {progress_inline(verification_status, target)}",
-            f"- Baseline verification: {baseline_status}; {baseline_root}",
-            f"- Baseline next action: {baseline_next}",
-        ]
-    )
-    sections["Cumulative Metrics"] = "\n".join(
-        [
-            f"- Total integrator runs: {integrator_runs}",
-            "- Accepted patches by role:",
-            *[f"  - {role}: {accepted_counts[role]}" for role in QUEUE_ROLES],
-            "- Deferred patches by role:",
-            *[f"  - {role}: {deferred_counts[role]}" for role in QUEUE_ROLES],
-            f"- Current deferred queue depth: {len(deferred_items)}",
-            "- Mean time from role-run completion to integration: not computed",
-            "- Human messages handled: recorded in typed human-message state",
-            "- Human requests created: recorded in typed human-message state",
-            "- Human requests resolved: recorded in typed human-message state",
-        ]
-    )
-    sections["Recent Activity Log"] = recent_body
-    sections["Historical Summary"] = "- Historical progress is represented by role manifests and SQLite events."
-    sections["Deferred-Patch Backlog"] = "\n".join(backlog_lines)
-    sections["Architectural Decisions"] = "- None recorded in typed state."
-    sections["Role Health"] = "\n".join(
-        [
-            f"- {role}: accepted={accepted_counts.get(role, 0)} deferred={deferred_counts.get(role, 0)}"
-            for role in QUEUE_ROLES
-        ]
-        + [f"- integrator: runs={integrator_runs}"]
-    )
-    body = header.rstrip() + "\n\n"
-    for section in PROGRESS_SECTIONS:
-        body += f"## {section}\n\n{sections.get(section, '').strip()}\n\n"
-    body = scrub_local_references(body, target)
-    if not dry_run:
-        progress.parent.mkdir(parents=True, exist_ok=True)
-        progress.write_text(body.rstrip() + "\n", encoding="utf-8")
+    # SQLite plus CODEX_AUTOMATION_TASKS.md are the generated target state surface.
+    # update_task_file appends the small generated handoff note.
+    return
 
 def update_task_file(
     target: Path,

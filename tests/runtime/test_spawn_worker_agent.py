@@ -41,6 +41,32 @@ EOF
         stub.chmod(0o755)
         return bin_dir
 
+    def write_recording_codex_stub(self, root: Path, args_path: Path) -> Path:
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "codex"
+        stub.write_text(
+            f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" > {str(args_path)!r}
+prompt="${{@: -1}}"
+report_path="$(printf '%s' "$prompt" | awk -F'Output report: ' '/Output report: / {{print $2; exit}}')"
+mkdir -p "$(dirname "$report_path")"
+cat >"$report_path" <<EOF
+# Worker Report
+
+- status: PASS
+
+## Findings
+
+- Stub worker wrote the requested report.
+EOF
+""",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        return bin_dir
+
     def test_write_mode_rejects_whitespace_only_ownership_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -103,6 +129,42 @@ EOF
             self.assertIn(f"WORKER_REPORT path={report_path}", result.stdout)
             self.assertTrue((report_path.parent / "custom-worker-report.raw.log").exists())
             self.assertFalse((target / "target" / "agent_runs").exists())
+
+    def test_worker_exec_explicitly_disables_optional_mcp_servers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            target.mkdir()
+            report_path = root / "reports" / "worker-report.md"
+            args_path = root / "codex-args.txt"
+            bin_dir = self.write_recording_codex_stub(root, args_path)
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(WORKER_HELPER),
+                    "--target",
+                    str(target),
+                    "--run-id",
+                    "mcp-off-test",
+                    "--role",
+                    "review",
+                    "--read-only",
+                    "--report-path",
+                    str(report_path),
+                    "--prompt",
+                    "Write a report.",
+                ],
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            args = args_path.read_text(encoding="utf-8")
+            self.assertIn("mcp_servers.context7.enabled=false", args)
+            self.assertIn("mcp_servers.playwright.enabled=false", args)
 
 
 if __name__ == "__main__":

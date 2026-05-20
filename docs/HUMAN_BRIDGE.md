@@ -24,15 +24,15 @@ Diffmogger supports:
 - `discord_notifier`: Discord progress/messages plus optional native local desktop notifications.
 - `disabled`: no human bridge queue required.
 
-In `file_only` mode, if the human asks `send me a summary`, `status update`, or similar in the dashboard Inbox, the automation should answer through the dashboard or an explicitly requested local artifact. It should not call notifier APIs unless the target project is explicitly configured for notifier mode.
+In `file_only` mode, if the human asks `send me a summary`, `status update`, or similar in the dashboard human-input panel, the automation should answer through the dashboard or an explicitly requested local artifact. It should not call notifier APIs unless the target project is explicitly configured for notifier mode.
 
 No Discord, webhook, notifier API, or messaging credentials are used in this mode.
 
 ## Dashboard State
 
-Enabled bridge modes use typed human-message state in `.diffmogger/runtime/orchestration.sqlite3`, exposed through the dashboard Inbox. Codex records requests. The human replies in the dashboard. A later run handles the reply, marks it resolved only after the requested action is complete or intentionally deferred, and records a concise resolution note.
+Enabled bridge modes use typed human-message state in `.diffmogger/runtime/orchestration.sqlite3`, exposed through the dashboard human-input panel. Codex records requests. The human replies in the dashboard. A later run handles the reply, marks it resolved only after the requested action is complete or intentionally deferred, and records a concise resolution note.
 
-Generated targets also include `.diffmogger/state/HUMAN_BRIDGE_SETUP.md` when the bridge is enabled. That generated file is a target-local setup note; this source kit keeps the reusable template under `templates/docs/HUMAN_BRIDGE_SETUP.md`.
+Generated targets do not create separate human-bridge setup docs. Bridge mode, pending input, replies, and delivery records live in typed SQLite state and the dashboard human-input panel; lean target instructions stay in `AGENTS.md` and the guardrails/task projection.
 
 ## Bundled Notifier Service
 
@@ -63,7 +63,7 @@ Target projects must not import notifier code, inspect notifier internals during
 
 Progress events use `event_kind: "progress"` and route to the Discord progress channel when `discord_notifier` is configured. In multi-role automation, each local commit created by `.diffmogger/scripts/integrate_role_outputs.py` triggers a brief progress notification with the commit subject and work summary.
 
-Direct human messages use `event_kind: "message"` and route to the Discord messaging channel when configured. Human-unlock requests, blockers that need user input, and replies to user messages also use `event_kind: "message"`. They default to local desktop notifications when local notifications are enabled.
+Direct human messages use `event_kind: "message"` and route to the Discord messaging channel when configured. Human-unlock requests, pending input records, and replies to user messages also use `event_kind: "message"`. They default to local desktop notifications when local notifications are enabled. Human input should not pause automation while independent or unblocker work can continue.
 
 Example direct message:
 
@@ -86,7 +86,7 @@ Example direct message:
 }
 ```
 
-Ticket completion and terminal blocker notifications should use `event_kind: "progress"` and set `local_notify: true` when the human should also receive a local desktop notification.
+Ticket completion notifications should use `event_kind: "progress"` and set `local_notify: true` when the human should also receive a local desktop notification. Blocked tickets should create unblocker work rather than terminal notifications unless every ticket is already done with evidence.
 
 If the notifier is unavailable:
 

@@ -334,6 +334,99 @@ class ReadOnlyWorkerFanoutTests(unittest.TestCase):
             self.assertNotIn("_", report_path.name.removeprefix("worker_").removesuffix(".md"))
             self.assertEqual(report_path, Path(str(workers[0]["payload"]["report_path"])))
 
+    def test_duplicate_read_only_review_items_launch_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.setup_target(target)
+            commands: list[list[str]] = []
+
+            def capture_runner(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+                commands.append(command)
+                report = Path(command[command.index("--report-path") + 1])
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text("- status: PASS\n\n## Findings\n\n- Deduped report.\n", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, stdout=f"WORKER_REPORT path={report}\n", stderr="")
+
+            duplicate_group = {
+                "execution_group_id": "execution-group:duplicate-review",
+                "payload": {"execution_mode": "read_only"},
+                "items": [
+                    {
+                        "item_id": "review-1",
+                        "task_id": "AUTO-001",
+                        "owner_role": "builder",
+                        "payload": {"action_type": "review", "dag_node_id": "dag-node:review-1"},
+                    },
+                    {
+                        "item_id": "review-2",
+                        "task_id": "AUTO-001",
+                        "owner_role": "builder",
+                        "payload": {"action_type": "review", "dag_node_id": "dag-node:review-2"},
+                    },
+                ],
+            }
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = launch_read_only_execution_group_conn(
+                    conn,
+                    target,
+                    group=duplicate_group,
+                    max_workers=3,
+                    command_runner=capture_runner,
+                )
+
+            self.assertEqual("completed", result["status"])
+            self.assertEqual(1, result["worker_count"])
+            self.assertEqual(1, len(commands))
+
+    def test_same_role_read_only_items_get_unique_report_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            self.setup_target(target)
+            commands: list[list[str]] = []
+
+            def capture_runner(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+                commands.append(command)
+                report = Path(command[command.index("--report-path") + 1])
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text("- status: PASS\n\n## Findings\n\n- Unique report.\n", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, stdout=f"WORKER_REPORT path={report}\n", stderr="")
+
+            group = {
+                "execution_group_id": "execution-group:same-role-distinct-actions",
+                "payload": {"execution_mode": "read_only"},
+                "items": [
+                    {
+                        "item_id": "scope-1",
+                        "task_id": "AUTO-001",
+                        "owner_role": "builder",
+                        "payload": {"action_type": "scope", "dag_node_id": "dag-node:scope-1"},
+                    },
+                    {
+                        "item_id": "review-1",
+                        "task_id": "AUTO-001",
+                        "owner_role": "builder",
+                        "payload": {"action_type": "review", "dag_node_id": "dag-node:review-1"},
+                    },
+                ],
+            }
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = launch_read_only_execution_group_conn(
+                    conn,
+                    target,
+                    group=group,
+                    max_workers=3,
+                    command_runner=capture_runner,
+                )
+                workers = worker_agents_conn(conn, mode="read_only")
+
+            self.assertEqual("completed", result["status"])
+            self.assertEqual(2, result["worker_count"])
+            report_paths = [Path(command[command.index("--report-path") + 1]) for command in commands]
+            self.assertEqual(2, len(set(report_paths)))
+            self.assertEqual(2, len({Path(str(worker["payload"]["report_path"])) for worker in workers if worker["execution_group_id"] == group["execution_group_id"]}))
+
     def test_dependent_read_only_tickets_do_not_share_parallel_wave(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)

@@ -8,7 +8,7 @@ from diffmogger.runtime.paths import target_rel
 from diffmogger.runtime.state_store import automation_control_state
 
 def write_no_progress_progress_note(target: Path, info: dict[str, Any]) -> None:
-    progress = dpath(target, "docs/MULTI_ROLE_PROGRESS.md")
+    task = dpath(target, "docs/CODEX_AUTOMATION_TASKS.md")
     sqlite_rel = target_rel(target, "target/orchestration.sqlite3")
     queue_rel = target_rel(target, "target/automation_queue")
     reason = re.sub(r"\s+", " ", str(info.get("reason") or "integrator made no patch progress")).strip()
@@ -21,54 +21,24 @@ def write_no_progress_progress_note(target: Path, info: dict[str, Any]) -> None:
     deferred_depth = int(snapshot.get("deferred", 0) or 0)
     body = "\n".join(
         [
-            "# Multi-Role Progress",
-            "",
-            f"Generated dashboard/export projection for optional multi-role automation. SQLite in `{sqlite_rel}` is the live state authority.",
-            "Continuous DAG scheduler mode prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning after planner deferral changes, review/hardening, validation, targeted repairs, and compatible build waves.",
-            "",
-            "## Project State At Last Integration",
+            "## Scheduler No-Progress Note",
             "",
             f"- Current product horizon: {control.get('horizon') or 'unknown'}",
             "- Latest evidence: no-progress circuit breaker tripped after an integrator cycle.",
             f"- Last integrator run: {stamp}",
             "- Last verification status: recorded in typed validation receipts",
-            "",
-            "## Cumulative Metrics",
-            "",
-            "- Total integrator runs: recorded in role manifests",
-            "- Accepted patches by role:",
-            *[f"  - {role}: {int(applied_by_role.get(role, 0) or 0)}" for role in QUEUE_ROLES],
-            "- Deferred patches by role:",
-            *[f"  - {role}: {int(deferred_by_role.get(role, 0) or 0)}" for role in QUEUE_ROLES],
+            f"- Accepted patches by role: {', '.join(f'{role}={int(applied_by_role.get(role, 0) or 0)}' for role in QUEUE_ROLES)}",
+            f"- Deferred patches by role: {', '.join(f'{role}={int(deferred_by_role.get(role, 0) or 0)}' for role in QUEUE_ROLES)}",
             f"- Current deferred queue depth: {deferred_depth}",
-            "",
-            "## Recent Activity Log",
-            "",
-            f"### {stamp} conveyor-no-progress",
-            "",
             f"- circuit_breaker: active after {info.get('streak', 0)} no-progress integrator cycle(s).",
             f"- reason: {reason}",
-            "- next_lane: planner handoff or idle until the blocked condition changes.",
-            "",
-            "## Historical Summary",
-            "",
-            "- Historical progress is represented by role manifests and SQLite events.",
-            "",
-            "## Deferred-Patch Backlog",
-            "",
+            "- next_lane: planner handoff to create unblocker work or choose independent DAG work.",
             f"- See role manifests under `{queue_rel}/` for deferred patch details.",
-            "",
-            "## Architectural Decisions",
-            "",
-            "- None recorded in typed state.",
-            "",
-            "## Role Health",
-            "",
-            f"- conveyor: no-progress circuit breaker active; {reason}",
         ]
     )
-    progress.parent.mkdir(parents=True, exist_ok=True)
-    progress.write_text(body.rstrip() + "\n", encoding="utf-8")
+    task.parent.mkdir(parents=True, exist_ok=True)
+    existing = task.read_text(encoding="utf-8") if task.exists() else "# Codex Automation Tasks\n"
+    task.write_text(existing.rstrip() + "\n\n" + body.rstrip() + "\n", encoding="utf-8")
 
 def no_progress_info(state: dict[str, Any]) -> dict[str, Any]:
     info = state.get(NO_PROGRESS_STATE_KEY)
@@ -326,8 +296,8 @@ def apply_timeout_circuit_breaker(
         return role, reason, stop
     if role == "planner":
         return (
-            None,
-            f"planner lane timed out {streak} consecutive time(s); waiting for manual or environment recovery",
+            "planner",
+            f"planner lane timed out {streak} consecutive time(s); create setup, split, reframe, defer, or alternate-ticket work",
             False,
         )
     return (

@@ -65,11 +65,7 @@ def latest_run_id(target: Path) -> str:
 
 
 def agent_runs_dirs(target: Path) -> list[Path]:
-    canonical = target_path(target, "target/agent_runs")
-    legacy = target / "target" / "agent_runs"
-    if canonical == legacy:
-        return [canonical]
-    return [canonical, legacy]
+    return [target_path(target, "target/agent_runs")]
 
 
 def run_dir_for_summary(target: Path, run_id: str) -> Path:

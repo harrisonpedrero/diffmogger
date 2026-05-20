@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared path helpers for legacy and sidecar Diffmogger target layouts."""
+"""Shared path helpers for Diffmogger target sidecar layouts."""
 
 from __future__ import annotations
 
@@ -23,21 +23,9 @@ PATH_ALIASES: dict[str, str] = {
     ".agentic/roles/hardener.md": ".diffmogger/agentic/roles/hardener.md",
     ".agentic/roles/integrator.md": ".diffmogger/agentic/roles/integrator.md",
     ".codex/config.toml": ".diffmogger/agentic/codex_config.toml",
-    "docs/AUTONOMY_EXPERIMENT_LOG.md": ".diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md",
     "docs/CODEX_AUTOMATION_GUARDRAILS.md": ".diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md",
     "docs/CODEX_AUTOMATION_TASKS.md": ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
-    "docs/DAILY_AUTOMATION_REVIEW.md": ".diffmogger/state/DAILY_AUTOMATION_REVIEW.md",
     "docs/DEVELOPMENT.md": ".diffmogger/state/DEVELOPMENT.md",
-    "docs/HUMAN_BRIDGE_SETUP.md": ".diffmogger/state/HUMAN_BRIDGE_SETUP.md",
-    "docs/HUMAN_INBOX.md": ".diffmogger/state/HUMAN_INBOX.md",
-    "docs/HUMAN_OUTBOX.md": ".diffmogger/state/HUMAN_OUTBOX.md",
-    "docs/HUMAN_REQUESTS.md": ".diffmogger/state/HUMAN_REQUESTS.md",
-    "docs/HUMAN_RESPONSES_ARCHIVE.md": ".diffmogger/state/HUMAN_RESPONSES_ARCHIVE.md",
-    "docs/MCP_INTEGRATIONS.md": ".diffmogger/state/MCP_INTEGRATIONS.md",
-    "docs/MULTI_ROLE_PROGRESS.md": ".diffmogger/state/MULTI_ROLE_PROGRESS.md",
-    "docs/PROJECT_CONTEXT.md": ".diffmogger/state/PROJECT_CONTEXT.md",
-    "docs/TICKET_RUN.md": ".diffmogger/state/TICKET_RUN.md",
-    "docs/backlog/README.md": ".diffmogger/state/backlog/README.md",
     "docs/context": ".diffmogger/context",
     "target/action_plan_history.json": ".diffmogger/runtime/action_plan_history.json",
     "target/agent_runs": ".diffmogger/runtime/agent_runs",
@@ -134,24 +122,14 @@ def target_path(target: Path, legacy_rel: str | Path) -> Path:
     return target / target_rel(target, legacy_rel)
 
 
-def existing_target_path(target: Path, legacy_rel: str | Path) -> Path:
-    sidecar = target / sidecar_rel(legacy_rel)
-    if sidecar.exists():
-        return sidecar
-    return target / normalize_rel(legacy_rel)
-
-
 def existing_or_target_path(target: Path, legacy_rel: str | Path) -> Path:
-    if sidecar_enabled(target):
-        return target_path(target, legacy_rel)
-    return existing_target_path(target, legacy_rel)
+    return target_path(target, legacy_rel)
 
 
 def preferred_target_path(target: Path, legacy_rel: str | Path) -> Path:
-    legacy = target / normalize_rel(legacy_rel)
-    if not sidecar_enabled(target) and legacy.exists():
-        return legacy
-    return target / sidecar_rel(legacy_rel)
+    if sidecar_enabled(target):
+        return target_path(target, legacy_rel)
+    return target / normalize_rel(legacy_rel)
 
 
 def manifest_list(manifest: dict[str, Any], key: str) -> list[str]:

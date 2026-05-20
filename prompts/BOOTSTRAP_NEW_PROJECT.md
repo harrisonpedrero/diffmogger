@@ -1,9 +1,7 @@
 # Bootstrap New Project Prompt
 
 Use this in a fresh or newly retrofitted target repo after generating project-specific files.
-New generated targets use the `.diffmogger/` sidecar layout. If a target has no
-`.diffmogger/manifest.json`, use the equivalent legacy `.agentic/`, `docs/`, and
-`target/` paths.
+New generated targets use the `.diffmogger/` sidecar layout.
 
 ---
 
@@ -13,11 +11,10 @@ Read first:
 
 1. `README.md` if present.
 2. `AGENTS.md` if present.
-3. `.diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md`.
-4. `.diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md` if present.
-5. `.diffmogger/runtime/canonical_state_brief.md` if present.
-6. `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` if present.
-7. `.diffmogger/state/PROJECT_CONTEXT.md` if present.
+3. `.diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md` if present.
+4. `.diffmogger/runtime/canonical_state_brief.md` if present.
+5. `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` if present.
+6. Relevant files listed in intake/dashboard context records.
 
 ## Mission
 
@@ -25,22 +22,20 @@ Create or confirm the first runnable product baseline and install the automation
 
 ## Required Work
 
-- Scaffold or refine the project according to `.diffmogger/state/INITIAL_BOOTSTRAP_PROMPT.md`.
+- Scaffold or refine the project according to the intake and canonical state brief.
 - Create or update `AGENTS.md`.
 - Create or update `.diffmogger/agentic/automation_prompt.md`.
 - Seed or update typed automation control state in `.diffmogger/runtime/orchestration.sqlite3`, including explicit product horizon state and a horizon transition log, then refresh `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` as a prompt/handoff projection.
 - Create or update `.diffmogger/state/CODEX_AUTOMATION_GUARDRAILS.md`.
-- Create or update `.diffmogger/state/PROJECT_CONTEXT.md` when supplemental context exists.
-- Create or update human bridge docs if enabled.
-- Create or update `.diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md`.
-- Create or update `.diffmogger/state/DAILY_AUTOMATION_REVIEW.md`.
+- Track supplemental context through `.diffmogger/context/` plus intake/dashboard state; do not create a separate project-context Markdown index.
+- Keep human input in typed SQLite/dashboard records; do not create separate human-bridge setup docs.
 - Create or update local automation helper scripts under `.diffmogger/scripts/`: `run_conveyor_automation.sh`, `run_conveyor_automation.py`, `run_role_automation.sh`, `integrate_role_outputs.py`, `list_deferred_patches.py`, `run_observatory.py`, `repair_environment.py`, `state_brief.py`, `acquire_codex_lock.sh`, `release_codex_lock.sh`, `spawn_worker_agent.sh`, `summarize_worker_outputs.py`, and `compact_agent_state.py`.
 - Ensure the runtime can initialize `.diffmogger/runtime/orchestration.sqlite3`, materialize typed automation control, execution DAG nodes/edges, repo capability manifest, validation receipts, blockers, and next actions, regenerate `.diffmogger/runtime/canonical_state_brief.md`, and include `.diffmogger/schemas/orchestration_state.schema.json`.
-- If multi-role mode is enabled, create or update `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, `.diffmogger/agentic/roles/integrator.md`, and `.diffmogger/state/MULTI_ROLE_PROGRESS.md`.
+- If multi-role mode is enabled, create or update `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, and `.diffmogger/agentic/roles/integrator.md`.
 - Add a one-command local verification or demo path when practical.
 - Ensure `.diffmogger/agentic/automation_prompt.md` explains the configured human bridge mode, local lock helpers, wrapper-owned lock behavior with `CODEX_LOCK_ALREADY_ACQUIRED=true`, canonical typed SQLite runtime state, generated projection compaction, nested child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` worker usage, parent wrapper `--add-dir "$HOME/.codex"` behavior for nested CLI startup, explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` records, and explicit worker strategy decisions.
 - Preserve read-only worker reports for exploration and document write-capable workers as always available, optional per run, capped by `max_write_worker_count`, and governed by parallelism-budget decisions, reviewable ownership rules, lightweight coordination, main-agent integration/review/verification duties, and the option to run integration-only with no workers.
-- Preserve the execution DAG scheduler architecture with the `planner_builder_hardener_integrator` role profile. Document bounded vs ongoing campaign behavior, the DAG scheduler config fields, local-only no-remote rule, worktree queue paths, integrator ownership, SQLite checkpoints/events, batched verification fallback, deferred-patch schema, observability through `.diffmogger/scripts/run_observatory.py`, and `.diffmogger/state/MULTI_ROLE_PROGRESS.md` projection responsibilities.
+- Preserve the execution DAG scheduler architecture with the `planner_builder_hardener_integrator` role profile. Document bounded vs ongoing campaign behavior, the DAG scheduler config fields, local-only no-remote rule, worktree queue paths, integrator ownership, SQLite checkpoints/events, batched verification fallback, deferred-patch schema, liveness-first unblocker work, and observability through `.diffmogger/scripts/run_observatory.py`.
 
 ## Behavior
 

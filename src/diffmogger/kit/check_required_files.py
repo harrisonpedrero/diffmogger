@@ -42,11 +42,8 @@ BASE_REQUIRED = [
     "scripts/summarize_worker_outputs.py",
     "scripts/compact_agent_state.py",
     "docs/DEVELOPMENT.md",
-    "docs/PROJECT_CONTEXT.md",
     "docs/CODEX_AUTOMATION_TASKS.md",
     "docs/CODEX_AUTOMATION_GUARDRAILS.md",
-    "docs/AUTONOMY_EXPERIMENT_LOG.md",
-    "docs/DAILY_AUTOMATION_REVIEW.md",
 ]
 
 TICKET_CAMPAIGN_REQUIRED = []
@@ -58,7 +55,6 @@ MULTI_ROLE_REQUIRED = [
     ".agentic/roles/builder.md",
     ".agentic/roles/hardener.md",
     ".agentic/roles/integrator.md",
-    "docs/MULTI_ROLE_PROGRESS.md",
     "scripts/run_role_automation.sh",
     "scripts/integrate_role_outputs.py",
     "scripts/list_deferred_patches.py",
@@ -66,12 +62,10 @@ MULTI_ROLE_REQUIRED = [
 
 MCP_REQUIRED = [
     ".codex/config.toml",
-    "docs/MCP_INTEGRATIONS.md",
 ]
 
 PLAYWRIGHT_MCP_REQUIRED = [
     "scripts/run_playwright_mcp.sh",
-    "docs/backlog/README.md",
 ]
 
 RUNTIME_LIBRARY_REQUIRED = [
@@ -152,14 +146,12 @@ TASK_REQUIRED_STRINGS = [
     "## Current Project State",
     "## Automation Must Never Do",
     "## Product Horizon State",
-    "## Horizon Transition Log",
-    "## Completed Last Run",
     "## Checks From Last Run",
-    "## Worker-Agent Activity",
-    "Parallelism budget:",
+    "## Scheduler Work",
+    "## Validation And Repair",
+    "Required validation failure creates repair work.",
     "## Known Issues",
-    "## Pending Human Requests",
-    "## Human Messages Sent",
+    "## Human Input",
     "## Best Next Milestone",
     "## Suggested Next Sprint-Sized Task",
     "## Continue/Block/Critical-Stop Rationale",
@@ -172,18 +164,13 @@ TASK_BACKLOG_HEADINGS = [
 ]
 
 DEVELOPMENT_REQUIRED_STRINGS = [
-    "First Review Checklist",
-    "bash scripts/validate_starter_kit.sh",
-    "python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch",
+    "## Setup",
+    "## Verification",
+    "## Automation",
     "python3 .diffmogger/scripts/ticket_run.py . status --json",
-    "Run Safety Check",
-    "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
-    "Diffmogger-observatory.html",
-    "Diffmogger-self-review.md",
-    "Automation Environment Loading",
-    "CODEX_AUTOMATION_ENV_FILES",
-    "CODEX_AUTOMATION_ENV_DENYLIST",
-    "npm run browser-smoke",
+    "python3 .diffmogger/scripts/ticket_run.py . next --json",
+    "python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch",
+    "Failed validation creates work",
 ]
 
 AUTOMATION_REQUIRED_STRINGS = [
@@ -191,17 +178,12 @@ AUTOMATION_REQUIRED_STRINGS = [
     ".diffmogger/scripts/acquire_codex_lock.sh",
     ".diffmogger/scripts/release_codex_lock.sh",
     ".diffmogger/scripts/spawn_worker_agent.sh",
-    ".diffmogger/scripts/summarize_worker_outputs.py",
     ".diffmogger/runtime/canonical_state_brief.md",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
-    "command -v codex",
-    "--dangerously-bypass-approvals-and-sandbox",
     "ACTIVE_WITH_PENDING_USER_INPUT",
     "BLOCKED_ON_USER",
     "campaign",
-    ".diffmogger/scripts/ticket_run.py",
-    "MCP decision: context7 used|skipped",
-    "npm run browser-smoke",
+    "Failed validation creates work",
 ]
 
 RUNNER_REQUIRED_STRINGS = [
@@ -259,9 +241,8 @@ CONVEYOR_REQUIRED_STRINGS = [
     "CODEX_ROLE_TIMEOUT_SECONDS",
     "role_timeout_streaks",
     "decision_queue",
-    "planner deferred patch resolved",
     "bounded campaign complete",
-    "bounded campaign blocked",
+    "bounded campaign has blocked tickets requiring unblocker work",
 ]
 
 OBSERVATORY_REQUIRED_STRINGS = [
@@ -315,11 +296,6 @@ TICKET_HELPER_REQUIRED_STRINGS = [
 WRITE_WORKER_AUTOMATION_REQUIRED_STRINGS = [
     "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS",
     "Parallelism budget:",
-    "Write-capable worker agents allowed: true",
-    "Max write worker count:",
-    "--mode write",
-    "not alone in the codebase",
-    "blindly accepting changes",
 ]
 
 WRITE_WORKER_HELPER_REQUIRED_STRINGS = [
@@ -362,29 +338,15 @@ DISCORD_NOTIFIER_AUTOMATION_REQUIRED_STRINGS = [
 
 MULTI_ROLE_AUTOMATION_REQUIRED_STRINGS = [
     "Role profile: `planner_builder_hardener_integrator`",
-    "Continuous DAG scheduler",
-    "target/automation_worktrees",
-    "target/automation_queue",
-    "docs/MULTI_ROLE_PROGRESS.md",
+    "continuous local execution DAG scheduler",
+    ".diffmogger/runtime/",
     "CRITICAL_STOP",
 ]
 
 MULTI_ROLE_GUARDRAIL_REQUIRED_STRINGS = [
-    "Multi-role automation is enabled",
-    "MULTI_ROLE_ALLOW_REMOTES=1",
-    "checkpoint dirty main changes as-is",
-    "machine-readable deferral reasons",
-]
-
-MULTI_ROLE_PROGRESS_REQUIRED_STRINGS = [
-    "## Project State At Last Integration",
-    "## Cumulative Metrics",
-    "## Recent Activity Log",
-    "## Historical Summary",
-    "## Deferred-Patch Backlog",
-    "## Architectural Decisions",
-    "## Role Health",
-    "fast-follow replanning",
+    "Diffmogger is a work generator",
+    "Failed validation creates work",
+    "Blockers are node metadata",
 ]
 
 ROLE_PROMPT_REQUIRED_STRINGS = [
@@ -393,8 +355,7 @@ ROLE_PROMPT_REQUIRED_STRINGS = [
     "NEVER set up upstream tracking",
     "CRITICAL_STOP",
     "target/canonical_state_brief.md",
-    "docs/MULTI_ROLE_PROGRESS.md",
-    "MCP decision: context7 used|skipped",
+    "docs/CODEX_AUTOMATION_TASKS.md",
 ]
 
 QUEUE_ROLE_PROMPT_REQUIRED_STRINGS = [
@@ -485,14 +446,6 @@ MCP_CONFIG_REQUIRED_STRINGS = [
 ]
 
 MCP_DOC_REQUIRED_STRINGS = [
-    "Optional MCP servers enabled",
-    "Context7",
-    "Playwright MCP",
-    "CONTEXT7_API_KEY",
-    "auth errors",
-    "MCP decision: context7 used|skipped",
-    "do not depend on a worktree `.codex/config.toml`",
-    "Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config",
 ]
 
 PLAYWRIGHT_MCP_HELPER_REQUIRED_STRINGS = [
@@ -502,7 +455,7 @@ PLAYWRIGHT_MCP_HELPER_REQUIRED_STRINGS = [
     "--codegen",
     "--output-dir",
     "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
-    "docs/backlog/ui_artifacts",
+    ".diffmogger/runtime/validation_jobs",
 ]
 
 
@@ -715,10 +668,6 @@ def main() -> int:
         for marker in TASK_REQUIRED_STRINGS:
             if not has_marker(task_text, marker):
                 problems.append(f"{task_label}: missing marker {marker!r}")
-        if args.optional_mcp_enabled:
-            for marker in ["## Optional MCP Integrations", "## UI Artifact Backlog", "docs/backlog/ui_artifacts/<run_id>/"]:
-                if not has_marker(task_text, marker):
-                    problems.append(f"{task_label}: missing marker {marker!r}")
         if not any(marker in task_text for marker in TASK_BACKLOG_HEADINGS):
             problems.append(
                 f"{task_label}: missing a recognized backlog heading"
@@ -732,10 +681,6 @@ def main() -> int:
         for marker in DEVELOPMENT_REQUIRED_STRINGS:
             if not has_marker(development_text, marker):
                 problems.append(f"{development_label}: missing marker {marker!r}")
-        if args.optional_mcp_enabled:
-            for marker in ["## Optional MCP Integrations", ".codex/config.toml", "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png"]:
-                if not has_marker(development_text, marker):
-                    problems.append(f"{development_label}: missing marker {marker!r}")
 
     automation_rel = ".agentic/automation_prompt.md"
     automation_label = rel_label(root, automation_rel)
@@ -755,10 +700,6 @@ def main() -> int:
         for marker in AUTOMATION_REQUIRED_STRINGS + mode_markers + write_worker_markers + multi_role_markers + ticket_markers:
             if not has_marker(automation_text, marker):
                 problems.append(f"{automation_label}: missing marker {marker!r}")
-        if args.optional_mcp_enabled:
-            for marker in ["## Optional MCP Integrations", "expired auth", "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png"]:
-                if not has_marker(automation_text, marker):
-                    problems.append(f"{automation_label}: missing marker {marker!r}")
 
     if multi_role_enabled:
         guardrails_rel = "docs/CODEX_AUTOMATION_GUARDRAILS.md"
@@ -769,15 +710,6 @@ def main() -> int:
             for marker in MULTI_ROLE_GUARDRAIL_REQUIRED_STRINGS:
                 if not has_marker(guardrails_text, marker):
                     problems.append(f"{guardrails_label}: missing marker {marker!r}")
-
-        progress_rel = "docs/MULTI_ROLE_PROGRESS.md"
-        progress_label = rel_label(root, progress_rel)
-        progress_path = rel_path(root, progress_rel)
-        if progress_path.exists() and progress_path.is_file():
-            progress_text = progress_path.read_text(encoding="utf-8")
-            for marker in MULTI_ROLE_PROGRESS_REQUIRED_STRINGS:
-                if not has_marker(progress_text, marker):
-                    problems.append(f"{progress_label}: missing marker {marker!r}")
 
         for role in ["planner", "builder", "hardener", "integrator"]:
             role_rel = f".agentic/roles/{role}.md"
@@ -791,7 +723,7 @@ def main() -> int:
                 if args.optional_mcp_enabled and "context7" in mcp_servers and role in {"planner", "builder"}:
                     role_markers = role_markers + ["Context7", "auth errors", "do not halt"]
                 if args.optional_mcp_enabled and "playwright" in mcp_servers and role in {"hardener", "integrator"}:
-                    role_markers = role_markers + ["browser_take_screenshot", "docs/backlog/ui_artifacts"]
+                    role_markers = role_markers + ["local browser validation", "CODEX_AUTOMATION_TASKS"]
                 for marker in role_markers:
                     if not has_marker(role_text, marker):
                         problems.append(f"{role_label}: missing marker {marker!r}")
@@ -828,15 +760,6 @@ def main() -> int:
             for marker in config_markers:
                 if not has_marker(config_text, marker):
                     problems.append(f"{config_label}: missing marker {marker!r}")
-
-        mcp_doc_rel = "docs/MCP_INTEGRATIONS.md"
-        mcp_doc_label = rel_label(root, mcp_doc_rel)
-        mcp_doc_path = rel_path(root, mcp_doc_rel)
-        if mcp_doc_path.exists() and mcp_doc_path.is_file():
-            mcp_doc_text = mcp_doc_path.read_text(encoding="utf-8")
-            for marker in MCP_DOC_REQUIRED_STRINGS:
-                if not has_marker(mcp_doc_text, marker):
-                    problems.append(f"{mcp_doc_label}: missing marker {marker!r}")
 
         if "playwright" in mcp_servers:
             playwright_helper_rel = "scripts/run_playwright_mcp.sh"

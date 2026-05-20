@@ -37,8 +37,14 @@ KIT_ROOT = find_kit_root()
 TEMPLATE_ROOT = KIT_ROOT / "templates"
 RUNTIME_PACKAGE_ROOT = KIT_ROOT / "src" / "diffmogger"
 STARTER_KIT_MANIFEST = KIT_ROOT / "validation" / "starter_kit_manifest.json"
-HUMAN_BRIDGE_SETUP_FILES = {
+OBSOLETE_GENERATED_STATE_DOCS = {
+    "docs/AUTONOMY_EXPERIMENT_LOG.md",
+    "docs/DAILY_AUTOMATION_REVIEW.md",
     "docs/HUMAN_BRIDGE_SETUP.md",
+    "docs/MCP_INTEGRATIONS.md",
+    "docs/MULTI_ROLE_PROGRESS.md",
+    "docs/PROJECT_CONTEXT.md",
+    "docs/backlog/README.md",
 }
 LEGACY_MARKDOWN_QUEUE_ALIASES = {
     "docs/HUMAN_INBOX.md",
@@ -72,7 +78,6 @@ MULTI_ROLE_FILES = {
     ".agentic/roles/builder.md",
     ".agentic/roles/hardener.md",
     ".agentic/roles/integrator.md",
-    "docs/MULTI_ROLE_PROGRESS.md",
     "scripts/run_role_automation.sh",
     "scripts/integrate_role_outputs.py",
     "scripts/list_deferred_patches.py",
@@ -83,11 +88,9 @@ MULTI_ROLE_RUNTIME_ENTRYPOINTS = {
 }
 MCP_FILES = {
     ".codex/config.toml",
-    "docs/MCP_INTEGRATIONS.md",
 }
 PLAYWRIGHT_MCP_FILES = {
     "scripts/run_playwright_mcp.sh",
-    "docs/backlog/README.md",
 }
 MANAGED_EXISTING_PROJECT_FILES = {
     "AGENTS.md": "AGENTS",
@@ -423,7 +426,7 @@ def dag_scheduler_values(data: dict[str, Any]) -> dict[str, str]:
 - `max_parallel_write_workers`: `{max_write_workers}`
 - `max_parallel_scope_workers`: `{max_scope_workers}`
 
-The execution DAG is the scheduler authority. Direct file/path mentions and exact symbol-owner matches can enter write waves at the configured confidence threshold. Scoping/read-only candidates use a lower default confidence threshold of `0.55`. When a ready ticket lacks enough direct write confidence, bounded read-only scope workers gather ownership evidence, likely paths, likely symbols, validation hints, and risk notes before serial builder fallback. Structured scope evidence is normalized into SQLite before it can raise later write confidence; stale, ambiguous, unresolved, unsafe, or low-confidence records stay advisory. Import/test adjacency stays reduced-confidence, keyword-only impact remains advisory, integration is serialized, blocked human/environment nodes are not parallelized, and overlapping write ownership prevents same-wave write execution."""
+SQLite DAG state is the scheduler authority. Ready work runs when dependencies, ownership, and safety allow. Blocked human/environment annotations do not stop scheduling while repair, setup, mock, defer, split, reframe, review, documentation, or alternate-ticket work can continue."""
     return {
         "PARALLEL_EXECUTION_MODE": mode,
         "SYMBOL_GRAPH_LANGUAGES_INLINE": ",".join(languages),
@@ -569,7 +572,7 @@ def seed_ticket_items(data: dict[str, Any]) -> list[dict[str, Any]]:
             "status": status,
             "acceptance_criteria": normalize_seed_list(item.get("acceptance_criteria")) or [
                 "The requested behavior is implemented locally.",
-                "Relevant verification has run or an honest blocker is recorded.",
+                "Relevant verification has run or unblocker DAG work is created.",
             ],
             "verification_commands": normalize_seed_list(item.get("verification_commands")) or verification_fallback,
             "evidence": normalize_seed_list(item.get("evidence")),
@@ -587,7 +590,7 @@ def seed_ticket_items(data: dict[str, Any]) -> list[dict[str, Any]]:
             "status": "pending",
             "acceptance_criteria": [
                 "The requested behavior is implemented locally.",
-                "Relevant verification has run or an honest blocker is recorded.",
+                "Relevant verification has run or unblocker DAG work is created.",
             ],
             "verification_commands": verification_fallback,
             "evidence": [],
@@ -654,8 +657,8 @@ enabled = true"""
             )
         setup_lines.extend(
             [
-                "- MCP servers are optional and non-required. Missing MCP support must never change `AUTOMATION_STATUS` to `BLOCKED_ON_ENVIRONMENT` by itself; failed browser validation should instead be recorded as a validation issue or explicit deferred validation blocker.",
-                "- Project-scoped config lives in `.codex/config.toml` for compatibility, while wrappers mount role-scoped MCP overrides from the resolved intake/dashboard/manifest state. Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config.",
+                "- MCP servers are optional and non-required. Missing MCP support must never change `AUTOMATION_STATUS` to `BLOCKED_ON_ENVIRONMENT` by itself; failed browser validation should instead be recorded as a validation issue or deferred validation DAG work.",
+                "- Project-scoped config lives in `.codex/config.toml`, while wrappers mount role-scoped MCP overrides from the resolved intake/dashboard/manifest state. Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config.",
             ]
         )
         setup = "\n".join(setup_lines)
@@ -685,7 +688,7 @@ def ticket_run_values(data: dict[str, Any]) -> dict[str, str]:
     if mode == "bounded":
         section = """Campaign mode: `bounded`
 
-Use the dashboard-backed SQLite ticket queue as the bounded campaign scope. Runtime decisions, events, blockers, next actions, and ticket status remain canonical in `target/orchestration.sqlite3`; agents should read `target/canonical_state_brief.md` and use `scripts/ticket_run.py` instead of inspecting SQLite manually. Do not invent new backlog after the seeded/imported tickets are done or blocked.
+Use the dashboard-backed SQLite ticket queue as the bounded campaign scope. Runtime decisions, events, blockers, next actions, and ticket status remain canonical in `.diffmogger/runtime/orchestration.sqlite3`; agents should read `.diffmogger/runtime/canonical_state_brief.md` and use `.diffmogger/scripts/ticket_run.py` instead of inspecting SQLite manually. Diffmogger is a work generator, not a blocker detector: do not invent new backlog after the seeded/imported tickets are done, but convert blocked tickets into repair, setup, mock, fixture, defer, split, reframe, review, documentation, or alternate-ticket DAG work.
 
 Before choosing ticket work in any normal campaign run, run:
 
@@ -693,11 +696,11 @@ Before choosing ticket work in any normal campaign run, run:
 python3 scripts/ticket_run.py . next --json
 ```
 
-Use that dependency-aware selection as the only ticket scope for the run. The DAG scheduler may plan compatible nodes across ready tickets when ownership is disjoint, preserving file order as the human's priority order when dependencies require it. Roles may implement, verify, or integrate selected ticket work, but must not expand the campaign after it is completed, blocked, or marked `candidate_done`.
+Use that dependency-aware selection as the only ticket scope for the run. The DAG scheduler may plan compatible nodes across ready tickets when ownership is disjoint, preserving file order as the human's priority order when dependencies require it. Roles may implement, verify, integrate selected ticket work, or create unblocker DAG work, but must not expand the campaign after every ticket is completed with evidence.
 
-If `next --json` reports placeholder tickets, missing dependencies, duplicate ticket IDs, dependency cycles, blocked dependencies, or no actionable ticket, record the structured blocker in typed runtime state and refresh generated handoff projections instead of guessing or reordering the campaign by hand.
+If `next --json` reports placeholder tickets, missing dependencies, duplicate ticket IDs, dependency cycles, blocked dependencies, or no actionable ticket, convert that structured condition into unblocker DAG work unless every ticket is done with evidence. Refresh generated handoff projections instead of guessing or reordering the campaign by hand.
 
-When every ticket is done, or when all remaining tickets are blocked, run:
+When every ticket is done with evidence, run:
 
 ```bash
 python3 scripts/ticket_run.py . should-halt --finalize
@@ -711,7 +714,7 @@ Then stop launching new work. Diffmogger writes a local report, sends a native d
 - Normal campaign runs use `python3 scripts/ticket_run.py . next --json` for dependency-aware ticket context.
 - The DAG scheduler may group compatible ready nodes across tickets when dependencies, confidence, and ownership scopes allow.
 - Optional dependencies: use `depends_on` arrays in the dashboard ticket queue when one ticket must wait for another.
-- Halt when every ticket is done or all remaining tickets are blocked.
+- Halt only when every ticket is done with evidence; blocked tickets create unblocker DAG work.
 - Completion report is written under `target/ticket_run_reports/`.
 - Completion notification uses the local desktop notification system when enabled.
 - Remote push/PR creation is manual."""
@@ -729,7 +732,7 @@ Scaffold initializes the bounded campaign and Start launches actual ticket work 
 
 Use the dashboard-backed SQLite ticket queue as an ongoing campaign surface. When no dependency-ready tickets remain, Diffmogger may draft and enqueue the next generic project-agnostic ticket from intake, runtime state, current repo context, blockers, validation receipts, and completed work. Newly drafted tickets do not require human approval before the DAG scheduler continues.
 
-Agents should still use dependency-aware ticket selection and respect DAG ownership/confidence policy. If all existing tickets are done or blocked, the scheduler may draft a safe next ticket instead of stopping."""
+Agents should still use dependency-aware ticket selection and respect DAG ownership/confidence policy. If all existing tickets are done or blocked, the scheduler may draft a safe next ticket or unblocker ticket instead of stopping."""
         task_notes = """Campaign mode: `ongoing`
 
 - Ticket authoring surface: dashboard-backed SQLite ticket queue plus automatic generic drafting.
@@ -745,7 +748,7 @@ python3 scripts/ticket_run.py . status --json
 python3 scripts/ticket_run.py . next --json
 ```
 
-Ongoing campaigns should not halt merely because the current ticket set is done or blocked; they should continue by drafting safe follow-up work from typed runtime context unless the automation status is blocked or stopped."""
+Ongoing campaigns should not halt merely because the current ticket set is done or blocked; they should continue by drafting safe follow-up or unblocker work from typed runtime context unless the automation status is `CRITICAL_STOP`."""
     return {
         "CAMPAIGN_MODE": mode,
         "TICKET_RUN_TICKETS_JSON": ticket_json,
@@ -796,25 +799,25 @@ def progression_values(data: dict[str, Any], project_name: str) -> dict[str, str
             (
                 "T1 Ticket-run readiness",
                     f"Confirm the {ticket_file}, local setup, and verification are ready for `{project_name}`.",
-                "The ticket queue exists, setup expectations are clear, and at least one useful verification path is available or honestly blocked.",
+                "The ticket queue exists, setup expectations are clear, and at least one useful verification path is available or setup/defer work is created.",
             ),
             (
                 "T2 Ticket implementation",
                 "Use `scripts/ticket_run.py . next --json` to select dependency-aware ticket context, then let DAG readiness and ownership policy shape execution waves.",
-                "The selected ticket has implementation notes, changed files, evidence, `candidate_done`, or a recorded blocker.",
+                "The selected ticket has implementation notes, changed files, evidence, `candidate_done`, or follow-up unblocker DAG work.",
             ),
             (
                 "T3 Verification and hardening",
                 "Verify candidate tickets, repair failures, and record acceptance evidence.",
-                "Completed tickets have acceptance and verification evidence; blocked tickets explain the missing human or environment action.",
+                "Completed tickets have acceptance and verification evidence; validation failures create repair/setup/defer work and blocked tickets create unblocker DAG work.",
             ),
             (
                 "T4 Completion report and stop",
-                "Finalize when every ticket is done or all remaining tickets are blocked.",
+                "Finalize only when every ticket is done with evidence.",
                 "`scripts/ticket_run.py . should-halt --finalize` writes the report and completion state, then automation stops launching new work.",
             ),
         ]
-        guidance = f"""Progression is campaign-aware for this target. Because `campaign_mode` is `bounded`, use the bounded ticket-run phases below instead of an open-ended roadmap. The {ticket_file} is the ticket-scope authoring surface; runtime decisions and blockers remain canonical in SQLite. Do not invent new roadmap work after listed tickets are done or blocked. Scaffold handles ticket-run readiness; Start uses `python3 scripts/ticket_run.py . next --json` for dependency-aware ticket context and lets DAG readiness, confidence, and ownership policy shape execution waves.
+        guidance = f"""Progression is campaign-aware for this target. Because `campaign_mode` is `bounded`, use the bounded ticket-run phases below instead of an open-ended roadmap. The {ticket_file} is the ticket-scope authoring surface; runtime decisions and blockers remain canonical in SQLite. Diffmogger is a work generator, not a blocker detector: do not invent new roadmap work after listed tickets are done, but convert blocked tickets into unblocker DAG work. Scaffold handles ticket-run readiness; Start uses `python3 scripts/ticket_run.py . next --json` for dependency-aware ticket context and lets DAG readiness, confidence, and ownership policy shape execution waves.
 
 {markdown_table(rows)}
 
@@ -828,7 +831,7 @@ At the end of every run, update `## Product Horizon State` with:
 - next horizon candidate
 - remaining work before advancement
 
-If the phase criteria are met, update the current horizon to the next ticket-run phase and append a dated note to `## Horizon Transition Log` with the previous phase, new phase, evidence, and checks. When every ticket is done, or when all remaining tickets are blocked, finalize the bounded campaign and stop launching new work."""
+If the phase criteria are met, update the current horizon to the next ticket-run phase and append a dated note to `## Horizon Transition Log` with the previous phase, new phase, evidence, and checks. When every ticket is done with evidence, finalize the bounded campaign and stop launching new work. If tickets remain, create unblocker work."""
         return {
             "PRODUCT_HORIZON_GUIDANCE": guidance.strip(),
             "CURRENT_HORIZON": "T2 Ticket implementation",
@@ -836,9 +839,9 @@ If the phase criteria are met, update the current horizon to the next ticket-run
             "HORIZON_ADVANCEMENT_CRITERIA": "\n".join(
                 [
                     "  - The dashboard-backed SQLite ticket queue contains the bounded ticket scope.",
-                    "  - `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` can read the ticket queue, or an honest blocker is documented.",
+                    "  - `python3 scripts/ticket_run.py . status --json` and `python3 scripts/ticket_run.py . next --json` can read the ticket queue, or unblocker DAG work is created.",
                     "  - Local setup and verification expectations are documented.",
-                    "  - The first ticket implementation run can start safely, or an environment blocker is documented.",
+                    "  - The first ticket implementation run can start safely, or local setup/harness/mock/fixture DAG work is created.",
                 ]
             ),
             "NEXT_HORIZON_CANDIDATE": "T2 Ticket implementation",
@@ -855,27 +858,27 @@ If the phase criteria are met, update the current horizon to the next ticket-run
                 ]
             ),
             "BEST_NEXT_MILESTONE": f"Start the first dependency-ready ticket for `{project_name}`.",
-            "SUGGESTED_NEXT_SPRINT_TASK": "Run `python3 scripts/ticket_run.py . next --json`, implement one dependency-ready ticket, and record candidate evidence or a blocker.",
+            "SUGGESTED_NEXT_SPRINT_TASK": "Run `python3 scripts/ticket_run.py . next --json`, implement one dependency-ready ticket, and record candidate evidence or follow-up DAG work.",
             "BACKLOG_SECTION_HEADING": "Deferred / Follow-Up Tickets",
             "BACKLOG_SECTION_BODY": "\n".join(
                 [
                     "- Keep follow-up work in the dashboard-backed ticket queue.",
-                    "- Record blocked tickets with the exact missing human or environment action.",
+                    "- Convert blocked tickets into repair, setup, mock, fixture, defer, split, reframe, review, documentation, or alternate-ticket work.",
                     "- Do not create open-ended roadmap work after the bounded ticket set is finalized.",
                 ]
             ),
-            "CONTINUE_RATIONALE": "Continue. The bounded campaign has local ticket scope and no active blocker.",
+            "CONTINUE_RATIONALE": "Continue. The bounded campaign has local ticket scope; if tickets remain, unblocker work is available.",
             "AGENTS_PROGRESS_RULE": "Treat the ticket queue as a bounded, dependency-aware execution queue; after readiness, use `scripts/ticket_run.py . next --json` for ticket context and let DAG readiness, confidence, and ownership policy shape execution waves.",
             "INITIAL_PROGRESS_EVIDENCE_LABEL": "ticket-readiness evidence",
-            "BOOTSTRAP_SCOPE_BOUNDARY": "Scaffold already initialized the bounded campaign. Use `python3 scripts/ticket_run.py . next --json` to select the next dependency-ready ticket, then implement only that ticket or record an honest blocker. Do not expand scope after every ticket is done or blocked.",
-            "BOOTSTRAP_END_NOTE": "Use the ticket queue as the bounded scope. Do not create extra roadmap work after every ticket is done or blocked.",
+            "BOOTSTRAP_SCOPE_BOUNDARY": "Scaffold already initialized the bounded campaign. Use `python3 scripts/ticket_run.py . next --json` to select the next dependency-ready ticket, then implement only that ticket or create unblocker work. Do not expand scope after every ticket is done.",
+            "BOOTSTRAP_END_NOTE": "Use the ticket queue as the bounded scope. Do not create extra roadmap work after every ticket is done; create unblocker work while tickets remain.",
         }
 
     rows = [
         (
             "H1 Runnable baseline",
             f"Create or confirm setup, local run path, and verification for `{project_name}`.",
-            "Setup, a local run or demo command, and at least one useful verification path exist or an environment blocker is documented.",
+            "Setup, a local run or demo command, and at least one useful verification path exist or local setup/harness/mock/fixture work is created.",
         ),
         (
             "H2 Local-first demo",
@@ -913,7 +916,7 @@ If the phase criteria are met, update the current horizon to the next ticket-run
             "The workflow has been reviewed, simplified, strengthened, or compacted based on real automation evidence.",
         ),
     ]
-    guidance = f"""Product horizons are typed automation control state, not just inspiration. At the start of each run, read `target/canonical_state_brief.md`; `docs/CODEX_AUTOMATION_TASKS.md` is the generated handoff projection. Choose work that advances the current horizon unless a regression, blocker, or human instruction requires a different focus.
+    guidance = f"""Product horizons are typed automation control state, not just inspiration. At the start of each run, read `.diffmogger/runtime/canonical_state_brief.md`; `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` is the generated handoff projection. Choose work that advances the current horizon unless a regression, blocker, or human instruction requires a different focus.
 
 These horizons were scaffolded from the project intake:
 
@@ -940,7 +943,7 @@ Long-run direction: {long_run}"""
             [
                 "  - Setup path is documented.",
                 "  - A local run or demo command exists.",
-                "  - At least one useful verification command exists and has run, or an environment blocker is documented.",
+                "  - At least one useful verification command exists and has run, or local setup/harness/mock/fixture work is created.",
             ]
         ),
         "NEXT_HORIZON_CANDIDATE": "H2 Local-first demo",
@@ -962,7 +965,7 @@ Long-run direction: {long_run}"""
                 f"- Use the long-run direction as future backlog seed: {long_run}.",
             ]
         ),
-        "CONTINUE_RATIONALE": "Continue. The project has a clear mission and no active blocker.",
+        "CONTINUE_RATIONALE": "Continue. The project has a clear mission; create unblocker work for any planning inputs that are not directly runnable.",
         "AGENTS_PROGRESS_RULE": "Treat the first working baseline as an early milestone, not the finish line.",
         "INITIAL_PROGRESS_EVIDENCE_LABEL": "H1 advancement evidence",
         "BOOTSTRAP_SCOPE_BOUNDARY": "Start automation to create or confirm the first runnable baseline and automation state for the current horizon.",
@@ -1192,7 +1195,7 @@ Every write-worker assignment must tell the worker:
 - Adjust your implementation to documented contracts and other workers' outputs.
 - Follow the generated environment-access policy. Never print, copy, store, or commit secret values.
 - Do not spawn workers, use network, send messages, or run destructive cleanup.
-- Stop after the bounded assignment and write `target/agent_runs/<run_id>/worker_<role>.md`.
+- Stop after the bounded assignment and write `.diffmogger/runtime/agent_runs/<run_id>/worker_<role>.md`.
 - List changed files, checks run, integration notes, and risks.
 
 After write workers finish, the main agent must:
@@ -1254,15 +1257,15 @@ def multi_role_values(data: dict[str, Any]) -> dict[str, str]:
 
     automation_section = f"""Role profile: `{profile}`
 
-Diffmogger uses a continuous local execution DAG scheduler. Role prompts live under `.agentic/roles/`, isolated git worktrees live under `target/automation_worktrees/`, queued patches live under `target/automation_queue/`, canonical runtime state lives in `target/orchestration.sqlite3`, and agents read the generated `target/canonical_state_brief.md` view. `docs/MULTI_ROLE_PROGRESS.md` is a human-readable projection/export.
+Diffmogger uses a continuous local execution DAG scheduler. Role prompts live under `.diffmogger/agentic/roles/`; isolated worktrees and queued patches live under `.diffmogger/runtime/`; canonical state lives in `.diffmogger/runtime/orchestration.sqlite3`.
 
-The dashboard Start button launches `scripts/run_conveyor_automation.sh` as a detached local runner. That filename is retained as a compatibility wrapper; the scheduler chooses ready nodes and compatible waves from execution DAG state, prioritizing queued integration, baseline repair, typed human-message triage, fast-follow replanning after planner deferral changes, review/hardening, validation, targeted repairs, and compatible build waves.
+The dashboard Start button launches `.diffmogger/scripts/run_conveyor_automation.sh`. The scheduler chooses ready nodes or compatible waves and creates repair/setup/mock/defer/split/reframe/unblocker work instead of idling on ordinary blockers.
 
 {scheduler_config}
 
-Multi-role mode is local-only. Roles must never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run any git command that touches a remote. Local commits, local branches, local tags, and local worktrees are allowed. Any remote-touching attempt is a `CRITICAL_STOP`.
+Multi-role mode is local-only. Roles must never push, fetch, pull, configure remotes, set upstream tracking, or run remote-touching git commands. Any remote-touching attempt is a `CRITICAL_STOP`.
 
-Planner, builder, and hardener start from the latest main `HEAD` at run start. They may see partially integrated state from earlier patches in the same cycle; this is accepted. The integrator owns the main checkout, applies queued patches FIFO, verifies, creates local checkpoint commits, updates typed state, refreshes `docs/CODEX_AUTOMATION_TASKS.md` and `docs/MULTI_ROLE_PROGRESS.md` as projections, and enforces retention."""
+Planner, builder, and hardener use isolated worktrees. The integrator owns main checkout mutation, applies queued patches FIFO, verifies, creates local checkpoint commits, updates typed state, and refreshes `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`."""
     guardrails = """- Multi-role automation is enabled by default and runs through the continuous execution DAG scheduler.
 - Multi-role role runs require an initialized local git repo.
 - Multi-role mode is local-only: never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run git commands that touch a remote.
@@ -1275,39 +1278,28 @@ Planner, builder, and hardener start from the latest main `HEAD` at run start. T
 - Continuous DAG scheduler: `scripts/run_conveyor_automation.sh`.
 - The scheduler prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning, review/hardening, validation, targeted repairs, and compatible build waves.
 - DAG scheduler config: `parallel_execution_mode={dag_scheduler_values(data)["PARALLEL_EXECUTION_MODE"]}`, `symbol_graph_languages={dag_scheduler_values(data)["SYMBOL_GRAPH_LANGUAGES_INLINE"]}`, `parallel_write_min_confidence={dag_scheduler_values(data)["PARALLEL_WRITE_MIN_CONFIDENCE"]}`, `parallel_write_direct_confidence={dag_scheduler_values(data)["PARALLEL_WRITE_DIRECT_CONFIDENCE"]}`, `max_parallel_write_workers={dag_scheduler_values(data)["MAX_PARALLEL_WRITE_WORKERS"]}`, `max_parallel_scope_workers={dag_scheduler_values(data)["MAX_PARALLEL_SCOPE_WORKERS"]}`.
-- Integrator refreshes `docs/MULTI_ROLE_PROGRESS.md` as a projection and creates local checkpoint commits.
+- Integrator refreshes `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` as the generated projection and creates local checkpoint commits.
 - Deferred patches remain visible through `scripts/list_deferred_patches.py`; use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local triage or add `--decision-template` for a per-manifest cleanup worksheet.
 - Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""
     development = f"""Role profile: `{profile}`
 
-Use the dashboard Start/Stop buttons or the continuous DAG scheduler directly. The scheduler keeps work moving by running the next useful node or compatible wave as soon as dependencies allow:
+Use the dashboard Start/Stop buttons or the scheduler directly:
 
 ```bash
 bash scripts/run_conveyor_automation.sh --dry-run
 bash scripts/run_conveyor_automation.sh --once
 ```
 
-You can still run a role manually:
-
-```bash
-bash scripts/run_role_automation.sh --role planner
-bash scripts/run_role_automation.sh --role builder
-bash scripts/run_role_automation.sh --role hardener
-bash scripts/run_role_automation.sh --role integrator
-```
-
-Review deferred backlog triage without mutating the repo:
+Review deferred patch triage without mutating the repo:
 
 ```bash
 python3 scripts/list_deferred_patches.py . --markdown
 python3 scripts/list_deferred_patches.py . --decision-template
 ```
 
-The Markdown view groups the backlog by reason and recommended local action. The decision template adds per-manifest fields for archive, replace-from-current-HEAD, repair-and-retry, retry-as-is, or keep-deferred choices during integrator cleanup.
-
 {scheduler_config}
 
-The target must have a local git repo with an initial commit. Diffmogger scaffold creates both automatically when `HEAD` is missing. Multi-role mode creates local worktrees, local queue artifacts, and local commits only. It never pushes."""
+The target must have a local git repo with an initial commit. Diffmogger scaffold creates both automatically when `HEAD` is missing. Multi-role mode creates local worktrees, queue artifacts, and local commits only. It never pushes."""
     bootstrap = f"""Role profile: `{profile}`
 
 {scheduler_config}
@@ -1383,7 +1375,7 @@ def bridge_values(mode: str, text_responses: bool) -> dict[str, str]:
             if mode == "discord_notifier"
             else "Local notifier mode uses the same loopback API for native desktop notifications only; Discord is not required."
         )
-        agents_read = "Read `target/canonical_state_brief.md`; human messages and requests come from typed dashboard/SQLite state, not Markdown inbox files."
+        agents_read = "Read `.diffmogger/runtime/canonical_state_brief.md`; human messages and requests come from typed dashboard/SQLite state, not Markdown inbox files."
         agents_rules = """- Process queued human messages, including freeform commands.
 - If the human asks to be messaged or sent a status update, use the local notifier API when available instead of only writing Markdown.
 - Record handled human messages through the dashboard/typed state surface after completing or intentionally deferring the requested action."""
@@ -1406,19 +1398,19 @@ POST http://127.0.0.1:8765/api/notify
 
 ### Queued Human Messages
 
-At the beginning of every run, read `target/canonical_state_brief.md`; it includes a compact summary of typed human-message state.
+At the beginning of every run, read `.diffmogger/runtime/canonical_state_brief.md`; it includes a compact summary of typed human-message state.
 
 Queued human messages can be structured replies such as `HR-001 DONE` or freeform instructions such as `send me a summary of what you've accomplished so far`. Interpret natural language intent; do not treat every freeform message as a request to create a local file.
 
-If the human asks to be messaged, replied to, or sent a summary/status update, create a concise response and send it via `POST http://127.0.0.1:8765/api/notify` with `event_kind: "message"`. Human-unlock requests, blockers that need human input, and replies to user messages also use `event_kind: "message"` so they route to the messaging channel. Do not satisfy that request only by writing a local Markdown file. You may also update local docs, but the primary requested action is outbound notification.
+If the human asks to be messaged, replied to, or sent a summary/status update, create a concise response and send it via `POST http://127.0.0.1:8765/api/notify` with `event_kind: "message"`. Human-unlock requests, pending input records, and replies to user messages also use `event_kind: "message"` so they route to the messaging channel. Do not satisfy that request only by writing a local Markdown file. You may also update local docs, but the primary requested action is outbound notification.
 
 If the human explicitly asks for a local document, report, Markdown file, artifact, or dashboard page, create the local artifact. Send a notifier message only if the human also asked for a direct message.
 
 ### Outbound Message Style
 
-Notifier responses should be concise but useful: summarize the work done, checks run, current blocker, and next step. Avoid secrets, raw stack traces, and long reports.
+Notifier responses should be concise but useful: summarize the work done, checks run, current planning input or pending human item, and next step. Avoid secrets, raw stack traces, and long reports.
 
-Progress-only updates should use `event_kind: "progress"`. Direct human messages, blockers, human-unlock requests, and replies to user messages should use `event_kind: "message"`. In `discord_notifier` mode, `scripts/integrate_role_outputs.py` sends a brief progress-channel notification after each local automation commit it creates.
+Progress-only updates should use `event_kind: "progress"`. Direct human messages, pending input records, human-unlock requests, and replies to user messages should use `event_kind: "message"`. In `discord_notifier` mode, `scripts/integrate_role_outputs.py` sends a brief progress-channel notification after each local automation commit it creates.
 
 Payload shape for direct human-requested outbound responses:
 
@@ -1445,10 +1437,10 @@ If the notifier is not reachable:
 2. Record the intended outbound message in typed human-message state with status `NOTIFIER_UNREACHABLE`.
 3. Keep the message unresolved if a response is required.
 4. Continue useful offline/product work.
-5. Set status to `ACTIVE_WITH_PENDING_USER_INPUT` only if the unresolved item matters and useful work remains."""
+5. Set status to `ACTIVE_WITH_PENDING_USER_INPUT` only when an unresolved input item exists; keep scheduling useful independent work."""
         guardrails = """- Ask the human only for meaningful unlocks.
 - For reversible choices, choose a safe default and document it.
-- Use `ACTIVE_WITH_PENDING_USER_INPUT` when work can continue around a pending request.
+- Use `ACTIVE_WITH_PENDING_USER_INPUT` when a pending request exists; it is not a pause state.
 - Use `POST http://127.0.0.1:8765/api/notify` when the local notifier is available; otherwise record the pending outbound message in typed human-message state.
 - The notifier owns Discord credentials and local notification delivery. This repo must not import notifier code or print, copy, store, or commit notifier credential values.
 - If the human asks to be messaged or sent a summary/status update, send a concise notifier response rather than only writing Markdown.
@@ -1456,7 +1448,7 @@ If the notifier is not reachable:
 - Mark handled messages resolved only after the requested action is complete or intentionally deferred."""
         task_notes = f"""Human bridge mode: `{mode}`
 
-- The automation must read `target/canonical_state_brief.md` at run start, then handle any queued typed human messages through the dashboard/SQLite state surface.
+- The automation must read `.diffmogger/runtime/canonical_state_brief.md` at run start, then handle any queued typed human messages through the dashboard/SQLite state surface.
 - If the local notifier is running, this project may call `POST http://127.0.0.1:8765/api/notify`.
 - Direct human messages should use `event_kind: "message"`; progress updates should use `event_kind: "progress"`.
 - In `discord_notifier` mode, each local automation commit created by the multi-role integrator sends a brief `event_kind: "progress"` update with the commit subject and work summary.
@@ -1489,7 +1481,7 @@ The notifier owns credentials, dedupe state, optional JSONL queues, Discord inbo
 - Record concise resolution notes and notifier failures in typed human-message state.
 """
     elif mode == "file_only":
-        agents_read = "Read `target/canonical_state_brief.md`; human messages and requests come from typed dashboard/SQLite state, not Markdown inbox files."
+        agents_read = "Read `.diffmogger/runtime/canonical_state_brief.md`; human messages and requests come from typed dashboard/SQLite state, not Markdown inbox files."
         agents_rules = """- Process queued human messages, including freeform commands.
 - If the human asks for a summary, status update, explanation, or report, answer through the dashboard/typed state surface or requested artifact.
 - Do not use Discord or notifier APIs unless the human explicitly changes bridge mode.
@@ -1505,14 +1497,14 @@ Use file-only human intervention. Do not use Discord or notifier APIs for this p
 The human owner uses the Diffmogger dashboard to review automation requests and send replies. If the human asks for a summary, status update, explanation, local report, or decision record, satisfy that request through the dashboard/typed state surface or the explicitly requested artifact."""
         guardrails = """- Ask the human only for meaningful unlocks.
 - For reversible choices, choose a safe default and document it.
-- Use `ACTIVE_WITH_PENDING_USER_INPUT` when work can continue around a pending request.
+- Use `ACTIVE_WITH_PENDING_USER_INPUT` when a pending request exists; it is not a pause state.
 - Use dashboard/SQLite human-message state for requests, replies, and resolution notes.
 - Do not use Discord or notifier APIs unless the human explicitly changes the bridge mode.
 - If the human asks for a summary or status update, answer through the dashboard or requested local artifact.
 - Mark messages handled only after the requested action is complete or intentionally deferred."""
         task_notes = """Human bridge mode: `file_only`
 
-- The automation must read `target/canonical_state_brief.md` at run start and handle queued typed human messages from the dashboard.
+- The automation must read `.diffmogger/runtime/canonical_state_brief.md` at run start and handle queued typed human messages from the dashboard.
 - The human uses the dashboard to inspect requests and reply.
 - Do not use Discord or notifier APIs in this mode."""
         setup = """# Human Bridge Setup
@@ -1531,11 +1523,11 @@ No Discord, webhook, notifier API, or messaging credentials are used in this mod
 
 Human bridge mode: `disabled`
 
-Do not create human requests or wait for human replies during normal automation runs. If work becomes unsafe or impossible without the human, record the blocker through typed runtime state so generated projections can reflect it, and use `BLOCKED_ON_USER` only when no useful work can continue."""
+Do not create human requests or wait for human replies during normal automation runs. If work becomes unsafe or impossible without the human, create unblocker work while tickets remain. Use `BLOCKED_ON_USER` only as an exceptional annotation; it does not pause scheduling."""
         guardrails = """- Human bridge is disabled.
 - Do not create human request queues during normal runs.
 - For reversible choices, choose a safe default and document it.
-- Use `BLOCKED_ON_USER` only when no valuable work can continue without the human."""
+- Use `BLOCKED_ON_USER` only as an exceptional annotation. If tickets remain, create unblocker or alternate-ticket work instead of pausing."""
         task_notes = "Human bridge mode: `disabled`. No human request queue is active."
         setup = "# Human Bridge Setup\n\nHuman bridge disabled for this project.\n"
 
@@ -1658,7 +1650,7 @@ def render_template(text: str, values: dict[str, str]) -> str:
 
 
 def template_included(rel: str, values: dict[str, str]) -> bool:
-    if values.get("HUMAN_BRIDGE_MODE") == "disabled" and rel in HUMAN_BRIDGE_SETUP_FILES:
+    if rel in OBSOLETE_GENERATED_STATE_DOCS:
         return False
     if values.get("MCP_ENABLED") != "true" and rel in MCP_FILES:
         return False
@@ -1933,7 +1925,7 @@ def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -
     path_aliases = {
         key: value
         for key, value in PATH_ALIASES.items()
-        if key not in LEGACY_MARKDOWN_QUEUE_ALIASES
+        if key not in LEGACY_MARKDOWN_QUEUE_ALIASES and key not in OBSOLETE_GENERATED_STATE_DOCS
     }
     path_aliases.update(generated_script_aliases(values))
     manifest = sidecar_manifest(
@@ -2214,6 +2206,15 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
     written: list[Path] = []
     mode = values.get("PROJECT_MODE", "fresh_project")
     generated_paths = sorted(set([*generated_scaffold_destinations(values), *diffmogger_runtime_library_paths()]))
+    if force:
+        for rel in OBSOLETE_GENERATED_STATE_DOCS | {"docs/INITIAL_BOOTSTRAP_PROMPT.md"}:
+            for stale_rel in {sidecar_rel(rel), f".diffmogger/state/{Path(rel).name}"}:
+                stale = target / stale_rel
+                if stale.is_file():
+                    stale.unlink()
+        for stale_dir in [target / ".diffmogger" / "state" / "backlog"]:
+            if stale_dir.is_dir():
+                shutil.rmtree(stale_dir)
     for template_path in sorted(TEMPLATE_ROOT.rglob("*")):
         if template_path.is_dir():
             continue

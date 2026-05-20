@@ -4,15 +4,14 @@ Use this after several automation runs or at the end of a day.
 
 ---
 
-Create or update `.diffmogger/state/DAILY_AUTOMATION_REVIEW.md`.
+Create a concise local review note only when a human explicitly asks for one. Do not add it to the generated target scaffold.
 
 Read:
 
 - `.diffmogger/runtime/canonical_state_brief.md`
 - `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`
-- `.diffmogger/state/AUTONOMY_EXPERIMENT_LOG.md`
 - recent generated artifacts
-- typed human-message state or generated human bridge setup/projections
+- typed human-message state
 - worker reports under `.diffmogger/runtime/agent_runs/` if present
 - git diff or commit history if available
 

@@ -125,7 +125,7 @@ if stale_hits:
         print(f"Stale workspace/product reference in {path}: {term}", file=sys.stderr)
     raise SystemExit(1)
 
-required_phrase = "Treat each run as a substantial engineering sprint."
+required_phrase = "If tickets remain, automation must produce work."
 for path in [
     Path("templates/.agentic/automation_prompt.md"),
     Path("prompts/GENERATE_PROJECT_AUTOMATION_PROMPTS.md"),
@@ -135,21 +135,18 @@ for path in [
         raise SystemExit(1)
 
 automation_sections = [
-    "## File Reads",
+    "## Read First",
     "## Mission",
-    "## Core Operating Principle",
+    "## Liveness Rule",
     "## Run Structure",
-    "## Sprint Sizing",
-    "## Autonomy",
-    "## Product Horizons",
-    "## Worker-Agent Orchestration",
+    "## Campaign Mode",
+    "## Workers",
     "## Automation Role Profile",
     "## Optional MCP Integrations",
     "## Human-Intervention Protocol",
     "## Lock-File Behavior",
     "## Verification",
     "## End-Of-Run Requirements",
-    "## Self-Improvement Loop",
     "## Status Model",
 ]
 automation = Path("templates/.agentic/automation_prompt.md").read_text(encoding="utf-8")
@@ -163,19 +160,14 @@ task_markers = [
     "## Current Project State",
     "## Automation Must Never Do",
     "## Product Horizon State",
-    "## Horizon Transition Log",
-    "## Completed Last Run",
     "## Checks From Last Run",
-    "## Worker-Agent Activity",
-    "Worker strategy:",
-    "Parallelism budget:",
+    "## Scheduler Work",
+    "## Validation And Repair",
+    "Required validation failure creates repair work.",
+    "## Human Input",
     "## Known Issues",
-    "## Pending Human Requests",
-    "## Human Messages Sent",
     "## Best Next Milestone",
     "## Suggested Next Sprint-Sized Task",
-    "## Optional MCP Integrations",
-    "## UI Artifact Backlog",
     "{{BACKLOG_SECTION_HEADING}}",
     "{{BACKLOG_SECTION_BODY}}",
     "## Continue/Block/Critical-Stop Rationale",
@@ -186,31 +178,15 @@ if missing:
     print(f"Task template missing markers: {missing}", file=sys.stderr)
     raise SystemExit(1)
 
-context_template = Path("templates/docs/PROJECT_CONTEXT.md").read_text(encoding="utf-8")
-for marker in ["# Project Context", "{{ADDITIONAL_CONTEXT_FILES}}", "Do not place secrets"]:
-    if marker not in context_template:
-        print(f"Project context template missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
-
 guardrail_markers = [
-    "## Scope Boundaries",
-    "## Automation Must Never Do",
-    "## Secrets Policy",
-    "## External Side Effects Policy",
-    "## Quality Policy",
-    "## Worker-Agent Policy",
-    "parallelism budget",
-    "{{WRITE_WORKER_GUARDRAILS_POLICY}}",
-    "## Multi-Role Automation Policy",
-    "{{MULTI_ROLE_GUARDRAILS_POLICY}}",
-    "Optional MCP servers must never be required for progress",
-    "docs/backlog/ui_artifacts/<run_id>/",
-    "MCP decision: context7 used|skipped",
-    "npm run browser-smoke",
-    "## Lock-File Policy",
-    "## Human-Intervention Policy",
-    "## Status Policy",
-    "## Context-Bloat Policy",
+    "## Safety",
+    "## Liveness",
+    "Diffmogger is a work generator",
+    "Failed validation creates work",
+    "Blockers are node metadata",
+    "## Status",
+    "## Runtime State",
+    "## Workers And Git",
 ]
 guardrails = Path("templates/docs/CODEX_AUTOMATION_GUARDRAILS.md").read_text(encoding="utf-8")
 missing = [marker for marker in guardrail_markers if marker not in guardrails]
@@ -218,37 +194,20 @@ if missing:
     print(f"Guardrails template missing markers: {missing}", file=sys.stderr)
     raise SystemExit(1)
 
-human_setup = Path("templates/docs/HUMAN_BRIDGE_SETUP.md").read_text(encoding="utf-8")
-if "{{HUMAN_BRIDGE_SETUP_CONTENT}}" not in human_setup:
-    print("Human bridge setup template missing mode-aware placeholder", file=sys.stderr)
-    raise SystemExit(1)
-
 for marker in [
     "CODEX_LOCK_ALREADY_ACQUIRED=true",
     ".diffmogger/scripts/acquire_codex_lock.sh",
     ".diffmogger/scripts/release_codex_lock.sh",
     ".diffmogger/scripts/spawn_worker_agent.sh",
-    ".diffmogger/scripts/summarize_worker_outputs.py",
-    "target/canonical_state_brief.md",
+    ".diffmogger/runtime/canonical_state_brief.md",
     "Codex CLI worker decision: USE / SKIP / UNAVAILABLE",
-    "MCP decision: context7 used|skipped",
     "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS",
     "Parallelism budget:",
-    "Write-capable worker agents allowed:",
-    "Max write worker count:",
-    "command -v codex",
-    "--dangerously-bypass-approvals-and-sandbox",
     "{{HUMAN_PROTOCOL}}",
-    "{{WRITE_WORKER_ORCHESTRATION}}",
     "{{MULTI_ROLE_AUTOMATION_SECTION}}",
-    "{{MCP_SETUP_SECTION}}",
-    "expired auth",
-    "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png",
-    "npm run browser-smoke",
     "{{TICKET_CAMPAIGN_SECTION}}",
-    "{{PRODUCT_HORIZON_GUIDANCE}}",
-    "## Product Horizon State",
-    "## Horizon Transition Log",
+    "Failed validation creates work",
+    "Blockers are node metadata",
 ]:
     if marker not in automation:
         print(f"Automation prompt missing required marker: {marker}", file=sys.stderr)
@@ -269,7 +228,8 @@ for marker in [
     "mcp_mounted_servers",
     "playwright_validation_status",
     "--add-dir",
-    "codex exec --full-auto",
+    "codex exec --sandbox danger-full-access",
+    "approval_policy=\"never\"",
     "--skip-git-repo-check",
     "repair_environment.py",
     "state_brief.py",
@@ -312,20 +272,6 @@ for marker in [
         print(f"MCP config template missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
-mcp_docs = Path("templates/docs/MCP_INTEGRATIONS.md").read_text(encoding="utf-8")
-for marker in [
-    "# Optional MCP Integrations",
-    "{{MCP_SETUP_SECTION}}",
-    "Role wrappers apply temporary `codex exec -c` MCP overrides",
-    "CONTEXT7_API_KEY",
-    "browser_take_screenshot",
-    "MCP decision: context7 used|skipped",
-    "do not depend on a worktree `.codex/config.toml`",
-]:
-    if marker not in mcp_docs:
-        print(f"MCP docs template missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
-
 playwright_mcp_helper = Path("templates/scripts/run_playwright_mcp.sh").read_text(encoding="utf-8")
 for marker in [
     "@playwright/mcp@latest",
@@ -334,7 +280,7 @@ for marker in [
     "--codegen",
     "--output-dir",
     "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
-    "docs/backlog/ui_artifacts",
+    ".diffmogger/runtime/validation_jobs",
 ]:
     if marker not in playwright_mcp_helper:
         print(f"Playwright MCP helper template missing marker: {marker}", file=sys.stderr)
@@ -419,7 +365,7 @@ for marker in [
     "deferred_delta_by_role",
     "planner deferred patch resolved",
     "bounded campaign complete",
-    "bounded campaign blocked",
+    "bounded campaign has blocked tickets requiring unblocker work",
     "builder-first policy",
 ]:
     if marker not in conveyor:
@@ -476,16 +422,15 @@ for role in ["planner", "builder", "hardener", "integrator"]:
         "NEVER configure a remote",
         "NEVER set up upstream tracking",
         "CRITICAL_STOP",
-        "target/canonical_state_brief.md",
-        "docs/MULTI_ROLE_PROGRESS.md",
-        "MCP decision: context7 used|skipped",
+        ".diffmogger/runtime/canonical_state_brief.md",
+        ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
     ]
     if role != "integrator":
         markers.extend(["Commit subject:", "Do not use generic subjects"])
     if role in {"planner", "builder"}:
         markers.extend(["Context7", "auth errors", "do not halt"])
     if role in {"hardener", "integrator"}:
-        markers.extend(["browser_take_screenshot", "docs/backlog/ui_artifacts"])
+        markers.extend(["local browser validation", "CODEX_AUTOMATION_TASKS"])
     for marker in markers:
         if marker not in role_prompt:
             print(f"Role prompt template {role} missing marker: {marker}", file=sys.stderr)
@@ -569,22 +514,6 @@ for marker in [
         print(f"Integrator template missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
-progress = Path("templates/docs/MULTI_ROLE_PROGRESS.md").read_text(encoding="utf-8")
-for marker in [
-    "## Project State At Last Integration",
-    "## Cumulative Metrics",
-    "## Recent Activity Log",
-    "## Historical Summary",
-    "## Deferred-Patch Backlog",
-    "## UI Artifact Backlog",
-    "## Architectural Decisions",
-    "## Role Health",
-    "fast-follow replanning",
-]:
-    if marker not in progress:
-        print(f"Multi-role progress template missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
-
 compile_paths = [
     *Path("src/diffmogger").rglob("*.py"),
     *Path("scripts").rglob("*.py"),
@@ -648,11 +577,6 @@ for marker in [
     "brief.scaffold_preview",
     "brief.scaffold",
     "context.import",
-    "inbox.load",
-    "inbox.send_note",
-    "inbox.reply_request",
-    "run.load",
-    "run.load_log",
     "run.once",
     "automation.start",
     "automation.stop",
@@ -664,21 +588,17 @@ for marker in [
     "worker.run_read_only",
     "worker.run_write",
     "worker.run_integrator",
-    "observatory.snapshot",
-    "observatory.generate_html",
-    "observatory.load_html",
-    "review.load",
-    "review.export_bundle",
-    "review.mark_reviewed",
+    "execution_group.load",
+    "execution_group.start",
+    "execution_group.export_debug_bundle",
+    "validation_jobs.load",
+    "lease.release_stale",
     "state.snapshot",
+    "state.brief",
     "state.validate",
+    "state.watch",
     "diagnostics.environment",
     "diagnostics.run_checks",
-    "advanced.list_files",
-    "advanced.load_file",
-    "advanced.save_file",
-    "advanced.validate_file",
-    "advanced.export_debug_bundle",
     "schema_version",
     "BackendArgumentParser",
     "resolve_target",
@@ -737,17 +657,12 @@ for marker in [
     "DIFFMOGGER_BACKEND_PATH",
     "rfd::FileDialog",
     "select_context_files",
-    "select_settings_directory",
-    "get_advanced_settings",
-    "update_advanced_settings",
+    "select_ticket_import_file",
     "run_backend_command_streamed",
     "backend-log",
     "brief.scaffold",
     "brief.scaffold_preview",
     "context.import",
-    "inbox.load",
-    "inbox.send_note",
-    "inbox.reply_request",
     "automation.start",
     "automation.stop",
     "safety.run_check",
@@ -756,24 +671,18 @@ for marker in [
     "worker.run_integrator",
     "project.load_snapshot",
     "diagnostics.environment",
-    "observatory.snapshot",
-    "observatory.load_html",
-    "review.load",
-    "review.mark_reviewed",
+    "execution_group.load",
+    "execution_group.start",
+    "execution_group.export_debug_bundle",
     "state.snapshot",
     "state.validate",
-    "advanced.save_file",
-    "advanced.validate_file",
-    "advanced.export_debug_bundle",
-    "open_observatory_file",
-    "open_review_artifact",
+    "state.watch",
     "open_managed_file",
     "reveal_managed_file",
+    "monitor.automation_tasks",
     "reveal_project",
     "open_project_in_editor",
     "ALLOWED_EDITOR_COMMANDS",
-    "validate_review_artifact_path",
-    "validate_observatory_html_path",
     "app_config_dir",
     "run_backend_command",
 ]:
@@ -784,8 +693,6 @@ for marker in [
 native_api = Path("services/agentic-dashboard/native/src/api/backend.ts").read_text(encoding="utf-8")
 for marker in [
     "BackendEnvelope",
-    "InboxSnapshot",
-    "ReviewSnapshot",
     "ProjectSnapshot",
     "listRecentProjects",
     "selectProjectFolder",
@@ -794,16 +701,12 @@ for marker in [
     "runBackendCommand",
     "runBackendCommandStreamed",
     "listenBackendLogs",
-    "openObservatoryFile",
-    "openReviewArtifact",
     "openManagedFile",
     "revealManagedFile",
     "revealProject",
     "openProjectInEditor",
-    "AdvancedSettings",
-    "AdvancedDebugBundleResult",
     "CanonicalStateSnapshot",
-    "ObservatorySnapshot",
+    "BackendLogEvent",
     "ownership",
 ]:
     if marker not in native_api:
@@ -812,28 +715,20 @@ for marker in [
 
 native_app = Path("services/agentic-dashboard/native/src/App.tsx").read_text(encoding="utf-8")
 for marker in [
-    "Home",
-    "Brief",
-    "Run",
-    "Observatory",
-    "Inbox",
-    "Review",
-    "Advanced",
-    "Backend Error",
+    "Setup",
+    "Automation",
+    "viewRequiresTarget",
+    "autoRefreshIntervalMs",
     "Choose project",
     "Command",
-    "HomePage",
     "BriefWizard",
-    "InboxPage",
-    "ObservatoryPage",
-    "ReviewPage",
-    "RunPage",
-    "AdvancedPage",
+    "AutomationPage",
     "CommandPalette",
-    "Cmd/Ctrl+K",
     "executePaletteCommand",
     "buildCommandPaletteModel",
-    "Next action",
+    "schedulerLabel",
+    "Human input",
+    "Run setup checks",
 ]:
     if marker not in native_app:
         print(f"Native React shell missing marker: {marker}", file=sys.stderr)
@@ -856,23 +751,18 @@ for marker in [
 
 native_command_palette_model = Path("services/agentic-dashboard/native/src/commandPaletteModel.ts").read_text(encoding="utf-8")
 for marker in [
-    "Open project",
+    "Open Setup",
+    "Open Automation",
+    "Choose project",
     "New project",
     "Reveal project in Finder",
     "Open project in editor",
-    "Open setup",
     "Import context files",
     "Scaffold",
-    "Run",
-    "Start automation.",
-    "Stop automation.",
+    "Start automation",
+    "Stop automation",
     "Run safety check",
-    "Open activity",
-    "Export review",
-    "Send note to next run",
-    "Open task state",
-    "Open diagnostics",
-    "Export debug",
+    "Open task projection",
     "filterPaletteCommands",
 ]:
     if marker not in native_command_palette_model:
@@ -881,7 +771,7 @@ for marker in [
 
 native_command_palette_tests = Path("services/agentic-dashboard/native/src/commandPaletteModel.test.ts").read_text(encoding="utf-8")
 for marker in [
-    "includes the required command surface",
+    "includes the simplified command surface",
     "explains disabled target-scoped commands",
     "uses run-control reasons",
     "searches command title",
@@ -896,10 +786,10 @@ for marker in [
     "Project",
     "Goal",
     "Stack",
-    "Run mode",
+    "Automation mode",
     "Guardrails",
     "Context files",
-    "Review",
+    "Confirm",
     "brief.save_draft",
     "brief.scaffold_preview",
     "context.import",
@@ -909,47 +799,18 @@ for marker in [
     "Context7 MCP",
     "Playwright MCP",
     "Checkpoint commits",
-    "FIRST_REVIEW_NEEDED",
     "progress-log",
-    "Open Debug",
+    "Human Input",
 ]:
     if marker not in native_brief:
         print(f"Native Brief wizard missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
-
-native_home_model = Path("services/agentic-dashboard/native/src/homeModel.ts").read_text(encoding="utf-8")
-for marker in [
-    "buildHomeModel",
-    "Unknown",
-    "Open setup",
-    "Open Run",
-    "Open Inbox",
-    "Review",
-    "Start automation from Run.",
-    "Gates needing attention",
-]:
-    if marker not in native_home_model:
-        print(f"Native Home model missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
-
-native_home_tests = Path("services/agentic-dashboard/native/src/homeModel.test.ts").read_text(encoding="utf-8")
-for marker in [
-    "maps no target",
-    "maps unconfigured targets",
-    "maps scaffolded targets with no runs",
-    "maps running targets",
-    "maps blocked human input",
-    "maps environment blockers",
-]:
-    if marker not in native_home_tests:
-        print(f"Native Home tests missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
 native_run_model = Path("services/agentic-dashboard/native/src/runModel.ts").read_text(encoding="utf-8")
 for marker in [
     "buildRunModel",
     "Complete setup before running.",
-    "Run",
+    "Automation",
     "Start",
     "Stop",
     "Run safety check",
@@ -961,186 +822,101 @@ for marker in [
     "worker.run_integrator",
     "READ_ONLY_REPORTS",
     "Run read-only worker",
-    "Environment blocker",
+    "Human input is recorded; independent scheduler work should continue",
+    "Automation work",
 ]:
     if marker not in native_run_model:
         print(f"Native Run model missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
-native_run_page = Path("services/agentic-dashboard/native/src/RunPage.tsx").read_text(encoding="utf-8")
+native_automation_page = Path("services/agentic-dashboard/native/src/AutomationPage.tsx").read_text(encoding="utf-8")
 for marker in [
-    "Readiness",
-    "Controls",
     "Automation",
-    "Current status",
-    "Log",
-    "Helper Strategy",
-    "Blockers",
-    "worker.run_write",
-    "Copy",
-    "Open Log File",
+    "Execution Graph",
+    "Selected Work",
+    "Ticket Progress",
+    "Now & Next",
+    "Human Input",
+    "Checks & Repair",
+    "Activity Log",
+    "Command Output",
+    "pipeline-node",
+    "execution_group.retry_failed",
+    "automation.start",
+    "Copy start command",
 ]:
-    if marker not in native_run_page:
-        print(f"Native Run page missing marker: {marker}", file=sys.stderr)
+    if marker not in native_automation_page:
+        print(f"Native Automation page missing marker: {marker}", file=sys.stderr)
+        raise SystemExit(1)
+
+native_automation_view_model = Path("services/agentic-dashboard/native/src/automationViewModel.ts").read_text(encoding="utf-8")
+for marker in [
+    "buildAutomationViewModel",
+    "Continue role work",
+    "Waiting for previous step.",
+    "Follow-up",
+    "Setup or harness work has been generated.",
+    "run_serial_role",
+]:
+    if marker not in native_automation_view_model:
+        print(f"Native Automation view model missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
 native_run_tests = Path("services/agentic-dashboard/native/src/runModel.test.ts").read_text(encoding="utf-8")
 for marker in [
     "disables run controls when no target is selected",
-    "maps unscaffolded targets to the Brief gate",
+    "maps unscaffolded targets to the Setup gate",
     "enables Start for ready scaffolded targets",
     "disables start controls while automation is active",
     "enables Stop only when automation is running",
     "translates read-only worker strategy strings",
+    "labels scheduler task progress as automation work",
 ]:
     if marker not in native_run_tests:
         print(f"Native Run tests missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
-native_inbox = Path("services/agentic-dashboard/native/src/InboxPage.tsx").read_text(encoding="utf-8")
+native_automation_tests = Path("services/agentic-dashboard/native/src/AutomationPage.test.tsx").read_text(encoding="utf-8")
 for marker in [
-    "Requests",
-    "Notes to next run",
-    "Archive",
-    "bridge-mode-pill",
-    "inbox.load",
-    "inbox.send_note",
-    "inbox.reply_request",
-    "Send reply",
-    "Send to next run",
-    "Queued and recent notes",
-    "Search archive",
+    "renders an execution graph operations screen",
+    "Execution Graph",
+    "Selected Work",
+    "Ticket Progress",
+    "Now &amp; Next",
+    "Human Input",
+    "Checks &amp; Repair",
+    "not.toContain(\"Unblocker Work\")",
+    "not.toContain(\"Recent Outcomes\")",
 ]:
-    if marker not in native_inbox:
-        print(f"Native Inbox page missing marker: {marker}", file=sys.stderr)
+    if marker not in native_automation_tests:
+        print(f"Native Automation tests missing marker: {marker}", file=sys.stderr)
         raise SystemExit(1)
 
-native_review = Path("services/agentic-dashboard/native/src/ReviewPage.tsx").read_text(encoding="utf-8")
-native_review_model = Path("services/agentic-dashboard/native/src/reviewModel.ts").read_text(encoding="utf-8")
-for marker in [
-    "review-trust-summary",
-    "Latest Run Review",
-    "Run in progress",
-    "Review marker",
-    "Next action",
-    "Changed files",
-    "Commits",
-    "Verification",
-    "Safety check",
-    "Skipped checks",
-    "Markdown preview",
-    "Review export",
-    "review.load",
-    "review.export_bundle",
-    "review.mark_reviewed",
-    "openReviewArtifact",
-    "Open Markdown",
-    "Reveal folder",
-    "Open Inbox",
-    "Mark latest snapshot reviewed",
-]:
-    if marker not in native_review and marker not in native_review_model:
-        print(f"Native Review page missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
-
-native_advanced = Path("services/agentic-dashboard/native/src/AdvancedPage.tsx").read_text(encoding="utf-8")
-for marker in [
-    "Files",
-    "Diagnostics",
-    "Settings",
-    "Debug export",
-    "Core state",
-    "Human bridge",
-    "Review",
-    "Context",
-    "Roles / scheduler",
-    "advanced.list_files",
-    "advanced.load_file",
-    "advanced.save_file",
-    "advanced.validate_file",
-    "advanced.export_debug_bundle",
-    "Open externally",
-    "Reveal in Finder",
-    "Run checks",
-    "Codex",
-    "Tools",
-    "Target write access",
-    "Notifier",
-    "Backend versions",
-    "Review export directory",
-    "Preferred editor command",
-    "Inbox mode",
-    "Appearance",
-    "Density",
-    ".env and .env.* contents are omitted",
-]:
-    if marker not in native_advanced:
-        print(f"Native Advanced page missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
-
-native_observatory_page = Path("services/agentic-dashboard/native/src/ObservatoryPage.tsx").read_text(encoding="utf-8")
-for marker in [
-    "Activity",
-    "observatory.snapshot",
-    "review.export_bundle",
-    "targetSubdir",
-    "Export review",
-    "Summary",
-    "Events",
-    "Queue",
-    "Metrics",
-    "MissionStrip",
-    "AutomationActivityGraphPanel",
-    "Recent role results",
-    "LandedWorkSection",
-    "RecentOutcomesSection",
-    "Runtime",
-    "RoleCard",
-    "CommitCard",
-]:
-    if marker not in native_observatory_page:
-        print(f"Native Observatory page missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
-
-native_observatory_model = Path("services/agentic-dashboard/native/src/observatoryModel.ts").read_text(encoding="utf-8")
-for marker in [
-    "buildObservatoryViewModel",
-    "Critical stop is active",
-    "Input needed",
-    "Activity",
-    "Summary",
-    "Events",
-    "activeRole",
-    "Queue",
-    "Metrics",
-]:
-    if marker not in native_observatory_model:
-        print(f"Native Observatory model missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
-
-native_observatory_tests = Path("services/agentic-dashboard/native/src/observatoryModel.test.ts").read_text(encoding="utf-8")
-for marker in [
-    "covers the empty state",
-    "covers an active builder",
-    "covers a queued patch",
-    "covers blocked user input",
-    "covers critical stop",
-]:
-    if marker not in native_observatory_tests:
-        print(f"Native Observatory tests missing marker: {marker}", file=sys.stderr)
-        raise SystemExit(1)
-
-native_observatory_page_tests = Path("services/agentic-dashboard/native/src/ObservatoryPage.test.tsx").read_text(encoding="utf-8")
-for marker in [
-    "renders the empty state",
-    "renders an active builder",
-    "renders a queued patch",
-    "renders blocked user input",
-    "renders a critical stop",
-    "renderToStaticMarkup",
-]:
-    if marker not in native_observatory_page_tests:
-        print(f"Native Observatory component tests missing marker: {marker}", file=sys.stderr)
+removed_native_files = [
+    "HomeModel.ts",
+    "homeModel.ts",
+    "homeModel.test.ts",
+    "RunPage.tsx",
+    "RunPage.test.tsx",
+    "InboxPage.tsx",
+    "InboxPage.test.tsx",
+    "ReviewPage.tsx",
+    "ReviewPage.test.tsx",
+    "reviewModel.ts",
+    "AdvancedPage.tsx",
+    "AdvancedPage.test.tsx",
+    "advancedModel.ts",
+    "advancedModel.test.ts",
+    "ObservatoryPage.tsx",
+    "ObservatoryPage.test.tsx",
+    "observatoryModel.ts",
+    "observatoryModel.test.ts",
+    "GraphInsights.tsx",
+    "GraphInsights.test.tsx",
+]
+for removed in removed_native_files:
+    if Path("services/agentic-dashboard/native/src", removed).exists():
+        print(f"Removed native dashboard file still exists: {removed}", file=sys.stderr)
         raise SystemExit(1)
 
 dashboard_readme = Path("services/agentic-dashboard/README.md").read_text(encoding="utf-8")
@@ -1148,14 +924,15 @@ for marker in [
     "services/agentic-dashboard/native",
     "scripts/dashboard_backend_cli.py",
     "Scaffold",
-    ".diffmogger/agentic/dashboard_state.json",
-    "Open Diffmogger Project",
-    ".diffmogger/context/",
-    ".diffmogger/state/PROJECT_CONTEXT.md",
-    "Codex CLI installed and signed in",
-    "Export Review Bundle",
+	    ".diffmogger/agentic/dashboard_state.json",
+	    "Choose project",
+	    ".diffmogger/context/",
+	    "tracked in the intake/dashboard state",
+	    "Codex CLI installed and signed in",
+    "Setup",
+    "Automation",
     "Run Safety Check",
-    "Worker Strategy Controls",
+    "Start/Stop/Safety commands",
 ]:
     if marker not in dashboard_readme:
         print(f"Dashboard README missing marker: {marker}", file=sys.stderr)
@@ -1163,18 +940,16 @@ for marker in [
 
 first_review_markers = {
     Path("README.md"): [
-        "First Review Checklist",
+        "First review checklist",
         "bash scripts/validate_starter_kit.sh",
-        "Export Review Bundle",
         "Run Safety Check",
         "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
         "Diffmogger-self-review.md",
     ],
     Path("docs/DASHBOARD.md"): [
-        "First Review Checklist",
-        "Open Diffmogger Project",
-        "Export Review Bundle",
+        "Review Artifacts",
+        "native dashboard does not have a Review page",
         "Run Safety Check",
         "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
@@ -1183,30 +958,17 @@ first_review_markers = {
     Path("docs/FRESH_PROJECT_SETUP.md"): [
         "First Review Checklist",
         "bash scripts/validate_starter_kit.sh",
-        "Export Review Bundle",
         "Run Safety Check",
         "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
         "Diffmogger-observatory.html",
         "Diffmogger-self-review.md",
     ],
     Path("templates/docs/DEVELOPMENT.md"): [
-        "First Review Checklist",
-        "bash scripts/validate_starter_kit.sh",
+        "## Setup",
+        "## Verification",
+        "## Automation",
+        "Failed validation creates work",
         "python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch",
-        "Export Review Bundle",
-        "Run Safety Check",
-        "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
-        "Diffmogger-observatory.html",
-        "Diffmogger-self-review.md",
-    ],
-    Path("services/agentic-dashboard/README.md"): [
-        "First Review Checklist",
-        "bash scripts/validate_starter_kit.sh",
-        "Export Review Bundle",
-        "Run Safety Check",
-        "python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diffmogger-review",
-        "Diffmogger-observatory.html",
-        "Diffmogger-self-review.md",
     ],
 }
 for path, markers in first_review_markers.items():
@@ -1265,7 +1027,7 @@ for marker in [
     "scripts/scaffold_project_docs.py",
     "scripts/check_required_files.py",
     "Run Safety Check",
-    "Export Review Bundle",
+    "observatory artifacts",
 ]:
     if marker not in readme:
         print(f"README missing marker: {marker}", file=sys.stderr)
@@ -1308,11 +1070,11 @@ raise SystemExit(shared.smoke_check())
 PY
 
 lock_smoke_dir="$(mktemp -d)"
-CODEX_LOCK_PATH="$lock_smoke_dir/target/codex_automation.lock" \
+CODEX_LOCK_PATH="$lock_smoke_dir/.diffmogger/runtime/codex_automation.lock" \
 CODEX_RUN_ID="validation-smoke" \
 bash scripts/target/acquire_codex_lock.sh "validation smoke" >/tmp/Diffmogger-lock-acquire.log
 
-if CODEX_LOCK_PATH="$lock_smoke_dir/target/codex_automation.lock" \
+if CODEX_LOCK_PATH="$lock_smoke_dir/.diffmogger/runtime/codex_automation.lock" \
   CODEX_RUN_ID="validation-other" \
   bash scripts/target/acquire_codex_lock.sh "validation overlap" >/tmp/Diffmogger-lock-overlap.log 2>&1; then
     echo "Lock smoke failed: overlapping acquire unexpectedly succeeded" >&2
@@ -1320,7 +1082,7 @@ if CODEX_LOCK_PATH="$lock_smoke_dir/target/codex_automation.lock" \
     exit 1
 fi
 
-CODEX_LOCK_PATH="$lock_smoke_dir/target/codex_automation.lock" \
+CODEX_LOCK_PATH="$lock_smoke_dir/.diffmogger/runtime/codex_automation.lock" \
 CODEX_RUN_ID="validation-smoke" \
 bash scripts/target/release_codex_lock.sh >/tmp/Diffmogger-lock-release.log
 rm -rf "$lock_smoke_dir"
@@ -1367,8 +1129,6 @@ if present:
 PY
 for expected_mcp_path in \
     ".diffmogger/agentic/codex_config.toml" \
-    ".diffmogger/state/MCP_INTEGRATIONS.md" \
-    ".diffmogger/state/backlog/README.md" \
     ".diffmogger/scripts/run_playwright_mcp.sh"; do
     if [ ! -e "$tmp_dir/$expected_mcp_path" ]; then
         echo "Default scaffold missing enabled MCP file: $expected_mcp_path" >&2
@@ -1393,12 +1153,8 @@ if manifest.get("optional_mcp_servers") != expected:
     raise SystemExit(1)
 PY
 for marker in \
-    "H2 Local-first demo" \
     "weekly board" \
-    "Long-run direction" \
     "recurring review capsules" \
-    "MCP decision: context7 used|skipped" \
-    "npm run browser-smoke" \
     "## Improvement Backlog"; do
     if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-mode-horizon-grep.log 2>&1; then
         echo "Continuous-improvement scaffold missing mode-aware horizon marker: $marker" >&2
@@ -1428,8 +1184,6 @@ python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_d
 python3 scripts/check_required_files.py --human-bridge-mode disabled --multi-role-enabled "$tmp_dir" >/tmp/Diffmogger-check-mcp-opt-out.log
 for unexpected_mcp_path in \
     ".diffmogger/agentic/codex_config.toml" \
-    ".diffmogger/state/MCP_INTEGRATIONS.md" \
-    ".diffmogger/state/backlog/README.md" \
     ".diffmogger/scripts/run_playwright_mcp.sh"; do
     if [ -e "$tmp_dir/$unexpected_mcp_path" ]; then
         echo "Explicit optional_mcp_servers opt-out unexpectedly generated MCP file: $unexpected_mcp_path" >&2
@@ -1540,11 +1294,11 @@ if ! grep -R "Campaign mode: \`bounded\`\\|SQLite ticket queue\\|.diffmogger/scr
     exit 1
 fi
 for marker in \
-    "T1 Ticket-run readiness" \
-    "T4 Completion report and stop" \
+    "Current horizon: T2 Ticket implementation" \
+    "Halt only when every ticket is done with evidence" \
     "Scaffold seeds and validates the ticket queue" \
     "python3 .diffmogger/scripts/ticket_run.py . next --json" \
-    "let execution DAG dependencies, confidence, and ownership scopes determine" \
+    "The DAG scheduler may group compatible ready nodes across tickets when dependencies, confidence, and ownership scopes allow" \
     "depends_on" \
     "## Deferred / Follow-Up Tickets"; do
     if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" >/tmp/Diffmogger-ticket-horizon-grep.log 2>&1; then
@@ -1605,13 +1359,11 @@ JSON
 python3 scripts/scaffold_project_docs.py --intake "$tmp_intake" --target "$tmp_dir" >/tmp/Diffmogger-scaffold-write-workers.log
 python3 scripts/check_required_files.py --human-bridge-mode disabled "$tmp_dir" >/tmp/Diffmogger-check-write-workers.log
 for marker in \
-    "Write-capable worker agents allowed: true" \
-    "Max write worker count: 10" \
+    "Worker agents allowed: true" \
     "Worker strategy: READ_ONLY_REPORTS / WRITE_WORKERS / INTEGRATION_ONLY / NO_WORKERS" \
     "Parallelism budget:" \
-    "--mode write" \
-    "not alone in the codebase" \
-    "blindly accepting changes"; do
+    "--mode write requires --ownership" \
+    "not alone in the codebase"; do
     if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" "$tmp_dir/.diffmogger/scripts/spawn_worker_agent.sh" >/tmp/Diffmogger-write-worker-grep.log 2>&1; then
         echo "Write-worker scaffold missing marker: $marker" >&2
         rm -rf "$tmp_dir" "$tmp_intake"
@@ -1669,10 +1421,8 @@ for marker in \
 done
 for marker in \
     "auth errors" \
-    "browser_take_screenshot" \
-    "docs/backlog/ui_artifacts/<run_id>/<issue-slug>.png" \
-    "MCP decision: context7 used|skipped" \
-    "npm run browser-smoke"; do
+    "local browser validation" \
+    "CODEX_AUTOMATION_TASKS"; do
     if ! grep -R -- "$marker" "$tmp_dir/.diffmogger/agentic" "$tmp_dir/.diffmogger/state" >/tmp/Diffmogger-optional-mcp-prompt-grep.log 2>&1; then
         echo "Optional MCP prompt/docs missing marker: $marker" >&2
         rm -rf "$tmp_dir" "$tmp_intake"
@@ -1905,8 +1655,25 @@ tmp_dir="$(mktemp -d)"
   git init >/tmp/Diffmogger-pytest-repair-git-init.log
   git config user.name "Diffmogger Validation"
   git config user.email "diffmogger-validation@example.invalid"
-  mkdir -p .agentic services/agentic-notifier/.venv/bin
-  printf './missing_pytest_python -m pytest\n' > .agentic/verification_commands.txt
+  mkdir -p .diffmogger/agentic services/agentic-notifier/.venv/bin
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+Path(".diffmogger/manifest.json").write_text(
+    json.dumps(
+        {
+            "layout": "sidecar_v1",
+            "path_aliases": {
+                ".agentic/verification_commands.txt": ".diffmogger/agentic/verification_commands.txt"
+            },
+        }
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+  printf './missing_pytest_python -m pytest\n' > .diffmogger/agentic/verification_commands.txt
   cat > missing_pytest_python <<'SH'
 #!/usr/bin/env sh
 echo "No module named pytest" >&2
@@ -2010,10 +1777,24 @@ import sys
 from pathlib import Path
 
 target = Path(sys.argv[1])
-(target / "docs").mkdir(parents=True)
-(target / "target/automation_queue/builder/run-bad").mkdir(parents=True)
-(target / "docs/MULTI_ROLE_PROGRESS.md").write_text(
-    "# Multi-Role Progress\n\n## Recent Activity Log\n\n- No multi-role integrator runs yet.\n",
+(target / ".diffmogger/state").mkdir(parents=True)
+(target / ".diffmogger/runtime/automation_queue/builder/run-bad").mkdir(parents=True)
+(target / ".diffmogger/manifest.json").parent.mkdir(parents=True, exist_ok=True)
+(target / ".diffmogger/manifest.json").write_text(
+    json.dumps(
+        {
+            "layout": "sidecar_v1",
+            "path_aliases": {
+                "docs/CODEX_AUTOMATION_TASKS.md": ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+                "target/automation_queue": ".diffmogger/runtime/automation_queue",
+            },
+        }
+    )
+    + "\n",
+    encoding="utf-8",
+)
+(target / ".diffmogger/state/CODEX_AUTOMATION_TASKS.md").write_text(
+    "AUTOMATION_STATUS: ACTIVE\n\n## Automation Task Projection\n\n- Next task: keep the queue live.\n",
     encoding="utf-8",
 )
 manifest = {
@@ -2024,7 +1805,7 @@ manifest = {
     "deferral_detail": "failed at /User" + "s/example/agentic-kit-" + "lab/project with huge output\n" + ("x" * 5000),
     "changed_files": [],
 }
-(target / "target/automation_queue/builder/run-bad/manifest.json").write_text(
+(target / ".diffmogger/runtime/automation_queue/builder/run-bad/manifest.json").write_text(
     json.dumps(manifest),
     encoding="utf-8",
 )
@@ -2033,22 +1814,21 @@ module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
-module.update_progress(
+module.update_task_file(
     target,
-    run_id="sanitize-smoke",
-    verification_status="failed at /User" + "s/example/agentic-kit-" + "lab/project",
+    run_id="handoff-smoke",
+    checkpoint_commit=None,
+    dirty_files=["src/app.py"],
     committed=[],
     deferred_count=1,
-    checkpoint_commit=None,
-    cleanup_summary=[],
     dry_run=False,
 )
-progress = (target / "docs/MULTI_ROLE_PROGRESS.md").read_text(encoding="utf-8")
-if ("/User" + "s/") in progress or ("agentic-kit-" + "lab") in progress:
-    print(progress, file=sys.stderr)
+task = (target / ".diffmogger/state/CODEX_AUTOMATION_TASKS.md").read_text(encoding="utf-8")
+if "## Multi-Role Integration handoff-smoke" not in task or "- deferred_patches: 1" not in task:
+    print(task, file=sys.stderr)
     raise SystemExit(1)
-if len(progress) > 5000:
-    print("Progress sanitation smoke produced oversized progress output", file=sys.stderr)
+if (target / ".diffmogger/state/MULTI_ROLE_PROGRESS.md").exists():
+    print("Lean generated state should not recreate MULTI_ROLE_PROGRESS.md", file=sys.stderr)
     raise SystemExit(1)
 PY
 rm -rf "$tmp_dir"
@@ -2056,21 +1836,33 @@ rm -rf "$tmp_dir"
 tmp_dir="$(mktemp -d)"
 python3 - "$tmp_dir" <<'PY'
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
 target = Path(sys.argv[1])
-(target / "docs").mkdir(parents=True)
-(target / ".agentic/roles").mkdir(parents=True)
-(target / "scripts").mkdir(parents=True)
-(target / "docs/CODEX_AUTOMATION_TASKS.md").write_text("AUTOMATION_STATUS: ACTIVE\n", encoding="utf-8")
-(target / "docs/MULTI_ROLE_PROGRESS.md").write_text(
-    "# Multi-Role Progress\n\n## Recent Activity Log\n\n- No multi-role integrator runs yet.\n\n## Role Health\n\n- integrator: no runs yet\n",
+(target / ".diffmogger/state").mkdir(parents=True)
+(target / ".diffmogger/agentic/roles").mkdir(parents=True)
+(target / ".diffmogger/scripts").mkdir(parents=True)
+(target / ".diffmogger/manifest.json").write_text(
+    json.dumps(
+        {
+            "layout": "sidecar_v1",
+            "path_aliases": {
+                ".agentic/roles": ".diffmogger/agentic/roles",
+                "docs/CODEX_AUTOMATION_TASKS.md": ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+                "scripts": ".diffmogger/scripts",
+                "target/automation_queue": ".diffmogger/runtime/automation_queue",
+            },
+        }
+    )
+    + "\n",
     encoding="utf-8",
 )
-(target / "scripts/run_role_automation.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+(target / ".diffmogger/state/CODEX_AUTOMATION_TASKS.md").write_text("AUTOMATION_STATUS: ACTIVE\n", encoding="utf-8")
+(target / ".diffmogger/scripts/run_role_automation.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
 for role in ["planner", "builder", "hardener", "integrator"]:
-    (target / ".agentic/roles" / f"{role}.md").write_text(role, encoding="utf-8")
+    (target / ".diffmogger/agentic/roles" / f"{role}.md").write_text(role, encoding="utf-8")
 spec = importlib.util.spec_from_file_location("run_conveyor_automation", Path("scripts/runtime/run_conveyor_automation.py"))
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -2112,12 +1904,8 @@ candidate = decision["selected_candidate"]
 if role != "builder" or candidate.get("action_kind") != "launch_write_group" or stop:
     print(("dag-write-launch", role, reason, stop, candidate), file=sys.stderr)
     raise SystemExit(1)
-if decision.get("scheduler_fallback_used") or decision.get("legacy_result"):
-    print(("legacy-fallback-used", decision), file=sys.stderr)
-    raise SystemExit(1)
-
-(target / "target/automation_queue/planner/run-queued").mkdir(parents=True)
-(target / "target/automation_queue/planner/run-queued/manifest.json").write_text(
+(target / ".diffmogger/runtime/automation_queue/planner/run-queued").mkdir(parents=True)
+(target / ".diffmogger/runtime/automation_queue/planner/run-queued/manifest.json").write_text(
     '{"role":"planner","run_id":"run-queued","status":"queued"}\n',
     encoding="utf-8",
 )
@@ -2125,7 +1913,7 @@ role, reason, stop = module.choose_next(target, {"last_completed_role": "hardene
 with closing(connect(database_path_for_target(target))) as conn:
     decision = latest_scheduler_decision_conn(conn)
 if role != "builder" or decision["selected_candidate"].get("action_kind") != "launch_write_group" or stop:
-    print(("legacy-queue-preempted-dag", role, reason, stop, decision["selected_candidate"]), file=sys.stderr)
+    print(("queued-role-manifest-preempted-dag", role, reason, stop, decision["selected_candidate"]), file=sys.stderr)
     raise SystemExit(1)
 
 with closing(connect(database_path_for_target(target))) as conn:
@@ -2153,7 +1941,7 @@ state = {
         "active": True,
         "streak": 2,
         "threshold": 2,
-        "reason": "legacy no-progress smoke",
+        "reason": "no-progress liveness smoke",
     },
 }
 role, reason, stop = module.choose_next(target, state, 2)
@@ -2161,11 +1949,11 @@ queue = module.conveyor_decision_queue(target, state, role, reason, 2)
 with closing(connect(database_path_for_target(target))) as conn:
     decision = latest_scheduler_decision_conn(conn)
     model = execution_dag_read_model(conn)
-if role is not None or "no DAG-ready scheduler action" not in reason or stop:
-    print(("idle-without-dag-work", role, reason, stop), file=sys.stderr)
+if role != "planner" or "ticket queue" not in reason or stop:
+    print(("planner-liveness-work-missing", role, reason, stop), file=sys.stderr)
     raise SystemExit(1)
-if decision["selected_candidate"].get("action_kind") != "idle" or queue[0].get("action_kind") != "idle":
-    print(("idle-candidate-missing", decision["selected_candidate"], queue), file=sys.stderr)
+if decision["selected_candidate"].get("action_kind") != "run_serial_role" or queue[0].get("action_kind") != "run_serial_role":
+    print(("planner-liveness-candidate-missing", decision["selected_candidate"], queue), file=sys.stderr)
     raise SystemExit(1)
 if not any(item.get("action_type") == "building" and item.get("status") == "done" for item in model["terminal_nodes"]):
     print(("done-dag-node-missing", model), file=sys.stderr)
@@ -2203,10 +1991,26 @@ import sys
 from pathlib import Path
 
 target = Path(sys.argv[1])
-(target / "docs").mkdir(parents=True)
-(target / "target/automation_queue/builder/run-observe").mkdir(parents=True)
-(target / "target/automation_logs").mkdir(parents=True)
-(target / "docs/CODEX_AUTOMATION_TASKS.md").write_text(
+(target / ".diffmogger/state").mkdir(parents=True)
+(target / ".diffmogger/runtime/automation_queue/builder/run-observe").mkdir(parents=True)
+(target / ".diffmogger/runtime/automation_logs").mkdir(parents=True)
+(target / ".diffmogger/manifest.json").write_text(
+    json.dumps(
+        {
+            "layout": "sidecar_v1",
+            "path_aliases": {
+                "docs/CODEX_AUTOMATION_TASKS.md": ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+                "target/automation_conveyor_state.json": ".diffmogger/runtime/automation_conveyor_state.json",
+                "target/automation_logs": ".diffmogger/runtime/automation_logs",
+                "target/automation_queue": ".diffmogger/runtime/automation_queue",
+                "target/orchestration.sqlite3": ".diffmogger/runtime/orchestration.sqlite3",
+            },
+        }
+    )
+    + "\n",
+    encoding="utf-8",
+)
+(target / ".diffmogger/state/CODEX_AUTOMATION_TASKS.md").write_text(
     "\n".join(
         [
             "AUTOMATION_STATUS: ACTIVE",
@@ -2233,104 +2037,66 @@ target = Path(sys.argv[1])
     + "\n",
     encoding="utf-8",
 )
-(target / "docs/MULTI_ROLE_PROGRESS.md").write_text(
-    "\n".join(
-        [
-            "# Multi-Role Progress",
-            "",
-            "## Cumulative Metrics",
-            "",
-            "- Total integrator runs: 2",
-            "- Accepted patches by role:",
-            "  - planner: 1",
-            "  - builder: 2",
-            "  - hardener: 1",
-            "- Deferred patches by role:",
-            "  - planner: 1",
-            "  - builder: 0",
-            "  - hardener: 0",
-            "- Current deferred queue depth: 1",
-            "",
-            "## Recent Activity Log",
-            "",
-            "- builder queued an observatory smoke patch.",
-            "",
-            "## Deferred-Patch Backlog",
-            "",
-            "- planner `run-stale`: staleness; Patch base no longer matches HEAD.",
-        ]
-    )
-    + "\n",
-    encoding="utf-8",
-)
-(target / "target/automation_logs/conveyor.stdout.log").write_text(
+(target / ".diffmogger/runtime/automation_logs/conveyor.stdout.log").write_text(
     "CONVEYOR_DECISION role=builder reason=validation smoke\n",
     encoding="utf-8",
 )
-(target / "target/automation_conveyor_state.json").write_text(
-    json.dumps(
-        {
-            "schema_version": 1,
-            "cycles": 2,
-            "updated_at": "2026-05-03T00:00:00+00:00",
-            "active_role_run": {
-                "role": "builder",
-                "run_id": "observe-smoke",
-                "reason": "validation smoke",
-                "pid": os.getpid(),
-                "started_at": "2026-05-03T00:00:00+00:00",
-                "status": "running",
+sys.path.insert(0, str(Path("src").resolve()))
+from diffmogger.runtime.state_store import conveyor_projection_path_for_target, write_conveyor_state
+
+write_conveyor_state(
+    conveyor_projection_path_for_target(target),
+    {
+        "schema_version": 1,
+        "cycles": 2,
+        "updated_at": "2026-05-03T00:00:00+00:00",
+        "active_role_run": {
+            "role": "builder",
+            "run_id": "observe-smoke",
+            "reason": "validation smoke",
+            "pid": os.getpid(),
+            "started_at": "2026-05-03T00:00:00+00:00",
+            "status": "running",
+        },
+        "decision_queue": [
+            {"role": "builder", "state": "next", "reason": "builder lane is next"},
+            {"role": "integrator", "state": "ready", "reason": "queued patch needs integration"},
+        ],
+        "history": [
+            {
+                "role": "hardener",
+                "reason": "builder lane completed without queued work",
+                "exit_code": 0,
+                "finished_at": "2026-05-03T00:00:00+00:00",
+                "progress_success": True,
             },
-            "decision_queue": [
-                {"role": "builder", "state": "next", "reason": "builder lane is next"},
-                {"role": "integrator", "state": "ready", "reason": "queued patch needs integration"},
-            ],
-            "integrator_no_progress": {
-                "active": True,
-                "streak": 2,
-                "threshold": 2,
-                "reason": "integrator accepted 0 patches; deferred queue stayed blocked for staleness:no_detail",
-                "planner_requested_at": None,
+            {
+                "role": "integrator",
+                "reason": "queued patch needs integration",
+                "exit_code": 0,
+                "finished_at": "2026-05-03T00:01:00+00:00",
+                "progress_success": True,
+                "metadata": {"accepted_by_role": {"planner": 0, "builder": 0, "hardener": 1}},
             },
-	            "history": [
-	                {
-	                    "role": "hardener",
-	                    "reason": "builder lane completed without queued work",
-	                    "exit_code": 0,
-	                    "finished_at": "2026-05-03T00:00:00+00:00",
-	                    "progress_success": True,
-	                },
-	                {
-	                    "role": "integrator",
-	                    "reason": "queued patch needs integration",
-	                    "exit_code": 0,
-	                    "finished_at": "2026-05-03T00:01:00+00:00",
-	                    "progress_success": True,
-	                    "metadata": {"accepted_by_role": {"planner": 0, "builder": 0, "hardener": 1}},
-	                },
-	                {
-	                    "role": "hardener",
-	                    "reason": "hardener churn smoke",
-	                    "exit_code": 0,
-	                    "finished_at": "2026-05-03T00:02:00+00:00",
-	                    "progress_success": True,
-	                },
-	                {
-	                    "role": "integrator",
-	                    "reason": "queued patch needs integration",
-	                    "exit_code": 0,
-	                    "finished_at": "2026-05-03T00:03:00+00:00",
-	                    "progress_success": True,
-	                    "metadata": {"accepted_by_role": {"planner": 0, "builder": 0, "hardener": 1}},
-	                },
-	            ],
-	        },
-	        indent=2,
-    )
-    + "\n",
-    encoding="utf-8",
+            {
+                "role": "hardener",
+                "reason": "hardener churn smoke",
+                "exit_code": 0,
+                "finished_at": "2026-05-03T00:02:00+00:00",
+                "progress_success": True,
+            },
+            {
+                "role": "integrator",
+                "reason": "queued patch needs integration",
+                "exit_code": 0,
+                "finished_at": "2026-05-03T00:03:00+00:00",
+                "progress_success": True,
+                "metadata": {"accepted_by_role": {"planner": 0, "builder": 0, "hardener": 1}},
+            },
+        ],
+    },
 )
-(target / "target/automation_queue/builder/run-observe/manifest.json").write_text(
+(target / ".diffmogger/runtime/automation_queue/builder/run-observe/manifest.json").write_text(
     json.dumps(
         {
             "role": "builder",
@@ -2343,8 +2109,8 @@ target = Path(sys.argv[1])
     ),
     encoding="utf-8",
 )
-(target / "target/automation_queue/planner/run-stale").mkdir(parents=True)
-(target / "target/automation_queue/planner/run-stale/manifest.json").write_text(
+(target / ".diffmogger/runtime/automation_queue/planner/run-stale").mkdir(parents=True)
+(target / ".diffmogger/runtime/automation_queue/planner/run-stale/manifest.json").write_text(
     json.dumps(
         {
             "role": "planner",
@@ -2353,14 +2119,14 @@ target = Path(sys.argv[1])
             "summary": "Patch base no longer matches HEAD.",
             "deferral_reason": "staleness",
             "deferral_detail": "Patch base no longer matches HEAD.",
-            "changed_files": ["docs/CODEX_AUTOMATION_TASKS.md"],
+            "changed_files": [".diffmogger/state/CODEX_AUTOMATION_TASKS.md"],
             "created_at": "2026-05-03T00:00:30+00:00",
         }
     ),
     encoding="utf-8",
 )
-(target / "target/automation_queue/hardener/run-skipped").mkdir(parents=True)
-(target / "target/automation_queue/hardener/run-skipped/manifest.json").write_text(
+(target / ".diffmogger/runtime/automation_queue/hardener/run-skipped").mkdir(parents=True)
+(target / ".diffmogger/runtime/automation_queue/hardener/run-skipped/manifest.json").write_text(
     json.dumps(
         {
             "role": "hardener",
@@ -2375,7 +2141,7 @@ target = Path(sys.argv[1])
 )
 PY
 python3 scripts/runtime/run_observatory.py --target "$tmp_dir" --once --output "$tmp_dir/target/observatory/index.html" >/tmp/Diffmogger-observatory-render.log
-for marker in "Diffmogger Observatory" "Activity Lanes" "First Review / Runtime State" "run-observe" "builder" "Runtime Health" "First review" "Scorecard" "Action Plan" "Integration safety" "Run integrator triage" "Accepted patches" "Deferred triage" "Start with \`staleness\`" "Next-Run Worker Strategy" "INTEGRATION_ONLY" "NO-PROGRESS CIRCUIT" "staleness:no_detail" "Recent Outcomes" "run-skipped" "skipped"; do
+for marker in "Diffmogger Observatory" "Activity Lanes" "First Review / Runtime State" "run-observe" "builder" "Runtime Health" "First review" "Scorecard" "Action Plan" "Integration safety" "Run integrator triage" "Accepted patches" "Deferred triage" "Start with \`staleness\`" "Next-Run Worker Strategy" "INTEGRATION_ONLY" "Recent Outcomes" "run-skipped" "skipped"; do
     if ! grep -q "$marker" "$tmp_dir/target/observatory/index.html"; then
         echo "Observatory render smoke missing marker: $marker" >&2
         rm -rf "$tmp_dir"
@@ -2406,9 +2172,8 @@ if [ -z "$worktree" ]; then
   echo "missing -C worktree" >&2
   exit 2
 fi
-test -f "$worktree/.agentic/roles/builder.md" || exit 3
-test -f "$worktree/docs/CODEX_AUTOMATION_TASKS.md" || exit 4
-test -f "$worktree/docs/MULTI_ROLE_PROGRESS.md" || exit 5
+test -f "$worktree/.diffmogger/agentic/roles/builder.md" || exit 3
+test -f "$worktree/.diffmogger/state/CODEX_AUTOMATION_TASKS.md" || exit 4
 printf 'role context smoke\n' > "$worktree/feature.txt"
 exit 0
 SH
@@ -2421,31 +2186,54 @@ chmod +x "$fake_codex_dir/codex"
   printf '# Role Context Smoke\n' > README.md
   git add README.md
   git commit -m "role context smoke base" >/tmp/Diffmogger-role-context-commit.log
-  mkdir -p .agentic/roles docs
-  printf 'builder prompt\n' > .agentic/roles/builder.md
-  printf 'planner prompt\n' > .agentic/roles/planner.md
-  printf 'hardener prompt\n' > .agentic/roles/hardener.md
-  printf 'integrator prompt\n' > .agentic/roles/integrator.md
-  printf 'AUTOMATION_STATUS: ACTIVE\n' > docs/CODEX_AUTOMATION_TASKS.md
-  printf '# Multi-Role Progress\n' > docs/MULTI_ROLE_PROGRESS.md
-  mkdir -p .git/info
+  mkdir -p .diffmogger/agentic/roles .diffmogger/state .diffmogger/runtime
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+Path(".diffmogger/manifest.json").write_text(
+    json.dumps(
+        {
+            "layout": "sidecar_v1",
+            "path_aliases": {
+                ".agentic/roles": ".diffmogger/agentic/roles",
+                "docs/CODEX_AUTOMATION_TASKS.md": ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+                "target/automation_queue": ".diffmogger/runtime/automation_queue",
+                "target/automation_worktrees": ".diffmogger/runtime/automation_worktrees",
+                "target/automation_logs": ".diffmogger/runtime/automation_logs",
+                "target/canonical_state_brief.md": ".diffmogger/runtime/canonical_state_brief.md",
+            },
+            "worktree_seed_paths": [
+                ".diffmogger/agentic/roles",
+                ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+            ],
+        }
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+	  printf 'builder prompt\n' > .diffmogger/agentic/roles/builder.md
+	  printf 'planner prompt\n' > .diffmogger/agentic/roles/planner.md
+	  printf 'hardener prompt\n' > .diffmogger/agentic/roles/hardener.md
+	  printf 'integrator prompt\n' > .diffmogger/agentic/roles/integrator.md
+	  printf 'AUTOMATION_STATUS: ACTIVE\n' > .diffmogger/state/CODEX_AUTOMATION_TASKS.md
+	  mkdir -p .git/info
   {
-    printf '/.agentic/\n'
-    printf '/docs/CODEX_AUTOMATION_TASKS.md\n'
-    printf '/docs/MULTI_ROLE_PROGRESS.md\n'
+    printf '/.diffmogger/\n'
   } >> .git/info/exclude
 )
 CODEX_AUTOMATION_PATH="$fake_codex_dir:$PATH" CODEX_RUN_ID="validation-context" \
   bash "$kit_root/scripts/target/run_role_automation.sh" --target "$tmp_dir" --role builder >/tmp/Diffmogger-role-context.log
-patch_path="$tmp_dir/target/automation_queue/builder/validation-context/changes.patch"
-changed_path="$tmp_dir/target/automation_queue/builder/validation-context/changed_files.txt"
+patch_path="$tmp_dir/.diffmogger/runtime/automation_queue/builder/validation-context/changes.patch"
+changed_path="$tmp_dir/.diffmogger/runtime/automation_queue/builder/validation-context/changed_files.txt"
 if ! grep -q "feature.txt" "$patch_path"; then
     echo "Role context smoke did not export fake feature change" >&2
     cat /tmp/Diffmogger-role-context.log >&2
     rm -rf "$tmp_dir" "$fake_codex_dir"
     exit 1
 fi
-if grep -E "\\.agentic|CODEX_AUTOMATION_TASKS|MULTI_ROLE_PROGRESS" "$patch_path" "$changed_path" >/tmp/Diffmogger-role-context-pollution.log; then
+if grep -E "\\.agentic|CODEX_AUTOMATION_TASKS" "$patch_path" "$changed_path" >/tmp/Diffmogger-role-context-pollution.log; then
     echo "Role context smoke leaked seeded context into queued patch" >&2
     cat /tmp/Diffmogger-role-context-pollution.log >&2
     rm -rf "$tmp_dir" "$fake_codex_dir"

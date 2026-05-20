@@ -2,7 +2,7 @@
 set -euo pipefail
 
 run_id="${CODEX_RUN_ID:-manual}"
-output_dir="${PLAYWRIGHT_MCP_OUTPUT_DIR:-docs/backlog/ui_artifacts/$run_id}"
+output_dir="${PLAYWRIGHT_MCP_OUTPUT_DIR:-.diffmogger/runtime/validation_jobs/$run_id/ui_artifacts}"
 mkdir -p "$output_dir"
 
 args=(
