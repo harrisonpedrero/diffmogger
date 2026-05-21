@@ -2,10 +2,12 @@ import type {
   ProjectSnapshot,
 } from "./api/backend";
 import type {
+  RunDagClusterEdge,
+  RunDagEdge,
+  RunDagPhaseId,
   RunDagNode,
   RunDagStatusKind,
   RunModel,
-  RunProgressColumnId,
   RunTone,
 } from "./runModel";
 
@@ -13,6 +15,7 @@ export type AutomationPipelineColumnId = "plan" | "build" | "review" | "validate
 export type AutomationQueueBucketId = "ready" | "running" | "waiting" | "followup" | "done";
 export type AutomationNodeStatus = "ready" | "running" | "waiting" | "followup" | "done" | "failed" | "skipped";
 export type AutomationTicketStatus = "pending" | "in_progress" | "candidate_done" | "done" | "blocked";
+export type AutomationGraphRenderMode = "node" | "cluster";
 
 export type AutomationPipelineNode = {
   id: string;
@@ -32,6 +35,63 @@ export type AutomationPipelineRow = {
   label: string;
   summary: string;
   cells: Record<AutomationPipelineColumnId, AutomationPipelineNode | null>;
+};
+
+export type AutomationGraphNode = {
+  id: string;
+  sourceKind: AutomationGraphRenderMode;
+  title: string;
+  subtitle: string;
+  phase: AutomationPipelineColumnId;
+  phaseLabel: string;
+  status: AutomationNodeStatus;
+  statusKind: RunDagStatusKind;
+  statusLabel: string;
+  tone: RunTone;
+  role: string;
+  ticketId: string;
+  detail: string;
+  scope: string;
+  nodeCount: number;
+  samples: string[];
+  badges: string[];
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type AutomationGraphEdge = {
+  id: string;
+  source: string;
+  target: string;
+  presentationKind: "hard" | "advisory" | "blocker";
+  dependencyKind: string;
+  dependencyMode: string;
+  count: number;
+  label: string;
+  detail: string;
+  points: {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    cx1: number;
+    cy1: number;
+    cx2: number;
+    cy2: number;
+  };
+};
+
+export type AutomationGraphGroup = {
+  id: string;
+  label: string;
+  kind: "proposed" | "active" | "completed";
+  mode: string;
+  status: string;
+  detail: string;
+  nodeIds: string[];
+  tone: RunTone;
 };
 
 export type AutomationQueueBucket = {
@@ -86,11 +146,17 @@ export type AutomationViewModel = {
     tone: RunTone;
   };
   dag: {
-    columns: Array<{ id: AutomationPipelineColumnId; label: string }>;
-    rows: AutomationPipelineRow[];
-    nodes: AutomationPipelineNode[];
+    columns: Array<{ id: AutomationPipelineColumnId; label: string; x: number; width: number }>;
+    nodes: AutomationGraphNode[];
+    edges: AutomationGraphEdge[];
+    groups: AutomationGraphGroup[];
     defaultSelectedNodeId: string;
     summary: string;
+    mode: AutomationGraphRenderMode;
+    modeLabel: string;
+    hiddenSummary: string;
+    width: number;
+    height: number;
   };
   ticketProgress: {
     summary: string;
@@ -121,14 +187,23 @@ export type AutomationViewModel = {
   activityLog: AutomationActivityRow[];
 };
 
-const PIPELINE_COLUMNS: Array<{ id: AutomationPipelineColumnId; label: string; source: RunProgressColumnId }> = [
-  { id: "plan", label: "Plan", source: "scope" },
-  { id: "build", label: "Build", source: "build" },
-  { id: "review", label: "Review", source: "review" },
-  { id: "validate", label: "Validate", source: "validate" },
-  { id: "integrate", label: "Integrate", source: "integrate" },
-  { id: "done", label: "Done", source: "done" },
+const GRAPH_COLUMNS: Array<{ id: AutomationPipelineColumnId; label: string; phases: RunDagPhaseId[] }> = [
+  { id: "plan", label: "Plan", phases: ["orchestrate", "decompose", "scope", "audit"] },
+  { id: "build", label: "Build", phases: ["build", "repair"] },
+  { id: "review", label: "Review", phases: ["review"] },
+  { id: "validate", label: "Validate", phases: ["validate"] },
+  { id: "integrate", label: "Integrate", phases: ["integrate"] },
+  { id: "done", label: "Done", phases: ["done"] },
 ];
+
+const GRAPH_NODE_WIDTH = 156;
+const GRAPH_NODE_HEIGHT = 62;
+const GRAPH_COLUMN_GAP = 28;
+const GRAPH_LEFT = 18;
+const GRAPH_TOP = 56;
+const GRAPH_ROW_GAP = 16;
+const GRAPH_BOTTOM = 24;
+const GRAPH_MAX_EDGES = 120;
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -281,41 +356,6 @@ function friendlyNodeDetail(node: RunDagNode | undefined, fallback: string, stat
   return `${nodeTitle(node, node.actionType, node.ownerRole)} is ${statusLabel(displayStatus).toLowerCase()}${ticket}.${scopeDetail}`;
 }
 
-function emptyPipelineCells(): Record<AutomationPipelineColumnId, AutomationPipelineNode | null> {
-  return {
-    plan: null,
-    build: null,
-    review: null,
-    validate: null,
-    integrate: null,
-    done: null,
-  };
-}
-
-function pipelineRowSummary(cells: Record<AutomationPipelineColumnId, AutomationPipelineNode | null>, fallback: string): string {
-  const nodes = PIPELINE_COLUMNS.map((column) => cells[column.id]).filter((node): node is AutomationPipelineNode => Boolean(node));
-  const active = nodes.find((node) => node.status === "running") ||
-    nodes.find((node) => node.status === "ready") ||
-    nodes.find((node) => node.status === "followup") ||
-    nodes.find((node) => node.status === "waiting");
-  if (active) return `${active.title} is ${active.statusLabel.toLowerCase()}.`;
-  const done = nodes.filter((node) => node.status === "done").length;
-  if (done) return `${done} step${done === 1 ? "" : "s"} done.`;
-  return fallback;
-}
-
-function ticketRows(snapshot: ProjectSnapshot | null): Array<{ id: string; label: string; summary: string }> {
-  return list(snapshot?.tickets.remaining || snapshot?.tickets.items)
-    .map(record)
-    .map((ticket, index) => ({
-      id: text(ticket.id || ticket.ticket_id, `ticket-${index + 1}`),
-      label: text(ticket.id || ticket.ticket_id, `Ticket ${index + 1}`),
-      summary: text(ticket.summary || ticket.title, "Ticket is queued."),
-    }))
-    .filter((ticket) => ticket.id)
-    .slice(0, 12);
-}
-
 function ticketStatus(value: unknown): AutomationTicketStatus {
   const normalized = normalize(value);
   if (normalized === "in_progress") return "in_progress";
@@ -328,7 +368,7 @@ function ticketStatus(value: unknown): AutomationTicketStatus {
 function ticketStatusLabel(status: AutomationTicketStatus): string {
   if (status === "in_progress") return "In progress";
   if (status === "candidate_done") return "Ready for hardening";
-  if (status === "blocked") return "Needs attention";
+  if (status === "blocked") return "Follow-up work";
   return titleCase(status);
 }
 
@@ -466,68 +506,247 @@ function ticketProgress(snapshot: ProjectSnapshot | null, model: RunModel): Auto
   };
 }
 
-function pipelineRows(snapshot: ProjectSnapshot | null, model: RunModel): AutomationViewModel["dag"] {
-  const nodeById = new Map(model.executionDag.nodes.map((node) => [node.id, node]));
-  const rows: AutomationPipelineRow[] = model.operations.progressRows.map((progressRow) => {
-    const cells = emptyPipelineCells();
-    for (const column of PIPELINE_COLUMNS) {
-      const cell = progressRow.cells[column.source];
-      if (!cell) continue;
-      const node = nodeById.get(cell.nodeId);
-      const displayStatus = displayStatusKind(cell.statusKind, node);
-      const detail = friendlyNodeDetail(node, cell.detail, displayStatus);
-      cells[column.id] = {
-        id: cell.nodeId,
-        title: nodeTitle(node, column.source, cell.role),
-        phase: column.id,
-        status: displayStatus,
-        statusLabel: statusLabel(displayStatus),
-        tone: toneForDisplayStatus(displayStatus),
-        role: roleLabel(node?.ownerRole || cell.role),
-        ticketId: progressRow.taskId,
-        detail,
-        scope: usefulScope(node),
-      };
-    }
-    return {
-      id: progressRow.taskId,
-      label: progressRow.label || progressRow.taskId,
-      summary: pipelineRowSummary(cells, "DAG work is recorded for this row."),
-      cells,
-    };
-  });
+function graphColumnForPhase(phase: RunDagPhaseId): AutomationPipelineColumnId {
+  return GRAPH_COLUMNS.find((column) => column.phases.includes(phase))?.id ?? "done";
+}
 
-  const existingRows = new Set(rows.map((row) => row.id));
-  for (const ticket of ticketRows(snapshot)) {
-    if (existingRows.has(ticket.id)) continue;
-    rows.push({
-      id: ticket.id,
-      label: ticket.label,
-      summary: ticket.summary,
-      cells: emptyPipelineCells(),
-    });
+function graphColumnLabel(id: AutomationPipelineColumnId): string {
+  return GRAPH_COLUMNS.find((column) => column.id === id)?.label ?? titleCase(id);
+}
+
+function graphStatusSort(status: AutomationNodeStatus): number {
+  const order: AutomationNodeStatus[] = ["running", "ready", "followup", "failed", "waiting", "done", "skipped"];
+  const index = order.indexOf(status);
+  return index === -1 ? order.length : index;
+}
+
+function graphNodeBadges(node: RunDagNode): string[] {
+  return node.badges.map((badge) => badge.label).filter(Boolean).slice(0, 3);
+}
+
+function graphNodeFromDagNode(node: RunDagNode): AutomationGraphNode {
+  const status = displayStatusKind(node.statusKind, node);
+  const phase = graphColumnForPhase(node.phase);
+  const title = nodeTitle(node, node.actionType, node.ownerRole);
+  return {
+    id: node.id,
+    sourceKind: "node",
+    title,
+    subtitle: node.ticketId || roleLabel(node.ownerRole),
+    phase,
+    phaseLabel: graphColumnLabel(phase),
+    status,
+    statusKind: node.statusKind,
+    statusLabel: statusLabel(status),
+    tone: toneForDisplayStatus(status),
+    role: roleLabel(node.ownerRole),
+    ticketId: node.ticketId,
+    detail: friendlyNodeDetail(node, node.detail, status),
+    scope: usefulScope(node),
+    nodeCount: 1,
+    samples: [node.ticketId, usefulScope(node)].filter(Boolean).slice(0, 3),
+    badges: graphNodeBadges(node),
+    x: 0,
+    y: 0,
+    width: GRAPH_NODE_WIDTH,
+    height: GRAPH_NODE_HEIGHT,
+  };
+}
+
+function graphNodeFromCluster(cluster: RunModel["executionDag"]["clusters"][number]): AutomationGraphNode {
+  const status = displayStatusKind(cluster.statusKind);
+  const phase = graphColumnForPhase(cluster.phase);
+  const actionSamples = cluster.actionSamples.map((item) => friendlyActionLabel(item));
+  const badges = [
+    cluster.activeGroupNodeCount ? `${cluster.activeGroupNodeCount} running group` : "",
+    cluster.plannedGroupNodeCount ? `${cluster.plannedGroupNodeCount} planned wave` : "",
+    cluster.ownerSamples.length ? cluster.ownerSamples.slice(0, 2).map(roleLabel).join(", ") : "",
+  ].filter(Boolean);
+  return {
+    id: cluster.id,
+    sourceKind: "cluster",
+    title: `${graphColumnLabel(phase)} ${statusLabel(status)}`,
+    subtitle: `${cluster.nodeCount} node${cluster.nodeCount === 1 ? "" : "s"}`,
+    phase,
+    phaseLabel: graphColumnLabel(phase),
+    status,
+    statusKind: cluster.statusKind,
+    statusLabel: statusLabel(status),
+    tone: toneForDisplayStatus(status),
+    role: cluster.ownerSamples.length ? cluster.ownerSamples.slice(0, 2).map(roleLabel).join(", ") : "scheduler",
+    ticketId: cluster.ticketSamples[0] || "",
+    detail: friendlyDetail(cluster.detail, `${cluster.nodeCount} execution DAG node${cluster.nodeCount === 1 ? "" : "s"} are grouped here.`),
+    scope: actionSamples.length ? `Actions: ${actionSamples.slice(0, 3).join(", ")}` : "",
+    nodeCount: cluster.nodeCount,
+    samples: [...cluster.ticketSamples, ...actionSamples].filter(Boolean).slice(0, 4),
+    badges,
+    x: 0,
+    y: 0,
+    width: GRAPH_NODE_WIDTH,
+    height: GRAPH_NODE_HEIGHT + 8,
+  };
+}
+
+function layoutGraphNodes(nodes: AutomationGraphNode[]): {
+  columns: AutomationViewModel["dag"]["columns"];
+  nodes: AutomationGraphNode[];
+  width: number;
+  height: number;
+} {
+  const width = GRAPH_LEFT * 2 + GRAPH_COLUMNS.length * GRAPH_NODE_WIDTH + (GRAPH_COLUMNS.length - 1) * GRAPH_COLUMN_GAP;
+  const columns = GRAPH_COLUMNS.map((column, index) => ({
+    id: column.id,
+    label: column.label,
+    x: GRAPH_LEFT + index * (GRAPH_NODE_WIDTH + GRAPH_COLUMN_GAP),
+    width: GRAPH_NODE_WIDTH,
+  }));
+  const columnById = new Map(columns.map((column) => [column.id, column]));
+  const bucketed = new Map<AutomationPipelineColumnId, AutomationGraphNode[]>();
+  for (const column of GRAPH_COLUMNS) bucketed.set(column.id, []);
+  for (const node of nodes) {
+    bucketed.get(node.phase)?.push(node);
   }
+  const laidOut: AutomationGraphNode[] = [];
+  let height = 320;
+  for (const [phase, bucket] of bucketed.entries()) {
+    const column = columnById.get(phase);
+    if (!column) continue;
+    bucket.sort((first, second) => (
+      graphStatusSort(first.status) - graphStatusSort(second.status) ||
+      second.nodeCount - first.nodeCount ||
+      first.subtitle.localeCompare(second.subtitle) ||
+      first.title.localeCompare(second.title)
+    ));
+    let y = GRAPH_TOP;
+    for (const node of bucket) {
+      laidOut.push({
+        ...node,
+        x: column.x,
+        y,
+        width: column.width,
+      });
+      y += node.height + GRAPH_ROW_GAP;
+    }
+    height = Math.max(height, y + GRAPH_BOTTOM);
+  }
+  return { columns, nodes: laidOut, width, height };
+}
 
-  const nodes = rows.flatMap((row) => PIPELINE_COLUMNS.map((column) => row.cells[column.id]).filter((node): node is AutomationPipelineNode => Boolean(node)));
-  const defaultSelectedNode = nodes.find((node) => node.status === "running") ||
-    nodes.find((node) => node.status === "ready") ||
-    nodes.find((node) => node.status === "followup") ||
-    nodes.find((node) => node.status === "waiting") ||
-    nodes[0];
+function edgeLabel(edge: RunDagEdge | RunDagClusterEdge): string {
+  const count = "count" in edge ? edge.count : 1;
+  if (count > 1) return `${count} ${edge.dependencyKind}`;
+  if (edge.presentationKind === "blocker") return "blocker";
+  if (edge.dependencyMode === "advisory") return "advisory";
+  return edge.dependencyKind.replace(/_/g, " ");
+}
 
+function graphEdges(
+  sourceEdges: Array<RunDagEdge | RunDagClusterEdge>,
+  nodes: AutomationGraphNode[],
+): AutomationGraphEdge[] {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  return sourceEdges
+    .filter((edge) => nodeById.has(edge.source) && nodeById.has(edge.target))
+    .slice(0, GRAPH_MAX_EDGES)
+    .map((edge) => {
+      const source = nodeById.get(edge.source);
+      const target = nodeById.get(edge.target);
+      if (!source || !target) throw new Error("graph edge references missing nodes after filtering");
+      const x1 = source.x + source.width;
+      const y1 = source.y + source.height / 2;
+      const x2 = target.x;
+      const y2 = target.y + target.height / 2;
+      const curve = Math.max(42, Math.abs(x2 - x1) * 0.42);
+      return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        presentationKind: edge.presentationKind,
+        dependencyKind: edge.dependencyKind,
+        dependencyMode: edge.dependencyMode,
+        count: "count" in edge ? edge.count : 1,
+        label: edgeLabel(edge),
+        detail: friendlyDetail(edge.detail, edge.reason),
+        points: {
+          x1,
+          y1,
+          x2,
+          y2,
+          cx1: x1 + curve,
+          cy1: y1,
+          cx2: x2 - curve,
+          cy2: y2,
+        },
+      };
+    });
+}
+
+function groupTone(kind: AutomationGraphGroup["kind"], status: string): RunTone {
+  if (kind === "active") return "info";
+  if (kind === "completed") return "good";
+  if (/fail|block|error|conflict/i.test(status)) return "warn";
+  return "quiet";
+}
+
+function graphGroups(model: RunModel, visibleNodeIds: Set<string>, mode: AutomationGraphRenderMode): AutomationGraphGroup[] {
+  if (mode === "cluster") return [];
+  return model.executionDag.groups
+    .map((group) => {
+      const nodeIds = group.nodeIds.filter((nodeId) => visibleNodeIds.has(nodeId));
+      return {
+        id: group.id,
+        label: group.label,
+        kind: group.kind,
+        mode: group.mode,
+        status: group.status,
+        detail: friendlyDetail(group.detail, "Execution wave is recorded."),
+        nodeIds,
+        tone: groupTone(group.kind, group.status),
+      };
+    })
+    .filter((group) => group.nodeIds.length > 0)
+    .slice(0, 8);
+}
+
+function dagGraph(model: RunModel): AutomationViewModel["dag"] {
+  const mode: AutomationGraphRenderMode = model.executionDag.abstraction.enabled ? "cluster" : "node";
+  const sourceNodes = mode === "cluster"
+    ? model.executionDag.clusters.map(graphNodeFromCluster)
+    : model.executionDag.visibleNodes.map(graphNodeFromDagNode);
+  const layout = layoutGraphNodes(sourceNodes);
+  const sourceEdges = mode === "cluster" ? model.executionDag.clusterEdges : model.executionDag.visibleEdges;
+  const edges = graphEdges(sourceEdges, layout.nodes);
+  const visibleNodeIds = new Set(layout.nodes.map((node) => node.id));
+  const groups = graphGroups(model, visibleNodeIds, mode);
+  const defaultSelectedNode = layout.nodes.find((node) => node.status === "running") ||
+    layout.nodes.find((node) => node.status === "ready") ||
+    layout.nodes.find((node) => node.status === "followup") ||
+    layout.nodes.find((node) => node.status === "waiting") ||
+    layout.nodes[0];
   const summaryParts = [
     `${model.executionDag.summary.running} running`,
     `${model.executionDag.summary.ready} ready`,
     `${model.executionDag.summary.completed} done`,
     `${model.executionDag.summary.blocked + model.executionDag.summary.failed + model.executionDag.summary.pending} waiting or follow-up`,
   ];
+  const hidden = [
+    model.executionDag.renderLimit.hiddenNodeCount ? `${model.executionDag.renderLimit.hiddenNodeCount} nodes folded` : "",
+    model.executionDag.renderLimit.hiddenEdgeCount ? `${model.executionDag.renderLimit.hiddenEdgeCount} edges folded` : "",
+    mode === "cluster" ? `${model.executionDag.abstraction.clusterCount} clusters / ${model.executionDag.abstraction.bundledEdgeCount} bundled edges` : "",
+  ].filter(Boolean).join(" · ");
 
   return {
-    columns: PIPELINE_COLUMNS.map(({ id, label }) => ({ id, label })),
-    rows,
-    nodes,
+    columns: layout.columns,
+    nodes: layout.nodes,
+    edges,
+    groups,
     defaultSelectedNodeId: defaultSelectedNode?.id || "",
     summary: model.executionDag.hasData ? summaryParts.join(" / ") : "No DAG work has been recorded yet.",
+    mode,
+    modeLabel: mode === "cluster" ? "Clustered DAG" : "Node DAG",
+    hiddenSummary: hidden,
+    width: layout.width,
+    height: layout.height,
   };
 }
 
@@ -547,7 +766,7 @@ function queueBuckets(snapshot: ProjectSnapshot | null, model: RunModel, tickets
     running: { id: "running", label: "Running", count: 0, tone: "info", items: [] },
     ready: { id: "ready", label: "Next", count: 0, tone: "info", items: [] },
     waiting: { id: "waiting", label: "Harden", count: 0, tone: "info", items: [] },
-    followup: { id: "followup", label: "Needs attention", count: 0, tone: "warn", items: [] },
+    followup: { id: "followup", label: "Generated follow-up", count: 0, tone: "warn", items: [] },
     done: { id: "done", label: "Recently done", count: 0, tone: "good", items: [] },
   };
   const add = (bucketId: AutomationQueueBucketId, item: AutomationQueueBucket["items"][number]) => {
@@ -756,7 +975,7 @@ export function buildAutomationViewModel(snapshot: ProjectSnapshot | null, model
   const progress = ticketProgress(snapshot, model);
   return {
     nextAction: selectedSchedulerAction(snapshot, model),
-    dag: pipelineRows(snapshot, model),
+    dag: dagGraph(model),
     ticketProgress: progress,
     queueBuckets: queueBuckets(snapshot, model, progress),
     validationRepair: validationRepair(snapshot, model),

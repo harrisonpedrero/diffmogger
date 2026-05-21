@@ -1490,7 +1490,7 @@ function integrationBacklogModel(snapshot: ProjectSnapshot | null): RunIntegrati
   const tone: RunTone = conflictCount ? "critical" : blockedCount ? "warn" : safeCount || queuedCount ? "info" : "quiet";
   const patchSamples = sampleUnique(uniquePatches.map((patch) => text(patch.patch_id || patch.manifest_path || patch.patch_path, "")), 4);
   const summary = queuedCount || conflictCount || safeCount || blockedCount
-    ? `${queuedCount} queued patch${queuedCount === 1 ? "" : "es"}; ${safeCount} safe for serialized integration; ${blockedCount + conflictCount} need attention.`
+    ? `${queuedCount} queued patch${queuedCount === 1 ? "" : "es"}; ${safeCount} safe for serialized integration; ${blockedCount + conflictCount} need follow-up.`
     : "No queued worker patches are waiting for serialized integration.";
   return {
     queuedCount,

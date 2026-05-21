@@ -5,12 +5,18 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 WATCHDOG = ROOT / "scripts" / "runtime" / "run_process_watchdog.py"
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from diffmogger.runtime.run_process_watchdog import deadline_reached, elapsed_seconds  # noqa: E402
 
 
 class RunProcessWatchdogTests(unittest.TestCase):
@@ -84,6 +90,61 @@ class RunProcessWatchdogTests(unittest.TestCase):
         self.assertFalse(status["idle_timed_out"])
         self.assertEqual("progress_path_changed", status["last_progress_reason"])
 
+    def test_progress_updates_status_file_before_process_exits(self) -> None:
+        script = textwrap.dedent(
+            """
+            import time
+
+            print("first-progress", flush=True)
+            time.sleep(2)
+            """
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            stdout = tmp_path / "stdout.log"
+            stderr = tmp_path / "stderr.log"
+            status_path = tmp_path / "watchdog.json"
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(WATCHDOG),
+                    "--stdout-file",
+                    str(stdout),
+                    "--stderr-file",
+                    str(stderr),
+                    "--status-file",
+                    str(status_path),
+                    "--timeout-seconds",
+                    "30",
+                    "--idle-timeout-seconds",
+                    "5",
+                    "--termination-grace-seconds",
+                    "0",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    script,
+                ],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.time() + 5
+                observed: dict[str, object] = {}
+                while time.time() < deadline:
+                    if status_path.exists():
+                        observed = json.loads(status_path.read_text(encoding="utf-8"))
+                        if observed.get("last_progress_reason") == "progress_path_changed":
+                            break
+                    time.sleep(0.1)
+                self.assertEqual("progress_path_changed", observed.get("last_progress_reason"))
+            finally:
+                result_stdout, result_stderr = process.communicate(timeout=10)
+
+        self.assertEqual(0, process.returncode, result_stdout + result_stderr)
+
     def test_watched_directory_progress_resets_idle_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -111,6 +172,25 @@ class RunProcessWatchdogTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertFalse(status["idle_timed_out"])
         self.assertEqual("progress_path_changed", status["last_progress_reason"])
+
+    def test_deadline_reached_uses_wall_clock_after_sleep(self) -> None:
+        self.assertTrue(
+            deadline_reached(
+                monotonic_now=105.0,
+                monotonic_deadline=700.0,
+                wall_now=1_800.0,
+                wall_deadline=700.0,
+            )
+        )
+        self.assertEqual(
+            1_700.0,
+            elapsed_seconds(
+                monotonic_now=105.0,
+                monotonic_started=100.0,
+                wall_now=1_800.0,
+                wall_started=100.0,
+            ),
+        )
 
 
 if __name__ == "__main__":

@@ -89,10 +89,13 @@ describe("AutomationPage", () => {
     expect(html).toContain("Selected Work");
     expect(html).toContain("Ticket Progress");
     expect(html).toContain("Now &amp; Next");
-    expect(html).toContain("Human Input");
+    expect(html).toContain("DAG Flow");
+    expect(html).toContain("Operational Feed");
+    expect(html).toContain("Input Records");
     expect(html).toContain("1 pending");
     expect(html).toContain("Checks &amp; Repair");
-    expect(html).toContain("Activity Log");
+    expect(html).toContain("Command Output");
+    expect(html).toContain("Node DAG");
     expect(html).toContain("Plan");
     expect(html).toContain("Build");
     expect(html).toContain("Review");
@@ -105,6 +108,7 @@ describe("AutomationPage", () => {
     expect(html).toContain("Setup or harness work has been generated.");
     expect(html).toContain("Patch accepted.");
     expect(html).toContain("npm test");
+    expect(html).not.toContain("Human Input");
     expect(html).not.toContain("Scheduler Next");
     expect(html).not.toContain("Unblocker Work");
     expect(html).not.toContain("Recent Outcomes");
@@ -139,5 +143,34 @@ describe("AutomationPage", () => {
     expect(html).toContain("TICKET-030");
     expect(html).toContain("1/1 done");
     expect(html).not.toContain("No tickets are loaded.");
+  });
+
+  it("renders large execution DAGs as clustered graph nodes", () => {
+    const data = snapshot();
+    data.dag.execution_dag = {
+      nodes: Array.from({ length: 310 }, (_, index) => ({
+        node_id: `dag-node:large:${index}`,
+        task_id: `TICKET-${String(index + 1).padStart(3, "0")}`,
+        action_type: index % 3 === 0 ? "build" : index % 3 === 1 ? "validate" : "review",
+        status: index < 4 ? "ready" : index < 8 ? "running" : "pending",
+        owner_role: index % 3 === 0 ? "builder" : "hardener",
+      })),
+      edges: [],
+    };
+
+    const html = renderToStaticMarkup(
+      <AutomationPage
+        snapshot={data}
+        loading={false}
+        onChoose={() => undefined}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Clustered DAG");
+    expect(html).toContain("Build Running");
+    expect(html).toContain("nodes folded");
+    expect(html).not.toContain("pipeline-row");
   });
 });

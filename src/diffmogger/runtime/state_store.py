@@ -18057,6 +18057,61 @@ def _source_dag_node_for_role_manifest_conn(conn: sqlite3.Connection, *, role: s
     return str(row["node_id"] or "") if row is not None else ""
 
 
+def _role_manifest_validation_evidence(manifest: Mapping[str, Any]) -> list[Any]:
+    explicit = manifest.get("validation_evidence")
+    if isinstance(explicit, list) and any(item for item in explicit):
+        return list(explicit)
+    checks = manifest.get("checks_run")
+    if isinstance(checks, list) and any(str(item).strip() for item in checks):
+        return [str(item) for item in checks if str(item).strip()]
+
+    evidence: list[dict[str, Any]] = []
+    summary = str(manifest.get("summary") or "")
+    in_checks = False
+    for raw_line in summary.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("## "):
+            in_checks = line.strip("# ").lower() in {"checks", "checks run", "validation", "verification"}
+            continue
+        if not in_checks:
+            continue
+        normalized = line.lstrip("-* ").strip()
+        lowered = normalized.lower()
+        if not normalized:
+            continue
+        if any(token in lowered for token in (" passed", " pass", "0 console errors", "validated", "succeeded")):
+            evidence.append(
+                {
+                    "source": "role_manifest_summary",
+                    "status": "passed",
+                    "detail": _brief_text(normalized, limit=260),
+                }
+            )
+
+    playwright_status = str(manifest.get("playwright_validation_status") or "").lower()
+    if playwright_status in {"passed", "passed_or_blocker_recorded"}:
+        evidence.append(
+            {
+                "source": "role_manifest_playwright",
+                "status": "passed",
+                "detail": playwright_status,
+            }
+        )
+
+    if evidence and int(manifest.get("watchdog_exit_code") or 0) == 0:
+        evidence.append(
+            {
+                "source": "role_manifest_watchdog",
+                "status": "passed",
+                "detail": "Role watchdog exited 0.",
+            }
+        )
+
+    return evidence
+
+
 def sync_queued_role_manifests_into_worker_patches_conn(
     conn: sqlite3.Connection,
     target: Path,
@@ -18183,6 +18238,7 @@ def sync_queued_role_manifests_into_worker_patches_conn(
                 write_json_projection(manifest_path, manifest)
             created_at = str(manifest.get("created_at") or now)
             summary_path = manifest_path.parent / "summary.md"
+            validation_evidence = _role_manifest_validation_evidence(manifest)
             payload = {
                 **dict(existing_payload),
                 "schema_version": 1,
@@ -18200,6 +18256,7 @@ def sync_queued_role_manifests_into_worker_patches_conn(
                 "patch_cluster_key": cluster_key,
                 "patch_cluster_changed_files": _worker_patch_cluster_files(changed_files),
                 "patch_cluster_action_type": str(manifest.get("action_type") or "build"),
+                "validation_evidence": validation_evidence,
             }
             worker_payload = {**dict(existing_worker_payload), **payload}
             with conn:
@@ -18265,7 +18322,7 @@ def sync_queued_role_manifests_into_worker_patches_conn(
                         stable_json(changed_files),
                         str(manifest.get("base_commit") or ""),
                         stable_json(manifest.get("required_leases") if isinstance(manifest.get("required_leases"), list) else []),
-                        stable_json(manifest.get("checks_run") if isinstance(manifest.get("checks_run"), list) else []),
+                        stable_json(validation_evidence),
                         created_at,
                         created_at,
                         stable_json(payload),
@@ -18750,6 +18807,37 @@ def _preflight_path_overlap(first: list[str], second: list[str]) -> bool:
     return False
 
 
+def _worker_patch_path_is_test(path: str) -> bool:
+    normalized = normalize_path_for_brief(path).strip("/")
+    if not normalized:
+        return False
+    lowered = normalized.lower()
+    parts = tuple(part for part in Path(lowered).parts if part and part != ".")
+    name = Path(lowered).name
+    return (
+        bool(parts and parts[0] in {"test", "tests"})
+        or "/test/" in lowered
+        or "/tests/" in lowered
+        or name.endswith((".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx"))
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+    )
+
+
+def _worker_patch_changes_are_test_only(changed_files: list[str]) -> bool:
+    normalized = [normalize_path_for_brief(path) for path in changed_files if normalize_path_for_brief(path)]
+    return bool(normalized) and all(_worker_patch_path_is_test(path) for path in normalized)
+
+
+def _worker_patch_has_validation_evidence(patch: Mapping[str, Any]) -> bool:
+    evidence = patch.get("validation_evidence")
+    if isinstance(evidence, list) and any(item for item in evidence):
+        return True
+    payload = patch.get("payload") if isinstance(patch.get("payload"), Mapping) else {}
+    payload_evidence = payload.get("validation_evidence") if isinstance(payload, Mapping) else None
+    return isinstance(payload_evidence, list) and any(item for item in payload_evidence)
+
+
 def _worker_patch_preflight_patch_path(target: Path | None, patch_path: str) -> Path | None:
     if target is None or not str(patch_path or "").strip():
         return None
@@ -18921,6 +19009,7 @@ def _worker_patch_preflight_payload(record: Mapping[str, Any]) -> dict[str, Any]
         "integration_apply_mode": str(record.get("integration_apply_mode") or ""),
         "changed_since_base": list(record.get("changed_since_base") or []),
         "protected_paths": list(record.get("protected_paths") or []),
+        "missing_validation_evidence": bool(record.get("missing_validation_evidence")),
     }
 
 
@@ -19073,6 +19162,7 @@ def worker_patch_integration_preflight_conn(
             "can_proceed_after_validation": False,
             "status": "unknown",
             "reason_kind": "",
+            "missing_validation_evidence": False,
         }
         if not changed_files and not metadata_only_patch:
             record["missing_metadata"] = True
@@ -19088,6 +19178,25 @@ def worker_patch_integration_preflight_conn(
                 "protected_path",
                 f"Patch touches protected or secret-sensitive path(s): {', '.join(protected_paths[:4])}.",
             )
+        if (
+            _worker_patch_changes_are_test_only(changed_files)
+            and not _worker_patch_has_validation_evidence(patch)
+            and not metadata_only_patch
+        ):
+            record["missing_validation_evidence"] = True
+            if record["ready_to_integrate"]:
+                add_reason(
+                    record,
+                    "missing_validation_evidence",
+                    "Test-only patch has no patch-applied validation evidence; require validation evidence or an implementation patch before integration.",
+                )
+            else:
+                add_reason(
+                    record,
+                    "validation_evidence_required_before_integration",
+                    "Test-only patch will require patch-applied validation evidence before integration.",
+                    severity="info",
+                )
         if not integration_nodes:
             add_reason(record, "missing_integration_dag_node", "Patch has not been reconciled into an integration DAG node.", severity="warn")
         elif patch_id not in ready_patch_ids:
@@ -19161,6 +19270,8 @@ def worker_patch_integration_preflight_conn(
             record["status"] = "missing_metadata"
         elif protected_paths:
             record["status"] = "protected_path"
+        elif record["missing_validation_evidence"] and record["ready_to_integrate"]:
+            record["status"] = "missing_validation_evidence"
         elif record["stale_base"]:
             record["status"] = "needs_reconciliation"
         elif not integration_nodes:
@@ -19286,6 +19397,7 @@ def worker_patch_integration_preflight_conn(
         "needs_reconciliation_count": len([record for record in records if str(record.get("status") or "") == "needs_reconciliation"]),
         "protected_path_count": len([record for record in records if str(record.get("status") or "") == "protected_path"]),
         "missing_metadata_count": len([record for record in records if bool(record.get("missing_metadata"))]),
+        "missing_validation_evidence_count": len([record for record in records if str(record.get("status") or "") == "missing_validation_evidence"]),
         "stale_base_count": len([record for record in records if bool(record.get("stale_base"))]),
         "dependency_pending_count": len([record for record in records if str(record.get("status") or "") in {"waiting_validation", "waiting_dag_handoff"}]),
         "safe_patch_ids": safe_patch_ids,
@@ -19294,7 +19406,15 @@ def worker_patch_integration_preflight_conn(
         "blocked_patch_ids": [
             str(record.get("patch_id") or "")
             for record in records
-            if str(record.get("status") or "") in {"missing_metadata", "stale_base", "likely_conflict", "true_conflict", "needs_reconciliation", "protected_path"}
+            if str(record.get("status") or "") in {
+                "missing_metadata",
+                "missing_validation_evidence",
+                "stale_base",
+                "likely_conflict",
+                "true_conflict",
+                "needs_reconciliation",
+                "protected_path",
+            }
         ],
         "safe_order": safe_order_records,
         "likely_conflicts": [
@@ -20378,6 +20498,25 @@ def reconcile_integrated_worker_patch_ticket_state_conn(
             payload = _json_cell(ticket_row["payload_json"], {})
             payload = dict(payload if isinstance(payload, Mapping) else {})
             changed_files = [str(item) for item in patch.get("changed_files") or [] if str(item)]
+            if _worker_patch_changes_are_test_only(changed_files):
+                append_event(
+                    conn,
+                    StateEvent(
+                        stream_id=f"stream:ticket-run:{task_id}",
+                        event_type="ticket.worker_patch_candidate_done_skipped",
+                        actor_role=selected_by,
+                        phase="ticket_state",
+                        status="ACTIVE",
+                        task_id=task_id,
+                        payload={
+                            "ticket_id": task_id,
+                            "patch_id": patch_id,
+                            "changed_files": changed_files,
+                            "reason": "test_only_patch_requires_implementation_or_explicit_ticket_state_action",
+                        },
+                    ),
+                )
+                continue
             accepted_commit = _manifest_accepted_commit(target, str(patch.get("manifest_path") or ""))
             evidence = [
                 f"Integrated validated worker patch {patch_id} for {task_id}.",
@@ -20476,6 +20615,14 @@ def mark_worker_patches_integrated_conn(
     ).fetchall()
     now = utc_now()
     ready_patch_ids = ready_integration_patch_ids_conn(conn)
+    if target is not None and rows:
+        preflight = worker_patch_integration_preflight_conn(conn, target=target, limit=max(limit, len(rows)))
+        safe_preflight_patch_ids = {
+            str(patch_id)
+            for patch_id in (preflight.get("safe_patch_ids") if isinstance(preflight.get("safe_patch_ids"), list) else [])
+            if str(patch_id)
+        }
+        ready_patch_ids = ready_patch_ids.intersection(safe_preflight_patch_ids)
     integrated_patch_ids = [
         str(row["patch_id"])
         for row in rows
@@ -24105,7 +24252,7 @@ def why_not_parallel_read_model(
             summary = f"{len(records)} parallel candidate(s) are using serialized or waiting paths; top reason: {top_summary}."
             status = str(top.get("reason_kind") or "serialized_role_path")
         else:
-            summary = f"{len(records)} parallel candidate(s) need attention; top reason: {top.get('label') or top.get('reason_kind')}."
+            summary = f"{len(records)} parallel candidate(s) need follow-up work; top reason: {top.get('label') or top.get('reason_kind')}."
             status = "blocked"
     elif proposed_groups:
         summary = "Planning preview has proposed group(s) and no candidate reason groups."

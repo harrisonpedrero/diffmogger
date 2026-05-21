@@ -2663,8 +2663,16 @@ textarea {
   align-content: start;
 }
 
-.queue-summary-panel,
+.queue-summary-panel {
+  grid-column: span 4;
+}
+
+.wave-panel {
+  grid-column: span 8;
+}
+
 .ticket-progress-panel,
+.operational-feed-panel,
 .log-panel {
   grid-column: span 12;
 }
@@ -2929,9 +2937,240 @@ textarea {
   border-top: 1px solid var(--border-subtle);
 }
 
+.selected-work-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.selected-work-tags span {
+  max-width: 100%;
+  padding: 4px 6px;
+  overflow: hidden;
+  border: 1px solid #2e302c;
+  color: var(--text-secondary);
+  background: #151817;
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dag-graph-scroll {
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid #202722;
+  background:
+    linear-gradient(90deg, rgba(41, 251, 15, 0.035) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    #0b0f0e;
+  background-size: 44px 44px, 44px 44px, auto;
+}
+
+.dag-graph-canvas {
+  position: relative;
+  min-width: 100%;
+}
+
+.dag-graph-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.dag-column-guide rect {
+  fill: rgba(255, 255, 255, 0.018);
+  stroke: rgba(255, 255, 255, 0.04);
+}
+
+.dag-column-guide text {
+  fill: var(--text-muted);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-anchor: middle;
+  text-transform: uppercase;
+}
+
+.dag-edge path {
+  fill: none;
+  stroke: rgba(253, 253, 253, 0.24);
+  stroke-width: 1.35;
+  vector-effect: non-scaling-stroke;
+}
+
+.dag-edge text {
+  fill: var(--text-muted);
+  paint-order: stroke;
+  stroke: #0b0f0e;
+  stroke-width: 4px;
+  font-size: 10px;
+  font-weight: 900;
+  text-anchor: middle;
+  text-transform: uppercase;
+}
+
+.dag-edge.advisory path {
+  stroke: rgba(253, 253, 253, 0.18);
+  stroke-dasharray: 5 5;
+}
+
+.dag-edge.blocker path {
+  stroke: rgba(255, 122, 150, 0.62);
+  stroke-dasharray: 7 4;
+}
+
+.dag-graph-svg marker path {
+  fill: rgba(253, 253, 253, 0.46);
+}
+
+.dag-wave-outline rect {
+  fill: rgba(41, 251, 15, 0.035);
+  stroke: rgba(41, 251, 15, 0.36);
+  stroke-width: 1;
+  stroke-dasharray: 8 5;
+}
+
+.dag-wave-outline.active rect {
+  fill: rgba(41, 251, 15, 0.07);
+  stroke: rgba(41, 251, 15, 0.72);
+}
+
+.dag-wave-outline.completed rect {
+  fill: rgba(253, 253, 253, 0.025);
+  stroke: rgba(253, 253, 253, 0.24);
+}
+
+.dag-wave-outline text {
+  fill: var(--brand-signal);
+  paint-order: stroke;
+  stroke: #0b0f0e;
+  stroke-width: 5px;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.dag-graph-node {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  padding: 7px 8px;
+  overflow: hidden;
+  border: 1px solid #3a3d38;
+  border-radius: 0;
+  background: rgba(20, 24, 23, 0.96);
+  color: var(--text-primary);
+  text-align: left;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.22);
+}
+
+.dag-graph-node span,
+.dag-graph-node small,
+.dag-graph-node em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dag-graph-node span {
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.dag-graph-node small,
+.dag-graph-node em {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.dag-graph-node.cluster {
+  border-color: rgba(253, 253, 253, 0.22);
+  background:
+    linear-gradient(180deg, rgba(253, 253, 253, 0.045), rgba(253, 253, 253, 0.015)),
+    #151918;
+}
+
+.dag-graph-node.ready {
+  border-color: rgba(253, 253, 253, 0.52);
+}
+
+.dag-graph-node.running {
+  border-color: rgba(41, 251, 15, 0.82);
+  box-shadow: inset 3px 0 0 var(--brand-signal), 0 0 22px rgba(41, 251, 15, 0.12);
+}
+
+.dag-graph-node.waiting {
+  color: var(--text-secondary);
+  background: rgba(16, 18, 18, 0.96);
+}
+
+.dag-graph-node.followup,
+.dag-graph-node.failed {
+  border-color: rgba(255, 122, 150, 0.66);
+  color: var(--status-warn);
+  background: rgba(42, 23, 29, 0.94);
+}
+
+.dag-graph-node.done {
+  border-color: rgba(41, 251, 15, 0.38);
+  background: rgba(19, 35, 24, 0.94);
+}
+
+.dag-graph-node.selected {
+  outline: 2px solid rgba(253, 253, 253, 0.34);
+  outline-offset: 3px;
+}
+
+.dag-graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.dag-graph-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dag-graph-legend strong {
+  color: var(--text-secondary);
+}
+
+.dag-graph-legend i {
+  display: inline-block;
+  width: 22px;
+  height: 0;
+  border-top: 2px solid rgba(253, 253, 253, 0.34);
+}
+
+.dag-graph-legend .edge-advisory {
+  border-top-style: dashed;
+  border-color: rgba(253, 253, 253, 0.24);
+}
+
+.dag-graph-legend .edge-blocker {
+  border-top-style: dashed;
+  border-color: rgba(255, 122, 150, 0.72);
+}
+
 .queue-buckets {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -2995,6 +3234,116 @@ textarea {
 .queue-bucket-items span {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.wave-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.wave-metrics div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #2e302c;
+  background: #202121;
+}
+
+.wave-metrics span {
+  display: block;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.wave-metrics strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 21px;
+}
+
+.wave-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.wave-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid #2e302c;
+  background: #171b1a;
+}
+
+.wave-card.active {
+  border-color: rgba(41, 251, 15, 0.52);
+  background: rgba(41, 251, 15, 0.055);
+}
+
+.wave-card.proposed {
+  border-color: rgba(253, 253, 253, 0.3);
+}
+
+.wave-card.blocked,
+.wave-card.integration {
+  border-color: rgba(255, 122, 150, 0.48);
+}
+
+.wave-card.completed {
+  border-color: rgba(41, 251, 15, 0.28);
+}
+
+.wave-card > div:first-child,
+.wave-card-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.wave-card > div:first-child {
+  justify-content: space-between;
+}
+
+.wave-card strong,
+.wave-card p,
+.wave-card-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wave-card strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.wave-card p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.wave-card-meta {
+  flex-wrap: wrap;
+}
+
+.wave-card-meta span {
+  max-width: 100%;
+  padding: 3px 5px;
+  border: 1px solid #2e302c;
+  color: var(--text-secondary);
+  background: #111514;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
 }
 
 .ticket-progress-counts {
@@ -3132,6 +3481,57 @@ textarea {
   white-space: nowrap;
 }
 
+.feed-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.feed-tabs button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border: 1px solid #2e302c;
+  border-radius: 0;
+  color: var(--text-muted);
+  background: #151817;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.feed-tabs button.active {
+  border-color: rgba(41, 251, 15, 0.58);
+  color: var(--text-primary);
+  background: rgba(41, 251, 15, 0.06);
+}
+
+.feed-tabs strong {
+  color: var(--brand-signal);
+}
+
+.feed-content {
+  max-height: 260px;
+  overflow: auto;
+}
+
+.operational-feed-panel [hidden] {
+  display: none !important;
+}
+
+.feed-command,
+.feed-input {
+  display: grid;
+  gap: 9px;
+}
+
+.feed-input p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
 @media (max-width: 1180px) {
   .automation-main-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3140,10 +3540,12 @@ textarea {
   .dag-inspector-panel,
   .selected-work-panel,
   .queue-summary-panel,
+  .wave-panel,
   .ticket-progress-panel,
   .human-compact-panel,
   .validation-panel,
   .activity-panel,
+  .operational-feed-panel,
   .log-panel {
     grid-column: span 2;
   }
@@ -3163,5 +3565,10 @@ textarea {
 
   .ticket-progress-table {
     overflow: auto;
+  }
+
+  .wave-list,
+  .wave-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

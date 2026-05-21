@@ -437,6 +437,68 @@ class StateStoreTests(unittest.TestCase):
             loaded = state_store_module.load_ticket_run_state(target)
             self.assertEqual("candidate_done", loaded["tickets"][0]["status"])
 
+    def test_unvalidated_test_only_worker_patch_does_not_integrate_or_advance_ticket(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            write_ticket_run_state(
+                target,
+                {
+                    "run_id": "ticket-run",
+                    "tickets": [
+                        {
+                            "id": "TICKET-017",
+                            "summary": "Define world schema",
+                            "status": "pending",
+                        }
+                    ],
+                },
+                actor_role="test",
+                event_type="ticket.run_seeded",
+            )
+            with closing(connect(database_path_for_target(target))) as conn:
+                with conn:
+                    self._seed_worker_patch_for_preflight(
+                        conn,
+                        patch_id="patch:test-only",
+                        changed_files=["tests/world/worldSchema.test.ts"],
+                        payload={"task_id": "TICKET-017", "dag_node_id": "dag-node:test:build"},
+                    )
+                    upsert_worker_patch_lineage_conn(
+                        conn,
+                        patch_id="patch:test-only",
+                        worker_id="worker:patch:test-only",
+                        execution_group_id="execution-group:test",
+                        task_id="TICKET-017",
+                        source_dag_node_id="dag-node:test:build",
+                        status="queued",
+                    )
+                    self._seed_ready_integration_node(conn, "patch:test-only")
+
+                preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
+                record = next(item for item in preflight["records"] if item["patch_id"] == "patch:test-only")
+                self.assertEqual("missing_validation_evidence", record["status"])
+                self.assertEqual(["patch:test-only"], preflight["blocked_patch_ids"])
+
+                result = state_store_module.mark_worker_patches_integrated_conn(
+                    conn,
+                    target=target,
+                    patch_ids=["patch:test-only"],
+                    selected_by="test.integration",
+                )
+                patch_row = conn.execute(
+                    "SELECT status, integrated_at FROM worker_patches WHERE patch_id = 'patch:test-only'",
+                ).fetchone()
+                ticket_row = conn.execute(
+                    "SELECT status, payload_json FROM ticket_items WHERE ticket_id = 'TICKET-017'",
+                ).fetchone()
+
+            self.assertEqual("skipped", result["status"])
+            self.assertEqual("queued", patch_row["status"])
+            self.assertEqual("", patch_row["integrated_at"])
+            self.assertEqual("pending", ticket_row["status"])
+            payload = json.loads(ticket_row["payload_json"])
+            self.assertEqual("pending", payload["status"])
+
     def test_role_manifest_sync_excludes_runtime_state_paths_from_patch_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
@@ -474,6 +536,58 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual([".diffmogger/agentic/verification_commands.txt"], payload["runtime_state_changed_files"])
             self.assertNotEqual("protected_path", record["status"])
             self.assertEqual(0, preflight["protected_path_count"])
+
+    def test_role_manifest_sync_derives_validation_evidence_from_summary_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            queue_dir = target / "target" / "automation_queue" / "hardener" / "run-summary-checks"
+            queue_dir.mkdir(parents=True)
+            manifest_path = queue_dir / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "role": "hardener",
+                        "run_id": "run-summary-checks",
+                        "status": "queued",
+                        "patch_path": "target/automation_queue/hardener/run-summary-checks/changes.patch",
+                        "changed_files": ["tests/game/cameraTransform.test.ts"],
+                        "checks_run": [],
+                        "watchdog_exit_code": 0,
+                        "playwright_validation_status": "passed_or_blocker_recorded",
+                        "summary": "\n".join(
+                            [
+                                "Commit type: test",
+                                "Commit scope: camera-transform",
+                                "Commit subject: Cover camera transforms",
+                                "",
+                                "## Checks",
+                                "- `npm test -- --run tests/game/cameraTransform.test.ts` passed.",
+                                "- Playwright opened the app and recorded 0 console errors.",
+                            ]
+                        ),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with closing(connect(database_path_for_target(target))) as conn:
+                result = state_store_module.sync_queued_role_manifests_into_worker_patches_conn(conn, target)
+                patch_id = result["patch_ids"][0]
+                row = conn.execute(
+                    "SELECT validation_evidence_json, payload_json FROM worker_patches WHERE patch_id = ?",
+                    (patch_id,),
+                ).fetchone()
+                self._seed_ready_integration_node(conn, patch_id)
+                preflight = state_store_module.worker_patch_integration_preflight_conn(conn, target=target)
+
+            evidence = json.loads(row["validation_evidence_json"])
+            payload = json.loads(row["payload_json"])
+            record = next(item for item in preflight["records"] if item["patch_id"] == patch_id)
+            self.assertGreaterEqual(len(evidence), 2)
+            self.assertEqual(evidence, payload["validation_evidence"])
+            self.assertEqual(0, preflight["missing_validation_evidence_count"])
+            self.assertNotEqual("missing_validation_evidence", record["status"])
 
     def test_role_manifest_sync_recovers_parallel_worker_attribution_from_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

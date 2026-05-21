@@ -16,6 +16,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from diffmogger.conveyor import scheduler as scheduler_module
+from diffmogger.conveyor import cli as conveyor_cli
 from diffmogger.conveyor import runner as conveyor_runner
 from diffmogger.conveyor.scheduler import DAG_RUNNER_ACTIONS
 from diffmogger.runtime.state_store import (
@@ -25,9 +26,11 @@ from diffmogger.runtime.state_store import (
     execution_dag_edges_conn,
     execution_dag_read_model,
     latest_scheduler_decision_conn,
+    load_runner_state,
     launch_read_only_execution_group_conn,
     reconcile_worker_results_into_execution_dag_conn,
     record_validation_group_result_on_execution_dag_conn,
+    runner_projection_path_for_target,
     scope_fanout_outcomes_conn,
     stable_json,
     state_snapshot,
@@ -111,6 +114,26 @@ class DagSchedulerRunnerTests(unittest.TestCase):
                         "paths": ["src/app.py"],
                     },
                 )
+
+    def test_conveyor_cli_writes_runner_projection_for_direct_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            started_at = "2026-05-21T00:00:00+00:00"
+
+            projected = conveyor_cli.write_conveyor_runner_projection(
+                target,
+                state="running",
+                message="Continuous automation is running.",
+                started_at=started_at,
+                event_type="test.runner_projection",
+            )
+            loaded = load_runner_state(runner_projection_path_for_target(target))
+
+            self.assertEqual("running", projected["state"])
+            self.assertEqual("running", loaded["state"])
+            self.assertEqual(str(target), loaded["target"])
+            self.assertEqual(started_at, loaded["started_at"])
+            self.assertEqual("automation.runner", loaded["canonical_state"]["projection"])
 
     def seed_worker_patch(
         self,

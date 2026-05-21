@@ -17,7 +17,68 @@ from .queue_state import queued_manifests
 from .runner import finish_active_role_run
 from .state import *
 from .tickets import finalize_ticket_campaign, ticket_campaign_terminal
-from diffmogger.runtime.state_store import connect, database_path_for_target, human_messages_snapshot, latest_scheduler_decision_conn
+from diffmogger.runtime.state_store import (
+    connect,
+    database_path_for_target,
+    human_messages_snapshot,
+    latest_scheduler_decision_conn,
+    runner_projection_path_for_target,
+    write_runner_state as write_canonical_runner_state,
+)
+
+
+def write_conveyor_runner_projection(
+    target: Path,
+    *,
+    state: str,
+    message: str,
+    started_at: str,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    projection = {
+        "schema_version": 1,
+        "state": state,
+        "message": message,
+        "pid": os.getpid(),
+        "pgid": os.getpgrp(),
+        "target": str(target),
+        "started_at": started_at,
+        "command": sys.argv,
+        "command_display": command_display(sys.argv),
+    }
+    if state != "running":
+        projection["stopped_at"] = utc_now()
+    return write_canonical_runner_state(
+        runner_projection_path_for_target(target),
+        projection,
+        event_type=event_type,
+        actor_role="conveyor",
+        phase="run_control",
+        payload=payload,
+    )
+
+
+def try_write_conveyor_runner_projection(
+    target: Path,
+    *,
+    state: str,
+    message: str,
+    started_at: str,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    try:
+        write_conveyor_runner_projection(
+            target,
+            state=state,
+            message=message,
+            started_at=started_at,
+            event_type=event_type,
+            payload=payload,
+        )
+    except Exception as exc:
+        print(f"CONVEYOR_RUNNER_PROJECTION_WARN error={exc}", flush=True)
 
 
 def _latest_selected_scheduler_candidate(target: Path) -> dict[str, Any]:
@@ -116,6 +177,15 @@ def main() -> int:
     cycles = 0
     last_exit = 0
     allow_remotes = args.allow_remotes or os.environ.get("MULTI_ROLE_ALLOW_REMOTES") == "1"
+    runner_started_at = utc_now()
+    try_write_conveyor_runner_projection(
+        target,
+        state="running",
+        message="Continuous automation is running.",
+        started_at=runner_started_at,
+        event_type="runner.started_from_conveyor_cli",
+        payload={"lock_path": str(lock_path), "max_cycles": args.max_cycles, "once": args.once},
+    )
     try:
         while not conveyor_runner.TERMINATE_REQUESTED:
             state = load_state(state_path)
@@ -161,6 +231,14 @@ def main() -> int:
                 payload={"role": role, "reason": reason, "stop": stop, "selected_scheduler_candidate": selected_candidate},
             )
             print(f"CONVEYOR_DECISION role={role or 'idle'} reason={reason}", flush=True)
+            try_write_conveyor_runner_projection(
+                target,
+                state="running",
+                message="Continuous automation is running.",
+                started_at=runner_started_at,
+                event_type="runner.heartbeat_from_conveyor_cli",
+                payload={"role": role, "reason": reason, "stop": stop},
+            )
 
             if stop:
                 if reason == "bounded campaign complete":
@@ -232,6 +310,14 @@ def main() -> int:
         return 143
     finally:
         conveyor_runner.terminate_child()
+        try_write_conveyor_runner_projection(
+            target,
+            state="stopped",
+            message="Continuous automation stopped.",
+            started_at=runner_started_at if "runner_started_at" in locals() else utc_now(),
+            event_type="runner.stopped_from_conveyor_cli",
+            payload={"terminate_requested": conveyor_runner.TERMINATE_REQUESTED},
+        )
         release_conveyor_lock(lock_path)
 
 if __name__ == "__main__":

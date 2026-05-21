@@ -56,6 +56,7 @@ DAG_RUNNER_ACTIONS = {
 _PREFLIGHT_BLOCKED_STATUSES = {
     "likely_conflict",
     "missing_metadata",
+    "missing_validation_evidence",
     "needs_reconciliation",
     "protected_path",
     "stale_base",

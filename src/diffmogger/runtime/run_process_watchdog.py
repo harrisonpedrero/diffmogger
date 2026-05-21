@@ -99,9 +99,20 @@ def progress_path_label(path: Path) -> str:
         return str(path)
 
 
-def progress_entries_for_path(path: Path, *, file_limit: int) -> list[str]:
+def _ignored_progress_path(path: Path, ignore_paths: set[str]) -> bool:
+    try:
+        label = str(path.resolve())
+    except OSError:
+        label = str(path)
+    return label in ignore_paths
+
+
+def progress_entries_for_path(path: Path, *, file_limit: int, ignore_paths: set[str] | None = None) -> list[str]:
     """Return file metadata entries that represent observable subprocess progress."""
+    ignore_paths = ignore_paths or set()
     label = progress_path_label(path)
+    if _ignored_progress_path(path, ignore_paths):
+        return []
     try:
         stat_result = path.stat()
     except OSError as exc:
@@ -112,7 +123,7 @@ def progress_entries_for_path(path: Path, *, file_limit: int) -> list[str]:
     if not path.is_dir():
         return [f"{label}\0other\0{stat_result.st_size}\0{stat_result.st_mtime_ns}"]
 
-    entries = [f"{label}\0dir\0{stat_result.st_mtime_ns}"]
+    entries = [f"{label}\0dir"]
     seen = 0
     for root, dirs, files in os.walk(path):
         dirs[:] = [name for name in sorted(dirs) if name not in PROGRESS_SKIP_DIR_NAMES]
@@ -122,6 +133,8 @@ def progress_entries_for_path(path: Path, *, file_limit: int) -> list[str]:
                 entries.append(f"{label}\0truncated\0{file_limit}")
                 return entries
             file_path = root_path / name
+            if _ignored_progress_path(file_path, ignore_paths):
+                continue
             try:
                 file_stat = file_path.stat()
             except OSError as exc:
@@ -137,12 +150,42 @@ def progress_entries_for_path(path: Path, *, file_limit: int) -> list[str]:
     return entries
 
 
-def progress_signature(paths: list[Path], *, file_limit: int) -> tuple[str, dict[str, Any]]:
+def progress_signature(
+    paths: list[Path],
+    *,
+    file_limit: int,
+    ignore_paths: set[str] | None = None,
+) -> tuple[str, dict[str, Any]]:
     entries: list[str] = []
     for path in paths:
-        entries.extend(progress_entries_for_path(path, file_limit=file_limit))
+        entries.extend(progress_entries_for_path(path, file_limit=file_limit, ignore_paths=ignore_paths))
     digest = hashlib.sha256("\n".join(entries).encode("utf-8", errors="surrogateescape")).hexdigest()
     return digest, {"path_count": len(paths), "entry_count": len(entries), "digest": digest}
+
+
+def deadline_reached(
+    *,
+    monotonic_now: float,
+    monotonic_deadline: float | None,
+    wall_now: float,
+    wall_deadline: float | None,
+) -> bool:
+    """Return true when either monotonic or wall-clock time has crossed a deadline."""
+    if monotonic_deadline is None:
+        return False
+    if monotonic_now >= monotonic_deadline:
+        return True
+    return wall_deadline is not None and wall_now >= wall_deadline
+
+
+def elapsed_seconds(
+    *,
+    monotonic_now: float,
+    monotonic_started: float,
+    wall_now: float,
+    wall_started: float,
+) -> float:
+    return max(monotonic_now - monotonic_started, wall_now - wall_started)
 
 
 def stream_to_file(stream: BinaryIO, output: BinaryIO) -> None:
@@ -417,15 +460,25 @@ def main() -> int:
         return 2
 
     started = time.monotonic()
+    started_wall = time.time()
     args.stdout_file.parent.mkdir(parents=True, exist_ok=True)
     args.stderr_file.parent.mkdir(parents=True, exist_ok=True)
     args.stdout_file.touch(exist_ok=True)
     args.stderr_file.touch(exist_ok=True)
     progress_paths = [args.stdout_file, args.stderr_file, *args.progress_path]
     progress_limit = progress_file_limit()
+    ignored_progress_paths = {
+        progress_path_label(args.status_file),
+        progress_path_label(args.status_file.with_name(args.status_file.name + ".tmp")),
+    }
     last_progress = started
+    last_progress_wall = started_wall
     last_progress_at = utc_now()
-    current_progress_signature, progress_detail = progress_signature(progress_paths, file_limit=progress_limit)
+    current_progress_signature, progress_detail = progress_signature(
+        progress_paths,
+        file_limit=progress_limit,
+        ignore_paths=ignored_progress_paths,
+    )
     status: dict[str, Any] = {
         "schema_version": 1,
         "started_at": utc_now(),
@@ -506,11 +559,14 @@ def main() -> int:
             thread.start()
 
         deadline = time.monotonic() + timeout_seconds if timeout_seconds else None
+        deadline_wall = time.time() + timeout_seconds if timeout_seconds else None
         idle_deadline = time.monotonic() + idle_timeout_seconds if idle_timeout_seconds else None
+        idle_deadline_wall = time.time() + idle_timeout_seconds if idle_timeout_seconds else None
         next_process_scan = 0.0
         next_progress_scan = 0.0
         while True:
             now = time.monotonic()
+            now_wall = time.time()
             if now >= next_process_scan:
                 remember_related_processes(
                     CHILD.pid,
@@ -521,16 +577,23 @@ def main() -> int:
                 scan_interval = 0.1 if now - started < 5 else PROCESS_SCAN_INTERVAL_SECONDS
                 next_process_scan = now + scan_interval
             if idle_timeout_seconds and now >= next_progress_scan:
-                observed_signature, observed_detail = progress_signature(progress_paths, file_limit=progress_limit)
+                observed_signature, observed_detail = progress_signature(
+                    progress_paths,
+                    file_limit=progress_limit,
+                    ignore_paths=ignored_progress_paths,
+                )
                 if observed_signature != current_progress_signature:
                     current_progress_signature = observed_signature
                     progress_detail = observed_detail
                     last_progress = now
+                    last_progress_wall = now_wall
                     last_progress_at = utc_now()
                     idle_deadline = now + idle_timeout_seconds
+                    idle_deadline_wall = now_wall + idle_timeout_seconds
                     status["last_progress_at"] = last_progress_at
                     status["last_progress_reason"] = "progress_path_changed"
                     status["progress_observation"] = progress_detail
+                    write_status(args.status_file, status)
                 next_progress_scan = now + PROGRESS_SCAN_INTERVAL_SECONDS
             child_return_code = CHILD.poll()
             if child_return_code is not None:
@@ -544,12 +607,25 @@ def main() -> int:
                 status["killed"] = killed
                 exit_code = 128 + int(TERMINATE_SIGNAL)
                 break
-            if idle_deadline is not None and time.monotonic() >= idle_deadline:
+            if deadline_reached(
+                monotonic_now=now,
+                monotonic_deadline=idle_deadline,
+                wall_now=now_wall,
+                wall_deadline=idle_deadline_wall,
+            ):
                 status["idle_timed_out"] = True
                 status["terminated"] = True
                 status["signal"] = signal_name(signal.SIGTERM)
                 status["termination_reason"] = "idle_timeout"
-                status["idle_seconds"] = round(time.monotonic() - last_progress, 3)
+                status["idle_seconds"] = round(
+                    elapsed_seconds(
+                        monotonic_now=now,
+                        monotonic_started=last_progress,
+                        wall_now=now_wall,
+                        wall_started=last_progress_wall,
+                    ),
+                    3,
+                )
                 signal_child_group(CHILD, signal.SIGTERM)
                 child_return_code, killed = wait_after_termination(CHILD, grace_seconds)
                 status["killed"] = killed
@@ -557,7 +633,12 @@ def main() -> int:
                     status["signal"] = signal_name(signal.SIGKILL)
                 exit_code = TIMEOUT_EXIT_CODE
                 break
-            if deadline is not None and time.monotonic() >= deadline:
+            if deadline_reached(
+                monotonic_now=now,
+                monotonic_deadline=deadline,
+                wall_now=now_wall,
+                wall_deadline=deadline_wall,
+            ):
                 status["timed_out"] = True
                 status["terminated"] = True
                 status["signal"] = signal_name(signal.SIGTERM)
@@ -591,8 +672,17 @@ def main() -> int:
         stdout_handle.close()
         stderr_handle.close()
         finished = time.monotonic()
+        finished_wall = time.time()
         status["finished_at"] = utc_now()
-        status["duration_seconds"] = round(finished - started, 3)
+        status["duration_seconds"] = round(
+            elapsed_seconds(
+                monotonic_now=finished,
+                monotonic_started=started,
+                wall_now=finished_wall,
+                wall_started=started_wall,
+            ),
+            3,
+        )
         status["child_exit_code"] = child_return_code
         status["exit_code"] = exit_code
         if status.get("signal") is None:

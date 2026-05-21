@@ -10,12 +10,14 @@ import {
   ShieldCheck,
   Square,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 import type { BackendEnvelope, BackendLogEvent, ProjectSnapshot } from "./api/backend";
 import { listenBackendLogs, runBackendCommandStreamed } from "./api/backend";
 import {
   buildAutomationViewModel,
-  type AutomationPipelineNode,
+  type AutomationGraphEdge,
+  type AutomationGraphGroup,
+  type AutomationGraphNode,
   type AutomationQueueBucket,
   type AutomationTicketProgressRow,
   type AutomationValidationRow,
@@ -70,28 +72,136 @@ function retryFailedAction(model: ReturnType<typeof buildRunModel>): AutomationC
   };
 }
 
-function PipelineNodeButton(props: {
-  node: AutomationPipelineNode;
+function graphEdgePath(edge: AutomationGraphEdge): string {
+  const { x1, y1, cx1, cy1, cx2, cy2, x2, y2 } = edge.points;
+  return `M ${x1} ${y1} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${x2} ${y2}`;
+}
+
+function GraphNodeButton(props: {
+  node: AutomationGraphNode;
   selected: boolean;
   onSelect: (nodeId: string) => void;
 }) {
+  const style: CSSProperties = {
+    left: props.node.x,
+    top: props.node.y,
+    width: props.node.width,
+    height: props.node.height,
+  };
   return (
     <button
       type="button"
-      className={`pipeline-node ${props.node.status}${props.selected ? " selected" : ""}`}
+      className={`dag-graph-node ${props.node.sourceKind} ${props.node.status}${props.selected ? " selected" : ""}`}
+      style={style}
       aria-pressed={props.selected}
-      aria-label={`${props.node.title} for ${props.node.ticketId || "automation work"}`}
+      aria-label={`${props.node.title} ${props.node.subtitle} ${props.node.statusLabel}`}
       title={props.node.detail}
       onClick={() => props.onSelect(props.node.id)}
     >
       <span>{props.node.title}</span>
-      <small>{props.node.statusLabel}</small>
+      <small>{props.node.subtitle}</small>
+      <em>{props.node.statusLabel}</em>
     </button>
   );
 }
 
+function groupBounds(group: AutomationGraphGroup, nodes: AutomationGraphNode[]) {
+  const groupNodes = group.nodeIds
+    .map((nodeId) => nodes.find((node) => node.id === nodeId))
+    .filter((node): node is AutomationGraphNode => Boolean(node));
+  if (!groupNodes.length) return null;
+  const padding = 10;
+  const minX = Math.min(...groupNodes.map((node) => node.x)) - padding;
+  const minY = Math.min(...groupNodes.map((node) => node.y)) - padding;
+  const maxX = Math.max(...groupNodes.map((node) => node.x + node.width)) + padding;
+  const maxY = Math.max(...groupNodes.map((node) => node.y + node.height)) + padding;
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+function ExecutionGraphPanel(props: {
+  dag: ReturnType<typeof buildAutomationViewModel>["dag"];
+  nextAction: ReturnType<typeof buildAutomationViewModel>["nextAction"];
+  selectedNodeId: string;
+  onSelect: (nodeId: string) => void;
+}) {
+  const graphStyle: CSSProperties = {
+    width: props.dag.width,
+    height: props.dag.height,
+  };
+  const groupBoxes = props.dag.groups
+    .map((group) => ({ group, bounds: groupBounds(group, props.dag.nodes) }))
+    .filter((item): item is { group: AutomationGraphGroup; bounds: NonNullable<ReturnType<typeof groupBounds>> } => Boolean(item.bounds));
+  return (
+    <article className="automation-panel dag-inspector-panel">
+      <div className="panel-heading-row compact">
+        <div>
+          <h2>Execution Graph</h2>
+          <p>{props.dag.summary}</p>
+        </div>
+        <TonePill tone={props.nextAction.tone}>{props.dag.modeLabel}</TonePill>
+      </div>
+      <div className="next-action-strip">
+        <GitBranch size={16} />
+        <span>Next</span>
+        <strong>{props.nextAction.title}</strong>
+        <p>{props.nextAction.detail}</p>
+      </div>
+      <div className="dag-graph-scroll" aria-label="Execution graph">
+        <div className={`dag-graph-canvas ${props.dag.mode}`} style={graphStyle}>
+          <svg
+            className="dag-graph-svg"
+            role="img"
+            aria-label={`${props.dag.modeLabel}: ${props.dag.summary}`}
+            viewBox={`0 0 ${props.dag.width} ${props.dag.height}`}
+          >
+            <defs>
+              <marker id="dag-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" />
+              </marker>
+            </defs>
+            {props.dag.columns.map((column) => (
+              <g className="dag-column-guide" key={column.id}>
+                <rect x={column.x - 8} y="30" width={column.width + 16} height={Math.max(0, props.dag.height - 42)} />
+                <text x={column.x + column.width / 2} y="20">{column.label}</text>
+              </g>
+            ))}
+            {groupBoxes.map(({ group, bounds }) => (
+              <g className={`dag-wave-outline ${group.kind}`} key={group.id}>
+                <rect x={bounds.x} y={bounds.y} width={bounds.width} height={bounds.height} />
+                <text x={bounds.x + 8} y={Math.max(18, bounds.y - 4)}>{group.label}</text>
+              </g>
+            ))}
+            {props.dag.edges.map((edge) => (
+              <g className={`dag-edge ${edge.presentationKind}`} key={edge.id}>
+                <path d={graphEdgePath(edge)} markerEnd="url(#dag-arrow)" />
+                {edge.count > 1 && (
+                  <text x={(edge.points.x1 + edge.points.x2) / 2} y={(edge.points.y1 + edge.points.y2) / 2 - 5}>{edge.label}</text>
+                )}
+              </g>
+            ))}
+          </svg>
+          {props.dag.nodes.map((node) => (
+            <GraphNodeButton
+              node={node}
+              selected={node.id === props.selectedNodeId}
+              onSelect={props.onSelect}
+              key={node.id}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="dag-graph-legend">
+        <span><i className="edge-hard" /> Hard dependency</span>
+        <span><i className="edge-advisory" /> Advisory</span>
+        <span><i className="edge-blocker" /> Blocker/follow-up</span>
+        {props.dag.hiddenSummary && <strong>{props.dag.hiddenSummary}</strong>}
+      </div>
+    </article>
+  );
+}
+
 function SelectedWorkDetail(props: {
-  node: AutomationPipelineNode | null;
+  node: AutomationGraphNode | null;
   nextAction: ReturnType<typeof buildAutomationViewModel>["nextAction"];
   ticket?: AutomationTicketProgressRow;
 }) {
@@ -110,12 +220,20 @@ function SelectedWorkDetail(props: {
           {props.ticket && <p className="selected-work-ticket-summary">{props.ticket.summary}</p>}
           <div className="selected-work-meta">
             <div>
-              <span>Ticket</span>
-              <strong>{props.node.ticketId || "Automation work"}</strong>
+              <span>{props.node.sourceKind === "cluster" ? "Cluster" : "Ticket"}</span>
+              <strong>{props.node.sourceKind === "cluster" ? props.node.subtitle : props.node.ticketId || "Automation work"}</strong>
             </div>
             <div>
               <span>Stage</span>
-              <strong>{props.node.phase}</strong>
+              <strong>{props.node.phaseLabel}</strong>
+            </div>
+            <div>
+              <span>Status</span>
+              <strong>{props.node.statusLabel}</strong>
+            </div>
+            <div>
+              <span>Role</span>
+              <strong>{props.node.role}</strong>
             </div>
             {props.ticket && (
               <>
@@ -131,6 +249,11 @@ function SelectedWorkDetail(props: {
             )}
           </div>
           {usefulScope && <p className="selected-work-scope">{usefulScope}</p>}
+          {(props.node.samples.length > 0 || props.node.badges.length > 0) && (
+            <div className="selected-work-tags">
+              {[...props.node.badges, ...props.node.samples].slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}
+            </div>
+          )}
         </div>
       ) : (
         <div className="selected-work-detail">
@@ -220,6 +343,126 @@ function ActivityRow(props: { row: AutomationActivityRow }) {
       <TonePill tone={props.row.tone}>{props.row.status}</TonePill>
       <span>{props.row.detail}</span>
     </div>
+  );
+}
+
+function ExecutionWavesPanel(props: { model: ReturnType<typeof buildRunModel> }) {
+  const waves = props.model.operations.concurrencyWaves;
+  const integration = props.model.operations.integrationBacklog;
+  return (
+    <article className="automation-panel wave-panel">
+      <div className="panel-heading-row compact">
+        <div>
+          <h2>DAG Flow</h2>
+          <p>
+            {props.model.executionDag.parallel.activeGroups} running wave / {props.model.executionDag.parallel.proposedGroups} planned / {props.model.executionDag.parallel.completedGroups} recently done
+          </p>
+        </div>
+        <TonePill tone={integration.tone}>{integration.queuedCount} queued patches</TonePill>
+      </div>
+      <div className="wave-metrics">
+        <div><span>Active nodes</span><strong>{props.model.executionDag.parallel.activeNodeCount}</strong></div>
+        <div><span>Planned nodes</span><strong>{props.model.executionDag.parallel.plannedNodeCount}</strong></div>
+        <div><span>Safe patches</span><strong>{integration.safeCount}</strong></div>
+        <div><span>Follow-up</span><strong>{integration.blockedCount}</strong></div>
+      </div>
+      <div className="wave-list">
+        {waves.length ? waves.slice(0, 8).map((wave) => (
+          <div className={`wave-card ${wave.kind}`} key={`${wave.kind}:${wave.id}`}>
+            <div>
+              <strong>{wave.label}</strong>
+              <TonePill tone={wave.tone}>{wave.status}</TonePill>
+            </div>
+            <p>{wave.detail}</p>
+            <div className="wave-card-meta">
+              <span>{wave.mode}</span>
+              <span>{wave.itemCount} item{wave.itemCount === 1 ? "" : "s"}</span>
+              {wave.owners.length > 0 && <span>{wave.owners.join(", ")}</span>}
+              {wave.leases.length > 0 && <span>{wave.leases.join(", ")}</span>}
+            </div>
+          </div>
+        )) : <div className="empty-copy">No execution waves are recorded yet.</div>}
+      </div>
+    </article>
+  );
+}
+
+type FeedTab = "activity" | "checks" | "command" | "input";
+
+function OperationalFeedPanel(props: {
+  view: ReturnType<typeof buildAutomationViewModel>;
+  logs: AutomationLogEvent[];
+  busyCommand: string;
+  startCommand: string;
+}) {
+  const [tab, setTab] = useState<FeedTab>("activity");
+  const tabs: Array<{ id: FeedTab; label: string; badge?: string }> = [
+    { id: "activity", label: "Activity", badge: props.view.activityLog.length ? String(props.view.activityLog.length) : undefined },
+    { id: "checks", label: "Checks & Repair", badge: props.view.validationRepair.rows.length ? String(props.view.validationRepair.rows.length) : undefined },
+    { id: "command", label: "Command Output", badge: props.busyCommand || undefined },
+    { id: "input", label: "Input Records", badge: props.view.humanInput.total ? props.view.humanInput.badge : undefined },
+  ];
+  return (
+    <article className="automation-panel operational-feed-panel">
+      <div className="panel-heading-row compact">
+        <div>
+          <h2>Operational Feed</h2>
+          <p>{props.view.activityLog.length} activity / {props.view.validationRepair.rows.length} checks / {props.logs.length} command lines</p>
+        </div>
+      </div>
+      <div className="feed-tabs" role="tablist" aria-label="Operational feed sections">
+        {tabs.map((item) => (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === item.id}
+            className={tab === item.id ? "active" : ""}
+            onClick={() => setTab(item.id)}
+            key={item.id}
+          >
+            <span>{item.label}</span>
+            {item.badge && <strong>{item.badge}</strong>}
+          </button>
+        ))}
+      </div>
+      <div className="automation-table feed-content" hidden={tab !== "activity"}>
+        {props.view.activityLog.length
+          ? props.view.activityLog.map((row) => <ActivityRow row={row} key={row.id} />)
+          : <div className="empty-copy">No useful activity has been recorded yet.</div>}
+      </div>
+      <div className="automation-table feed-content" hidden={tab !== "checks"}>
+        {props.view.validationRepair.rows.length
+          ? props.view.validationRepair.rows.map((row) => <ValidationRow row={row} key={row.id} />)
+          : <div className="empty-copy">No validation or repair work is active.</div>}
+      </div>
+      <div className="feed-command" hidden={tab !== "command"}>
+        <div className="automation-log">
+          {props.logs.length ? props.logs.map((line, index) => (
+            <div className={`automation-log-line ${line.level}`} key={`${line.stage}-${line.message}-${index}`}>
+              <span>{line.stage}</span>
+              <p>{line.message}</p>
+            </div>
+          )) : (
+            <div className="empty-copy">No command output captured.</div>
+          )}
+        </div>
+        <button
+          className="secondary-action"
+          onClick={() => navigator.clipboard?.writeText(props.startCommand)}
+        >
+          <Clipboard size={15} />
+          Copy start command
+        </button>
+      </div>
+      <div className="feed-input" hidden={tab !== "input"}>
+        <div className="human-compact-counts">
+          <div><span>Requests</span><strong>{props.view.humanInput.requests}</strong></div>
+          <div><span>Records</span><strong>{props.view.humanInput.records}</strong></div>
+          <div><span>Outbound</span><strong>{props.view.humanInput.outbound}</strong></div>
+        </div>
+        <p>{props.view.humanInput.detail}</p>
+      </div>
+    </article>
   );
 }
 
@@ -334,59 +577,14 @@ export function AutomationPage(props: {
       )}
 
       <section className="automation-main-grid" aria-label="Automation state">
-        <article className="automation-panel dag-inspector-panel">
-          <div className="panel-heading-row compact">
-            <div>
-              <h2>Execution Graph</h2>
-              <p>{view.dag.summary}</p>
-            </div>
-            <TonePill tone={view.nextAction.tone}>{view.nextAction.status}</TonePill>
-          </div>
-          <div className="next-action-strip">
-            <GitBranch size={16} />
-            <span>Next</span>
-            <strong>{view.nextAction.title}</strong>
-            <p>{view.nextAction.detail}</p>
-          </div>
-          <div className="pipeline-dag" role="table" aria-label="Execution graph">
-            <div className="pipeline-header" role="row">
-              <span />
-              {view.dag.columns.map((column) => <strong key={column.id}>{column.label}</strong>)}
-            </div>
-            {view.dag.rows.length ? view.dag.rows.map((row) => (
-              <div className="pipeline-row" role="row" key={row.id}>
-                <div className="pipeline-row-label">
-                  <strong>{row.label}</strong>
-                  <span>{row.summary}</span>
-                </div>
-                <div className="pipeline-cells">
-                  {view.dag.columns.map((column) => {
-                    const node = row.cells[column.id];
-                    return (
-                      <div className={`pipeline-cell${node ? " has-node" : ""}`} role="cell" key={`${row.id}:${column.id}`}>
-                        {node ? (
-                          <PipelineNodeButton
-                            node={node}
-                            selected={node.id === effectiveSelectedNodeId}
-                            onSelect={setSelectedNodeId}
-                          />
-                        ) : <span className="pipeline-empty-cell" aria-label={`${column.label} not recorded`} />}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )) : (
-              <div className="pipeline-empty-state">
-                <span>No execution graph data is recorded yet.</span>
-              </div>
-            )}
-          </div>
-        </article>
+        <ExecutionGraphPanel
+          dag={view.dag}
+          nextAction={view.nextAction}
+          selectedNodeId={effectiveSelectedNodeId}
+          onSelect={setSelectedNodeId}
+        />
 
         <SelectedWorkDetail node={selectedNode} nextAction={view.nextAction} ticket={selectedTicket} />
-
-        <TicketProgressPanel tickets={view.ticketProgress} />
 
         <article className="automation-panel queue-summary-panel">
           <div className="panel-heading-row compact">
@@ -397,65 +595,16 @@ export function AutomationPage(props: {
           </div>
         </article>
 
-        <article className="automation-panel human-compact-panel">
-          <div className="panel-heading-row compact">
-            <h2>Human Input</h2>
-            <TonePill tone={view.humanInput.tone}>{view.humanInput.badge}</TonePill>
-          </div>
-          <div className="human-compact-counts">
-            <div><span>Requests</span><strong>{view.humanInput.requests}</strong></div>
-            <div><span>Records</span><strong>{view.humanInput.records}</strong></div>
-            <div><span>Outbound</span><strong>{view.humanInput.outbound}</strong></div>
-          </div>
-          <p>{view.humanInput.detail}</p>
-        </article>
+        <ExecutionWavesPanel model={model} />
 
-        <article className="automation-panel validation-panel">
-          <div className="panel-heading-row compact">
-            <h2>Checks & Repair</h2>
-            <TonePill tone={view.validationRepair.tone}>{view.validationRepair.summary}</TonePill>
-          </div>
-          <div className="automation-table">
-            {view.validationRepair.rows.length
-              ? view.validationRepair.rows.map((row) => <ValidationRow row={row} key={row.id} />)
-              : <div className="empty-copy">No validation or repair work is active.</div>}
-          </div>
-        </article>
+        <TicketProgressPanel tickets={view.ticketProgress} />
 
-        <article className="automation-panel activity-panel">
-          <div className="panel-heading-row compact">
-            <h2>Activity Log</h2>
-          </div>
-          <div className="automation-table">
-            {view.activityLog.length
-              ? view.activityLog.map((row) => <ActivityRow row={row} key={row.id} />)
-              : <div className="empty-copy">No useful activity has been recorded yet.</div>}
-          </div>
-        </article>
-
-        <article className="automation-panel log-panel">
-          <div className="panel-heading-row compact">
-            <h2>Command Output</h2>
-            {busyCommand && <TonePill tone="info">{busyCommand}</TonePill>}
-          </div>
-          <div className="automation-log">
-            {logs.length ? logs.map((line, index) => (
-              <div className={`automation-log-line ${line.level}`} key={`${line.stage}-${line.message}-${index}`}>
-                <span>{line.stage}</span>
-                <p>{line.message}</p>
-              </div>
-            )) : (
-              <div className="empty-copy">Start, stop, and safety-check output appears here.</div>
-            )}
-          </div>
-          <button
-            className="secondary-action"
-            onClick={() => navigator.clipboard?.writeText(model.controls.startAutomation.command || automationCommandFallbacks.start)}
-          >
-            <Clipboard size={15} />
-            Copy start command
-          </button>
-        </article>
+        <OperationalFeedPanel
+          view={view}
+          logs={logs}
+          busyCommand={busyCommand}
+          startCommand={model.controls.startAutomation.command || automationCommandFallbacks.start}
+        />
       </section>
     </section>
   );
