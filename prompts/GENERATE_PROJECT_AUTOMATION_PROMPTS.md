@@ -8,7 +8,7 @@ You are generating project-specific Codex automation files from a project intake
 
 Read the intake brief first. If values are missing, make reasonable defaults and document assumptions. Do not ask questions unless a missing value would make the workflow unsafe.
 
-Respect the intake's project mode. For `fresh_project`, generate files for a new target repo. For `existing_project`, preserve existing architecture, commands, docs, and project-specific instructions; add Diffmogger guidance as a clearly marked managed section when updating existing `AGENTS.md` or existing project-owned development docs. Generated Diffmogger-owned runtime state should live under `.diffmogger/`; canonical live orchestration state is `.diffmogger/runtime/orchestration.sqlite3`, with typed automation control, execution DAG nodes/edges, repository capability manifest, validation receipts, blockers, and next actions exposed through `.diffmogger/runtime/canonical_state_brief.md`.
+Respect the intake's project mode. For `fresh_project`, generate files for a new target repo. For `existing_project`, respect existing architecture, commands, docs, and project-specific instructions; add Diffmogger guidance as a clearly marked managed section when updating existing `AGENTS.md` or existing project-owned development docs. Generated Diffmogger-owned runtime state should live under `.diffmogger/`. The current runtime uses `.diffmogger/runtime/orchestration.sqlite3` as canonical live orchestration state, with typed automation control, execution DAG nodes/edges, repository capability manifest, validation receipts, blockers, and next actions exposed through `.diffmogger/runtime/canonical_state_brief.md`.
 
 Create these files as complete drafts:
 
@@ -101,7 +101,7 @@ The human bridge docs and automation prompt must support four modes:
 
 For `file_only`, the generated docs must say the human reviews requests and replies through the Diffmogger dashboard, and summary/status requests are satisfied through the dashboard or requested local artifacts. It must not tell Codex to call Discord or notifier APIs in file-only mode.
 
-For `local_notifier`, the generated automation prompt must say the notifier is for local desktop notifications only. For `discord_notifier`, it must say progress uses `event_kind: "progress"`, direct human messages use `event_kind: "message"`, local automation commits trigger brief progress-channel notifications with the commit subject and work summary, and Discord credentials stay only in `services/agentic-notifier/.env`. If the notifier is unavailable in either notifier mode, Codex should record the pending outbound message in typed human-message state, continue useful work, and use `ACTIVE_WITH_PENDING_USER_INPUT` unless no useful work remains.
+For `local_notifier`, the generated automation prompt must say the notifier is for local desktop notifications only. For `discord_notifier`, it must say progress uses `event_kind: "progress"`, direct human messages use `event_kind: "message"`, local automation commits trigger brief progress-channel notifications with the commit subject and work summary, and Discord credentials stay only in `services/agentic-notifier/.env`. If the notifier is unavailable in either notifier mode, Codex should record the pending outbound message in typed human-message state and continue useful work. While the current status vocabulary is active, `ACTIVE_WITH_PENDING_USER_INPUT` can annotate that state unless no useful work remains.
 
 The generated automation prompt must read `.diffmogger/runtime/canonical_state_brief.md` at the start of each run, handle queued human messages from typed state, and record concise resolution notes through typed human-message APIs.
 
@@ -145,7 +145,7 @@ Reason: <one sentence>
 
 It must check availability with `command -v codex` before using Codex CLI workers, record `UNAVAILABLE` if the command is missing, and continue the sprint. For broad or multi-module runs, Codex CLI worker usage should be expected unless skipped with a clear reason. Include the target repo's local `.diffmogger/scripts/spawn_worker_agent.sh` and `.diffmogger/scripts/summarize_worker_outputs.py` helper pattern and a read-only nested-child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox -C .` fallback pattern. Also ensure the parent run wrapper invokes automation with `--add-dir "$HOME/.codex"` so nested Codex CLI workers can authenticate and start inside the parent sandbox.
 
-Preserve read-only worker-report behavior. Read-only workers are the default for exploration, review, risk checks, product polish, and test-gap analysis.
+Keep read-only worker-report behavior as the current exploration default. Read-only workers are the default for exploration, review, risk checks, product polish, and test-gap analysis.
 
 Support bounded write workers as an always-available capability. `write_worker_agents_allowed` is a deprecated compatibility mirror and must not disable write workers when absent or false. Use `max_write_worker_count`, capped at 10 with a default of 3, and `write_worker_guidance` to shape how many write workers the main agent may choose per run. Generated targets should treat write workers as optional bounded acceleration rather than a last resort.
 
@@ -167,7 +167,7 @@ Generated guardrails must prohibit unbounded recursive agents, overlapping write
 
 If the target helper script supports write workers, keep read-only as the default mode and require an explicit write mode plus ownership scope for write-capable workers.
 
-Support one continuous automation architecture: the typed execution DAG scheduler with the `planner_builder_hardener_integrator` role profile. Diffmogger is a work generator, not a blocker detector: required validation failures create repair work, missing tools create setup/harness work, external services create mock/local-fixture/defer work, browser/MCP failures create alternate validation or deferred QA work, repeated failures create split/reframe/planner work, human input creates pending input records, and automation continues independent work. Treat `campaign_mode` as the user-facing setup choice: `bounded` stops only after seeded/imported tickets are complete with evidence, while `ongoing` drafts/enqueues safe project-agnostic follow-up tickets from typed runtime context and continues.
+Support the current continuous automation architecture: the typed execution DAG scheduler with the `planner_builder_hardener_integrator` role profile. Do not describe it as permanent. Diffmogger should generate work rather than merely detect blockers: required validation failures create repair work, missing tools create setup/harness work, external services create mock/local-fixture/defer work, browser/MCP failures create alternate validation or deferred QA work, repeated failures create split/reframe/planner work, human input creates pending input records, and automation continues independent work. Treat `campaign_mode` as the user-facing setup choice: `bounded` stops only after seeded/imported tickets are complete with evidence, while `ongoing` drafts/enqueues safe project-agnostic follow-up tickets from typed runtime context and continues.
 
 Generated docs and config must document DAG scheduler fields: `parallel_execution_mode`, `symbol_graph_languages`, `parallel_write_min_confidence`, `parallel_write_direct_confidence`, `max_parallel_write_workers`, and `max_parallel_scope_workers`.
 
@@ -176,7 +176,7 @@ Generated targets must include `.diffmogger/scripts/run_conveyor_automation.sh`,
 Generated multi-role prompts must state that:
 
 - every role is local-only and must never push, fetch, pull, configure remotes, set upstream tracking, or run remote-affecting git commands
-- no-remote violations are `CRITICAL_STOP`
+- no-remote violations are safety stops; while the current status vocabulary is active, record them as `CRITICAL_STOP`
 - continuous DAG scheduler mode prioritizes queued integration first, baseline repair and unblocker work when needed, compatible build waves, review/hardening, validation, targeted repairs, and serialized integration
 - builder and hardener start from latest main `HEAD` in isolated worktrees and may see partially integrated state from earlier patches in the cycle
 - integrator owns the main checkout, dirty-checkpoint commits, FIFO patch application, batched verification with individual fallback, local commits, canonical state/task projection updates, and retention
@@ -187,7 +187,7 @@ Generated guardrails must prohibit recursive role spawning, unbounded write owne
 
 Lock-file instructions should reference the target repo's local DAG scheduler and role wrappers, `.diffmogger/scripts/acquire_codex_lock.sh`, and `.diffmogger/scripts/release_codex_lock.sh` helpers, the default `.diffmogger/runtime/codex_automation.lock` path, `CODEX_LOCK_PATH` overrides, stale-lock detection, `CODEX_RUN_ID` identity for safe release, and `CODEX_LOCK_ALREADY_ACQUIRED=true` for wrapper-owned runs.
 
-State-compaction instructions should reference `.diffmogger/scripts/compact_agent_state.py --dry-run <target-project>`, preserve unresolved human requests and deferred multi-role manifests, summarize transient multi-role artifacts, and archive concise rollups rather than silently deleting active state.
+State-compaction instructions should reference `.diffmogger/scripts/compact_agent_state.py --dry-run <target-project>`, retain unresolved human requests and deferred multi-role manifests, summarize transient multi-role artifacts, and archive concise rollups rather than silently deleting active state.
 
 ## Output
 

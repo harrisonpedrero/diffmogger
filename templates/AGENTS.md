@@ -24,7 +24,7 @@ Project mode: {{PROJECT_MODE_LABEL}}
 - Failed validation creates work: repair for required check failures, setup/harness for missing tools, mock/local-fixture/defer for external services, alternate validation or deferred QA for browser/MCP failures, and split/reframe/planner work after repeated failures.
 - Blockers are node metadata, not a campaign-ending status.
 - Diffmogger is a work generator. If tickets remain, keep producing scheduler-runnable work unless continuing would be unsafe or destructive.
-- Use `CRITICAL_STOP` only for unsafe, destructive, or corrupt states.
+- Current status labels are compatibility vocabulary. Record `CRITICAL_STOP` only when that vocabulary is active and continuing would be unsafe, destructive, credential-exposing, or corrupting.
 - Treat `.diffmogger/runtime/orchestration.sqlite3` as canonical runtime state. Markdown and JSON files are handoffs, authored inputs, or generated projections.
 - Read `.diffmogger/runtime/canonical_state_brief.md` instead of inspecting SQLite manually.
 - Refresh `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` only after typed state changes.

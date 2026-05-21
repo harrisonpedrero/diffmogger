@@ -20,7 +20,7 @@ Create a concise retrofit plan, then implement the automation docs:
 
 Respect the existing stack and conventions. Do not rewrite the product just to fit the kit.
 
-Canonical live orchestration state should remain `.diffmogger/runtime/orchestration.sqlite3`. Typed automation control, execution DAG nodes and edges, repository capability manifest, validation receipts, blockers, human messages, and next actions live there; conveyor stage fields are read-model projections only. `.diffmogger/runtime/canonical_state_brief.md` is the generated state view agents read instead of inspecting SQLite manually. Preserve or add DAG scheduler config fields for parallel execution mode, symbol graph languages, write-confidence thresholds, and max parallel scope/write workers.
+Canonical live orchestration state currently lives in `.diffmogger/runtime/orchestration.sqlite3`. Typed automation control, execution DAG nodes and edges, repository capability manifest, validation receipts, blockers, human messages, and next actions live there; conveyor stage fields are read-model projections only. `.diffmogger/runtime/canonical_state_brief.md` is the generated state view agents read instead of inspecting SQLite manually. Carry forward or add the current DAG scheduler config fields for parallel execution mode, symbol graph languages, write-confidence thresholds, and max parallel scope/write workers when they are still part of the active runtime.
 
 The initial typed automation control state and generated task projection should honestly describe:
 

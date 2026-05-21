@@ -104,7 +104,7 @@ State derivation lives in small testable frontend files:
 - `AutomationPage.tsx`: dense operational rendering of scheduler next action, tickets/actions, human input, unblocker work, and command output.
 - `commandPaletteModel.ts`: state-gated command palette commands and disabled reasons.
 
-Status values remain compatible (`ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, `CRITICAL_STOP`), but only `CRITICAL_STOP` is a safety stop. User and environment statuses annotate planning inputs and should not halt normal scheduling while unfinished work can continue.
+The dashboard currently remains compatible with `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`. Treat those names as compatibility vocabulary. User and environment states should annotate planning inputs rather than halt normal scheduling while unfinished work can continue, and future dashboard work may replace the vocabulary with a richer state model.
 
 ## Guardrails
 

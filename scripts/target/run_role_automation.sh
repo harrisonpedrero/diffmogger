@@ -1189,7 +1189,7 @@ else:
     if missing_rationale:
         lines.extend(
             [
-                "- required_summary_line_when_touching_tests: `Test change rationale: <one concise reason this preserves or improves meaningful coverage>`",
+                "- required_summary_line_when_touching_tests: `Test change rationale: <one concise reason this maintains or improves meaningful coverage>`",
                 "- missing_test_change_rationale_deferral_detected: yes; include that exact summary line in `summary.md` whenever this hardener run touches tests.",
             ]
         )
@@ -1300,7 +1300,7 @@ Verification scope: baseline_repair
 If you are the hardener and you add, remove, substantially rewrite, broaden, or otherwise touch tests, add:
 
 \`\`\`text
-Test change rationale: <one concise reason this preserves or improves meaningful coverage>
+Test change rationale: <one concise reason this maintains or improves meaningful coverage>
 \`\`\`
 
 Do not remove or weaken tests merely to make verification pass.

@@ -508,7 +508,7 @@ def _low_cortisol_refinement_prompt(
             ticket_sizing_policy_prompt(complexity),
             "",
             "Refinement requirements:",
-            "- Preserve useful tickets when they are already appropriately granular.",
+            "- Keep useful tickets when they are already appropriately granular.",
             "- Split broad tickets into one reviewable local patch with one primary deliverable.",
             "- Add missing tickets for uncovered decomposition groups and surfaces.",
             "- Generate as many tickets as the full described scope needs; do not impose a fixed maximum.",
@@ -924,7 +924,7 @@ def scaffold_file_preview(target: Path, intake: dict[str, Any], *, force: bool) 
         if mode == "existing_project" and managed_kind and exists:
             action = "managed_section_update"
             managed = True
-            detail = f"Will update only the Diffmogger-managed {managed_kind} section and preserve surrounding content."
+            detail = f"Will update only the Diffmogger-managed {managed_kind} section and leave surrounding content unchanged."
         elif mode == "existing_project" and managed_kind:
             managed = True
             detail = f"Will create this file with a Diffmogger-managed {managed_kind} section."

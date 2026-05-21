@@ -657,7 +657,7 @@ enabled = true"""
             )
         setup_lines.extend(
             [
-                "- MCP servers are optional and non-required. Missing MCP support must never change `AUTOMATION_STATUS` to `BLOCKED_ON_ENVIRONMENT` by itself; failed browser validation should instead be recorded as a validation issue or deferred validation DAG work.",
+                "- MCP servers are optional and non-required. Missing MCP support should be recorded as validation/setup context, not as a frozen automation state by itself; failed browser validation should instead be recorded as a validation issue or deferred validation DAG work.",
                 "- Project-scoped config lives in `.codex/config.toml`, while wrappers mount role-scoped MCP overrides from the resolved intake/dashboard/manifest state. Diffmogger never runs `codex mcp add`, `codex mcp login`, or mutates user/global Codex config.",
             ]
         )
@@ -1057,7 +1057,7 @@ def project_mode_label(mode: str) -> str:
 def project_mode_guidance(mode: str) -> str:
     if mode == "existing_project":
         return (
-            "Integrate Diffmogger into the selected existing project. Preserve the existing "
+            "Integrate Diffmogger into the selected existing project. Respect the existing "
             "architecture, package manager, tests, docs, and project-specific instructions unless "
             "the intake explicitly asks for a scoped change. Treat the desired first demo as an "
             "integrated increment inside the current codebase, not a greenfield rewrite."
@@ -1523,11 +1523,11 @@ No Discord, webhook, notifier API, or messaging credentials are used in this mod
 
 Human bridge mode: `disabled`
 
-Do not create human requests or wait for human replies during normal automation runs. If work becomes unsafe or impossible without the human, create unblocker work while tickets remain. Use `BLOCKED_ON_USER` only as an exceptional annotation; it does not pause scheduling."""
+Do not create human requests or wait for human replies during normal automation runs. If work becomes unsafe or impossible without the human, create unblocker work while tickets remain. If the current compatibility status vocabulary is active, `BLOCKED_ON_USER` is only an annotation and not a scheduler pause."""
         guardrails = """- Human bridge is disabled.
 - Do not create human request queues during normal runs.
 - For reversible choices, choose a safe default and document it.
-- Use `BLOCKED_ON_USER` only as an exceptional annotation. If tickets remain, create unblocker or alternate-ticket work instead of pausing."""
+- If the current compatibility status vocabulary is active, `BLOCKED_ON_USER` is only an annotation. If tickets remain, create unblocker or alternate-ticket work instead of pausing."""
         task_notes = "Human bridge mode: `disabled`. No human request queue is active."
         setup = "# Human Bridge Setup\n\nHuman bridge disabled for this project.\n"
 

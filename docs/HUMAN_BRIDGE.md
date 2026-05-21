@@ -63,7 +63,7 @@ Target projects must not import notifier code, inspect notifier internals during
 
 Progress events use `event_kind: "progress"` and route to the Discord progress channel when `discord_notifier` is configured. In multi-role automation, each local commit created by `.diffmogger/scripts/integrate_role_outputs.py` triggers a brief progress notification with the commit subject and work summary.
 
-Direct human messages use `event_kind: "message"` and route to the Discord messaging channel when configured. Human-unlock requests, pending input records, and replies to user messages also use `event_kind: "message"`. They default to local desktop notifications when local notifications are enabled. Human input should not pause automation while independent or unblocker work can continue.
+Direct human messages use `event_kind: "message"` and route to the Discord messaging channel when configured. Human-unlock requests, pending input records, and replies to user messages also use `event_kind: "message"`. They default to local desktop notifications when local notifications are enabled. Human input should become typed planning context without hiding independent or unblocker work that can continue.
 
 Example direct message:
 

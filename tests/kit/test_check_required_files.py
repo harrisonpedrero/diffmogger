@@ -276,7 +276,7 @@ class RequiredFilesCheckTests(unittest.TestCase):
             manifest = (target / ".diffmogger" / "manifest.json").read_text(encoding="utf-8")
             self.assertIn("Blockers are node metadata", agents)
             self.assertIn("## Scheduler Work", task)
-            self.assertIn("Only unsafe corruption or destructive risk", task)
+            self.assertIn("Under the current status vocabulary", task)
             self.assertIn("Diffmogger is a work generator", guardrails)
             self.assertIn('"automation_role_profile": "planner_builder_hardener_integrator"', manifest)
 

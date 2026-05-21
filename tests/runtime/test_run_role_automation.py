@@ -783,7 +783,7 @@ class RunRoleAutomationTests(unittest.TestCase):
                     self.assertIn("apps/web/tests/api.auth.rate-limit.test.ts", prompt)
                     self.assertIn("#76", prompt)
                     self.assertIn(
-                        "Test change rationale: <one concise reason this preserves or improves meaningful coverage>",
+                        "Test change rationale: <one concise reason this maintains or improves meaningful coverage>",
                         prompt,
                     )
                     self.assertIn("whenever this hardener run touches tests", prompt)

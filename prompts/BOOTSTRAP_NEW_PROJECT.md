@@ -18,7 +18,7 @@ Read first:
 
 ## Mission
 
-Create or confirm the first runnable product baseline and install the automation operating system for this repo. If this is an existing project, preserve the local stack, architecture, docs, tests, and project-specific instructions unless the intake explicitly asks for a scoped change.
+Create or confirm the first runnable product baseline and install the automation operating system for this repo. If this is an existing project, respect the local stack, architecture, docs, tests, and project-specific instructions unless the intake explicitly asks for a scoped change.
 
 ## Required Work
 
@@ -34,8 +34,8 @@ Create or confirm the first runnable product baseline and install the automation
 - If multi-role mode is enabled, create or update `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, and `.diffmogger/agentic/roles/integrator.md`.
 - Add a one-command local verification or demo path when practical.
 - Ensure `.diffmogger/agentic/automation_prompt.md` explains the configured human bridge mode, local lock helpers, wrapper-owned lock behavior with `CODEX_LOCK_ALREADY_ACQUIRED=true`, canonical typed SQLite runtime state, generated projection compaction, nested child `codex exec --disable plugins --ephemeral --dangerously-bypass-approvals-and-sandbox` worker usage, parent wrapper `--add-dir "$HOME/.codex"` behavior for nested CLI startup, explicit `Codex CLI worker decision: USE / SKIP / UNAVAILABLE` records, and explicit worker strategy decisions.
-- Preserve read-only worker reports for exploration and document write-capable workers as always available, optional per run, capped by `max_write_worker_count`, and governed by parallelism-budget decisions, reviewable ownership rules, lightweight coordination, main-agent integration/review/verification duties, and the option to run integration-only with no workers.
-- Preserve the execution DAG scheduler architecture with the `planner_builder_hardener_integrator` role profile. Document bounded vs ongoing campaign behavior, the DAG scheduler config fields, local-only no-remote rule, worktree queue paths, integrator ownership, SQLite checkpoints/events, batched verification fallback, deferred-patch schema, liveness-first unblocker work, and observability through `.diffmogger/scripts/run_observatory.py`.
+- Carry forward read-only worker reports as the current exploration default and document write-capable workers as always available, optional per run, capped by `max_write_worker_count`, and governed by parallelism-budget decisions, reviewable ownership rules, lightweight coordination, main-agent integration/review/verification duties, and the option to run integration-only with no workers.
+- Document the current execution DAG scheduler architecture with the `planner_builder_hardener_integrator` role profile while making clear it is an implementation choice. Include bounded vs ongoing campaign behavior, the DAG scheduler config fields, local-only no-remote rule, worktree queue paths, integrator ownership, SQLite checkpoints/events, batched verification fallback, deferred-patch schema, liveness-first unblocker work, and observability through `.diffmogger/scripts/run_observatory.py`.
 
 ## Behavior
 

@@ -26,7 +26,7 @@ The native dashboard opens a local window and calls the Diffmogger backend comma
 
 Fill in the wizard, choose the target directory, optionally add context files such as PDFs or research notes, then click **Scaffold**. Choose fresh-project mode for a new target directory. Choose existing-project mode when the target already has project files and describe the first integrated change in the intake. The dashboard writes `.diffmogger/agentic/project_intake.json`, copies context files into `.diffmogger/context/`, tracks those paths in intake/dashboard state, scaffolds required files, validates them, and ensures the target has a local git repo with an initial `chore: initial commit` when `HEAD` does not exist. Then open **Automation** and click **Start** to launch the actual automation.
 
-When integrating into an existing repo, Diffmogger preserves project-owned files by keeping Diffmogger state under `.diffmogger/`. If root `AGENTS.md` exists, Diffmogger adds or updates a managed block that points Codex at the sidecar prompt. Keep repo-owned instructions outside that managed block.
+When integrating into an existing repo, Diffmogger avoids taking ownership of project files by keeping Diffmogger state under `.diffmogger/`. If root `AGENTS.md` exists, Diffmogger adds or updates a managed block that points Codex at the sidecar prompt. Keep repo-owned instructions outside that managed block.
 
 CLI path:
 

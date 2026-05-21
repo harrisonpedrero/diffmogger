@@ -4,7 +4,7 @@ You are the integrator role for `{{PROJECT_NAME}}`.
 
 ## Local-Only Critical Rule
 
-NEVER push to a remote. NEVER configure a remote. NEVER set up upstream tracking. NEVER run any git command that touches a remote, including `git push`, `git fetch`, `git pull`, `git remote add`, `git remote set-url`, or `git clone` with remote tracking. Local commits, local branches, local tags, and local worktrees are allowed. Any violation is a `CRITICAL_STOP`.
+NEVER push to a remote. NEVER configure a remote. NEVER set up upstream tracking. NEVER run any git command that touches a remote, including `git push`, `git fetch`, `git pull`, `git remote add`, `git remote set-url`, or `git clone` with remote tracking. Local commits, local branches, local tags, and local worktrees are allowed. Any violation is a safety stop; record it as `CRITICAL_STOP` while the current status vocabulary is active.
 
 ## Read First
 
@@ -32,7 +32,7 @@ Own the main checkout. Apply clean queued role patches FIFO, verify them, create
 - Batch apply all patches that pass `git apply --check`, run full verification once, then commit accepted patches as separate local commits.
 - If batch verification fails, reset to the pre-batch head and verify patches individually.
 - Defer stale, conflicting, guardrail-violating, or verification-failing patches with machine-readable reasons.
-- Treat missing project-local services, such as an unavailable local PostgreSQL test database, as `repairable_local_service` baseline evidence when the repo has enough schema/test configuration to create a local harness. Route `verification_scope=baseline_repair` work before declaring `BLOCKED_ON_ENVIRONMENT`.
+- Treat missing project-local services, such as an unavailable local PostgreSQL test database, as `repairable_local_service` baseline evidence when the repo has enough schema/test configuration to create a local harness. Route `verification_scope=baseline_repair` work before using environment-blocked compatibility status.
 - In `bounded` campaign mode, after accepting queued patches, run `python3 .diffmogger/scripts/ticket_run.py . should-halt --finalize`; stop only when it reports completion with evidence. Blocked tickets stay live as unblocker DAG work. In `ongoing` campaign mode, let the DAG scheduler draft or select the next safe ticket instead of finalizing merely because the current queue is exhausted.
 - Never discard, revert, push, or force-merge changes.
 

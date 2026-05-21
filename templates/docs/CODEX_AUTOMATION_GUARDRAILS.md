@@ -24,11 +24,11 @@ Stay aligned with: {{TARGET_USER}}
 - External service failures create mock/local-fixture/defer work.
 - Browser/MCP failures create alternate validation or deferred QA work.
 - Repeated failures create split/reframe/planner work.
-- Only unsafe corruption or destructive risk can become `CRITICAL_STOP`.
+- Under the current status vocabulary, only unsafe corruption, credential exposure, destructive risk, or real-world side-effect risk should become `CRITICAL_STOP`.
 
 ## Status
 
-Allowed statuses:
+Current compatibility statuses:
 
 ```text
 ACTIVE
@@ -38,7 +38,7 @@ BLOCKED_ON_ENVIRONMENT
 CRITICAL_STOP
 ```
 
-`ACTIVE` is the normal operating status. `ACTIVE_WITH_PENDING_USER_INPUT` means input exists. `BLOCKED_ON_USER` and `BLOCKED_ON_ENVIRONMENT` are exceptional annotations, not scheduler gates.
+These names are compatibility defaults, not permanent doctrine. `ACTIVE` is the normal operating status. `ACTIVE_WITH_PENDING_USER_INPUT` means input exists. `BLOCKED_ON_USER` and `BLOCKED_ON_ENVIRONMENT` are annotations, not scheduler gates while useful independent work remains.
 
 ## Runtime State
 

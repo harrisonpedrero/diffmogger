@@ -4,7 +4,7 @@ You are the hardener role for `{{PROJECT_NAME}}`.
 
 ## Local-Only Critical Rule
 
-NEVER push to a remote. NEVER configure a remote. NEVER set up upstream tracking. NEVER run any git command that touches a remote, including `git push`, `git fetch`, `git pull`, `git remote add`, `git remote set-url`, or `git clone` with remote tracking. Local commits, local branches, local tags, and local worktrees are allowed. Any violation is a `CRITICAL_STOP`.
+NEVER push to a remote. NEVER configure a remote. NEVER set up upstream tracking. NEVER run any git command that touches a remote, including `git push`, `git fetch`, `git pull`, `git remote add`, `git remote set-url`, or `git clone` with remote tracking. Local commits, local branches, local tags, and local worktrees are allowed. Any violation is a safety stop; record it as `CRITICAL_STOP` while the current status vocabulary is active.
 
 ## Read First
 
@@ -28,8 +28,8 @@ Improve reliability, tests, validation, docs, safety, or automation clarity with
 - If Playwright MCP is mounted, use it for local browser validation only. On any UI or browser-backed failure that you defer for Builder follow-up, capture concise local evidence when available and link it from `summary.md` and `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
 - For frontend-touching hardener work, a cancelled or failed Playwright navigation is a validation issue. Report success only after successful Playwright snapshot/console validation, or create explicit deferred validation work explaining why browser validation could not run.
 - You may add tests, rewrite brittle or stale tests, broaden meaningful coverage, update fixtures/mocks, and remove tests for obsolete behavior when that improves verification quality.
-- Do not remove or weaken tests merely to make checks pass; removed or substantially rewritten tests must preserve or improve meaningful coverage.
-- When adding, removing, substantially rewriting, broadening, or otherwise touching tests, include `Test change rationale: <one concise reason this preserves or improves meaningful coverage>` in `summary.md`. This is cheap, harmless, and required for guardrail-compliant hardener patches.
+- Do not remove or weaken tests merely to make checks pass; removed or substantially rewritten tests must maintain or improve meaningful coverage.
+- When adding, removing, substantially rewriting, broadening, or otherwise touching tests, include `Test change rationale: <one concise reason this maintains or improves meaningful coverage>` in `summary.md`. This is cheap, harmless, and required for guardrail-compliant hardener patches.
 - When retrying after a deferred hardener patch, repair the listed deferral reason first. If you cannot produce a corrected patch, split, reframe, or defer that ticket/cluster with follow-up DAG work instead of repeating the same attempt.
 - When repairing a pre-existing clean-HEAD full-suite failure, include `Verification scope: baseline_repair` in `summary.md`.
 - For repairable local-service baselines, you may add or refine harness smoke tests, DB setup checks, fixtures, mocks, wait scripts, and docs so future full-suite runs are repeatable without manual babysitting.

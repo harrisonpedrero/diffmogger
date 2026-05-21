@@ -27,7 +27,7 @@ Desired first demo: {{DESIRED_FIRST_DEMO}}
 
 If tickets remain, automation must produce work. Build, repair, defer, split, or create unblocker work before asking the user. Pending human input does not stop unrelated work. Failed validation creates work. Blockers are node metadata, not a campaign-ending status.
 
-Use `CRITICAL_STOP` only for unsafe corruption or destructive risk.
+When the current status vocabulary is active, use `CRITICAL_STOP` only for unsafe corruption, credential exposure, destructive risk, or real-world side-effect risk.
 
 ## Run Structure
 
@@ -111,9 +111,9 @@ python3 .diffmogger/scripts/state_brief.py \
 
 Refresh `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` with completed work, files changed, checks run, generated unblocker work, pending human input, best next milestone, and suggested next task. Keep this projection short.
 
-## Status Model
+## Status Compatibility
 
-Allowed statuses:
+Current compatibility statuses:
 
 ```text
 ACTIVE
@@ -123,7 +123,4 @@ BLOCKED_ON_ENVIRONMENT
 CRITICAL_STOP
 ```
 
-Use `ACTIVE` as the default operating status.
-Use `ACTIVE_WITH_PENDING_USER_INPUT` when pending input exists; it is not a pause state.
-Use `BLOCKED_ON_USER` and `BLOCKED_ON_ENVIRONMENT` only as exceptional annotations, not scheduler gates. Human input should create pending input records while independent work continues. Environment and validation failures should create repair, setup, mock, fixture, defer, split, reframe, review, documentation, or alternate-ticket work. Create unblocker work unless every ticket is done with evidence.
-Use `CRITICAL_STOP` only for serious safety, destructive-state, credential, or real-world side-effect risks.
+These names are compatibility defaults, not permanent doctrine. `ACTIVE` is the default operating status. `ACTIVE_WITH_PENDING_USER_INPUT` means pending input exists; it is not a pause state. `BLOCKED_ON_USER` and `BLOCKED_ON_ENVIRONMENT` annotate pressure, not scheduler gates while independent work can continue. Human input should create pending input records while independent work continues. Environment and validation failures should create repair, setup, mock, fixture, defer, split, reframe, review, documentation, or alternate-ticket work. Create unblocker work unless every ticket is done with evidence. `CRITICAL_STOP` is only for serious safety, destructive-state, credential, or real-world side-effect risks.

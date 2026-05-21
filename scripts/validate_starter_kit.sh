@@ -147,7 +147,7 @@ automation_sections = [
     "## Lock-File Behavior",
     "## Verification",
     "## End-Of-Run Requirements",
-    "## Status Model",
+    "## Status Compatibility",
 ]
 automation = Path("templates/.agentic/automation_prompt.md").read_text(encoding="utf-8")
 missing = [section for section in automation_sections if section not in automation]

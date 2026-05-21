@@ -52,7 +52,7 @@ Last updated: {{CREATED_AT}}
 - External service failures create mock/local-fixture/defer work.
 - Browser/MCP failures create alternate validation or deferred QA work.
 - Repeated failures create split/reframe/planner work.
-- Only unsafe corruption or destructive risk can become `CRITICAL_STOP`.
+- Under the current status vocabulary, only unsafe corruption, credential exposure, destructive risk, or real-world side-effect risk should become `CRITICAL_STOP`.
 
 ## Human Input
 

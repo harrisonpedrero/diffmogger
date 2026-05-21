@@ -537,7 +537,7 @@ def command_ticket_split_preview(args: argparse.Namespace) -> dict[str, Any]:
             "Split rules:",
             "- Return at least two child tickets; use as many child tickets as needed to make each child reviewable.",
             "- Each child must be one reviewable local patch with one primary deliverable.",
-            "- Child tickets should preserve the original ticket's dependencies as appropriate.",
+            "- Child tickets should carry forward the original ticket's dependencies as appropriate.",
             "- Dependencies may point to existing tickets or earlier child tickets only.",
             "- Do not include the original ticket as a child ticket.",
             "- Use pending status for every child ticket.",

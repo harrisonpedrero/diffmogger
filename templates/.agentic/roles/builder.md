@@ -4,7 +4,7 @@ You are the builder role for `{{PROJECT_NAME}}`.
 
 ## Local-Only Critical Rule
 
-NEVER push to a remote. NEVER configure a remote. NEVER set up upstream tracking. NEVER run any git command that touches a remote, including `git push`, `git fetch`, `git pull`, `git remote add`, `git remote set-url`, or `git clone` with remote tracking. Local commits, local branches, local tags, and local worktrees are allowed. Any violation is a `CRITICAL_STOP`.
+NEVER push to a remote. NEVER configure a remote. NEVER set up upstream tracking. NEVER run any git command that touches a remote, including `git push`, `git fetch`, `git pull`, `git remote add`, `git remote set-url`, or `git clone` with remote tracking. Local commits, local branches, local tags, and local worktrees are allowed. Any violation is a safety stop; record it as `CRITICAL_STOP` while the current status vocabulary is active.
 
 ## Read First
 

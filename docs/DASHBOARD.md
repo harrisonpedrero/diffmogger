@@ -77,9 +77,9 @@ After scaffold and required-file validation, Automation can start or stop a deta
 
 Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Execution DAG state is canonical in `.diffmogger/runtime/orchestration.sqlite3`. The dashboard derives state from scheduler-selected action, tickets, DAG nodes, validation receipts, next actions, and ticket completion, not from raw validation failure counts alone.
 
-Human input records are planning inputs. They do not pause the scheduler while independent work, setup, repair, mock, fixture, defer, split, reframe, documentation, review, or alternate-ticket work can continue.
+Human input records are planning inputs in the current model. They should not hide independent work, setup, repair, mock, fixture, defer, split, reframe, documentation, review, or alternate-ticket work that can continue.
 
-Validation failures are shown as validation/repair work, not as an environment-blocked top-level state. Required failures create repair nodes; missing tools create setup/harness nodes; external service failures create mock, local-fixture, or defer nodes; browser/MCP failures create alternate validation or deferred QA nodes; repeated failures create planner split/reframe/defer work. Only unsafe, destructive, or corrupt state should surface as `CRITICAL_STOP`.
+Validation failures are shown as validation/repair work rather than a generic frozen state. Required failures create repair nodes; missing tools create setup/harness nodes; external service failures create mock, local-fixture, or defer nodes; browser/MCP failures create alternate validation or deferred QA nodes; repeated failures create planner split/reframe/defer work. Current dashboards may surface unsafe, destructive, or corrupt state as `CRITICAL_STOP`; that label is compatibility vocabulary, not a reason to freeze the vocabulary forever.
 
 ## Review Artifacts
 

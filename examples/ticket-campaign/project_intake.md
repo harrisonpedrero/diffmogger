@@ -22,7 +22,7 @@ A readiness-only bootstrap followed by one dependency-aware ticket run, with evi
 
 ## Tech Preferences
 
-- Preserve the existing project stack.
+- Respect the existing project stack.
 - Use the existing test and lint commands.
 
 ## Constraints

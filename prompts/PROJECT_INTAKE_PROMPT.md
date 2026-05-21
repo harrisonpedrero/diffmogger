@@ -35,7 +35,7 @@ Capture:
 23. Long-run direction after the initial scope, unless the work is a bounded ticket campaign.
 24. What the automation must never do.
 
-For existing project integration, explicitly capture what already exists, which stack and commands must be preserved, and what the first integrated change should prove.
+For existing project integration, explicitly capture what already exists, which stack and commands should be respected, and what the first integrated change should prove.
 
 Output in this structure:
 

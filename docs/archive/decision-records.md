@@ -1,6 +1,6 @@
 # Archived Decision Records
 
-These records preserve historical source-kit decisions. Active setup and operating guidance lives in `docs/README.md`, `DEVELOPMENT.md`, and `docs/OPERATING_MODEL.md`.
+These records capture historical source-kit decisions. Active setup and operating guidance lives in `docs/README.md`, `DEVELOPMENT.md`, and `docs/OPERATING_MODEL.md`.
 
 ## DR-001: Separate Stable Prompt From Typed Runtime State
 
@@ -90,7 +90,7 @@ Why: nested Codex workers launched from inside a scheduled automation sandbox ma
 
 ## DR-015: Write-Capable Workers Are Explicitly Opt-In And Main-Agent Integrated
 
-Decision: generated target projects support optional bounded write-capable workers with `max_write_worker_count` capped at 10 and read-only worker reports preserved for exploration. The older `write_worker_agents_allowed` gate has been superseded; write workers are available by default and the main agent chooses whether to use zero or more workers per run.
+Decision: generated target projects support optional bounded write-capable workers with `max_write_worker_count` capped at 10 and read-only worker reports retained for exploration. The older `write_worker_agents_allowed` gate has been superseded; write workers are available by default and the main agent chooses whether to use zero or more workers per run.
 
 Why: high-throughput implementation can help when work can split into reviewable lanes, but overlapping autonomous writes are risky. The main agent must choose a strategy and parallelism budget each run, define enough ownership and contracts before spawning write workers, tell workers they are not alone in the codebase, review and integrate diffs, run verification, update typed runtime state, and refresh generated projections. Integration-only runs with no workers remain valid when faster or safer.
 
@@ -98,13 +98,13 @@ Why: high-throughput implementation can help when work can split into reviewable
 
 Decision: generated target projects may opt into the v1 `planner_builder_hardener_integrator` profile. Older intakes used `multi_role_automations_allowed` as the selector; current intakes use canonical `automation_role_profile` and treat the boolean as a derived compatibility mirror. Planner, builder, and hardener run in isolated local worktrees from current main `HEAD`; the integrator owns the main checkout and processes queued patches FIFO.
 
-Why: separate roles can increase useful autonomous throughput without making every target adopt that complexity. Fresh-HEAD role runs minimize stale work, while integrator-side `git apply --check` preserves correctness.
+Why: separate roles can increase useful autonomous throughput without making every target adopt that complexity. Fresh-HEAD role runs minimize stale work, while integrator-side `git apply --check` protects correctness.
 
 ## DR-017: Dirty Main Changes Become Local Checkpoint Commits
 
 Decision: when multi-role integrator runs find a dirty main checkout, they commit those pre-existing changes as-is with an automation-identifying author before applying queued role patches.
 
-Why: human changes should never stall autonomous progress. A local checkpoint commit preserves the bytes and gives the human a reset point if they prefer to restore an uncommitted working state.
+Why: human changes should never stall autonomous progress. A local checkpoint commit keeps the bytes and gives the human a reset point if they prefer to restore an uncommitted working state.
 
 ## DR-018: Batch Verification Falls Back To Individual Verification
 
@@ -114,7 +114,7 @@ Why: the common path should be fast, but failure attribution must stay clean eno
 
 ## DR-019: No-Push Enforcement Is Layered
 
-Decision: generated role prompts prohibit pushes, fetches, pulls, remote configuration, upstream tracking, and remote-affecting git commands as `CRITICAL_STOP` conditions. Runtime scripts also refuse configured remotes unless `MULTI_ROLE_ALLOW_REMOTES=1` is set, and the integrator refuses executable hooks containing `git push`.
+Decision: generated role prompts prohibit pushes, fetches, pulls, remote configuration, upstream tracking, and remote-affecting git commands as safety-stop conditions. Under the current status vocabulary those are recorded as `CRITICAL_STOP`. Runtime scripts also refuse configured remotes unless `MULTI_ROLE_ALLOW_REMOTES=1` is set, and the integrator refuses executable hooks containing `git push`.
 
 Why: prompts guide agent intent, while script guards catch mistakes and environment drift. Multi-role automation is local-only by default.
 
@@ -152,7 +152,7 @@ Why: the older layout scattered generated files across `.agentic/`, `docs/`, and
 
 Decision: canonical Python runtime source lives under `src/diffmogger/`. Root `scripts/*.py` are compatibility wrappers that import package modules, and generated target `.diffmogger/scripts/*.py` wrappers are rendered from the runtime entrypoint manifest and canonical wrapper template. Scaffolding copies `src/diffmogger/` into target repos under `.diffmogger/lib/diffmogger/` and records the bundle in `.diffmogger/manifest.json`.
 
-Why: the earlier layout kept Python implementation in multiple tracked locations, which made ownership unclear and made drift prevention depend on exact file comparisons. Manifest-generated wrappers preserve command names while making source ownership explicit.
+Why: the earlier layout kept Python implementation in multiple tracked locations, which made ownership unclear and made drift prevention depend on exact file comparisons. Manifest-generated wrappers keep command names while making source ownership explicit.
 
 ## Source Summary From References
 

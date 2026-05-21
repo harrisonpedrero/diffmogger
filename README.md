@@ -58,7 +58,7 @@ Diffmogger materializes target automation state into a directed execution graph 
 
 Those inputs become typed DAG nodes and edges. Common node types include `orchestrate`, `decompose`, `scope`, `build`, `review`, `validate`, `repair`, `integrate`, `audit`, `calibrate`, `blocker`, and `completion`.
 
-Hard edges block only the downstream node they guard. Advisory edges preserve context without stopping execution. Blockers are planning inputs that should create repair, setup, mock, fixture, defer, split, reframe, review, documentation, or alternate-ticket DAG work while tickets remain.
+Hard edges block only the downstream node they guard. Advisory edges carry context without stopping execution. Blockers are planning inputs that should create repair, setup, mock, fixture, defer, split, reframe, review, documentation, or alternate-ticket DAG work while tickets remain.
 
 On each scheduler cycle, Diffmogger refreshes the graph, computes runnable nodes, records scheduler candidates, and selects the next execution action. If tickets remain, the scheduler should produce work. Actions can launch read-only scope work, launch write work with leases, run validation groups, review queued patches, create repair/setup/harness/mock/defer nodes, reconcile worker outputs, or integrate accepted patches.
 
@@ -135,9 +135,9 @@ tests/{kit,runtime,dashboard}/  Source-kit, runtime, and dashboard test groups
 - Keep automation local-only unless a target explicitly opts into local runs with configured remotes.
 - Review diffs before trusting autonomous changes.
 
-Status values are `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP`. `BLOCKED_ON_USER` and `BLOCKED_ON_ENVIRONMENT` do not pause automation while any independent or unblocker work can continue; only complete ticket exhaustion stops automation.
+Current generated targets use `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP` as a compatibility vocabulary. These names are implementation details, not permanent product doctrine. The durable rule is that human input, missing tools, and validation failures should become typed planning inputs or follow-up work instead of silently freezing unrelated work.
 
-Failed validation is scheduler input, not a stop state. Required check failures create repair work; missing tools create setup/harness work; external services create mock, local-fixture, or defer work; browser/MCP failures create alternate validation or deferred QA work; repeated failures create planner split/reframe/defer work. Only unsafe, destructive, or corrupt states may become `CRITICAL_STOP`.
+Failed validation is scheduler input under the current model. Required check failures create repair work; missing tools create setup/harness work; external services create mock, local-fixture, or defer work; browser/MCP failures create alternate validation or deferred QA work; repeated failures create planner split/reframe/defer work. Future orchestration systems may express these states differently as long as the local-first safety and liveness behavior remains clear.
 
 ## Validation
 
