@@ -7,6 +7,7 @@ from ..jsonio import *
 from ..target import *
 
 from diffmogger.runtime import ticket_run
+from diffmogger import supervision
 from diffmogger.runtime.state_store import (
     automation_control_state,
     load_runner_state as load_canonical_runner_state,
@@ -17,13 +18,12 @@ from diffmogger.runtime.state_store import (
 
 RUNNER_STOP_GRACE_SECONDS = 8
 CONVEYOR_PROCESS_MARKERS = (
-    "run_conveyor_automation.py",
-    "run_conveyor_automation.sh",
+    "diffmogger.orchestration.cli",
+    "run_temporal_worker.sh",
 )
 TARGET_OWNED_DESCENDANT_MARKERS = (
     *CONVEYOR_PROCESS_MARKERS,
     "run_role_automation.sh",
-    "run_process_watchdog.py",
     "codex exec",
 )
 MCP_PROCESS_MARKERS = (
@@ -237,8 +237,8 @@ def automation_ready(target: Path, dashboard_app: Any, *, allow_bootstrap_pendin
         existing_or_target_path(target, ".agentic/project_intake.json"),
         existing_or_target_path(target, ".agentic/automation_prompt.md"),
         existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md"),
-        target_script_path(target, "scripts/run_conveyor_automation.sh"),
-        target_script_path(target, "scripts/run_conveyor_automation.py"),
+        target_script_path(target, "scripts/run_temporal_worker.sh"),
+        target_script_path(target, "scripts/orchestration_cli.py"),
         existing_or_target_path(target, ".agentic/roles/planner.md"),
         existing_or_target_path(target, ".agentic/roles/builder.md"),
         existing_or_target_path(target, ".agentic/roles/hardener.md"),
@@ -268,7 +268,7 @@ def run_once_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:
     required = [
         existing_or_target_path(target, ".agentic/automation_prompt.md"),
         existing_or_target_path(target, "docs/CODEX_AUTOMATION_TASKS.md"),
-        target_script_path(target, "scripts/run_conveyor_automation.sh"),
+        target_script_path(target, "scripts/run_temporal_worker.sh"),
     ]
     missing = [path.relative_to(target).as_posix() for path in required if not path.exists()]
     if missing:
@@ -284,7 +284,7 @@ def automation_log_dir(target: Path) -> Path:
     return target_path(target.expanduser().resolve(), "target/automation_logs")
 
 def automation_runner_path(target: Path) -> Path:
-    return runner_projection_path_for_target(target)
+    return supervision.runner_state_path(target)
 
 def load_runner_state(target: Path) -> dict[str, Any]:
     state = load_canonical_runner_state(automation_runner_path(target))
@@ -325,7 +325,7 @@ def process_is_alive(pid: Any) -> bool:
     return True
 
 def automation_conveyor_lock_path(target: Path) -> Path:
-    return target_path(target.expanduser().resolve(), "target/automation_conveyor.lock")
+    return target_path(target.expanduser().resolve(), "target/codex_automation.lock")
 
 def read_process_table() -> dict[int, dict[str, Any]]:
     try:
@@ -583,29 +583,16 @@ def automation_prerequisites(target: Path, dashboard_app: Any) -> list[Any]:
             else "Run scaffold again to create the local git repo and initial commit, or manually run `git init`, `git add .`, and `git commit -m 'chore: initial commit'`.",
         )
     )
-    if (
-        human_bridge_mode_from_state(target) in {"local_notifier", "discord_notifier"}
-        and bool(load_dashboard_state(target).get("local_notifications_enabled", True))
-    ):
-        osascript_path = shutil.which("osascript")
-        items.append(
-            dashboard_app.PrerequisiteItem(
-                "macOS desktop notifications",
-                bool(osascript_path),
-                False,
-                osascript_path
-                or "osascript unavailable; notifier delivery will record LOCAL_NOTIFICATION_FAILED in typed human-message state.",
-            )
-        )
     return items
 
 def automation_status_snapshot(target: Path, dashboard_app: Any) -> dict[str, Any]:
     ready, ready_reason = automation_ready(target, dashboard_app)
-    runner = running_runner_state(target)
-    running = runner.get("state") == "running" and process_is_alive(runner.get("pid"))
+    runner = supervision.status(target)
+    running = runner.get("state") == "running"
     if running:
         state = "running"
-        message = f"Continuous automation is running (pid {runner.get('pid')})."
+        supervisor = runner.get("supervisor") or "unknown"
+        message = f"Continuous automation is running under {supervisor}."
     elif ready:
         state = "stopped"
         message = "Continuous automation is ready to start."
@@ -617,13 +604,13 @@ def automation_status_snapshot(target: Path, dashboard_app: Any) -> dict[str, An
         "state": state,
         "message": message,
         "platform": sys.platform,
-        "pid": int(runner.get("pid") or 0) if running else None,
-        "started_at": runner.get("started_at") if running else None,
+        "pid": int(runner.get("runner", {}).get("pid") or 0) if running and isinstance(runner.get("runner"), dict) else None,
+        "started_at": runner.get("runner", {}).get("started_at") if isinstance(runner.get("runner"), dict) else None,
         "runner_state_path": str(automation_runner_path(target)),
         "log_dir": str(log_dir),
         "log_paths": {
-            "stdout": str(log_dir / "conveyor.runner.stdout.log"),
-            "stderr": str(log_dir / "conveyor.runner.stderr.log"),
+            "stdout": str(log_dir / "launchd.stdout.log"),
+            "stderr": str(log_dir / "launchd.stderr.log"),
         },
         "ready": ready,
         "ready_reason": ready_reason,
@@ -840,8 +827,10 @@ def command_run_once(args: argparse.Namespace) -> dict[str, Any]:
             error_type="automation_not_ready",
             details={"reason": reason},
         )
-    command = ["bash", str(target_script_path(target, "scripts/run_conveyor_automation.sh")), "--once"]
-    env = {**os.environ, **dashboard_app.automation_environment(target)}
+    run_id = dashboard_app.dashboard_run_id("dashboard-run-once")
+    command = supervision.temporal_command(target, run_id=run_id)
+    base_env = {**os.environ, **dashboard_app.automation_environment(target)}
+    env = {**base_env, **supervision.runner_environment(target, command[0], base_env=base_env)}
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     result = run_subprocess_streamed(args, command, cwd=target, stage="run", env=env)
     finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -866,21 +855,9 @@ def command_run_once(args: argparse.Namespace) -> dict[str, Any]:
 def command_automation_start(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     dashboard_app = load_dashboard_module()
-    live = live_target_conveyor_processes(target)
-    if live:
-        existing = attach_live_runner_state(target, live)
-        stream_event(args, "automation", f"Continuous automation is already running (pid {existing.get('pid')}).")
-        write_dashboard_action_state(target, last_action="automation_start_attached")
-        return {
-            "target": target_metadata(target),
-            "automation": automation_status_snapshot(target, dashboard_app),
-            "runner": existing,
-            "started": False,
-            "attached": True,
-        }
-    existing = running_runner_state(target)
-    if existing.get("state") == "running" and process_is_alive(existing.get("pid")):
-        stream_event(args, "automation", f"Continuous automation is already running (pid {existing.get('pid')}).")
+    existing = supervision.status(target)
+    if existing.get("state") == "running":
+        stream_event(args, "automation", "Continuous automation is already running.")
         write_dashboard_action_state(target, last_action="automation_start_noop")
         return {
             "target": target_metadata(target),
@@ -911,55 +888,20 @@ def command_automation_start(args: argparse.Namespace) -> dict[str, Any]:
             error_type="remote_opt_in_required",
             details={"remotes": remotes},
         )
-    log_dir = automation_log_dir(target)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = log_dir / "conveyor.runner.stdout.log"
-    stderr_path = log_dir / "conveyor.runner.stderr.log"
-    command = ["bash", str(target_script_path(target, "scripts/run_conveyor_automation.sh"))]
-    env = {**os.environ, **dashboard_app.automation_environment(target, allow_remotes=allow_remotes)}
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    stream_event(args, "automation", "$ " + shlex.join(command), data={"cwd": str(target)})
+    stream_event(args, "automation", "Starting supervised Temporal scheduler runner.", data={"cwd": str(target)})
     try:
-        stdout_handle = stdout_path.open("ab")
-        stderr_handle = stderr_path.open("ab")
-        process = subprocess.Popen(
-            command,
-            cwd=str(target),
-            env=env,
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-            start_new_session=True,
-            close_fds=True,
-        )
+        runner = supervision.start_runner(target)
     except OSError as exc:
         raise BackendError(
             "Could not start continuous automation.",
             error_type="automation_start_failed",
-            details={"command": command, "exception": str(exc)},
+            details={"exception": str(exc)},
         ) from exc
-    finally:
-        try:
-            stdout_handle.close()  # type: ignore[possibly-undefined]
-        except Exception:
-            pass
-        try:
-            stderr_handle.close()  # type: ignore[possibly-undefined]
-        except Exception:
-            pass
-    runner = {
-        "state": "running",
-        "message": "Continuous automation is running.",
-        "pid": process.pid,
-        "started_at": started_at,
-        "command": command,
-        "command_display": shlex.join(command),
-        "stdout_path": str(stdout_path),
-        "stderr_path": str(stderr_path),
-        "target": str(target),
-    }
-    write_runner_state(target, runner)
+    runner["started_at"] = started_at
+    supervision.write_state(target, runner)
     write_dashboard_action_state(target, last_action="automation_started")
-    stream_event(args, "automation", f"Started continuous automation (pid {process.pid}).")
+    stream_event(args, "automation", f"Started continuous automation under {runner.get('supervisor')}.")
     return {
         "target": target_metadata(target),
         "automation": automation_status_snapshot(target, dashboard_app),
@@ -970,53 +912,27 @@ def command_automation_start(args: argparse.Namespace) -> dict[str, Any]:
 def command_automation_stop(args: argparse.Namespace) -> dict[str, Any]:
     target = resolve_target(args.target)
     dashboard_app = load_dashboard_module()
-    runner = load_runner_state(target)
-    live = live_target_conveyor_processes(target, runner)
-    if not live:
-        stale = mark_stale_runner(target, runner)
+    runner = supervision.status(target)
+    if runner.get("state") != "running":
         stream_event(args, "automation", "Continuous automation is not currently running.", level="warning")
         write_dashboard_action_state(target, last_action="automation_stop_noop")
         return {
             "target": target_metadata(target),
             "automation": automation_status_snapshot(target, dashboard_app),
-            "runner": stale,
+            "runner": runner,
             "stopped": False,
             "forced": False,
         }
 
-    pid_int = int(live.get("root_pid") or runner.get("pid") or 0)
-    owned_pids = [int(item) for item in live.get("pids") or [pid_int] if int(item) > 0]
-    stopped = False
-    forced = False
-    stream_event(args, "automation", f"Stopping continuous automation (pid {pid_int}, processes {len(owned_pids)}).")
-    signal_process_group_if_safe(live, signal.SIGTERM)
-    signal_pids(owned_pids, signal.SIGTERM)
-    stopped = wait_for_processes_to_exit(owned_pids, RUNNER_STOP_GRACE_SECONDS)
-    if not stopped:
-        forced = True
-        signal_process_group_if_safe(live, signal.SIGKILL)
-        signal_pids(owned_pids, signal.SIGKILL)
-        stopped = wait_for_processes_to_exit(owned_pids, 3)
-
-    finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    runner = dict(runner)
-    runner["state"] = "stopped" if stopped else "stop_failed"
-    runner["message"] = "Continuous automation stopped." if stopped else "Continuous automation did not stop cleanly."
-    runner["stopped_at"] = finished_at
-    runner["forced_stop"] = forced
-    runner["stopped_pids"] = owned_pids
-    runner["process_sources"] = list(live.get("sources") or [])
-    if stopped:
-        cleanup_conveyor_lock_if_owned(target, live)
-    mcp_cleanup = cleanup_owned_mcp_processes(target, live) if stopped else {"pids": [], "terminated": False, "killed": False}
-    runner["mcp_cleanup"] = mcp_cleanup
-    write_runner_state(target, runner)
+    stream_event(args, "automation", "Stopping supervised automation.")
+    stopped_runner = supervision.stop_runner(target)
+    stopped = stopped_runner.get("state") in {"stopped", "stop_recorded"}
     write_dashboard_action_state(target, last_action="automation_stopped" if stopped else "automation_stop_failed")
     return {
         "target": target_metadata(target),
         "automation": automation_status_snapshot(target, dashboard_app),
-        "runner": runner,
+        "runner": stopped_runner,
         "stopped": stopped,
-        "forced": forced,
-        "mcp_cleanup": mcp_cleanup,
+        "forced": False,
+        "mcp_cleanup": {"pids": [], "terminated": False, "killed": False},
     }

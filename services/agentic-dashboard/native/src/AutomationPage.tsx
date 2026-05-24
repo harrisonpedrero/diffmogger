@@ -1,27 +1,38 @@
 import {
   AlertTriangle,
+  Bell,
   CheckCircle2,
   Clipboard,
+  FileText,
   FolderOpen,
   GitBranch,
+  GitPullRequest,
+  HelpCircle,
+  ListFilter,
+  Maximize2,
   PlayCircle,
   RefreshCw,
   RotateCcw,
+  Route,
+  Search,
+  Server,
   ShieldCheck,
   Square,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
-import { useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { BackendEnvelope, BackendLogEvent, ProjectSnapshot } from "./api/backend";
 import { listenBackendLogs, runBackendCommandStreamed } from "./api/backend";
 import {
   buildAutomationViewModel,
-  type AutomationGraphEdge,
-  type AutomationGraphGroup,
-  type AutomationGraphNode,
-  type AutomationQueueBucket,
+  type AutomationEvidenceRow,
+  type AutomationQueueRow,
+  type AutomationSchedulerCandidateRow,
+  type AutomationTicketGraphNode,
   type AutomationTicketProgressRow,
-  type AutomationValidationRow,
-  type AutomationActivityRow,
+  type AutomationTimelineCategory,
+  type AutomationTimelineEvent,
 } from "./automationViewModel";
 import { buildRunModel, type RunAction, type RunTone } from "./runModel";
 
@@ -72,395 +83,574 @@ function retryFailedAction(model: ReturnType<typeof buildRunModel>): AutomationC
   };
 }
 
-function graphEdgePath(edge: AutomationGraphEdge): string {
-  const { x1, y1, cx1, cy1, cx2, cy2, x2, y2 } = edge.points;
-  return `M ${x1} ${y1} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${x2} ${y2}`;
+type TicketProgressTab = "list" | "graph";
+type TicketDetailRecord = AutomationTicketProgressRow | AutomationTicketGraphNode;
+
+function defaultTicketId(view: ReturnType<typeof buildAutomationViewModel>): string {
+  return view.ticketProgress.rows.find((ticket) => ticket.status === "building")?.id ||
+    view.ticketProgress.rows.find((ticket) => ticket.status === "scoping")?.id ||
+    view.ticketProgress.rows.find((ticket) => ticket.status === "running")?.id ||
+    view.ticketProgress.rows.find((ticket) => ticket.status === "ready")?.id ||
+    view.ticketProgress.rows.find((ticket) => ticket.status === "waiting")?.id ||
+    view.ticketProgress.rows[0]?.id ||
+    view.ticketGraph.nodes[0]?.id ||
+    "";
 }
 
-function GraphNodeButton(props: {
-  node: AutomationGraphNode;
-  selected: boolean;
-  onSelect: (nodeId: string) => void;
-}) {
-  const style: CSSProperties = {
-    left: props.node.x,
-    top: props.node.y,
-    width: props.node.width,
-    height: props.node.height,
-  };
+function DetailList(props: { items: string[]; empty: string }) {
+  if (!props.items.length) return <p className="empty-copy">{props.empty}</p>;
   return (
-    <button
-      type="button"
-      className={`dag-graph-node ${props.node.sourceKind} ${props.node.status}${props.selected ? " selected" : ""}`}
-      style={style}
-      aria-pressed={props.selected}
-      aria-label={`${props.node.title} ${props.node.subtitle} ${props.node.statusLabel}`}
-      title={props.node.detail}
-      onClick={() => props.onSelect(props.node.id)}
-    >
-      <span>{props.node.title}</span>
-      <small>{props.node.subtitle}</small>
-      <em>{props.node.statusLabel}</em>
-    </button>
+    <ul className="ticket-detail-list">
+      {props.items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}
+    </ul>
   );
 }
 
-function groupBounds(group: AutomationGraphGroup, nodes: AutomationGraphNode[]) {
-  const groupNodes = group.nodeIds
-    .map((nodeId) => nodes.find((node) => node.id === nodeId))
-    .filter((node): node is AutomationGraphNode => Boolean(node));
-  if (!groupNodes.length) return null;
-  const padding = 10;
-  const minX = Math.min(...groupNodes.map((node) => node.x)) - padding;
-  const minY = Math.min(...groupNodes.map((node) => node.y)) - padding;
-  const maxX = Math.max(...groupNodes.map((node) => node.x + node.width)) + padding;
-  const maxY = Math.max(...groupNodes.map((node) => node.y + node.height)) + padding;
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+function DetailTags(props: { items: string[]; empty: string }) {
+  if (!props.items.length) return <p className="empty-copy">{props.empty}</p>;
+  return (
+    <div className="ticket-detail-tags">
+      {props.items.map((item) => <span key={item}>{item}</span>)}
+    </div>
+  );
 }
 
-function ExecutionGraphPanel(props: {
-  dag: ReturnType<typeof buildAutomationViewModel>["dag"];
-  nextAction: ReturnType<typeof buildAutomationViewModel>["nextAction"];
-  selectedNodeId: string;
-  onSelect: (nodeId: string) => void;
-}) {
-  const graphStyle: CSSProperties = {
-    width: props.dag.width,
-    height: props.dag.height,
-  };
-  const groupBoxes = props.dag.groups
-    .map((group) => ({ group, bounds: groupBounds(group, props.dag.nodes) }))
-    .filter((item): item is { group: AutomationGraphGroup; bounds: NonNullable<ReturnType<typeof groupBounds>> } => Boolean(item.bounds));
+function TicketDetailInspector(props: { ticket: TicketDetailRecord | undefined }) {
+  const ticket = props.ticket;
+  if (!ticket) {
+    return (
+      <aside className="ticket-detail-inspector">
+        <h3>Ticket Detail</h3>
+        <p className="empty-copy">Select a ticket to inspect details.</p>
+      </aside>
+    );
+  }
+  const placeholder = "placeholder" in ticket && ticket.placeholder;
+  const cyclic = "cyclic" in ticket && ticket.cyclic;
   return (
-    <article className="automation-panel dag-inspector-panel">
-      <div className="panel-heading-row compact">
+    <aside className="ticket-detail-inspector">
+      <div className="ticket-detail-title">
+        <span>{placeholder ? "Dependency Detail" : "Ticket Detail"}</span>
+        <h3>{ticket.id}</h3>
+        <TonePill tone={ticket.tone}>{ticket.statusLabel}</TonePill>
+      </div>
+      <p>{ticket.summary}</p>
+      <div className="ticket-detail-grid">
         <div>
-          <h2>Execution Graph</h2>
-          <p>{props.dag.summary}</p>
+          <span>Current phase</span>
+          <strong>{ticket.stage}</strong>
         </div>
-        <TonePill tone={props.nextAction.tone}>{props.dag.modeLabel}</TonePill>
+        <div>
+          <span>Runtime status</span>
+          <strong>{ticket.runtimeStatus || String(ticket.status)}</strong>
+        </div>
+        <div>
+          <span>Evidence</span>
+          <strong>{ticket.evidenceCount}</strong>
+        </div>
+        <div>
+          <span>Commits</span>
+          <strong>{ticket.commitCount}</strong>
+        </div>
       </div>
-      <div className="next-action-strip">
-        <GitBranch size={16} />
-        <span>Next</span>
-        <strong>{props.nextAction.title}</strong>
-        <p>{props.nextAction.detail}</p>
-      </div>
-      <div className="dag-graph-scroll" aria-label="Execution graph">
-        <div className={`dag-graph-canvas ${props.dag.mode}`} style={graphStyle}>
-          <svg
-            className="dag-graph-svg"
-            role="img"
-            aria-label={`${props.dag.modeLabel}: ${props.dag.summary}`}
-            viewBox={`0 0 ${props.dag.width} ${props.dag.height}`}
-          >
-            <defs>
-              <marker id="dag-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-                <path d="M 0 0 L 10 5 L 0 10 z" />
-              </marker>
-            </defs>
-            {props.dag.columns.map((column) => (
-              <g className="dag-column-guide" key={column.id}>
-                <rect x={column.x - 8} y="30" width={column.width + 16} height={Math.max(0, props.dag.height - 42)} />
-                <text x={column.x + column.width / 2} y="20">{column.label}</text>
-              </g>
-            ))}
-            {groupBoxes.map(({ group, bounds }) => (
-              <g className={`dag-wave-outline ${group.kind}`} key={group.id}>
-                <rect x={bounds.x} y={bounds.y} width={bounds.width} height={bounds.height} />
-                <text x={bounds.x + 8} y={Math.max(18, bounds.y - 4)}>{group.label}</text>
-              </g>
-            ))}
-            {props.dag.edges.map((edge) => (
-              <g className={`dag-edge ${edge.presentationKind}`} key={edge.id}>
-                <path d={graphEdgePath(edge)} markerEnd="url(#dag-arrow)" />
-                {edge.count > 1 && (
-                  <text x={(edge.points.x1 + edge.points.x2) / 2} y={(edge.points.y1 + edge.points.y2) / 2 - 5}>{edge.label}</text>
-                )}
-              </g>
-            ))}
-          </svg>
-          {props.dag.nodes.map((node) => (
-            <GraphNodeButton
-              node={node}
-              selected={node.id === props.selectedNodeId}
-              onSelect={props.onSelect}
-              key={node.id}
-            />
+      {cyclic && <div className="ticket-detail-warning">Dependency cycle detected for this ticket.</div>}
+      {ticket.blocker && <div className="ticket-detail-warning">{ticket.blocker}</div>}
+      <section className="ticket-detail-section">
+        <span>Dependencies</span>
+        <DetailTags items={ticket.dependsOn} empty="No dependencies recorded." />
+      </section>
+      <section className="ticket-detail-section">
+        <span>Acceptance criteria</span>
+        <DetailList items={ticket.acceptanceCriteria} empty="No acceptance criteria recorded." />
+      </section>
+      <section className="ticket-detail-section">
+        <span>Verification commands</span>
+        <DetailList items={ticket.verificationCommands} empty="No verification commands recorded." />
+      </section>
+      <section className="ticket-detail-section">
+        <span>Related commits</span>
+        <DetailTags items={ticket.relatedCommits} empty="No related commits recorded." />
+      </section>
+      <small title={ticket.detail}>{ticket.detail}</small>
+    </aside>
+  );
+}
+
+function TicketProgressListTab(props: {
+  view: ReturnType<typeof buildAutomationViewModel>;
+  selectedTicketId: string;
+  selectedTicket: TicketDetailRecord | undefined;
+  onSelect: (ticketId: string) => void;
+}) {
+  return (
+    <div className="ticket-progress-workspace">
+      <div className="ticket-progress-list-pane">
+        <div className="ticket-progress-counts">
+          {props.view.ticketProgress.counts.map((item) => (
+            <div className={`ticket-progress-count ${item.id}`} key={item.id}>
+              <span>{item.label}</span>
+              <strong>{item.count}</strong>
+            </div>
           ))}
         </div>
-      </div>
-      <div className="dag-graph-legend">
-        <span><i className="edge-hard" /> Hard dependency</span>
-        <span><i className="edge-advisory" /> Advisory</span>
-        <span><i className="edge-blocker" /> Blocker/follow-up</span>
-        {props.dag.hiddenSummary && <strong>{props.dag.hiddenSummary}</strong>}
-      </div>
-    </article>
-  );
-}
-
-function SelectedWorkDetail(props: {
-  node: AutomationGraphNode | null;
-  nextAction: ReturnType<typeof buildAutomationViewModel>["nextAction"];
-  ticket?: AutomationTicketProgressRow;
-}) {
-  const usefulScope = props.node?.scope && props.node.scope !== "No ownership scope recorded" ? props.node.scope : "";
-  return (
-    <article className="automation-panel selected-work-panel">
-      <div className="panel-heading-row compact">
-        <h2>Selected Work</h2>
-        <TonePill tone={props.node?.tone || props.nextAction.tone}>{props.node?.statusLabel || props.nextAction.status}</TonePill>
-      </div>
-      {props.node ? (
-        <div className="selected-work-detail">
-          <span>{props.node.role}</span>
-          <strong>{props.node.title}</strong>
-          <p>{props.node.detail}</p>
-          {props.ticket && <p className="selected-work-ticket-summary">{props.ticket.summary}</p>}
-          <div className="selected-work-meta">
-            <div>
-              <span>{props.node.sourceKind === "cluster" ? "Cluster" : "Ticket"}</span>
-              <strong>{props.node.sourceKind === "cluster" ? props.node.subtitle : props.node.ticketId || "Automation work"}</strong>
-            </div>
-            <div>
-              <span>Stage</span>
-              <strong>{props.node.phaseLabel}</strong>
-            </div>
-            <div>
-              <span>Status</span>
-              <strong>{props.node.statusLabel}</strong>
-            </div>
-            <div>
-              <span>Role</span>
-              <strong>{props.node.role}</strong>
-            </div>
-            {props.ticket && (
-              <>
-                <div>
-                  <span>Ticket status</span>
-                  <strong>{props.ticket.statusLabel}</strong>
-                </div>
-                <div>
-                  <span>Evidence</span>
-                  <strong>{props.ticket.evidenceCount}</strong>
-                </div>
-              </>
-            )}
+        <div className="ticket-progress-table" aria-label="Tickets">
+          <div className="ticket-progress-header">
+            <span>Ticket</span>
+            <span>Status</span>
+            <span>Current phase</span>
+            <span>Title</span>
+            <span>Dependencies / evidence</span>
           </div>
-          {usefulScope && <p className="selected-work-scope">{usefulScope}</p>}
-          {(props.node.samples.length > 0 || props.node.badges.length > 0) && (
-            <div className="selected-work-tags">
-              {[...props.node.badges, ...props.node.samples].slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}
-            </div>
-          )}
+          <div className="ticket-progress-scroll">
+            {props.view.ticketProgress.rows.map((ticket) => (
+              <button
+                type="button"
+                className={`ticket-progress-row ${ticket.status} ${props.selectedTicketId === ticket.id ? "selected" : ""}`}
+                onClick={() => props.onSelect(ticket.id)}
+                key={ticket.id}
+              >
+                <strong>{ticket.id}</strong>
+                <span>{ticket.statusLabel}</span>
+                <span>{ticket.stage}</span>
+                <p>{ticket.summary}</p>
+                <p>{ticket.evidenceCount ? `${ticket.evidenceCount} evidence item${ticket.evidenceCount === 1 ? "" : "s"}` : ticket.dependsOn.length ? `Depends on ${ticket.dependsOn.slice(0, 4).join(", ")}` : ticket.detail}</p>
+              </button>
+            ))}
+          </div>
         </div>
-      ) : (
-        <div className="selected-work-detail">
-          <span>{props.nextAction.role}</span>
-          <strong>{props.nextAction.title}</strong>
-          <p>{props.nextAction.detail}</p>
-        </div>
-      )}
-    </article>
+      </div>
+      <TicketDetailInspector ticket={props.selectedTicket} />
+    </div>
   );
 }
 
-function TicketProgressPanel(props: { tickets: ReturnType<typeof buildAutomationViewModel>["ticketProgress"] }) {
+function TicketDependencyGraphTab(props: {
+  view: ReturnType<typeof buildAutomationViewModel>;
+  selectedTicketId: string;
+  selectedTicket: TicketDetailRecord | undefined;
+  onSelect: (ticketId: string) => void;
+}) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  const [search, setSearch] = useState("");
+  const graph = props.view.ticketGraph;
+
+  function setBoundedZoom(value: number) {
+    setZoom(Math.max(0.45, Math.min(1.8, Number(value.toFixed(2)))));
+  }
+
+  function scrollToNode(node: AutomationTicketGraphNode, nextZoom = zoom) {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    viewport.scrollTo({
+      left: Math.max(0, node.x * nextZoom - 120),
+      top: Math.max(0, node.y * nextZoom - 80),
+      behavior: "smooth",
+    });
+  }
+
+  function fitGraph() {
+    const viewport = viewportRef.current;
+    if (!viewport || !graph.width) return;
+    const nextZoom = Math.max(0.45, Math.min(1.15, (viewport.clientWidth - 36) / graph.width));
+    setBoundedZoom(nextZoom);
+    viewport.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+  }
+
+  function resetGraph() {
+    setBoundedZoom(1);
+    viewportRef.current?.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+  }
+
+  function selectSearchMatch() {
+    const query = search.trim().toLowerCase();
+    if (!query) return;
+    const match = graph.nodes.find((node) =>
+      node.id.toLowerCase().includes(query) || node.summary.toLowerCase().includes(query)
+    );
+    if (!match) return;
+    props.onSelect(match.id);
+    scrollToNode(match);
+  }
+
+  return (
+    <div className="ticket-graph-workspace">
+      <div className="ticket-graph-main">
+        <div className="ticket-graph-toolbar">
+          <div className="ticket-graph-summary">
+            <strong>{graph.summary}</strong>
+            <span>{graph.completed} done / {graph.active} active / {graph.ready} ready / {graph.waiting} waiting{graph.cyclicCount ? ` / ${graph.cyclicCount} cyclic` : ""}</span>
+          </div>
+          <div className="ticket-graph-search">
+            <Search size={14} />
+            <input
+              aria-label="Search tickets"
+              placeholder="Search ticket"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") selectSearchMatch();
+              }}
+            />
+          </div>
+          <button className="secondary-action icon-only-action" type="button" title="Fit graph" onClick={fitGraph}><Maximize2 size={15} /></button>
+          <button className="secondary-action icon-only-action" type="button" title="Zoom out" onClick={() => setBoundedZoom(zoom - 0.12)}><ZoomOut size={15} /></button>
+          <button className="secondary-action icon-only-action" type="button" title="Zoom in" onClick={() => setBoundedZoom(zoom + 0.12)}><ZoomIn size={15} /></button>
+          <button className="secondary-action icon-only-action" type="button" title="Reset graph" onClick={resetGraph}><RotateCcw size={15} /></button>
+        </div>
+        <div className="ticket-graph-viewport" ref={viewportRef} aria-label="Ticket dependency graph">
+          {graph.nodes.length ? (
+            <div className="ticket-graph-canvas" style={{ width: graph.width * zoom, height: graph.height * zoom }}>
+              <div className="ticket-graph-scaled" style={{ width: graph.width, height: graph.height, transform: `scale(${zoom})` }}>
+                <svg className="ticket-graph-svg" viewBox={`0 0 ${graph.width} ${graph.height}`} role="presentation">
+                  <defs>
+                    <marker id="ticket-graph-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                      <path d="M 0 0 L 8 4 L 0 8 z" />
+                    </marker>
+                  </defs>
+                  {graph.layers.map((layer) => (
+                    <g className={`ticket-graph-layer ${layer.cyclic ? "cyclic" : ""}`} key={layer.id}>
+                      <line x1={layer.x - 14} y1="24" x2={layer.x - 14} y2={graph.height - 18} />
+                      <text x={layer.x} y="24">{layer.label} · {layer.count}</text>
+                    </g>
+                  ))}
+                  {graph.edges.map((edge) => (
+                    <path
+                      className={`ticket-graph-edge ${edge.cyclic ? "cyclic" : ""}`}
+                      d={edge.path}
+                      markerEnd="url(#ticket-graph-arrow)"
+                      key={edge.id}
+                    />
+                  ))}
+                </svg>
+                {graph.nodes.map((node) => (
+                  <button
+                    type="button"
+                    className={`ticket-graph-node ${node.status} ${node.placeholder ? "placeholder" : ""} ${node.cyclic ? "cyclic" : ""} ${props.selectedTicketId === node.id ? "selected" : ""}`}
+                    style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
+                    title={`${node.id}: ${node.summary}`}
+                    onClick={() => props.onSelect(node.id)}
+                    key={node.id}
+                  >
+                    <span>{node.id}</span>
+                    <strong>{node.summary}</strong>
+                    <small>{node.statusLabel} · {node.dependsOn.length} deps</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : <div className="pipeline-empty-state">No tickets are loaded.</div>}
+        </div>
+      </div>
+      <TicketDetailInspector ticket={props.selectedTicket} />
+    </div>
+  );
+}
+
+function TicketProgressPanel(props: { view: ReturnType<typeof buildAutomationViewModel> }) {
+  const [tab, setTab] = useState<TicketProgressTab>("list");
+  const [selectedTicketId, setSelectedTicketId] = useState("");
+  const done = props.view.ticketProgress.counts.find((item) => item.id === "done")?.count ?? 0;
+  const total = props.view.ticketProgress.total;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  const fallbackTicketId = defaultTicketId(props.view);
+  const effectiveSelectedTicketId = props.view.ticketGraph.nodes.some((node) => node.id === selectedTicketId)
+    ? selectedTicketId
+    : fallbackTicketId;
+  const selectedTicket = props.view.ticketProgress.rows.find((ticket) => ticket.id === effectiveSelectedTicketId) ||
+    props.view.ticketGraph.nodes.find((node) => node.id === effectiveSelectedTicketId);
   return (
     <article className="automation-panel ticket-progress-panel">
       <div className="panel-heading-row compact">
         <div>
           <h2>Ticket Progress</h2>
-          <p>{props.tickets.summary}</p>
+          <p>{props.view.ticketProgress.summary}</p>
+        </div>
+        <TonePill tone={done === total && total ? "good" : "info"}>{pct}%</TonePill>
+      </div>
+      <div className="ticket-progress-meter" aria-label="Ticket completion">
+        <span style={{ width: `${pct}%` }} />
+      </div>
+      <div className="feed-tabs ticket-progress-tabs" role="tablist" aria-label="Ticket progress views">
+        <button type="button" role="tab" aria-selected={tab === "list"} className={tab === "list" ? "active" : ""} onClick={() => setTab("list")}>List</button>
+        <button type="button" role="tab" aria-selected={tab === "graph"} className={tab === "graph" ? "active" : ""} onClick={() => setTab("graph")}>Graph</button>
+      </div>
+      {tab === "list" ? (
+        <TicketProgressListTab
+          view={props.view}
+          selectedTicketId={effectiveSelectedTicketId}
+          selectedTicket={selectedTicket}
+          onSelect={setSelectedTicketId}
+        />
+      ) : (
+        <TicketDependencyGraphTab
+          view={props.view}
+          selectedTicketId={effectiveSelectedTicketId}
+          selectedTicket={selectedTicket}
+          onSelect={setSelectedTicketId}
+        />
+      )}
+    </article>
+  );
+}
+
+function StatusBand(props: {
+  view: ReturnType<typeof buildAutomationViewModel>;
+  model: ReturnType<typeof buildRunModel>;
+  retryFailed: AutomationCommandAction;
+  busy: boolean;
+  loading: boolean;
+  onRun: (action: AutomationCommandAction) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <header className="automation-status-band">
+      <div className="status-band-target">
+        <TonePill tone={props.view.statusBand.tone}>{props.view.statusBand.headline}</TonePill>
+        <div>
+          <h1>{props.view.statusBand.targetName}</h1>
+          <p title={props.view.statusBand.targetPath}>{props.view.statusBand.targetPath}</p>
         </div>
       </div>
-      <div className="ticket-progress-counts" aria-label="Ticket status counts">
-        {props.tickets.counts.map((count) => (
-          <div className={`ticket-progress-count ${count.id}`} key={count.id}>
-            <span>{count.label}</span>
-            <strong>{count.count}</strong>
+      <div className="status-band-facts" aria-label="Automation status facts">
+        {props.view.statusBand.facts.map((fact) => (
+          <div className={`status-band-fact ${fact.tone}`} title={fact.detail} key={fact.id}>
+            <span>{fact.label}</span>
+            <strong>{fact.value}</strong>
           </div>
         ))}
       </div>
-      <div className="ticket-progress-table" role="table" aria-label="Ticket progress">
-        <div className="ticket-progress-header" role="row">
-          <span>Ticket</span>
-          <span>Status</span>
-          <span>Stage</span>
-          <span>Evidence</span>
-          <span>Summary</span>
-        </div>
-        <div className="ticket-progress-scroll">
-          {props.tickets.rows.length ? props.tickets.rows.map((ticket) => (
-            <div className={`ticket-progress-row ${ticket.status}`} role="row" key={ticket.id}>
-              <strong>{ticket.id}</strong>
-              <TonePill tone={ticket.tone}>{ticket.statusLabel}</TonePill>
-              <span>{ticket.stage}</span>
-              <span>{ticket.evidenceCount} evidence / {ticket.commitCount} commits</span>
-              <p>{ticket.summary}</p>
-            </div>
-          )) : <div className="empty-copy">No tickets are loaded.</div>}
-        </div>
+      <div className="status-band-actions" aria-label="Automation commands">
+        <CommandButton action={props.model.controls.startAutomation} busy={props.busy} icon={<PlayCircle size={16} />} onRun={props.onRun} primary />
+        <CommandButton action={props.model.controls.stopAutomation} busy={props.busy} icon={<Square size={15} />} onRun={props.onRun} />
+        <CommandButton action={props.retryFailed} busy={props.busy} icon={<RotateCcw size={16} />} onRun={props.onRun} />
+        <CommandButton action={props.model.controls.safetyCheck} busy={props.busy} icon={<ShieldCheck size={16} />} onRun={props.onRun} />
+        <button className="secondary-action" disabled={props.loading} title="Refresh automation state." onClick={props.onRefresh}>
+          <RefreshCw size={16} />
+          Refresh
+        </button>
       </div>
-    </article>
+      <p className="status-band-readiness">{props.view.statusBand.readinessReason}</p>
+    </header>
   );
 }
 
-function QueueBucketCard(props: { bucket: AutomationQueueBucket }) {
+function CandidateRow(props: { candidate: AutomationSchedulerCandidateRow }) {
   return (
-    <div className={`queue-bucket ${props.bucket.id}`}>
-      <div>
-        <span>{props.bucket.label}</span>
-        <strong>{props.bucket.count}</strong>
-      </div>
-      <div className="queue-bucket-items">
-        {props.bucket.items.length ? props.bucket.items.map((item) => (
-          <p key={item.id}>
-            <b>{item.title}</b>
-            <span>{item.detail}</span>
-          </p>
-        )) : <p className="empty-copy">None</p>}
-      </div>
+    <div className="scheduler-candidate-row">
+      <strong>{props.candidate.label}</strong>
+      <TonePill tone={props.candidate.tone}>{props.candidate.status}</TonePill>
+      <span>{props.candidate.owner}</span>
+      <span>{props.candidate.fanout}x</span>
+      <span>{props.candidate.confidence}</span>
+      <p title={props.candidate.detail}>{props.candidate.detail}</p>
     </div>
   );
 }
 
-function ValidationRow(props: { row: AutomationValidationRow }) {
+function SchedulerDecisionPanel(props: { view: ReturnType<typeof buildAutomationViewModel> }) {
+  const decision = props.view.schedulerDecision;
   return (
-    <div className="automation-row validation-row">
-      <strong>{props.row.title}</strong>
-      <TonePill tone={props.row.tone}>{props.row.status}</TonePill>
-      <span>{props.row.detail}</span>
-    </div>
-  );
-}
-
-function ActivityRow(props: { row: AutomationActivityRow }) {
-  return (
-    <div className="automation-row activity-row">
-      <strong>{props.row.title}</strong>
-      <TonePill tone={props.row.tone}>{props.row.status}</TonePill>
-      <span>{props.row.detail}</span>
-    </div>
-  );
-}
-
-function ExecutionWavesPanel(props: { model: ReturnType<typeof buildRunModel> }) {
-  const waves = props.model.operations.concurrencyWaves;
-  const integration = props.model.operations.integrationBacklog;
-  return (
-    <article className="automation-panel wave-panel">
+    <article className="automation-panel scheduler-decision-panel">
       <div className="panel-heading-row compact">
         <div>
-          <h2>DAG Flow</h2>
-          <p>
-            {props.model.executionDag.parallel.activeGroups} running wave / {props.model.executionDag.parallel.proposedGroups} planned / {props.model.executionDag.parallel.completedGroups} recently done
-          </p>
+          <h2>Scheduler Decision</h2>
+          <p>Selected next action and parallelism telemetry.</p>
         </div>
-        <TonePill tone={integration.tone}>{integration.queuedCount} queued patches</TonePill>
+        <TonePill tone={decision.selected.tone}>{decision.selected.status}</TonePill>
       </div>
-      <div className="wave-metrics">
-        <div><span>Active nodes</span><strong>{props.model.executionDag.parallel.activeNodeCount}</strong></div>
-        <div><span>Planned nodes</span><strong>{props.model.executionDag.parallel.plannedNodeCount}</strong></div>
-        <div><span>Safe patches</span><strong>{integration.safeCount}</strong></div>
-        <div><span>Follow-up</span><strong>{integration.blockedCount}</strong></div>
+      <div className="scheduler-selected-card">
+        <GitBranch size={16} />
+        <span>Next</span>
+        <strong>{decision.selected.label}</strong>
+        <p>{decision.selected.detail}</p>
       </div>
-      <div className="wave-list">
-        {waves.length ? waves.slice(0, 8).map((wave) => (
-          <div className={`wave-card ${wave.kind}`} key={`${wave.kind}:${wave.id}`}>
-            <div>
-              <strong>{wave.label}</strong>
-              <TonePill tone={wave.tone}>{wave.status}</TonePill>
-            </div>
-            <p>{wave.detail}</p>
-            <div className="wave-card-meta">
-              <span>{wave.mode}</span>
-              <span>{wave.itemCount} item{wave.itemCount === 1 ? "" : "s"}</span>
-              {wave.owners.length > 0 && <span>{wave.owners.join(", ")}</span>}
-              {wave.leases.length > 0 && <span>{wave.leases.join(", ")}</span>}
-            </div>
-          </div>
-        )) : <div className="empty-copy">No execution waves are recorded yet.</div>}
+      <div className="scheduler-decision-metrics">
+        <div><span>Fanout</span><strong>{decision.fanout}</strong></div>
+        <div><span>Ownership</span><strong title={decision.ownership}>{decision.ownership}</strong></div>
+        <div><span>Confidence</span><strong>{decision.confidence}</strong></div>
+      </div>
+      <div className="scheduler-parallel-note">
+        <HelpCircle size={15} />
+        <div>
+          <strong>{decision.whyParallel.status}</strong>
+          <p>{decision.whyParallel.summary}</p>
+          <small>{decision.whyParallel.next}</small>
+        </div>
+      </div>
+      <div className="scheduler-candidate-list">
+        {decision.alternatives.length ? decision.alternatives.map((candidate) => (
+          <CandidateRow candidate={candidate} key={candidate.id} />
+        )) : <div className="empty-copy">No alternate candidates recorded.</div>}
       </div>
     </article>
   );
 }
 
-type FeedTab = "activity" | "checks" | "command" | "input";
+function EvidenceRow(props: { row: AutomationEvidenceRow }) {
+  return (
+    <div className={`evidence-row ${props.row.scope}`}>
+      <strong>{props.row.label}</strong>
+      <TonePill tone={props.row.tone}>{props.row.status}</TonePill>
+      <span>{props.row.scope}</span>
+      <p>{props.row.detail}</p>
+      <small title={props.row.evidencePath}>{props.row.evidencePath || props.row.repairWork || "No evidence path"}</small>
+    </div>
+  );
+}
 
-function OperationalFeedPanel(props: {
+function ValidationEvidencePanel(props: { view: ReturnType<typeof buildAutomationViewModel> }) {
+  const evidence = props.view.validationEvidence;
+  return (
+    <article className="automation-panel validation-evidence-panel">
+      <div className="panel-heading-row compact">
+        <div>
+          <h2>Validation & Evidence</h2>
+          <p>{evidence.summary}</p>
+        </div>
+        <TonePill tone={evidence.tone}>{evidence.requiredFailed ? "Repair queued" : "Evidence"}</TonePill>
+      </div>
+      <div className="evidence-metric-strip">
+        <div><span>Required passed</span><strong>{evidence.requiredPassed}</strong></div>
+        <div><span>Required failed</span><strong>{evidence.requiredFailed}</strong></div>
+        <div><span>Advisory failed</span><strong>{evidence.advisoryFailed}</strong></div>
+        <div><span>Repair work</span><strong>{evidence.repairCreated}</strong></div>
+        <div><span>Evidence paths</span><strong>{evidence.evidencePaths.length}</strong></div>
+      </div>
+      <div className="evidence-row-list">
+        {evidence.rows.length ? evidence.rows.map((row) => <EvidenceRow row={row} key={row.id} />) : <div className="empty-copy">No validation evidence recorded yet.</div>}
+      </div>
+    </article>
+  );
+}
+
+function QueueRow(props: { row: AutomationQueueRow }) {
+  return (
+    <div className="queue-integration-row">
+      <strong>{props.row.label}</strong>
+      <TonePill tone={props.row.tone}>{props.row.status}</TonePill>
+      <span title={props.row.meta}>{props.row.meta}</span>
+      <p title={props.row.detail}>{props.row.detail}</p>
+    </div>
+  );
+}
+
+function QueueIntegrationPanel(props: { view: ReturnType<typeof buildAutomationViewModel> }) {
+  return (
+    <article className="automation-panel queue-integration-panel">
+      <div className="panel-heading-row compact">
+        <div>
+          <h2>Queue & Integration</h2>
+          <p>Execution groups, leases, worker runs, patches, and serialized integration.</p>
+        </div>
+      </div>
+      <div className="queue-integration-metrics">
+        {props.view.queueIntegration.metrics.map((metric) => (
+          <div className={metric.tone} title={metric.detail} key={metric.id}>
+            <span>{metric.label}</span>
+            <strong>{metric.value}</strong>
+          </div>
+        ))}
+      </div>
+      <div className="queue-integration-list">
+        {props.view.queueIntegration.rows.map((row) => <QueueRow row={row} key={`${row.id}:${row.label}`} />)}
+      </div>
+    </article>
+  );
+}
+
+function timelineIcon(category: AutomationTimelineCategory) {
+  if (category === "worker") return <Server size={14} />;
+  if (category === "validation") return <ShieldCheck size={14} />;
+  if (category === "integration") return <GitPullRequest size={14} />;
+  if (category === "notification") return <Bell size={14} />;
+  if (category === "human") return <FileText size={14} />;
+  return <Route size={14} />;
+}
+
+function logTimelineEvents(logs: AutomationLogEvent[]): AutomationTimelineEvent[] {
+  return logs.map((line, index) => {
+    const stage = line.stage.toLowerCase();
+    const category: AutomationTimelineCategory = stage.includes("validation") || stage.includes("safety")
+      ? "validation"
+      : stage.includes("integr")
+      ? "integration"
+      : stage.includes("worker")
+      ? "worker"
+      : "scheduler";
+    return {
+      id: `command-log-${index}`,
+      category,
+      title: line.stage,
+      status: line.level,
+      time: line.capturedAt.slice(11, 19),
+      detail: line.message,
+      tone: line.level === "error" ? "warn" : line.level === "warning" ? "warn" : "info",
+    };
+  });
+}
+
+function TimelinePanel(props: {
   view: ReturnType<typeof buildAutomationViewModel>;
   logs: AutomationLogEvent[];
   busyCommand: string;
   startCommand: string;
 }) {
-  const [tab, setTab] = useState<FeedTab>("activity");
-  const tabs: Array<{ id: FeedTab; label: string; badge?: string }> = [
-    { id: "activity", label: "Activity", badge: props.view.activityLog.length ? String(props.view.activityLog.length) : undefined },
-    { id: "checks", label: "Checks & Repair", badge: props.view.validationRepair.rows.length ? String(props.view.validationRepair.rows.length) : undefined },
-    { id: "command", label: "Command Output", badge: props.busyCommand || undefined },
-    { id: "input", label: "Input Records", badge: props.view.humanInput.total ? props.view.humanInput.badge : undefined },
+  const [category, setCategory] = useState<AutomationTimelineCategory | "all">("all");
+  const events = useMemo(() => [...logTimelineEvents(props.logs), ...props.view.timeline], [props.logs, props.view.timeline]);
+  const eventCategories = useMemo(() => new Set<AutomationTimelineCategory>(events.map((event) => event.category)), [events]);
+  const allCategories: Array<{ id: AutomationTimelineCategory | "all"; label: string }> = [
+    { id: "all", label: "All" },
+    { id: "scheduler", label: "Scheduler" },
+    { id: "worker", label: "Worker" },
+    { id: "validation", label: "Validation" },
+    { id: "integration", label: "Integration" },
+    { id: "notification", label: "Notification" },
+    { id: "human", label: "Human input" },
   ];
+  const categories = allCategories.filter((item) => item.id === "all" || eventCategories.has(item.id));
+  useEffect(() => {
+    if (category !== "all" && !eventCategories.has(category)) setCategory("all");
+  }, [category, eventCategories]);
+  const filtered = category === "all" ? events : events.filter((event) => event.category === category);
   return (
-    <article className="automation-panel operational-feed-panel">
+    <article className="automation-panel timeline-panel">
       <div className="panel-heading-row compact">
         <div>
-          <h2>Operational Feed</h2>
-          <p>{props.view.activityLog.length} activity / {props.view.validationRepair.rows.length} checks / {props.logs.length} command lines</p>
+          <h2>Timeline</h2>
+          <p>{events.length} recent event{events.length === 1 ? "" : "s"} / {props.logs.length} live command line{props.logs.length === 1 ? "" : "s"}</p>
         </div>
-      </div>
-      <div className="feed-tabs" role="tablist" aria-label="Operational feed sections">
-        {tabs.map((item) => (
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === item.id}
-            className={tab === item.id ? "active" : ""}
-            onClick={() => setTab(item.id)}
-            key={item.id}
-          >
-            <span>{item.label}</span>
-            {item.badge && <strong>{item.badge}</strong>}
-          </button>
-        ))}
-      </div>
-      <div className="automation-table feed-content" hidden={tab !== "activity"}>
-        {props.view.activityLog.length
-          ? props.view.activityLog.map((row) => <ActivityRow row={row} key={row.id} />)
-          : <div className="empty-copy">No useful activity has been recorded yet.</div>}
-      </div>
-      <div className="automation-table feed-content" hidden={tab !== "checks"}>
-        {props.view.validationRepair.rows.length
-          ? props.view.validationRepair.rows.map((row) => <ValidationRow row={row} key={row.id} />)
-          : <div className="empty-copy">No validation or repair work is active.</div>}
-      </div>
-      <div className="feed-command" hidden={tab !== "command"}>
-        <div className="automation-log">
-          {props.logs.length ? props.logs.map((line, index) => (
-            <div className={`automation-log-line ${line.level}`} key={`${line.stage}-${line.message}-${index}`}>
-              <span>{line.stage}</span>
-              <p>{line.message}</p>
-            </div>
-          )) : (
-            <div className="empty-copy">No command output captured.</div>
-          )}
-        </div>
-        <button
-          className="secondary-action"
-          onClick={() => navigator.clipboard?.writeText(props.startCommand)}
-        >
+        {props.busyCommand && <TonePill tone="info">{props.busyCommand}</TonePill>}
+        <button className="secondary-action compact-copy" onClick={() => navigator.clipboard?.writeText(props.startCommand)}>
           <Clipboard size={15} />
           Copy start command
         </button>
       </div>
-      <div className="feed-input" hidden={tab !== "input"}>
-        <div className="human-compact-counts">
-          <div><span>Requests</span><strong>{props.view.humanInput.requests}</strong></div>
-          <div><span>Records</span><strong>{props.view.humanInput.records}</strong></div>
-          <div><span>Outbound</span><strong>{props.view.humanInput.outbound}</strong></div>
-        </div>
-        <p>{props.view.humanInput.detail}</p>
+      <div className="feed-tabs timeline-filters" role="tablist" aria-label="Timeline filters">
+        <ListFilter size={14} />
+        {categories.map((item) => (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={category === item.id}
+            className={category === item.id ? "active" : ""}
+            onClick={() => setCategory(item.id)}
+            key={item.id}
+          >
+            <span>{item.label}</span>
+          </button>
+        ))}
+      </div>
+      <div className="timeline-list">
+        {filtered.length ? filtered.map((event) => (
+          <div className={`timeline-row ${event.category}`} key={event.id}>
+            <span>{timelineIcon(event.category)}{event.category}</span>
+            <strong>{event.title}</strong>
+            <TonePill tone={event.tone}>{event.status}</TonePill>
+            <time>{event.time || "recent"}</time>
+            <p>{event.detail}</p>
+          </div>
+        )) : <div className="empty-copy">No events match this filter.</div>}
       </div>
     </article>
   );
@@ -476,7 +666,6 @@ export function AutomationPage(props: {
 }) {
   const model = useMemo(() => buildRunModel(props.snapshot), [props.snapshot]);
   const view = useMemo(() => buildAutomationViewModel(props.snapshot, model), [props.snapshot, model]);
-  const [selectedNodeId, setSelectedNodeId] = useState("");
   const [busyCommand, setBusyCommand] = useState("");
   const [logs, setLogs] = useState<AutomationLogEvent[]>([]);
   const [message, setMessage] = useState("");
@@ -484,11 +673,13 @@ export function AutomationPage(props: {
   const target = props.snapshot?.target.path ?? "";
   const retryFailed = retryFailedAction(model);
   const commandBusy = props.loading || Boolean(busyCommand);
-  const effectiveSelectedNodeId = selectedNodeId || view.dag.defaultSelectedNodeId;
-  const selectedNode = view.dag.nodes.find((node) => node.id === effectiveSelectedNodeId) || null;
-  const selectedTicket = selectedNode?.ticketId
-    ? view.ticketProgress.rows.find((ticket) => ticket.id === selectedNode.ticketId)
-    : undefined;
+
+  useEffect(() => {
+    if (!busyCommand) {
+      setMessage("");
+      setError("");
+    }
+  }, [props.snapshot, busyCommand]);
 
   async function runAction(action: AutomationCommandAction) {
     setError("");
@@ -552,22 +743,15 @@ export function AutomationPage(props: {
 
   return (
     <section className="automation-page" aria-label="Automation" data-testid="automation-page">
-      <header className="automation-header">
-        <div>
-          <h1>Automation</h1>
-          <p>{model.automation.message}</p>
-        </div>
-        <div className="automation-command-row" aria-label="Automation commands">
-          <CommandButton action={model.controls.startAutomation} busy={commandBusy} icon={<PlayCircle size={16} />} onRun={runAction} primary />
-          <CommandButton action={model.controls.stopAutomation} busy={commandBusy} icon={<Square size={15} />} onRun={runAction} />
-          <CommandButton action={retryFailed} busy={commandBusy} icon={<RotateCcw size={16} />} onRun={runAction} />
-          <CommandButton action={model.controls.safetyCheck} busy={commandBusy} icon={<ShieldCheck size={16} />} onRun={runAction} />
-          <button className="secondary-action" disabled={props.loading} onClick={props.onRefresh}>
-            <RefreshCw size={16} />
-            Refresh
-          </button>
-        </div>
-      </header>
+      <StatusBand
+        view={view}
+        model={model}
+        retryFailed={retryFailed}
+        busy={commandBusy}
+        loading={props.loading}
+        onRun={runAction}
+        onRefresh={props.onRefresh}
+      />
 
       {(message || error) && (
         <div className={`automation-message ${error ? "critical" : "good"}`} role="status">
@@ -577,29 +761,15 @@ export function AutomationPage(props: {
       )}
 
       <section className="automation-main-grid" aria-label="Automation state">
-        <ExecutionGraphPanel
-          dag={view.dag}
-          nextAction={view.nextAction}
-          selectedNodeId={effectiveSelectedNodeId}
-          onSelect={setSelectedNodeId}
-        />
+        <TicketProgressPanel view={view} />
 
-        <SelectedWorkDetail node={selectedNode} nextAction={view.nextAction} ticket={selectedTicket} />
+        <SchedulerDecisionPanel view={view} />
 
-        <article className="automation-panel queue-summary-panel">
-          <div className="panel-heading-row compact">
-            <h2>Now & Next</h2>
-          </div>
-          <div className="queue-buckets">
-            {view.queueBuckets.map((bucket) => <QueueBucketCard bucket={bucket} key={bucket.id} />)}
-          </div>
-        </article>
+        <QueueIntegrationPanel view={view} />
 
-        <ExecutionWavesPanel model={model} />
+        <ValidationEvidencePanel view={view} />
 
-        <TicketProgressPanel tickets={view.ticketProgress} />
-
-        <OperationalFeedPanel
+        <TimelinePanel
           view={view}
           logs={logs}
           busyCommand={busyCommand}

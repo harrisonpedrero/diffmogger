@@ -41,10 +41,8 @@ def classify_path(path: str) -> str:
 def describe_path(path: str) -> str:
     if path.endswith("run_observatory.py"):
         return "observatory/review logic"
-    if path.endswith("run_conveyor_automation.py"):
-        return "conveyor runner"
-    if path.endswith("run_process_watchdog.py"):
-        return "process watchdog"
+    if path.endswith("run_temporal_worker.sh") or path.endswith("orchestration_cli.py"):
+        return "Temporal orchestration runner"
     if path.endswith("run_role_automation.sh"):
         return "role runner"
     if path.endswith("integrate_role_outputs.py"):
@@ -122,12 +120,12 @@ def commit_summary_from_files(subject: str, files: list[dict[str, Any]]) -> str:
         return "Dashboard backend controls or status surfaces changed."
     if "run_role_automation.sh" in joined and "integrate_role_outputs.py" in joined:
         return "Runtime-state handoff changed so ignored automation state reaches main."
-    if "run_process_watchdog.py" in joined:
-        return "Watchdog recovery changed for stuck automation subprocesses."
+    if "run_temporal_worker.sh" in joined or "orchestration_cli.py" in joined:
+        return "Temporal runner wiring changed."
     if "run_observatory.py" in joined and "test_run_observatory.py" in joined:
         return "Observatory reporting changed, with matching regression tests."
-    if "run_conveyor_automation.py" in joined and "test_run_conveyor_automation.py" in joined:
-        return "Conveyor routing changed, with policy coverage."
+    if "orchestration/" in joined and "test_new_architecture.py" in joined:
+        return "Orchestration behavior changed, with architecture smoke coverage."
     if paths and all(path.startswith("docs/") or path.endswith(".md") for path in paths):
         return "Operator documentation and durable planning state changed."
     return subject

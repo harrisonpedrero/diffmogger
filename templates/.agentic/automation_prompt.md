@@ -25,7 +25,7 @@ Desired first demo: {{DESIRED_FIRST_DEMO}}
 
 ## Liveness Rule
 
-If tickets remain, automation must produce work. Build, repair, defer, split, or create unblocker work before asking the user. Pending human input does not stop unrelated work. Failed validation creates work. Blockers are node metadata, not a campaign-ending status.
+If tickets remain, automation must produce work. Build, repair, defer, split, or create unblocker work before asking the user. Pending human input does not stop unrelated work. Failed validation creates work. Blockers are node metadata, not a campaign-ending status. Parallel fanout is bounded by scheduler evidence; uncertainty reduces fanout or creates scoping/setup work.
 
 When the current status vocabulary is active, use `CRITICAL_STOP` only for unsafe corruption, credential exposure, destructive risk, or real-world side-effect risk.
 

@@ -502,7 +502,7 @@ def scorecard_action_plan(
             "why": "A pending human request remains the highest-order local bridge item.",
             "next_steps": [
                 "Keep reversible local work moving if it does not depend on the reply.",
-                "Do not use Discord, notifier APIs, or external channels in file-only mode.",
+                "Do not use Apprise, notifier APIs, or external channels in file-only mode.",
                 "Resume the blocked path after the human response is archived.",
             ],
         }

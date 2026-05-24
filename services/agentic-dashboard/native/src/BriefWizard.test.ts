@@ -26,7 +26,6 @@ function draft(overrides: Partial<IntakeDraft> = {}): IntakeDraft {
     human_bridge_enabled: true,
     human_bridge_mode: "file_only",
     human_requested_text_responses: true,
-    local_notifications_enabled: true,
     worker_agents_allowed: true,
     codex_cli_workers_expected_on_broad_runs: true,
     write_worker_agents_allowed: true,

@@ -82,13 +82,8 @@
     },
     "human_bridge_mode": {
       "type": "string",
-      "enum": ["disabled", "file_only", "local_notifier", "discord_notifier"],
+      "enum": ["disabled", "file_only", "local_notifier", "apprise_notifier"],
       "default": "file_only"
-    },
-    "local_notifications_enabled": {
-      "type": "boolean",
-      "description": "Whether notifier modes should also use native local desktop notifications.",
-      "default": true
     },
     "human_requested_text_responses": {
       "type": "boolean",
@@ -226,7 +221,7 @@
     },
     "ticket_completion_notify": {
       "type": "boolean",
-      "description": "Whether bounded campaign finalization should send a native local desktop notification or record a fallback outbox entry.",
+      "description": "Whether bounded campaign finalization should send an Apprise notification when notifier mode is configured or record a fallback outbox entry.",
       "default": true
     },
     "ticket_generation_complexity": {

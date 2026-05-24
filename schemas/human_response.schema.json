@@ -18,7 +18,7 @@
     "received_at": { "type": "string", "format": "date-time" },
     "channel": {
       "type": "string",
-      "enum": ["manual", "discord", "local_notification", "email", "slack", "other"]
+      "enum": ["manual", "apprise", "local_notification", "email", "slack", "other"]
     },
     "from": { "type": "string" },
     "request_id": { "type": "string", "minLength": 1 },

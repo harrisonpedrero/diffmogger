@@ -53,7 +53,15 @@ LEGACY_MARKDOWN_QUEUE_ALIASES = {
     "docs/HUMAN_RESPONSES_ARCHIVE.md",
     "docs/TICKET_RUN.md",
 }
-VALID_HUMAN_BRIDGE_MODES = {"disabled", "file_only", "local_notifier", "discord_notifier"}
+LEGACY_GENERATED_ARTIFACTS = {
+    ".diffmogger/lib/diffmogger/conveyor",
+    ".diffmogger/lib/diffmogger/runtime/run_conveyor_automation.py",
+    ".diffmogger/lib/diffmogger/runtime/run_process_watchdog.py",
+    ".diffmogger/scripts/run_conveyor_automation.py",
+    ".diffmogger/scripts/run_conveyor_automation.sh",
+    ".diffmogger/scripts/run_process_watchdog.py",
+}
+VALID_HUMAN_BRIDGE_MODES = {"disabled", "file_only", "local_notifier", "apprise_notifier"}
 VALID_PROJECT_MODES = {"fresh_project", "existing_project"}
 VALID_ENV_ACCESS_POLICIES = {"project_commands_only", "direct_env_files_allowed"}
 MAX_WRITE_WORKER_COUNT = 10
@@ -108,8 +116,6 @@ DIFFMOGGER_RUNTIME_EXCLUDE_PATTERNS = [
     "/apps/*/.env.local",
     "/scripts/__pycache__/",
     "/target/agent_runs/",
-    "/target/automation_conveyor.lock",
-    "/target/automation_conveyor_state.json",
     "/target/automation_logs/",
     "/target/automation_queue/",
     "/target/automation_runner.json",
@@ -301,7 +307,7 @@ def bootstrap_baseline_commands(data: dict[str, Any]) -> list[str]:
         return normalize_command_list(data.get("verification_commands"))
 
     commands = [
-        "python3 -m py_compile scripts/run_process_watchdog.py scripts/ticket_run.py scripts/compact_agent_state.py scripts/run_observatory.py scripts/repair_environment.py",
+        "python3 -m py_compile scripts/orchestration_cli.py scripts/ticket_run.py scripts/compact_agent_state.py scripts/run_observatory.py scripts/repair_environment.py",
     ]
     if campaign == "bounded":
         return [
@@ -320,7 +326,7 @@ def bootstrap_baseline_command_text(data: dict[str, Any]) -> str:
     commands = bootstrap_baseline_commands(data)
     if commands:
         return "\n".join(commands)
-    return "python3 -m py_compile scripts/run_process_watchdog.py scripts/ticket_run.py scripts/compact_agent_state.py scripts/run_observatory.py scripts/repair_environment.py"
+    return "python3 -m py_compile scripts/orchestration_cli.py scripts/ticket_run.py scripts/compact_agent_state.py scripts/run_observatory.py scripts/repair_environment.py"
 
 
 def table_cell(value: str) -> str:
@@ -706,7 +712,7 @@ When every ticket is done with evidence, run:
 python3 scripts/ticket_run.py . should-halt --finalize
 ```
 
-Then stop launching new work. Diffmogger writes a local report, sends a native desktop notification when enabled, records fallback outbox state if notification delivery fails, and leaves remote push/PR creation to the human."""
+Then stop launching new work. Diffmogger writes a local report, sends an Apprise notification when notifier mode is configured, records fallback outbox state if notification delivery fails, and leaves remote push/PR creation to the human."""
         task_notes = """Campaign mode: `bounded`
 
 - Ticket authoring surface: dashboard-backed SQLite ticket queue
@@ -716,7 +722,7 @@ Then stop launching new work. Diffmogger writes a local report, sends a native d
 - Optional dependencies: use `depends_on` arrays in the dashboard ticket queue when one ticket must wait for another.
 - Halt only when every ticket is done with evidence; blocked tickets create unblocker DAG work.
 - Completion report is written under `target/ticket_run_reports/`.
-- Completion notification uses the local desktop notification system when enabled.
+- Completion notification uses the loopback Apprise notifier when configured.
 - Remote push/PR creation is manual."""
         development = """Bounded campaign mode is enabled. Edit the dashboard ticket queue with concrete local tickets before starting unattended automation. Use optional `depends_on` arrays when one ticket must wait for another ticket to be `done` with evidence.
 
@@ -726,7 +732,7 @@ python3 scripts/ticket_run.py . next --json
 python3 scripts/ticket_run.py . should-halt --finalize
 ```
 
-Scaffold initializes the bounded campaign and Start launches actual ticket work directly. Normal campaign runs should use `next --json` for dependency-aware context and let the DAG scheduler group only compatible ready nodes. The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When `ticket_completion_notify` or `notify_on_complete` is true on macOS, it sends a local desktop notification; if that fails, it records `LOCAL_NOTIFICATION_FAILED` in typed human-message state."""
+Scaffold initializes the bounded campaign and Start launches actual ticket work through the Temporal runner. Normal campaign runs should use `next --json` for dependency-aware context and let the DAG scheduler group only compatible ready nodes. The helper writes `target/ticket_run_completion.json` and a Markdown report when the run reaches a terminal state. When notifier mode is configured, completion delivery goes through Apprise; if that fails, record `APPRISE_SEND_FAILED` or `NOTIFIER_UNREACHABLE` in typed human-message state."""
     else:
         section = """Campaign mode: `ongoing`
 
@@ -995,10 +1001,10 @@ def human_bridge_mode(data: dict[str, Any]) -> str:
         return "disabled"
     if "file" in bridge_text or "manual" in bridge_text:
         return "file_only"
-    if "discord" in bridge_text:
-        return "discord_notifier"
+    if "apprise" in bridge_text:
+        return "apprise_notifier"
     if "notifier" in bridge_text or "local notification" in bridge_text:
-        return "local_notifier"
+        return "apprise_notifier"
     if normalize_bool(data.get("human_bridge_enabled"), False):
         return "file_only"
     return "disabled"
@@ -1259,7 +1265,7 @@ def multi_role_values(data: dict[str, Any]) -> dict[str, str]:
 
 Diffmogger uses a continuous local execution DAG scheduler. Role prompts live under `.diffmogger/agentic/roles/`; isolated worktrees and queued patches live under `.diffmogger/runtime/`; canonical state lives in `.diffmogger/runtime/orchestration.sqlite3`.
 
-The dashboard Start button launches `.diffmogger/scripts/run_conveyor_automation.sh`. The scheduler chooses ready nodes or compatible waves and creates repair/setup/mock/defer/split/reframe/unblocker work instead of idling on ordinary blockers.
+The dashboard Start button asks launchd to supervise the Temporal scheduler runner. The scheduler chooses ready nodes or compatible bounded waves, records execution groups, conflict telemetry, scoped validation groups, integration queue decisions, and repair/setup/mock/defer/split/reframe/unblocker work instead of idling on ordinary blockers.
 
 {scheduler_config}
 
@@ -1275,8 +1281,8 @@ Planner, builder, and hardener use isolated worktrees. The integrator owns main 
 - Integrator must checkpoint dirty main changes as-is before applying queued patches; do not revert or discard human changes.
 - Integrator must defer conflicting, stale, guardrail-violating, or verification-failing patches with machine-readable deferral reasons."""
     task_notes = f"""- Role profile: `{profile}`
-- Continuous DAG scheduler: `scripts/run_conveyor_automation.sh`.
-- The scheduler prioritizes queued integration, baseline repair, typed human-message triage, fast-follow replanning, review/hardening, validation, targeted repairs, and compatible build waves.
+- Continuous DAG scheduler: `scripts/run_temporal_worker.sh`.
+- The scheduler prioritizes required validation repair, compatible bounded waves, read-only scoping for weak ownership, parser/index setup when facts are unavailable, validation groups, and serialized integration gates.
 - DAG scheduler config: `parallel_execution_mode={dag_scheduler_values(data)["PARALLEL_EXECUTION_MODE"]}`, `symbol_graph_languages={dag_scheduler_values(data)["SYMBOL_GRAPH_LANGUAGES_INLINE"]}`, `parallel_write_min_confidence={dag_scheduler_values(data)["PARALLEL_WRITE_MIN_CONFIDENCE"]}`, `parallel_write_direct_confidence={dag_scheduler_values(data)["PARALLEL_WRITE_DIRECT_CONFIDENCE"]}`, `max_parallel_write_workers={dag_scheduler_values(data)["MAX_PARALLEL_WRITE_WORKERS"]}`, `max_parallel_scope_workers={dag_scheduler_values(data)["MAX_PARALLEL_SCOPE_WORKERS"]}`.
 - Integrator refreshes `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` as the generated projection and creates local checkpoint commits.
 - Deferred patches remain visible through `scripts/list_deferred_patches.py`; use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local triage or add `--decision-template` for a per-manifest cleanup worksheet.
@@ -1286,8 +1292,8 @@ Planner, builder, and hardener use isolated worktrees. The integrator owns main 
 Use the dashboard Start/Stop buttons or the scheduler directly:
 
 ```bash
-bash scripts/run_conveyor_automation.sh --dry-run
-bash scripts/run_conveyor_automation.sh --once
+bash scripts/run_temporal_worker.sh --policy --max-fanout 2
+bash scripts/run_temporal_worker.sh --temporal --max-fanout 2
 ```
 
 Review deferred patch triage without mutating the repo:
@@ -1366,15 +1372,8 @@ def bridge_values(mode: str, text_responses: bool) -> dict[str, str]:
     enabled = mode != "disabled"
     file_reads = ""
 
-    if mode in {"local_notifier", "discord_notifier"}:
-        channel_note = (
-            "Discord notifier mode posts progress updates to the configured progress channel, "
-            "direct human messages to the configured messaging channel, and captures only bot mentions/replies "
-            "from the messaging channel into typed dashboard/SQLite human-message state. Local automation commits trigger brief "
-            "`event_kind: \"progress\"` updates with the commit subject and work summary."
-            if mode == "discord_notifier"
-            else "Local notifier mode uses the same loopback API for native desktop notifications only; Discord is not required."
-        )
+    if mode in {"local_notifier", "apprise_notifier"}:
+        channel_note = "Notifier mode routes progress and direct human messages through the local loopback API. Apprise owns outbound delivery routes; target repos keep only typed local message state."
         agents_read = "Read `.diffmogger/runtime/canonical_state_brief.md`; human messages and requests come from typed dashboard/SQLite state, not Markdown inbox files."
         agents_rules = """- Process queued human messages, including freeform commands.
 - If the human asks to be messaged or sent a status update, use the local notifier API when available instead of only writing Markdown.
@@ -1394,7 +1393,7 @@ This project may use a separate local notifier service if it is running:
 POST http://127.0.0.1:8765/api/notify
 ```
 
-{channel_note} This target project must not inspect, clone, import, or modify the notifier service during normal automation runs. This project must not handle Discord credentials.
+{channel_note} This target project must not inspect, clone, import, or modify the notifier service during normal automation runs. This project must not handle notification credentials.
 
 ### Queued Human Messages
 
@@ -1410,7 +1409,7 @@ If the human explicitly asks for a local document, report, Markdown file, artifa
 
 Notifier responses should be concise but useful: summarize the work done, checks run, current planning input or pending human item, and next step. Avoid secrets, raw stack traces, and long reports.
 
-Progress-only updates should use `event_kind: "progress"`. Direct human messages, pending input records, human-unlock requests, and replies to user messages should use `event_kind: "message"`. In `discord_notifier` mode, `scripts/integrate_role_outputs.py` sends a brief progress-channel notification after each local automation commit it creates.
+Progress-only updates should use `event_kind: "progress"`. Direct human messages, pending input records, human-unlock requests, and replies to user messages should use `event_kind: "message"`.
 
 Payload shape for direct human-requested outbound responses:
 
@@ -1442,7 +1441,7 @@ If the notifier is not reachable:
 - For reversible choices, choose a safe default and document it.
 - Use `ACTIVE_WITH_PENDING_USER_INPUT` when a pending request exists; it is not a pause state.
 - Use `POST http://127.0.0.1:8765/api/notify` when the local notifier is available; otherwise record the pending outbound message in typed human-message state.
-- The notifier owns Discord credentials and local notification delivery. This repo must not import notifier code or print, copy, store, or commit notifier credential values.
+- The notifier owns Apprise routes and delivery credentials. This repo must not import notifier code or print, copy, store, or commit notifier credential values.
 - If the human asks to be messaged or sent a summary/status update, send a concise notifier response rather than only writing Markdown.
 - If the notifier is unreachable, do not claim delivery. Record `NOTIFIER_UNREACHABLE` in typed human-message state and continue useful work.
 - Mark handled messages resolved only after the requested action is complete or intentionally deferred."""
@@ -1451,7 +1450,6 @@ If the notifier is not reachable:
 - The automation must read `.diffmogger/runtime/canonical_state_brief.md` at run start, then handle any queued typed human messages through the dashboard/SQLite state surface.
 - If the local notifier is running, this project may call `POST http://127.0.0.1:8765/api/notify`.
 - Direct human messages should use `event_kind: "message"`; progress updates should use `event_kind: "progress"`.
-- In `discord_notifier` mode, each local automation commit created by the multi-role integrator sends a brief `event_kind: "progress"` update with the commit subject and work summary.
 - If the notifier is unavailable, record the intended outbound message in typed human-message state with status `NOTIFIER_UNREACHABLE` and continue useful work."""
         setup = f"""# Human Bridge Setup
 
@@ -1471,7 +1469,7 @@ POST http://127.0.0.1:8765/api/notify
 
 {channel_note}
 
-The notifier owns credentials, dedupe state, optional JSONL queues, Discord inbound handling, and native desktop notification delivery. This repo must not print, copy, store, or commit notifier credential values.
+The notifier owns Apprise routes, credentials, dedupe state, and optional JSONL queues. This repo must not print, copy, store, or commit notifier credential values.
 
 ## Human Message Handling Rules
 
@@ -1484,7 +1482,7 @@ The notifier owns credentials, dedupe state, optional JSONL queues, Discord inbo
         agents_read = "Read `.diffmogger/runtime/canonical_state_brief.md`; human messages and requests come from typed dashboard/SQLite state, not Markdown inbox files."
         agents_rules = """- Process queued human messages, including freeform commands.
 - If the human asks for a summary, status update, explanation, or report, answer through the dashboard/typed state surface or requested artifact.
-- Do not use Discord or notifier APIs unless the human explicitly changes bridge mode.
+- Do not use notifier APIs unless the human explicitly changes bridge mode.
 - Mark handled human messages resolved only after completing or intentionally deferring the requested action."""
         run_steps = """1. Classify and handle new queued human messages, including freeform commands.
 1. Resolve handled human messages through the dashboard/typed state surface after the requested action has actually been completed or intentionally deferred."""
@@ -1492,28 +1490,28 @@ The notifier owns credentials, dedupe state, optional JSONL queues, Discord inbo
 
 Human bridge mode: `file_only`
 
-Use file-only human intervention. Do not use Discord or notifier APIs for this project unless the human explicitly changes the bridge mode later.
+Use file-only human intervention. Do not use notifier APIs for this project unless the human explicitly changes the bridge mode later.
 
 The human owner uses the Diffmogger dashboard to review automation requests and send replies. If the human asks for a summary, status update, explanation, local report, or decision record, satisfy that request through the dashboard/typed state surface or the explicitly requested artifact."""
         guardrails = """- Ask the human only for meaningful unlocks.
 - For reversible choices, choose a safe default and document it.
 - Use `ACTIVE_WITH_PENDING_USER_INPUT` when a pending request exists; it is not a pause state.
 - Use dashboard/SQLite human-message state for requests, replies, and resolution notes.
-- Do not use Discord or notifier APIs unless the human explicitly changes the bridge mode.
+- Do not use notifier APIs unless the human explicitly changes bridge mode.
 - If the human asks for a summary or status update, answer through the dashboard or requested local artifact.
 - Mark messages handled only after the requested action is complete or intentionally deferred."""
         task_notes = """Human bridge mode: `file_only`
 
 - The automation must read `.diffmogger/runtime/canonical_state_brief.md` at run start and handle queued typed human messages from the dashboard.
 - The human uses the dashboard to inspect requests and reply.
-- Do not use Discord or notifier APIs in this mode."""
+- Do not use notifier APIs in this mode."""
         setup = """# Human Bridge Setup
 
 This project uses dashboard-backed file-only human intervention.
 
 The automation records requests, replies, and resolution notes in typed SQLite state exposed by the Diffmogger dashboard. Markdown human queue files are not generated for new targets.
 
-No Discord, webhook, notifier API, or messaging credentials are used in this mode.
+No webhook, notifier API, or messaging credentials are used in this mode.
 """
     else:
         agents_read = "Human bridge state is not required unless the human later enables the bridge."
@@ -1531,18 +1529,18 @@ Do not create human requests or wait for human replies during normal automation 
         task_notes = "Human bridge mode: `disabled`. No human request queue is active."
         setup = "# Human Bridge Setup\n\nHuman bridge disabled for this project.\n"
 
-    if mode in {"local_notifier", "discord_notifier"}:
+    if mode in {"local_notifier", "apprise_notifier"}:
         end_requirements = "- human requests created or resolved\n- human messages sent, including notifier delivery result\n"
         delivery_sentence = (
-            "The project may call `POST http://127.0.0.1:8765/api/notify`; the notifier handles Discord/local notification delivery and credentials."
+            "The project may call `POST http://127.0.0.1:8765/api/notify`; the notifier handles Apprise delivery routes and credentials."
         )
         bootstrap_sentence = (
-            "Use notifier mode. This repo may call `POST http://127.0.0.1:8765/api/notify` when the separate notifier service is running, but must not handle messaging credentials."
+            "Use notifier mode. This repo may call `POST http://127.0.0.1:8765/api/notify` when the separate notifier service is running, but must not handle notification credentials."
         )
     elif mode == "file_only":
         end_requirements = "- human messages handled and local response artifacts created\n"
         delivery_sentence = "The human reviews requests and replies through the Diffmogger dashboard. The automation handles dashboard-backed typed human messages on later runs."
-        bootstrap_sentence = "Use dashboard-backed file-only mode. Do not create Markdown human queue files and do not use Discord or notifier APIs unless the human explicitly changes mode later."
+        bootstrap_sentence = "Use dashboard-backed file-only mode. Do not create Markdown human queue files and do not use notifier APIs unless the human explicitly changes mode later."
     else:
         end_requirements = ""
         delivery_sentence = "No human bridge queue is required for normal runs."
@@ -1583,7 +1581,7 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
     project_name = str(data.get("project_name") or data.get("summary") or "New Project").strip()
     mode = project_mode(data)
     bridge_mode = human_bridge_mode(data)
-    text_responses = bridge_mode in {"local_notifier", "discord_notifier"} and normalize_bool(
+    text_responses = bridge_mode in {"local_notifier", "apprise_notifier"} and normalize_bool(
         data.get("human_requested_text_responses"),
         True,
     )
@@ -1764,8 +1762,13 @@ def generated_scaffold_destinations(values: dict[str, str]) -> list[str]:
 
 
 def iter_diffmogger_runtime_sources() -> list[Path]:
-    sources = [RUNTIME_PACKAGE_ROOT / "__init__.py"]
-    for package in ["runtime", "observatory", "integrator", "conveyor"]:
+    sources = [
+        RUNTIME_PACKAGE_ROOT / "__init__.py",
+        RUNTIME_PACKAGE_ROOT / "contracts.py",
+        RUNTIME_PACKAGE_ROOT / "notifications.py",
+        RUNTIME_PACKAGE_ROOT / "supervision.py",
+    ]
+    for package in ["runtime", "observatory", "integrator", "orchestration", "state"]:
         sources.extend(sorted((RUNTIME_PACKAGE_ROOT / package).rglob("*")))
     return sources
 
@@ -1803,8 +1806,6 @@ def diffmogger_runtime_paths(values: dict[str, str]) -> list[str]:
     paths = [
         sidecar_rel("target/action_plan_history.json"),
         sidecar_rel("target/agent_runs"),
-        sidecar_rel("target/automation_conveyor.lock"),
-        sidecar_rel("target/automation_conveyor_state.json"),
         sidecar_rel("target/automation_logs"),
         sidecar_rel("target/automation_runner.json"),
         sidecar_rel("target/automation_venvs"),
@@ -2212,6 +2213,12 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
                 stale = target / stale_rel
                 if stale.is_file():
                     stale.unlink()
+        for rel in LEGACY_GENERATED_ARTIFACTS:
+            stale = target / rel
+            if stale.is_dir():
+                shutil.rmtree(stale)
+            elif stale.exists():
+                stale.unlink()
         for stale_dir in [target / ".diffmogger" / "state" / "backlog"]:
             if stale_dir.is_dir():
                 shutil.rmtree(stale_dir)

@@ -1,69 +1,41 @@
 # Human Bridge
 
-The human bridge lets Codex ask for meaningful manual unlocks without blocking the whole automation workflow.
+The human bridge lets automation ask for real manual input without freezing unrelated work. Human input is typed target state first; notifications are delivery aids.
 
 ## When To Ask
 
-Ask the human for:
-
-- account/API setup
-- paid-tier approval
-- deployment/domain setup
-- high-impact product direction
-- risky external side effects
-- environment fixes only the human can perform
-
-Do not ask for routine implementation choices. Pick a safe default and document it.
+Ask for account setup, paid-tier approval, production/deploy actions, risky side effects, or high-impact direction. For routine implementation choices, choose a reversible default and record the assumption.
 
 ## Modes
 
-Diffmogger supports:
-
 - `file_only`: dashboard-backed typed human-message state only.
-- `local_notifier`: dashboard-backed typed state plus native local desktop notifications through the loopback notifier API.
-- `discord_notifier`: Discord progress/messages plus optional native local desktop notifications.
+- `apprise_notifier`: typed state plus outbound delivery through the loopback Apprise notifier service.
+- `local_notifier`: compatibility alias for local Apprise routes such as `macosx://`.
 - `disabled`: no human bridge queue required.
 
-In `file_only` mode, if the human asks `send me a summary`, `status update`, or similar in the dashboard human-input panel, the automation should answer through the dashboard or an explicitly requested local artifact. It should not call notifier APIs unless the target project is explicitly configured for notifier mode.
+In `file_only` mode, summary or status requests are answered through the dashboard or an explicitly requested local artifact. No Apprise, webhook, notifier API, or messaging credentials are used in this mode.
 
-No Discord, webhook, notifier API, or messaging credentials are used in this mode.
+## Runtime State
 
-## Dashboard State
+Canonical bridge records live in `.diffmogger/runtime/orchestration.sqlite3` and are exposed by the dashboard. Generated Markdown/JSONL inbox and outbox files are projections for audit and migration. A message is resolved only after the requested action is complete or intentionally deferred with a concise note.
 
-Enabled bridge modes use typed human-message state in `.diffmogger/runtime/orchestration.sqlite3`, exposed through the dashboard human-input panel. Codex records requests. The human replies in the dashboard. A later run handles the reply, marks it resolved only after the requested action is complete or intentionally deferred, and records a concise resolution note.
+Human input is planning context. If useful independent work remains, the scheduler should create or continue setup, fixture, mock, repair, defer, split, reframe, review, documentation, or alternate validation work instead of stopping.
 
-Generated targets do not create separate human-bridge setup docs. Bridge mode, pending input, replies, and delivery records live in typed SQLite state and the dashboard human-input panel; lean target instructions stay in `AGENTS.md` and the guardrails/task projection.
+## Apprise Notifier
 
-## Bundled Notifier Service
-
-Diffmogger includes a reusable notifier service:
+The reusable service lives in:
 
 ```text
 services/agentic-notifier/
 ```
 
-Target project automation may call:
+Target automation may call:
 
 ```text
 POST http://127.0.0.1:8765/api/notify
 ```
 
-The notifier owns:
-
-- Discord bot credentials and channel routing
-- native macOS desktop notifications
-- outbound and inbound dedupe
-- target-side typed human-message records
-- dry-run mode
-- optional JSONL queue files
-
-Target projects must not import notifier code, inspect notifier internals during normal runs, or handle Discord credentials.
-
-## Notify API Shape
-
-Progress events use `event_kind: "progress"` and route to the Discord progress channel when `discord_notifier` is configured. In multi-role automation, each local commit created by `.diffmogger/scripts/integrate_role_outputs.py` triggers a brief progress notification with the commit subject and work summary.
-
-Direct human messages use `event_kind: "message"` and route to the Discord messaging channel when configured. Human-unlock requests, pending input records, and replies to user messages also use `event_kind: "message"`. They default to local desktop notifications when local notifications are enabled. Human input should become typed planning context without hiding independent or unblocker work that can continue.
+The service owns Apprise URLs, outbound dedupe, dry-run behavior, loopback/API-token safety, and audit projections. Target projects must not import notifier internals or store notifier credentials.
 
 Example direct message:
 
@@ -72,38 +44,20 @@ Example direct message:
   "request_id": "MSG-2026-04-29-001",
   "type": "human_requested_summary",
   "priority": "normal",
-  "summary": "Progress summary requested by human",
+  "summary": "Progress summary requested",
   "event_kind": "message",
-  "message_body": "Project update: Built X, Y, and Z. Checks passing: tests/build. Current blocker: none.",
-  "agent_recommendation": "No action needed unless you want to review the generated artifacts.",
+  "message_body": "Project update: checks are passing and no action is needed.",
   "minimum_user_action": "None.",
   "reply_format": "Optional follow-up request.",
-  "unblocked_work_remaining": [
-    "Continue current automation sprint"
-  ],
   "dedupe_key": "MSG-2026-04-29-001:v1",
-  "expects_reply": false
+  "expects_reply": false,
+  "dry_run": true
 }
 ```
 
-Ticket completion notifications should use `event_kind: "progress"` and set `local_notify: true` when the human should also receive a local desktop notification. Blocked tickets should create unblocker work rather than terminal notifications unless every ticket is already done with evidence.
+If the notifier is unavailable, do not claim delivery. Record the intended message in typed human-message state with `NOTIFIER_UNREACHABLE`, keep unresolved input active if a reply is still required, and continue useful work where possible.
 
-If the notifier is unavailable:
-
-1. Do not claim a message was delivered.
-2. Record the intended message in typed human-message state with status `NOTIFIER_UNREACHABLE`.
-3. Keep or annotate the inbox entry as unresolved if a response is still required.
-4. Continue useful work where possible.
-
-The notifier records delivery failures with generic statuses such as `DISCORD_SEND_FAILED`, `LOCAL_NOTIFICATION_FAILED`, and `NOTIFIER_UNREACHABLE`.
-
-## Discord Inbound Replies
-
-In `discord_notifier` mode, the bot reads only the configured messaging channel. It ignores bot messages and captures human messages only when they mention the bot or reply to a bot-authored message.
-
-Captured messages should be bridged into typed human-message state with Discord metadata and deduped by Discord message ID.
-
-## Running The Bundled Service
+## Setup
 
 ```bash
 cd services/agentic-notifier
@@ -114,24 +68,4 @@ cp .env.example .env
 python -m agentic_notifier.run_service
 ```
 
-The example config starts with `DRY_RUN=true`; change it only after target-side human-message handling, Discord channels, and local notifications are verified.
-
-## Discord Setup
-
-1. Create a Discord application and bot.
-2. Copy the bot token into `DISCORD_BOT_TOKEN` in `services/agentic-notifier/.env`.
-3. Enable Message Content Intent for inbound replies. Leave Presence Intent and Server Members Intent off.
-4. Create a progress channel and messaging channel, then set `DISCORD_PROGRESS_CHANNEL_ID` and `DISCORD_MESSAGING_CHANNEL_ID`.
-5. Invite the bot with the OAuth2 URL Generator. Check only the `bot` scope. After `bot` is checked, Discord shows a separate **Bot Permissions** section below the scopes list. In that section, check View Channels, Send Messages, and Read Message History.
-6. Copy the generated URL, open it, choose your server, and authorize the bot. The invite URL may show `scope=bot&permissions=68608`.
-
-To get channel IDs, enable **User Settings -> Advanced -> Developer Mode** in Discord. Then right-click the progress channel, choose **Copy Channel ID**, and paste it into `DISCORD_PROGRESS_CHANNEL_ID`. Do the same for the messaging channel and `DISCORD_MESSAGING_CHANNEL_ID`.
-
-Do not check `identify`, `email`, `guilds`, `messages.read`, `webhook.incoming`, `applications.commands`, or `Administrator` for the basic Diffmogger notifier. `messages.read` is an OAuth2 scope and is not the same as the **Read Message History** bot permission.
-
-Message Content Intent is enabled separately under **Bot -> Privileged Gateway Intents**. It is not an OAuth2 URL checkbox. Turn on only **Message Content Intent**; leave **Presence Intent** and **Server Members Intent** off. Diffmogger does not read presence updates or member lists.
-
-Official references:
-
-- [Discord bot docs](https://docs.discord.com/developers/bots)
-- [Discord OAuth2 and permissions docs](https://docs.discord.com/developers/platform/oauth2-and-permissions)
+The example config starts with `DRY_RUN=true`; change it only after target-side state handling and Apprise routes are verified.

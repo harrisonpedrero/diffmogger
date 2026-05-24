@@ -178,6 +178,13 @@ if [[ "$prompt_chars" -gt "$max_prompt_chars" ]]; then
   truncated_notice="The assignment was truncated to ${max_prompt_chars} characters by spawn_worker_agent.sh."
 fi
 
+escape_heredoc_text() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/`/\\`/g; s/\$/\\$/g'
+}
+
+prompt_text_for_heredoc="$(escape_heredoc_text "$prompt_text")"
+truncated_notice_for_heredoc="$(escape_heredoc_text "$truncated_notice")"
+
 if [[ "$mode" == "write" ]]; then
   worker_prompt=$(cat <<EOF
 You are a bounded write-capable worker for a recurring Codex automation run.
@@ -197,7 +204,7 @@ Rules:
 - Adjust your implementation to documented contracts and outputs from other workers when visible.
 - {{WORKER_ENV_ACCESS_RULE}}
 - Do not use network.
-- Do not send Discord, notifier, email, or other external messages.
+- Do not send Apprise, notifier, email, or other external messages.
 - Do not spawn subagents, do not call codex exec, and do not call spawn_worker_agent.sh.
 - Do not run destructive cleanup, history rewrites, mass deletion, or broad formatting outside your owned scope.
 - Stop after the bounded assignment and report.
@@ -212,9 +219,9 @@ Report format:
 - follow-up needed
 
 Assignment:
-$prompt_text
+$prompt_text_for_heredoc
 
-$truncated_notice
+$truncated_notice_for_heredoc
 EOF
 )
 else
@@ -232,7 +239,7 @@ Rules:
 - Do not modify source files or docs except for the output report path above.
 - {{WORKER_ENV_ACCESS_RULE}}
 - Do not use network.
-- Do not send Discord, notifier, email, or other external messages.
+- Do not send Apprise, notifier, email, or other external messages.
 - Do not spawn subagents, do not call codex exec, and do not call spawn_worker_agent.sh.
 - Stop after writing the report.
 
@@ -245,10 +252,13 @@ Report format:
 - suggested verification
 - confidence
 
-Assignment:
-$prompt_text
+Include exactly one machine-readable ownership line for the implementation worker:
+OWNERSHIP_PATHS_JSON: ["path/or/dir", "..."]
 
-$truncated_notice
+Assignment:
+$prompt_text_for_heredoc
+
+$truncated_notice_for_heredoc
 EOF
 )
 fi
@@ -267,7 +277,7 @@ $(if [[ "$mode" == "write" ]]; then printf '%s\n' "- ownership_scope: $ownership
 
 ## Assignment
 
-$prompt_text
+$prompt_text_for_heredoc
 
 ## Result
 
@@ -312,7 +322,7 @@ $(if [[ "$mode" == "write" ]]; then printf '%s\n' "- ownership_scope: $ownership
 
 ## Assignment
 
-$prompt_text
+$prompt_text_for_heredoc
 
 ## Result
 
@@ -335,7 +345,7 @@ $(if [[ "$mode" == "write" ]]; then printf '%s\n' "- ownership_scope: $ownership
 
 ## Assignment
 
-$prompt_text
+$prompt_text_for_heredoc
 
 ## Result
 

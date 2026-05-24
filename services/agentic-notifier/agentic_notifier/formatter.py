@@ -82,18 +82,5 @@ def format_notify_message(request: NotifyRequest, max_chars: int = 1900) -> str:
     return _clip("\n".join(lines).strip(), max_chars)
 
 
-def format_local_notification_body(message: str, limit: int = 240) -> str:
-    return _clip(message.replace("\n", " "), limit)
-
-
 def preview_message(message: str, limit: int = 160) -> str:
     return _clip(message.replace("\n", " "), limit)
-
-
-def default_local_notify(request: NotifyRequest) -> bool:
-    if request.local_notify is not None:
-        return request.local_notify
-    request_type = request.type.lower()
-    if request.event_kind == "message":
-        return True
-    return any(term in request_type for term in ("complete", "completion", "ticket"))

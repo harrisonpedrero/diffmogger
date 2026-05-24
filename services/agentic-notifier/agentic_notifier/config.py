@@ -57,10 +57,7 @@ def _optional_int(value: str | int | None) -> int | None:
 
 @dataclass(frozen=True)
 class Settings:
-    discord_bot_token: str = ""
-    discord_progress_channel_id: int | None = None
-    discord_messaging_channel_id: int | None = None
-    local_notifications_enabled: bool = True
+    apprise_urls: tuple[str, ...] = ()
     target_repo_dir: Path | None = None
     target_human_inbox_path: Path | None = None
     target_human_requests_path: Path | None = None
@@ -86,12 +83,8 @@ class Settings:
         )
 
     @property
-    def discord_enabled(self) -> bool:
-        return bool(
-            self.discord_bot_token
-            and self.discord_progress_channel_id
-            and self.discord_messaging_channel_id
-        )
+    def apprise_enabled(self) -> bool:
+        return bool(self.apprise_urls)
 
     @property
     def sent_notifications_path(self) -> Path:
@@ -99,7 +92,7 @@ class Settings:
 
     @property
     def inbound_message_ids_path(self) -> Path:
-        return self.runtime_dir / "discord_inbound_message_ids.jsonl"
+        return self.runtime_dir / "inbound_message_ids.jsonl"
 
 
 def load_settings(load_dotenv_file: bool | None = None) -> Settings:
@@ -121,10 +114,11 @@ def load_settings(load_dotenv_file: bool | None = None) -> Settings:
     runtime_dir = _optional_path(os.getenv("NOTIFIER_RUNTIME_DIR")) or repo_root / "runtime"
 
     return Settings(
-        discord_bot_token=os.getenv("DISCORD_BOT_TOKEN", ""),
-        discord_progress_channel_id=_optional_int(os.getenv("DISCORD_PROGRESS_CHANNEL_ID")),
-        discord_messaging_channel_id=_optional_int(os.getenv("DISCORD_MESSAGING_CHANNEL_ID")),
-        local_notifications_enabled=_truthy(os.getenv("LOCAL_NOTIFICATIONS_ENABLED", "true"), default=True),
+        apprise_urls=tuple(
+            item.strip()
+            for item in os.getenv("APPRISE_URLS", "").replace(",", "\n").splitlines()
+            if item.strip()
+        ),
         target_repo_dir=repo_dir,
         target_human_inbox_path=target_path(
             "TARGET_HUMAN_INBOX_PATH", "HUMAN_INBOX.md"

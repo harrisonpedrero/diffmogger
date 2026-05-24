@@ -16,9 +16,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install notifier dependencies
+      - name: Install Diffmogger dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
           python -m pip install -r services/agentic-notifier/requirements.txt
 
       - name: Validate starter kit

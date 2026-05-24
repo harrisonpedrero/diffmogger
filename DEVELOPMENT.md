@@ -56,7 +56,8 @@ Canonical Python source lives under `src/diffmogger/`.
 
 - `src/diffmogger/kit/`: source-kit tools such as scaffold, required-file check, starter-kit manifest validation, integration-safety check, and native dashboard command guardrails.
 - `src/diffmogger/runtime/`: target runtime entrypoints, helpers, and canonical SQLite state store bundled under `.diffmogger/lib/diffmogger/`.
-- `src/diffmogger/conveyor/`: continuous conveyor decisions, active-role recovery, ticket stop/finalization, and role runner logic.
+- `src/diffmogger/orchestration/`: Temporal workflows, activities, worker helpers, and pure scheduler policy.
+- `src/diffmogger/state/`: Alembic migrations and SQLite read-model helpers for typed runtime state.
 - `src/diffmogger/integrator/`: multi-role integration, git safety, verification, baseline, commit, progress, notifier, and cleanup logic.
 - `src/diffmogger/observatory/`: observatory snapshot, scoring, render, and server logic bundled with the runtime entrypoint.
 - `src/diffmogger/dashboard/`: backend CLI and shared helpers used by the native dashboard.
@@ -66,7 +67,7 @@ Canonical Python source lives under `src/diffmogger/`.
 - `scripts/validation/*.py`: validation-only compatibility entrypoints.
 - `templates/scripts/*.sh`: physical shell templates for generated targets.
 
-Keep source-kit implementation in `src/diffmogger/kit/`, conveyor logic in `src/diffmogger/conveyor/`, integrator logic in `src/diffmogger/integrator/`, observatory logic in `src/diffmogger/observatory/`, and target runtime entrypoints in `src/diffmogger/runtime/`. Do not split the ticket, browser, or repair runtime modules unless that refactor is explicitly in scope.
+Keep source-kit implementation in `src/diffmogger/kit/`, scheduler/orchestration logic in `src/diffmogger/orchestration/`, Alembic read-model support in `src/diffmogger/state/`, integrator logic in `src/diffmogger/integrator/`, observatory logic in `src/diffmogger/observatory/`, and target runtime entrypoints in `src/diffmogger/runtime/`. Do not split the ticket, browser, or repair runtime modules unless that refactor is explicitly in scope.
 
 ## Generated Target Contract
 
@@ -86,7 +87,7 @@ Generated target Python wrappers are rendered from `src/diffmogger/kit/wrapper_t
 
 Shell entrypoints remain physical templates because locks, detached runner launch, role runners, and worker helpers need local executable files in each target.
 
-Canonical live orchestration state is `.diffmogger/runtime/orchestration.sqlite3`. `.diffmogger/runtime/canonical_state_brief.md` is the generated bounded state view agents read at run start. Markdown files under `.diffmogger/state/` and JSON files such as `.diffmogger/runtime/automation_conveyor_state.json` and `.diffmogger/runtime/automation_runner.json` are generated views, prompt inputs, exports, authored surfaces, or compatibility projections.
+Canonical live orchestration state is `.diffmogger/runtime/orchestration.sqlite3`. `.diffmogger/runtime/canonical_state_brief.md` is the generated bounded state view agents read at run start. Markdown files under `.diffmogger/state/` and JSON files such as `.diffmogger/runtime/automation_runner.json` and `.diffmogger/runtime/automation_runner.json` are generated views, prompt inputs, exports, authored surfaces, or compatibility projections.
 
 ## Adding Or Moving Source Files
 
@@ -131,7 +132,7 @@ Generated target-state docs under `templates/docs/` are active templates; do not
 - File-only human bridge remains the safe default.
 - Notifier credentials stay in `services/agentic-notifier/.env`.
 - Optional MCP setup is project-scoped and advisory; do not mutate user/global Codex config.
-- Multi-role and conveyor automation are local-first and must not push, fetch, pull, configure remotes, or set upstream tracking by default.
+- Multi-role and scheduler automation are local-first and must not push, fetch, pull, configure remotes, or set upstream tracking by default.
 - Review generated diffs before trusting autonomous changes.
 
 ## Release Checklist

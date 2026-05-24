@@ -44,8 +44,8 @@ Read `.diffmogger/runtime/canonical_state_brief.md`; use `.diffmogger/state/CODE
 Run the scheduler:
 
 ```bash
-bash .diffmogger/scripts/run_conveyor_automation.sh --dry-run
-bash .diffmogger/scripts/run_conveyor_automation.sh --once
+bash .diffmogger/scripts/run_temporal_worker.sh --policy --max-fanout 2
+bash .diffmogger/scripts/run_temporal_worker.sh --temporal --max-fanout 2
 ```
 
 Useful runtime helpers:

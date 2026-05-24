@@ -21,8 +21,7 @@ The native dashboard opens a local window and calls the Diffmogger backend comma
 - writable target parent directory
 - Codex home availability for nested workers
 - macOS Full Disk Access advisory for targets under `~/Documents`
-- optional local notifier health when using `local_notifier`
-- optional macOS desktop notification command when ticket completion notifications are enabled
+- optional Apprise notifier health when using `local_notifier` or `apprise_notifier`
 
 Fill in the wizard, choose the target directory, optionally add context files such as PDFs or research notes, then click **Scaffold**. Choose fresh-project mode for a new target directory. Choose existing-project mode when the target already has project files and describe the first integrated change in the intake. The dashboard writes `.diffmogger/agentic/project_intake.json`, copies context files into `.diffmogger/context/`, tracks those paths in intake/dashboard state, scaffolds required files, validates them, and ensures the target has a local git repo with an initial `chore: initial commit` when `HEAD` does not exist. Then open **Automation** and click **Start** to launch the actual automation.
 
@@ -38,7 +37,7 @@ python3 /path/to/Diffmogger/scripts/scaffold_project_docs.py \
   --target /path/to/target-project
 ```
 
-Use `human_bridge_mode: file_only` when you want manual Markdown communication, `local_notifier` for native desktop notifications, or `discord_notifier` for Discord progress/messages plus optional desktop notifications.
+Use `human_bridge_mode: file_only` for dashboard/SQLite-only communication, `apprise_notifier` for Apprise delivery, or `local_notifier` as a compatibility alias for local Apprise routes such as `macosx://`.
 
 Use `project_mode: existing_project` when scaffolding into a repo that already has app code, docs, or project-specific instructions.
 
@@ -87,7 +86,7 @@ For bounded ticket work, choose **Bounded campaign** in the dashboard run config
 
 The native dashboard provides a **Ticket Queue** panel before scaffold when bounded campaign is selected. Low-cortisol generation creates a full-scope seed queue by splitting the described project into reviewable local patches with no fixed ticket-count ceiling. Use the queue panel to add/edit/delete seed tickets, paste Markdown/CSV/JSON imports, or ask Codex to draft review-only follow-up candidates from current project state. CLI intakes can also include `ticket_run_seed_tickets`; scaffold writes those into the target-local SQLite ticket queue.
 
-After scaffold, the Automation screen shows ticket/action state, generated unblocker work, and Start/Stop/Safety controls. Runtime decisions, execution DAG progress, repo capability manifest, events, blockers, and next actions remain canonical in `.diffmogger/runtime/orchestration.sqlite3`. Scaffold initializes ticket readiness, and Start launches actual automation directly. Normal campaign runs use `python3 .diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket context; the DAG scheduler may launch compatible ready nodes across tickets when dependencies, confidence, and ownership scopes allow. Ongoing campaigns draft/enqueue safe follow-up tickets from typed runtime context when no dependency-ready tickets remain. Completion notifications use the laptop's native desktop notification system when enabled; failures are recorded in typed human-message state.
+After scaffold, the Automation screen shows ticket/action state, generated unblocker work, and Start/Stop/Safety controls. Runtime decisions, execution DAG progress, repo capability manifest, events, blockers, and next actions remain canonical in `.diffmogger/runtime/orchestration.sqlite3`. Scaffold initializes ticket readiness, and Start launches actual automation through the Temporal runner. Normal campaign runs use `python3 .diffmogger/scripts/ticket_run.py . next --json` for dependency-aware ticket context; the DAG scheduler may launch compatible ready nodes across tickets when dependencies, confidence, and ownership scopes allow. Ongoing campaigns draft/enqueue safe follow-up tickets from typed runtime context when no dependency-ready tickets remain. Completion notifications go through the loopback Apprise notifier when configured; failures are recorded in typed human-message state.
 
 For CLI validation of a ticket-campaign target, add `--ticket-campaign-enabled` to `scripts/check_required_files.py`.
 
@@ -122,8 +121,8 @@ Generated target repos include local runtime helpers:
 ```text
 .diffmogger/scripts/acquire_codex_lock.sh
 .diffmogger/scripts/release_codex_lock.sh
-.diffmogger/scripts/run_conveyor_automation.py
-.diffmogger/scripts/run_conveyor_automation.sh
+.diffmogger/scripts/orchestration_cli.py
+.diffmogger/scripts/run_temporal_worker.sh
 .diffmogger/scripts/run_role_automation.sh
 .diffmogger/scripts/integrate_role_outputs.py
 .diffmogger/scripts/list_deferred_patches.py
@@ -157,7 +156,7 @@ Target-project automation runs should use those local scripts, not scripts from 
 The dashboard handles this from **Automation** when the user clicks **Start**. For debugging, start the target-local automation directly:
 
 ```bash
-python3 .diffmogger/scripts/run_conveyor_automation.py .
+python3 .diffmogger/scripts/orchestration_cli.py .
 ```
 
 Review the first run closely. Confirm the app or workflow is runnable and that `.diffmogger/runtime/canonical_state_brief.md` shows a clear next sprint; `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` should match it as a generated handoff projection.
@@ -167,16 +166,16 @@ Review the first run closely. Confirm the app or workflow is runnable and that `
 Recommended path: use the dashboard's **Start** button. If first-run preparation is still pending, Start runs that guarded phase first, stops on preparation failure, and only then launches one detached target-scoped runner for:
 
 ```bash
-bash .diffmogger/scripts/run_conveyor_automation.sh
+bash .diffmogger/scripts/run_temporal_worker.sh
 ```
 
-The DAG scheduler runner keeps running locally, chooses the next runnable node or compatible wave from canonical SQLite execution DAG state, and records events, DAG nodes/edges, repo capability manifests, checkpoints, blockers, validations, and next actions in `.diffmogger/runtime/orchestration.sqlite3`. `.diffmogger/runtime/canonical_state_brief.md` is regenerated before role Codex runs; `.diffmogger/runtime/automation_conveyor_state.json` and `.diffmogger/runtime/automation_runner.json` are regenerated as read-model projections. The scheduler prioritizes queued integration, baseline verification preflight or repair routing when needed, fast-follow replanning after planner deferral changes, review/hardening, validation, targeted repairs, and compatible build waves. Role Codex subprocesses run under `.diffmogger/scripts/run_process_watchdog.py`; the scheduler also clears orphaned or over-time `active_role_run` state when restarted.
+The DAG scheduler runner keeps running locally, chooses the next runnable node or compatible bounded wave from canonical SQLite execution DAG state, and records events, DAG nodes/edges, execution groups, leases, conflict telemetry, validation groups, integration queue state, code facts, repair/unblocker work, and scheduler decisions in `.diffmogger/runtime/orchestration.sqlite3`. `.diffmogger/runtime/canonical_state_brief.md` and `.diffmogger/runtime/automation_runner.json` are regenerated as read-model projections. The scheduler prioritizes required validation repair, compatible work waves, read-only scoping for weak ownership, parser/index setup when facts are unavailable, validation, and serialized integration gates.
 
 The target wrapper can still be run manually for debugging:
 
 ```bash
-bash .diffmogger/scripts/run_conveyor_automation.sh --dry-run
-bash .diffmogger/scripts/run_conveyor_automation.sh --once
+bash .diffmogger/scripts/run_temporal_worker.sh --policy --max-fanout 2
+bash .diffmogger/scripts/run_temporal_worker.sh --temporal --max-fanout 2
 python3 .diffmogger/scripts/run_observatory.py --open
 ```
 
@@ -239,8 +238,8 @@ Write logs under:
 ```text
 .diffmogger/runtime/automation_logs/stdout.log
 .diffmogger/runtime/automation_logs/stderr.log
-.diffmogger/runtime/automation_logs/conveyor.stdout.log
-.diffmogger/runtime/automation_logs/conveyor.stderr.log
+.diffmogger/runtime/automation_logs/scheduler.stdout.log
+.diffmogger/runtime/automation_logs/scheduler.stderr.log
 .diffmogger/runtime/automation_logs/<role>.stdout.log
 .diffmogger/runtime/automation_logs/<role>.stderr.log
 ```
@@ -251,7 +250,7 @@ If the repo lives under `~/Documents`, macOS privacy controls may block local au
 
 In `file_only` mode, use the dashboard human-input panel to review automation requests and send replies. Let the next automation run mark handled messages resolved only after the requested action is complete or intentionally deferred.
 
-In `local_notifier` mode, the separate notifier service owns native desktop notification delivery. In `discord_notifier` mode, it owns Discord credentials and posts progress/messages to configured channels; dashboard/SQLite remains the target-side message state.
+In notifier modes, the separate service owns Apprise routes and delivery credentials; dashboard/SQLite remains the target-side message state. `local_notifier` is retained as a compatibility label for local Apprise routes.
 
 ## 6. Worker Agents
 

@@ -122,22 +122,22 @@ Generated target projects allow write-capable workers by default. They are meant
 
 ## Runtime Budgets
 
-Diffmogger stores local concurrency limits in SQLite as `parallelism_budgets`. Budgets are derived from intake worker and DAG scheduler settings, then surfaced in `state.snapshot` so the dashboard can show why work can or cannot start without launching anything.
+Diffmogger stores current scheduler decisions, execution groups, leases, conflict telemetry, validation groups, worker runs, and scheduler telemetry in SQLite. Intake worker settings still shape local caps, but the current implementation treats caps as scheduler evidence rather than a separate doctrine.
 
 - read-only worker budget is enabled when `worker_agents_allowed` is true
 - write worker budget is enabled by default
 - write worker capacity comes from `max_write_worker_count`
 - validation and integration have conservative local caps
 
-Runtime helpers check these budgets before manual workers, execution groups, or validation jobs start. A read-only budget never authorizes write-capable workers.
+Runtime helpers check ownership and cap evidence before manual workers, execution groups, or validation jobs start. A read-only scope never authorizes write-capable workers.
 
 Validation fanout classifies commands before launch. Unit tests, lint, typecheck, smoke checks, docs checks, and generated helper checks may run concurrently when they are local and read-only. Setup/repair, browser, build, unknown, and explicitly exclusive commands stay in a serial validation lane. Each `validation_jobs` row and matching receipt records the classification, lane, resource profile, and any reusable target-local setup cache that was detected.
 
 ## Read-Only Fanout
 
-Diffmogger can launch read-only workers from proposed execution groups. The launcher consumes a read-only dry-run group, checks the typed budget, creates `worker_agents` and `worker_contracts` rows, and writes each worker report under `.diffmogger/runtime/agent_runs/<run_id>/`.
+Diffmogger can launch read-only workers from proposed execution groups. The launcher consumes a read-only scope group, records `worker_runs`, and writes each worker report under `.diffmogger/runtime/agent_runs/<run_id>/`.
 
-When a ready ticket is too weakly scoped for parallel write work, the scheduler prefers a bounded read-only scope evidence group before serial builder fallback. These workers collect ownership evidence, likely paths, likely symbols, validation hints, and risk notes. The evidence contract lives in typed SQLite execution-group and worker-contract payloads; worker Markdown reports are review artifacts, not canonical state.
+When a ready ticket is too weakly scoped for parallel write work, the scheduler prefers a bounded read-only scope evidence group before serial builder fallback. These workers collect ownership evidence, likely paths, likely symbols, validation hints, and risk notes. The evidence contract lives in typed SQLite execution-group and worker-output payloads; worker Markdown reports are review artifacts, not canonical state.
 
 Scope/review workers may include a fenced JSON `scope_evidence_records` block in their report. Diffmogger normalizes those records into `scope_evidence_records` rows with candidate paths, symbols, confidence, stale-context warnings, likely tests, and reasons. Only accepted rows that resolve against the current codebase graph and meet the promotion threshold can raise future DAG ownership confidence. Ambiguous, stale, unresolved, unsafe, or low-confidence records remain auditable but do not authorize write leases.
 
@@ -229,7 +229,7 @@ Use this command shape for nested Codex CLI workers launched from an automation 
 Worker rules:
 
 - Workers must not spawn additional workers.
-- Workers must not send Discord, local notifier, email, or other external messages.
+- Workers must not send Apprise, local notifier, email, or other external messages.
 - Workers must not touch `.env` or credentials.
 - Read-only scope workers must not acquire write leases or mutate source, generated projections, or runtime state.
 - Workers must not use network unless explicitly approved for that run.

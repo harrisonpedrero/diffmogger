@@ -1,9 +1,9 @@
-"""Canonical typed SQLite state for Diffmogger orchestration.
+"""Compatibility state helpers for migrated Diffmogger targets.
 
-The runtime keeps SQLite as the authoritative control-plane store. JSON and
-Markdown files under ``.diffmogger/runtime`` or ``.diffmogger/state`` are
-generated projections, authored inputs, or agent-facing handoffs; they are not
-runtime authority once this module has initialized a target.
+New orchestration code writes the Alembic/Pydantic read model in
+``diffmogger.state``. This module remains as a migration aid for dashboard,
+ticket, observatory, and integration surfaces that still consume older read
+models while generated targets move to Temporal-owned workflow execution.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from diffmogger.runtime.paths import existing_or_target_path, normalize_rel, tar
 STATE_SCHEMA_VERSION = 19
 STATE_APPLICATION_ID = 0x444D4752  # DMGR
 CANONICAL_DB_RELATIVE = "target/orchestration.sqlite3"
-CONVEYOR_PROJECTION_RELATIVE = "target/automation_conveyor_state.json"
+CONVEYOR_PROJECTION_RELATIVE = "target/automation_activity.json"
 CONVEYOR_STREAM_ID = "stream:conveyor"
 DEFAULT_AUTOMATION_TASK_ID = "task:automation"
 LEGACY_CONVEYOR_TASK_ID = "task:conveyor"
@@ -755,11 +755,13 @@ ORCHESTRATION_TABLES = (
     "codebase_file_index",
     "code_intelligence_facts",
     "resource_leases",
+    "ownership_leases",
     "scheduler_candidates",
     "execution_groups",
     "execution_group_items",
     "parallelism_budgets",
     "worker_agents",
+    "worker_runs",
     "worker_contracts",
     "worker_patches",
     "worker_patch_integration_preflight",
@@ -1758,6 +1760,34 @@ def create_scheduler_candidates_table(conn: sqlite3.Connection) -> None:
 
 
 def create_execution_group_tables(conn: sqlite3.Connection) -> None:
+    columns = _sqlite_columns(conn, "execution_groups")
+    if columns and "execution_group_id" not in columns:
+        typed_index_columns = "status, execution_mode, updated_at" if "execution_mode" in columns else "status, updated_at"
+        conn.executescript(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_execution_groups_status_typed
+                ON execution_groups({typed_index_columns});
+
+            CREATE TABLE IF NOT EXISTS execution_group_items (
+                item_id TEXT PRIMARY KEY,
+                execution_group_id TEXT NOT NULL,
+                task_id TEXT NOT NULL DEFAULT '',
+                graph_task_node_id TEXT NOT NULL DEFAULT '',
+                owner_role TEXT NOT NULL DEFAULT '',
+                action_kind TEXT NOT NULL DEFAULT '',
+                required_leases_json TEXT NOT NULL DEFAULT '[]',
+                context_pack_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'proposed',
+                reason TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '{{}}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_execution_group_items_group
+                ON execution_group_items(execution_group_id, status);
+            CREATE INDEX IF NOT EXISTS idx_execution_group_items_task
+                ON execution_group_items(task_id, graph_task_node_id, status);
+            """
+        )
+        return
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS execution_groups (
@@ -3329,6 +3359,9 @@ def _delete_old_scheduler_decisions_conn(conn: sqlite3.Connection, *, keep: int)
 
 
 def _compact_old_execution_groups_conn(conn: sqlite3.Connection, *, keep: int) -> int:
+    columns = _sqlite_columns(conn, "execution_groups")
+    if "execution_group_id" not in columns:
+        return 0
     rows = conn.execute(
         """
         SELECT rowid, execution_group_id, payload_json
@@ -6757,6 +6790,8 @@ def _ticket_action_status(ticket_status: str, action: str) -> str:
         if canonical == "repair":
             return "ready"
         return "blocked" if canonical in {"build", "review", "validate", "integrate"} or action == "completion" else "done"
+    if status == "waiting":
+        return "waiting"
     if canonical in {"orchestrate", "decompose"}:
         return "done"
     if canonical == "scope":
@@ -6764,6 +6799,29 @@ def _ticket_action_status(ticket_status: str, action: str) -> str:
     if canonical == "build":
         return "ready"
     return "waiting"
+
+
+def _typed_ticket_statuses_conn(conn: sqlite3.Connection) -> dict[str, str]:
+    if "tickets" not in {str(row["name"]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}:
+        return {}
+    try:
+        rows = conn.execute("SELECT ticket_id, status FROM tickets").fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(row["ticket_id"] or ""): str(row["status"] or "") for row in rows if str(row["ticket_id"] or "")}
+
+
+def _legacy_ticket_status_from_typed(status: Any) -> str:
+    normalized = _execution_dag_status(status, "")
+    if normalized == "running":
+        return "in_progress"
+    if normalized == "ready":
+        return "pending"
+    if normalized == "waiting":
+        return "waiting"
+    if normalized in {"done", "blocked", "candidate_done"}:
+        return normalized
+    return normalized or "pending"
 
 
 def _default_action_for_stage(stage: str) -> str:
@@ -7103,6 +7161,7 @@ def materialize_execution_dag_conn(
     run = conn.execute("SELECT * FROM ticket_runs ORDER BY updated_at DESC LIMIT 1").fetchone()
     if run is not None:
         run_id = str(run["run_id"] or "ticket-run")
+        typed_ticket_statuses = _typed_ticket_statuses_conn(conn)
         rows = conn.execute(
             "SELECT * FROM ticket_items WHERE run_id = ? ORDER BY position ASC, ticket_id ASC",
             (run_id,),
@@ -7117,7 +7176,12 @@ def materialize_execution_dag_conn(
             ticket_id = str(ticket.get("id") or "").strip()
             if not ticket_id:
                 continue
-            ticket_status = _execution_dag_status(ticket.get("status"), "pending")
+            ticket_status = _execution_dag_status(
+                _legacy_ticket_status_from_typed(typed_ticket_statuses.get(ticket_id))
+                if ticket_id in typed_ticket_statuses
+                else ticket.get("status"),
+                "pending",
+            )
             blocker = str(ticket.get("blocker") or "")
             ticket_receipt_refs = receipt_refs.get(ticket_id, [])
             ticket_has_evidence = _ticket_has_verification_evidence(ticket, ticket_receipt_refs)
@@ -7188,9 +7252,9 @@ def materialize_execution_dag_conn(
                 refs = ticket_receipt_refs if _execution_dag_action_matches(action, "validate") else []
                 action_status = _ticket_action_status(ticket_status, action)
                 missing_done_evidence = ticket_status == "done" and not ticket_has_evidence
-                if action == "scope" and bool(policy.get("requires_scope")) and ticket_status not in {"done", "candidate_done", "in_progress", "blocked"}:
+                if action == "scope" and bool(policy.get("requires_scope")) and ticket_status not in {"done", "candidate_done", "in_progress", "blocked", "waiting"}:
                     action_status = "scope_exhausted" if scope_fanout_exhausted else "ready"
-                if action == "build" and bool(policy.get("requires_scope")) and ticket_status not in {"done", "candidate_done", "in_progress", "blocked"}:
+                if action == "build" and bool(policy.get("requires_scope")) and ticket_status not in {"done", "candidate_done", "in_progress", "blocked", "waiting"}:
                     action_status = "ready" if scope_fanout_exhausted else "waiting"
                 if action == "build" and ticket_status in {"pending", "in_progress"} and worker_patch_handoffs_by_task.get(ticket_id):
                     action_status = "done"
@@ -11052,6 +11116,70 @@ def active_resource_leases_conn(conn: sqlite3.Connection) -> list[dict[str, Any]
     return [_lease_row_to_dict(conn, row) for row in rows]
 
 
+def _ownership_lease_row_to_dict(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    paths = _json_cell(item.pop("paths_json", "[]"), [])
+    payload = _json_cell(item.pop("payload_json", "{}"), {})
+    paths = paths if isinstance(paths, list) else []
+    payload = payload if isinstance(payload, dict) else {}
+    path = str(paths[0] if paths else "").strip()
+    nested = payload.get("payload") if isinstance(payload.get("payload"), Mapping) else {}
+    ticket_id = str(payload.get("ticket_id") or nested.get("ticket_id") or "").strip()
+    action_kind = str(payload.get("action_kind") or nested.get("action_kind") or "").strip()
+    return {
+        "lease_id": str(item.get("lease_id") or ""),
+        "task_id": ticket_id,
+        "ticket_id": ticket_id,
+        "action_kind": action_kind,
+        "owner_role": str(item.get("owner") or ""),
+        "owner": str(item.get("owner") or ""),
+        "run_id": str(item.get("run_id") or ""),
+        "group_id": str(item.get("group_id") or ""),
+        "execution_group_id": str(item.get("group_id") or ""),
+        "node_id": str(item.get("node_id") or ""),
+        "scope_kind": "path",
+        "scope_node_id": path or ".",
+        "path": path or ".",
+        "paths": [str(value) for value in paths if str(value or "")],
+        "mode": str(item.get("mode") or ""),
+        "status": str(item.get("status") or ""),
+        "acquired_at": str(item.get("acquired_at") or ""),
+        "expires_at": str(item.get("expires_at") or ""),
+        "released_at": str(nested.get("released_at") or payload.get("released_at") or ""),
+        "payload": payload,
+        "scope": {"kind": "path", "path": path or ".", "name": path or "."},
+        "source": "ownership_leases",
+    }
+
+
+def active_ownership_leases_conn(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ownership_leases'").fetchone() is None:
+        return []
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM ownership_leases
+        WHERE status = 'active'
+        ORDER BY acquired_at ASC, lease_id ASC
+        """
+    ).fetchall()
+    return [_ownership_lease_row_to_dict(row) for row in rows]
+
+
+def active_runtime_leases_conn(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    leases = [*active_resource_leases_conn(conn), *active_ownership_leases_conn(conn)]
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for lease in leases:
+        key = str(lease.get("lease_id") or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        result.append(lease)
+    return result
+
+
 def list_conflicting_leases_conn(
     conn: sqlite3.Connection,
     *,
@@ -11842,6 +11970,58 @@ def write_scheduler_decision_conn(
     return latest_scheduler_decision_conn(conn, decision_id=decision_id)
 
 
+def _latest_typed_scheduler_event_decision_conn(conn: sqlite3.Connection) -> dict[str, Any]:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'runtime_events'").fetchone() is None:
+        return {}
+    row = conn.execute(
+        """
+        SELECT event_id, created_at, payload_json
+        FROM runtime_events
+        WHERE event_type = 'scheduler.decision'
+        ORDER BY event_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return {}
+    payload = _json_cell(row["payload_json"], {})
+    if not isinstance(payload, Mapping):
+        return {}
+    selected = dict(payload.get("selected") if isinstance(payload.get("selected"), Mapping) else {})
+    selected["state"] = str(selected.get("state") or "selected")
+    selected["selected"] = True
+    selected.setdefault("decision_id", str(payload.get("decision_id") or ""))
+    selected.setdefault("generated_at", str(payload.get("created_at") or row["created_at"] or ""))
+    candidates = [dict(item) for item in payload.get("candidates", []) if isinstance(item, Mapping)]
+    if selected and not any(str(item.get("candidate_id") or "") == str(selected.get("candidate_id") or "") for item in candidates):
+        candidates.insert(0, selected)
+    for candidate in candidates:
+        if str(candidate.get("candidate_id") or "") == str(selected.get("candidate_id") or ""):
+            candidate["state"] = "selected"
+            candidate["selected"] = True
+        else:
+            candidate.setdefault("state", str(candidate.get("status") or "ready"))
+        candidate.setdefault("decision_id", str(payload.get("decision_id") or ""))
+        candidate.setdefault("generated_at", str(payload.get("created_at") or row["created_at"] or ""))
+        if "role" not in candidate and "owner_role" in candidate:
+            candidate["role"] = candidate.get("owner_role")
+        if "task_id" not in candidate:
+            ticket_ids = candidate.get("ticket_ids") if isinstance(candidate.get("ticket_ids"), list) else []
+            candidate["task_id"] = str(ticket_ids[0] if ticket_ids else "")
+    skipped = [item for item in candidates if str(item.get("state") or "") == "skipped"]
+    return {
+        "decision_id": str(payload.get("decision_id") or ""),
+        "generated_at": str(payload.get("created_at") or row["created_at"] or ""),
+        "scheduling_candidates": candidates,
+        "selected_candidate": selected,
+        "selected_scheduler_candidate": selected,
+        "skipped_candidates": skipped,
+        "skipped_scheduler_candidates": skipped,
+        "graph_signals_used": {},
+        "lease_conflicts_considered": payload.get("conflicts") if isinstance(payload.get("conflicts"), list) else [],
+    }
+
+
 def latest_scheduler_decision_conn(conn: sqlite3.Connection, *, decision_id: str = "") -> dict[str, Any]:
     if not decision_id:
         row = conn.execute(
@@ -11853,6 +12033,9 @@ def latest_scheduler_decision_conn(conn: sqlite3.Connection, *, decision_id: str
             """
         ).fetchone()
         if row is None:
+            typed_event_decision = _latest_typed_scheduler_event_decision_conn(conn)
+            if typed_event_decision:
+                return typed_event_decision
             return {
                 "decision_id": "",
                 "generated_at": "",
@@ -11879,6 +12062,10 @@ def latest_scheduler_decision_conn(conn: sqlite3.Connection, *, decision_id: str
     ).fetchall()
     candidates = [_scheduler_candidate_row_to_dict(row) for row in rows]
     selected = next((item for item in candidates if str(item.get("state") or "") == "selected"), {})
+    if not selected:
+        typed_event_decision = _latest_typed_scheduler_event_decision_conn(conn)
+        if typed_event_decision:
+            return typed_event_decision
     skipped = [item for item in candidates if str(item.get("state") or "") == "skipped"]
     generated_at = str(candidates[0].get("generated_at") or "") if candidates else ""
     graph_signals = next(
@@ -12209,28 +12396,35 @@ def _budget_by_scope(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
 
 
 def active_parallel_counts_conn(conn: sqlite3.Connection) -> dict[str, int]:
-    group_rows = conn.execute(
-        """
-        SELECT mode, COUNT(*) AS count
-        FROM execution_groups
-        WHERE status = 'running'
-        GROUP BY mode
-        """
-    ).fetchall()
+    execution_group_columns = _sqlite_columns(conn, "execution_groups")
+    group_mode_column = "mode" if "mode" in execution_group_columns else "execution_mode" if "execution_mode" in execution_group_columns else ""
+    if group_mode_column:
+        group_rows = conn.execute(
+            f"""
+            SELECT {group_mode_column} AS mode, COUNT(*) AS count
+            FROM execution_groups
+            WHERE status = 'running'
+            GROUP BY {group_mode_column}
+            """
+        ).fetchall()
+    else:
+        group_rows = []
     active_execution_groups = sum(int(row["count"] or 0) for row in group_rows)
     active_group_modes = {str(row["mode"] or "unknown"): int(row["count"] or 0) for row in group_rows}
 
     item_counts = {"read_only_workers": 0, "write_workers": 0, "validation": 0, "mixed": 0}
-    item_rows = conn.execute(
-        """
-        SELECT item.payload_json AS item_payload_json, group_row.mode AS group_mode, COUNT(*) AS count
-        FROM execution_group_items item
-        JOIN execution_groups group_row ON group_row.execution_group_id = item.execution_group_id
-        WHERE group_row.status = 'running'
-          AND item.status IN ('running', 'proposed')
-        GROUP BY item.payload_json, group_row.mode
-        """
-    ).fetchall()
+    item_rows = []
+    if "execution_group_id" in execution_group_columns and "mode" in execution_group_columns:
+        item_rows = conn.execute(
+            """
+            SELECT item.payload_json AS item_payload_json, group_row.mode AS group_mode, COUNT(*) AS count
+            FROM execution_group_items item
+            JOIN execution_groups group_row ON group_row.execution_group_id = item.execution_group_id
+            WHERE group_row.status = 'running'
+              AND item.status IN ('running', 'proposed')
+            GROUP BY item.payload_json, group_row.mode
+            """
+        ).fetchall()
     for row in item_rows:
         payload = _json_cell(row["item_payload_json"], {})
         mode = str(payload.get("execution_mode") or row["group_mode"] or "").strip().lower() if isinstance(payload, Mapping) else str(row["group_mode"] or "")
@@ -13698,30 +13892,58 @@ def validation_jobs_conn(
 
 
 def _latest_validation_execution_group_conn(conn: sqlite3.Connection) -> dict[str, Any]:
-    row = conn.execute(
-        """
-        SELECT *
-        FROM execution_groups
-        WHERE mode = 'validation'
-        ORDER BY COALESCE(NULLIF(finished_at, ''), NULLIF(started_at, ''), created_at) DESC,
-                 execution_group_id DESC
-        LIMIT 1
-        """
-    ).fetchone()
-    if row is None:
-        return {}
-    payload = _json_cell(row["payload_json"], {})
-    return decorate_execution_group_for_display({
-        "execution_group_id": str(row["execution_group_id"]),
-        "status": str(row["status"] or ""),
-        "mode": str(row["mode"] or ""),
-        "created_at": str(row["created_at"] or ""),
-        "started_at": str(row["started_at"] or ""),
-        "finished_at": str(row["finished_at"] or ""),
-        "selected_by": str(row["selected_by"] or ""),
-        "reason": str(row["reason"] or ""),
-        "payload": payload if isinstance(payload, dict) else {},
-    })
+    columns = _sqlite_columns(conn, "execution_groups")
+    if {"execution_group_id", "mode", "finished_at", "started_at", "selected_by", "reason"}.issubset(columns):
+        row = conn.execute(
+            """
+            SELECT *
+            FROM execution_groups
+            WHERE mode = 'validation'
+            ORDER BY COALESCE(NULLIF(finished_at, ''), NULLIF(started_at, ''), created_at) DESC,
+                     execution_group_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return {}
+        payload = _json_cell(row["payload_json"], {})
+        return decorate_execution_group_for_display({
+            "execution_group_id": str(row["execution_group_id"]),
+            "group_id": str(row["execution_group_id"]),
+            "status": str(row["status"] or ""),
+            "mode": str(row["mode"] or ""),
+            "created_at": str(row["created_at"] or ""),
+            "started_at": str(row["started_at"] or ""),
+            "finished_at": str(row["finished_at"] or ""),
+            "selected_by": str(row["selected_by"] or ""),
+            "reason": str(row["reason"] or ""),
+            "payload": payload if isinstance(payload, dict) else {},
+        })
+    if {"group_id", "action_kind", "updated_at"}.issubset(columns):
+        row = conn.execute(
+            """
+            SELECT *
+            FROM execution_groups
+            WHERE action_kind = 'validation_group'
+            ORDER BY updated_at DESC, created_at DESC, group_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return {}
+        payload = _json_cell(row["payload_json"], {})
+        return decorate_execution_group_for_display({
+            "execution_group_id": str(row["group_id"]),
+            "status": str(row["status"] or ""),
+            "mode": str(row["execution_mode"] or row["action_kind"] or ""),
+            "created_at": str(row["created_at"] or ""),
+            "started_at": "",
+            "finished_at": str(row["updated_at"] or ""),
+            "selected_by": "typed_execution_group",
+            "reason": "",
+            "payload": payload if isinstance(payload, dict) else {},
+        })
+    return {}
 
 
 def validation_job_read_model_conn(conn: sqlite3.Connection, *, limit: int = 20) -> dict[str, Any]:
@@ -14824,6 +15046,163 @@ def worker_agents_conn(
     return workers
 
 
+def _worker_run_mode(payload: Mapping[str, Any], row: Mapping[str, Any]) -> str:
+    nested = payload.get("payload") if isinstance(payload.get("payload"), Mapping) else {}
+    mode = str(nested.get("worker_mode") or payload.get("worker_mode") or "").strip().lower().replace("-", "_")
+    if mode in {"read_only", "readonly"}:
+        return "read_only"
+    if mode in {"write", "write_workers"}:
+        return "write"
+    return "write" if str(row.get("node_id") or "") else "read_only"
+
+
+def _worker_run_ticket_id(conn: sqlite3.Connection, group_id: str, node_id: str) -> str:
+    if node_id:
+        row = conn.execute("SELECT ticket_id FROM execution_dag_nodes WHERE node_id = ?", (node_id,)).fetchone()
+        if row is not None and str(row["ticket_id"] or ""):
+            return str(row["ticket_id"] or "")
+    if group_id:
+        columns = _sqlite_columns(conn, "execution_groups")
+        id_column = "group_id" if "group_id" in columns else "execution_group_id" if "execution_group_id" in columns else ""
+        tickets_column = "ticket_ids_json" if "ticket_ids_json" in columns else ""
+        row = (
+            conn.execute(f"SELECT {tickets_column} AS ticket_ids_json FROM execution_groups WHERE {id_column} = ?", (group_id,)).fetchone()
+            if id_column and tickets_column
+            else None
+        )
+        if row is not None:
+            ticket_ids = _json_cell(row["ticket_ids_json"], [])
+            if isinstance(ticket_ids, list) and ticket_ids:
+                return str(ticket_ids[0] or "")
+    return ""
+
+
+def _worker_run_row_to_dict(conn: sqlite3.Connection, row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    payload = _json_cell(item.pop("payload_json", "{}"), {})
+    payload = payload if isinstance(payload, dict) else {}
+    changed_paths = _json_cell(item.pop("changed_paths_json", "[]"), [])
+    changed_paths = changed_paths if isinstance(changed_paths, list) else []
+    group_id = str(item.get("group_id") or "")
+    node_id = str(item.get("node_id") or "")
+    nested = payload.get("payload") if isinstance(payload.get("payload"), Mapping) else {}
+    mode = _worker_run_mode(payload, item)
+    report_path = str(payload.get("report_path") or nested.get("report_path") or "")
+    failure_reason = str(nested.get("failure_reason") or payload.get("failure_reason") or "")
+    return {
+        "worker_id": str(item.get("worker_id") or item.get("output_id") or ""),
+        "output_id": str(item.get("output_id") or ""),
+        "execution_group_id": group_id,
+        "group_id": group_id,
+        "run_id": str(item.get("run_id") or ""),
+        "mode": mode,
+        "role": "builder" if mode == "write" else "planner",
+        "owner_role": "builder" if mode == "write" else "planner",
+        "status": str(item.get("status") or ""),
+        "task_id": _worker_run_ticket_id(conn, group_id, node_id),
+        "ticket_id": _worker_run_ticket_id(conn, group_id, node_id),
+        "dag_node_id": node_id,
+        "node_id": node_id,
+        "context_pack_id": "",
+        "started_at": "",
+        "finished_at": str(item.get("recorded_at") or ""),
+        "recorded_at": str(item.get("recorded_at") or ""),
+        "report_artifact_id": report_path,
+        "report_path": report_path,
+        "failure_reason": failure_reason,
+        "changed_paths": [str(path) for path in changed_paths if str(path or "")],
+        "summary": str(payload.get("summary") or ""),
+        "payload": payload,
+        "source": "worker_runs",
+    }
+
+
+def worker_runs_conn(
+    conn: sqlite3.Connection,
+    *,
+    mode: str = "",
+    statuses: set[str] | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_runs'").fetchone() is None:
+        return []
+    clauses: list[str] = []
+    params: list[Any] = []
+    if statuses:
+        placeholders = ",".join("?" for _ in statuses)
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(sorted(statuses))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM worker_runs
+        {where}
+        ORDER BY recorded_at DESC, output_id DESC
+        LIMIT ?
+        """,
+        (*params, max(1, int(limit))),
+    ).fetchall()
+    workers = [_worker_run_row_to_dict(conn, row) for row in rows]
+    if mode:
+        workers = [worker for worker in workers if str(worker.get("mode") or "") == mode]
+    return workers[: max(1, int(limit))]
+
+
+def active_workers_from_ownership_leases_conn(conn: sqlite3.Connection, *, mode: str = "", limit: int = 20) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for lease in active_ownership_leases_conn(conn):
+        payload = lease.get("payload") if isinstance(lease.get("payload"), Mapping) else {}
+        nested = payload.get("payload") if isinstance(payload.get("payload"), Mapping) else {}
+        lease_mode = str(lease.get("mode") or "write").replace("-", "_")
+        worker_mode = "read_only" if lease_mode in {"read", "read_only", "read_only_scope", "scope"} else "write"
+        if mode and worker_mode != mode:
+            continue
+        group_id = str(lease.get("group_id") or "")
+        node_id = str(lease.get("node_id") or "")
+        ticket_id = str(
+            lease.get("ticket_id")
+            or lease.get("task_id")
+            or payload.get("ticket_id")
+            or nested.get("ticket_id")
+            or _worker_run_ticket_id(conn, group_id, node_id)
+        )
+        action_kind = str(lease.get("action_kind") or payload.get("action_kind") or nested.get("action_kind") or "")
+        display_status = (
+            "scoping"
+            if worker_mode == "read_only" and action_kind == "launch_scope_work"
+            else "building"
+            if worker_mode == "write"
+            else "running"
+        )
+        rows.append({
+            "worker_id": f"active-lease:{lease.get('lease_id')}",
+            "execution_group_id": group_id,
+            "group_id": group_id,
+            "run_id": str(lease.get("run_id") or ""),
+            "mode": worker_mode,
+            "action_kind": action_kind,
+            "role": str(lease.get("owner_role") or lease.get("owner") or ("builder" if worker_mode == "write" else "planner")),
+            "owner_role": str(lease.get("owner_role") or lease.get("owner") or ("builder" if worker_mode == "write" else "planner")),
+            "status": "running",
+            "display_status": display_status,
+            "runtime_status": display_status,
+            "status_label": display_status.replace("_", " ").title(),
+            "task_id": ticket_id,
+            "ticket_id": ticket_id,
+            "dag_node_id": node_id,
+            "node_id": node_id,
+            "context_pack_id": "",
+            "started_at": str(lease.get("acquired_at") or ""),
+            "finished_at": "",
+            "report_artifact_id": "",
+            "failure_reason": "",
+            "payload": {"lease": lease, "ticket_id": ticket_id, "action_kind": action_kind, "display_status": display_status},
+            "source": "ownership_leases",
+        })
+    return rows[: max(1, int(limit))]
+
+
 def _execution_group_mode_display(mode: Any, payload: Mapping[str, Any] | None = None) -> dict[str, str]:
     payload = payload if isinstance(payload, Mapping) else {}
     raw_mode = re.sub(r"[^a-z0-9]+", "_", str(mode or "").strip().lower()).strip("_")
@@ -14927,6 +15306,13 @@ def _payload_count(payload: Mapping[str, Any], *keys: str) -> int:
 def _worker_disposition_display(worker: Mapping[str, Any], patches: list[Mapping[str, Any]] | None = None) -> dict[str, Any]:
     payload = worker.get("payload") if isinstance(worker.get("payload"), Mapping) else {}
     patches = [patch for patch in (patches or []) if isinstance(patch, Mapping)]
+    if str(worker.get("source") or "") == "worker_runs":
+        return {
+            "status": "recorded",
+            "label": "Recorded worker run",
+            "summary": str(worker.get("summary") or "Typed orchestration worker output is recorded."),
+            "required": False,
+        }
     raw_status = re.sub(r"[^a-z0-9]+", "_", str(payload.get("disposition_status") or "").strip().lower()).strip("_")
     raw_required = bool(payload.get("finding_disposition_required"))
     accepted = _payload_count(payload, "accepted_count", "accepted_findings_count", "accepted_findings", "accepted")
@@ -15044,19 +15430,22 @@ def _worker_disposition_summary(workers: list[Mapping[str, Any]]) -> dict[str, A
 
 
 def worker_reports_read_model_conn(conn: sqlite3.Connection, *, limit: int = 12) -> dict[str, Any]:
-    active = worker_agents_conn(conn, mode="read_only", statuses={"queued", "running"}, limit=limit)
+    active = [
+        *worker_agents_conn(conn, mode="read_only", statuses={"queued", "running"}, limit=limit),
+        *active_workers_from_ownership_leases_conn(conn, mode="read_only", limit=limit),
+    ][:limit]
     completed_read_only = worker_agents_conn(
         conn,
         mode="read_only",
         statuses={"completed", "failed", "unavailable"},
         limit=limit,
-    )
+    ) + worker_runs_conn(conn, mode="read_only", statuses={"completed", "failed", "unavailable"}, limit=limit)
     completed_write = worker_agents_conn(
         conn,
         mode="write",
         statuses={"completed", "failed", "unavailable"},
         limit=limit,
-    )
+    ) + worker_runs_conn(conn, mode="write", statuses={"completed", "failed", "unavailable"}, limit=limit)
     completed = _decorate_worker_dispositions(conn, [*completed_read_only, *completed_write])[:limit]
     disposition_required = any(bool(worker.get("finding_disposition_required_effective")) for worker in completed)
     return {
@@ -15071,49 +15460,68 @@ def worker_reports_read_model_conn(conn: sqlite3.Connection, *, limit: int = 12)
 
 
 def _execution_group_by_id_conn(conn: sqlite3.Connection, execution_group_id: str) -> dict[str, Any]:
+    columns = _sqlite_columns(conn, "execution_groups")
+    id_column = "execution_group_id" if "execution_group_id" in columns else "group_id" if "group_id" in columns else ""
+    if not id_column:
+        return {}
     row = conn.execute(
-        "SELECT * FROM execution_groups WHERE execution_group_id = ?",
+        f"SELECT * FROM execution_groups WHERE {id_column} = ?",
         (execution_group_id,),
     ).fetchone()
     if row is None:
         return {}
-    item_rows = conn.execute(
-        """
-        SELECT *
-        FROM execution_group_items
-        WHERE execution_group_id = ?
-        ORDER BY item_id
-        """,
-        (execution_group_id,),
-    ).fetchall()
     items = []
-    for item in item_rows:
-        payload = _json_cell(item["payload_json"], {})
-        items.append(
-            {
-                "item_id": str(item["item_id"]),
-                "execution_group_id": str(item["execution_group_id"] or ""),
-                "task_id": str(item["task_id"] or ""),
-                "graph_task_node_id": str(item["graph_task_node_id"] or ""),
-                "owner_role": str(item["owner_role"] or ""),
-                "action_kind": str(item["action_kind"] or ""),
-                "required_leases": _json_cell(item["required_leases_json"], []),
-                "context_pack_id": str(item["context_pack_id"] or ""),
-                "status": str(item["status"] or ""),
-                "reason": str(item["reason"] or ""),
-                "payload": payload if isinstance(payload, dict) else {},
-            }
-        )
+    if id_column == "execution_group_id":
+        item_rows = conn.execute(
+            """
+            SELECT *
+            FROM execution_group_items
+            WHERE execution_group_id = ?
+            ORDER BY item_id
+            """,
+            (execution_group_id,),
+        ).fetchall()
+        for item in item_rows:
+            payload = _json_cell(item["payload_json"], {})
+            items.append(
+                {
+                    "item_id": str(item["item_id"]),
+                    "execution_group_id": str(item["execution_group_id"] or ""),
+                    "task_id": str(item["task_id"] or ""),
+                    "graph_task_node_id": str(item["graph_task_node_id"] or ""),
+                    "owner_role": str(item["owner_role"] or ""),
+                    "action_kind": str(item["action_kind"] or ""),
+                    "required_leases": _json_cell(item["required_leases_json"], []),
+                    "context_pack_id": str(item["context_pack_id"] or ""),
+                    "status": str(item["status"] or ""),
+                    "reason": str(item["reason"] or ""),
+                    "payload": payload if isinstance(payload, dict) else {},
+                }
+            )
+        payload = _json_cell(row["payload_json"], {})
+        return decorate_execution_group_for_display({
+            "execution_group_id": str(row["execution_group_id"]),
+            "status": str(row["status"] or ""),
+            "mode": str(row["mode"] or ""),
+            "created_at": str(row["created_at"] or ""),
+            "started_at": str(row["started_at"] or ""),
+            "finished_at": str(row["finished_at"] or ""),
+            "selected_by": str(row["selected_by"] or ""),
+            "reason": str(row["reason"] or ""),
+            "payload": payload if isinstance(payload, dict) else {},
+            "items": items,
+        })
     payload = _json_cell(row["payload_json"], {})
     return decorate_execution_group_for_display({
-        "execution_group_id": str(row["execution_group_id"]),
+        "execution_group_id": str(row["group_id"]),
+        "group_id": str(row["group_id"]),
         "status": str(row["status"] or ""),
-        "mode": str(row["mode"] or ""),
+        "mode": str(row["execution_mode"] or row["action_kind"] or ""),
         "created_at": str(row["created_at"] or ""),
-        "started_at": str(row["started_at"] or ""),
-        "finished_at": str(row["finished_at"] or ""),
-        "selected_by": str(row["selected_by"] or ""),
-        "reason": str(row["reason"] or ""),
+        "started_at": "",
+        "finished_at": str(row["updated_at"] or ""),
+        "selected_by": "typed_execution_group",
+        "reason": str(payload.get("reason") or "") if isinstance(payload, Mapping) else "",
         "payload": payload if isinstance(payload, dict) else {},
         "items": items,
     })
@@ -15128,21 +15536,69 @@ def execution_groups_by_status_conn(
     if not statuses:
         return []
     placeholders = ",".join("?" for _ in statuses)
-    rows = conn.execute(
-        f"""
-        SELECT execution_group_id
-        FROM execution_groups
-        WHERE status IN ({placeholders})
-        ORDER BY COALESCE(NULLIF(finished_at, ''), NULLIF(started_at, ''), created_at) DESC,
-                 execution_group_id DESC
-        LIMIT ?
-        """,
-        (*sorted(statuses), max(1, int(limit))),
-    ).fetchall()
-    return [_execution_group_by_id_conn(conn, str(row["execution_group_id"])) for row in rows]
+    columns = _sqlite_columns(conn, "execution_groups")
+    if "execution_group_id" in columns:
+        rows = conn.execute(
+            f"""
+            SELECT execution_group_id AS group_id
+            FROM execution_groups
+            WHERE status IN ({placeholders})
+            ORDER BY COALESCE(NULLIF(finished_at, ''), NULLIF(started_at, ''), created_at) DESC,
+                     execution_group_id DESC
+            LIMIT ?
+            """,
+            (*sorted(statuses), max(1, int(limit))),
+        ).fetchall()
+    elif "group_id" in columns:
+        rows = conn.execute(
+            f"""
+            SELECT group_id
+            FROM execution_groups
+            WHERE status IN ({placeholders})
+            ORDER BY updated_at DESC, created_at DESC, group_id DESC
+            LIMIT ?
+            """,
+            (*sorted(statuses), max(1, int(limit))),
+        ).fetchall()
+    else:
+        return []
+    return [_execution_group_by_id_conn(conn, str(row["group_id"])) for row in rows]
+
+
+def execution_groups_for_active_ownership_leases_conn(conn: sqlite3.Connection, *, limit: int = 16) -> list[dict[str, Any]]:
+    leases = active_ownership_leases_conn(conn)
+    group_ids = []
+    seen: set[str] = set()
+    for lease in leases:
+        group_id = str(lease.get("group_id") or lease.get("execution_group_id") or "")
+        if group_id and group_id not in seen:
+            seen.add(group_id)
+            group_ids.append(group_id)
+    groups: list[dict[str, Any]] = []
+    for group_id in group_ids[: max(1, int(limit))]:
+        group = _execution_group_by_id_conn(conn, group_id)
+        if not group:
+            continue
+        group_leases = [lease for lease in leases if str(lease.get("group_id") or lease.get("execution_group_id") or "") == group_id]
+        payload = dict(group.get("payload") if isinstance(group.get("payload"), Mapping) else {})
+        payload["active_lease_ids"] = [str(lease.get("lease_id") or "") for lease in group_leases if str(lease.get("lease_id") or "")]
+        group = {
+            **group,
+            "status": "running" if str(group.get("status") or "") == "planned" else str(group.get("status") or "running"),
+            "display_status_label": "Running",
+            "display_summary": str(group.get("display_summary") or "Running execution group"),
+            "active_lease_count": len(group_leases),
+            "active_leases": group_leases,
+            "payload": payload,
+        }
+        groups.append(group)
+    return groups
 
 
 def _latest_read_only_execution_group_conn(conn: sqlite3.Connection) -> dict[str, Any]:
+    columns = _sqlite_columns(conn, "execution_groups")
+    if "execution_group_id" not in columns:
+        return {}
     rows = conn.execute(
         """
         SELECT execution_group_id, payload_json
@@ -18859,7 +19315,7 @@ def _worker_patch_preflight_protected_paths(changed_files: list[str]) -> list[st
         if parts and parts[0] in {".git", ".hg", ".svn", ".diffmogger", ".agentic"}:
             protected.append(path)
             continue
-        if lowered in {"target/orchestration.sqlite3", "target/automation_conveyor_state.json", "target/automation_runner.json"}:
+        if lowered in {"target/orchestration.sqlite3", "target/automation_activity.json", "target/automation_runner.json"}:
             protected.append(path)
             continue
         if lowered.startswith(("target/automation_queue/", "target/automation_worktrees/", "target/automation_logs/", "target/validation_jobs/")):
@@ -19538,7 +19994,10 @@ def _worker_patch_backlog_summary(
 
 
 def worker_patch_read_model_conn(conn: sqlite3.Connection, target: Path | None = None, *, limit: int = 20) -> dict[str, Any]:
-    active_write_workers = worker_agents_conn(conn, mode="write", statuses={"queued", "running"}, limit=limit)
+    active_write_workers = [
+        *worker_agents_conn(conn, mode="write", statuses={"queued", "running"}, limit=limit),
+        *active_workers_from_ownership_leases_conn(conn, mode="write", limit=limit),
+    ][:limit]
     queued = worker_patches_conn(conn, statuses={"queued"}, limit=limit)
     conflicts = worker_patches_conn(conn, statuses={"conflict"}, limit=limit)
     backlog = [
@@ -19560,7 +20019,7 @@ def worker_patch_read_model_conn(conn: sqlite3.Connection, target: Path | None =
         "queued_worker_patches": queued,
         "write_worker_conflicts": conflicts,
         "lease_conflict_summary": {
-            "active_lease_count": len(active_resource_leases_conn(conn)),
+            "active_lease_count": len(active_runtime_leases_conn(conn)),
             "conflict_count": len(lease_conflicts),
             "conflicts": lease_conflicts[:6],
         },
@@ -24844,6 +25303,10 @@ def _build_parallel_groups(
 
 
 def _persist_parallel_execution_plan_conn(conn: sqlite3.Connection, groups: list[dict[str, Any]], *, generated_at: str) -> None:
+    execution_group_columns = _sqlite_columns(conn, "execution_groups")
+    legacy_group_columns = {"execution_group_id", "mode", "finished_at", "selected_by", "reason"}
+    if not legacy_group_columns.issubset(execution_group_columns):
+        return
     group_ids = [str(group.get("execution_group_id") or "") for group in groups if str(group.get("execution_group_id") or "")]
     with conn:
         if group_ids:
@@ -28126,7 +28589,7 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         impact_graph = refresh_impact_graph_conn(conn, target)
         impact_read_model = impact_graph_read_model(conn, target)
         expire_stale_leases_conn(conn)
-        active_leases = active_resource_leases_conn(conn)
+        active_leases = active_runtime_leases_conn(conn)
         conflicting_leases = current_conflicting_resource_leases_conn(conn)
         lease_suggestions = lease_suggestions_for_next_action_conn(conn, target)
         scheduler_decision = latest_scheduler_decision_conn(conn)
@@ -28168,7 +28631,19 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         patch_lineage = patch_lineage_summary_conn(conn)
         candidate_lanes = candidate_lane_read_model_conn(conn)
         validation_jobs = validation_job_read_model_conn(conn)
-        active_execution_groups = execution_groups_by_status_conn(conn, {"running"}, limit=16)
+        active_execution_groups = [
+            *execution_groups_by_status_conn(conn, {"running"}, limit=16),
+            *execution_groups_for_active_ownership_leases_conn(conn, limit=16),
+        ]
+        active_group_seen: set[str] = set()
+        active_execution_groups = [
+            group
+            for group in active_execution_groups
+            if not (
+                str(group.get("execution_group_id") or group.get("group_id") or "") in active_group_seen
+                or active_group_seen.add(str(group.get("execution_group_id") or group.get("group_id") or ""))
+            )
+        ][:16]
         recent_execution_groups = execution_groups_by_status_conn(conn, {"completed", "failed", "cancelled"}, limit=16)
         parallel_execution = {
             "schema_version": 1,

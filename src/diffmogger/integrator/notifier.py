@@ -41,8 +41,8 @@ def notify_commit_progress(
         return {"status": "dry_run"}
     if not commit_hash:
         return {"status": "no_commit"}
-    if human_bridge_mode(target) != "discord_notifier":
-        return {"status": "disabled", "detail": "human bridge mode is not discord_notifier"}
+    if human_bridge_mode(target) not in {"apprise_notifier", "local_notifier"}:
+        return {"status": "disabled", "detail": "human bridge mode does not use notifier delivery"}
 
     short_hash = commit_hash[:12]
     subject = commit_subject(commit_message)
@@ -65,7 +65,6 @@ def notify_commit_progress(
         "unblocked_work_remaining": [],
         "dedupe_key": f"commit-progress:{commit_hash}",
         "expects_reply": False,
-        "local_notify": False,
     }
     try:
         delivered = post_notifier(payload)

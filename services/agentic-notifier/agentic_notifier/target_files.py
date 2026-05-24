@@ -280,14 +280,15 @@ class TargetFiles:
             },
         )
 
-    def append_discord_inbound_message(
+    def append_inbound_message(
         self,
         *,
         author_name: str,
-        author_id: str,
-        channel_id: str,
         message_id: str,
         body: str,
+        channel: str = "manual",
+        author_id: str = "",
+        route: str = "",
         request_id: str | None,
         capture_reason: str,
         received_at: datetime | None = None,
@@ -298,11 +299,11 @@ class TargetFiles:
         entry = f"""## {inbox_id}
 
 - received_at: {timestamp.isoformat(timespec="seconds")}
-- channel: discord
-- discord_channel_id: {_one_line(channel_id)}
-- discord_author: {_one_line(author_name)}
-- discord_author_id: {_one_line(author_id)}
-- discord_message_id: {_one_line(message_id)}
+- channel: {_one_line(channel)}
+- route: {_one_line(route) or "unknown"}
+- author: {_one_line(author_name)}
+- author_id: {_one_line(author_id) or "unknown"}
+- message_id: {_one_line(message_id)}
 - capture_reason: {_one_line(capture_reason)}
 - request_id: {_one_line(request_id) or "unknown"}
 - status: unhandled
@@ -327,11 +328,11 @@ The next target project automation run should handle this message through typed 
                 "event": "inbound_response",
                 "inbox_id": inbox_id,
                 "received_at": timestamp.isoformat(timespec="seconds"),
-                "channel": "discord",
-                "discord_channel_id": channel_id,
-                "discord_author": author_name,
-                "discord_author_id": author_id,
-                "discord_message_id": message_id,
+                "channel": channel,
+                "route": route,
+                "author": author_name,
+                "author_id": author_id,
+                "message_id": message_id,
                 "capture_reason": capture_reason,
                 "request_id": request_id or "unknown",
                 "status": "unhandled",

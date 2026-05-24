@@ -11,7 +11,7 @@ import {
   TerminalSquare,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   BackendEnvelope,
   EnvironmentDiagnosticsSnapshot,
@@ -367,11 +367,13 @@ function SetupStatusCard(props: {
         <strong>{status.label}</strong>
         <small>{status.detail}</small>
       </div>
-      <div className={`setup-status-card ${human ? "warn" : "good"}`}>
-        <span>Human Input</span>
-        <strong>{human ? `${human} pending` : "Clear"}</strong>
-        <small>Recorded as input; scheduler work continues independently.</small>
-      </div>
+      {human ? (
+        <div className="setup-status-card warn">
+          <span>Human Input</span>
+          <strong>{human} pending</strong>
+          <small>Recorded as input; scheduler work continues independently.</small>
+        </div>
+      ) : null}
       <div className={`setup-status-card ${props.diagnostics?.status === "pass" ? "good" : props.diagnostics?.status ? "warn" : "quiet"}`}>
         <span>Backend checks</span>
         <strong>{props.diagnosticsLoading ? "Checking" : props.diagnostics?.status || "Not run"}</strong>
@@ -553,6 +555,33 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
     refreshInFlightRef.current = false;
     announce("Project closed.");
   }
+
+  const updateDirtyRoute = useCallback((route: ViewKey, message: string | null) => {
+    setDirtyRoutes((current) => {
+      const next = message || undefined;
+      if (current[route] === next) return current;
+      return { ...current, [route]: next };
+    });
+  }, []);
+
+  const updateBusyRoute = useCallback((route: ViewKey, busy: boolean) => {
+    setBusyRoutes((current) => {
+      if (Boolean(current[route]) === busy) return current;
+      return { ...current, [route]: busy || undefined };
+    });
+  }, []);
+
+  const handleSetupDirtyChange = useCallback((message: string | null) => {
+    updateDirtyRoute("Setup", message);
+  }, [updateDirtyRoute]);
+
+  const handleSetupBusyChange = useCallback((busy: boolean) => {
+    updateBusyRoute("Setup", busy);
+  }, [updateBusyRoute]);
+
+  const handleAutomationBusyChange = useCallback((busy: boolean) => {
+    updateBusyRoute("Automation", busy);
+  }, [updateBusyRoute]);
 
   async function revealSelectedProject() {
     if (!selectedPath) return;
@@ -896,10 +925,12 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
             <span>Scheduler next</span>
             <strong>{schedulerLabel(snapshot)}</strong>
           </div>
-          <div>
-            <span>Human input</span>
-            <strong>{human ? `${human} pending` : "Clear"}</strong>
-          </div>
+          {human ? (
+            <div>
+              <span>Human input</span>
+              <strong>{human} pending</strong>
+            </div>
+          ) : null}
         </section>
 
         {error && (
@@ -927,8 +958,8 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
                 onOpenRecent={(target) => void loadTarget(target, { navigateTo: "Setup" })}
                 onNavigate={navigate}
                 onRefresh={() => void refreshProject()}
-                onDirtyChange={(message) => setDirtyRoutes((current) => ({ ...current, Setup: message || undefined }))}
-                onBusyChange={(busy) => setBusyRoutes((current) => ({ ...current, Setup: busy }))}
+                onDirtyChange={handleSetupDirtyChange}
+                onBusyChange={handleSetupBusyChange}
               />
             </>
           ) : snapshot ? (
@@ -938,7 +969,7 @@ function App(props: { initialView?: ViewKey; initialProjectMenuOpen?: boolean } 
               onChoose={() => void chooseProject()}
               onNavigate={navigate}
               onRefresh={() => void refreshProject()}
-              onBusyChange={(busy) => setBusyRoutes((current) => ({ ...current, Automation: busy }))}
+              onBusyChange={handleAutomationBusyChange}
             />
           ) : (
             <NoTargetAutomation onChoose={() => void chooseProject()} onSetup={() => navigate("Setup")} />

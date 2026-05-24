@@ -1,1 +1,0 @@
-"""Source-kit validation tests."""

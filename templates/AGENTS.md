@@ -29,6 +29,7 @@ Project mode: {{PROJECT_MODE_LABEL}}
 - Read `.diffmogger/runtime/canonical_state_brief.md` instead of inspecting SQLite manually.
 - Refresh `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` only after typed state changes.
 - Use `.diffmogger/scripts/ticket_run.py` for ticket state. Planner, builder, and hardener worktrees stage typed ticket actions for integrator reconciliation.
+- Parallel scheduler waves are bounded and ownership-driven. If non-overlap is unclear, reduce fanout, run read-only scoping, or create setup/repair/indexing work.
 - {{ENV_ACCESS_AGENTS_RULE}}
 - Use safe local defaults, fixtures, mocks, or seed data unless the task explicitly enables external integration.
 - Do not spend money, deploy publicly, print secrets, or trigger real-world side effects without explicit approval.

@@ -22,7 +22,7 @@ Capture:
 10. Verification commands or expected checks.
 11. Environment access policy: project commands only, or direct local `.env*` reads allowed.
 12. Whether a human bridge is enabled.
-13. Human bridge mode: dashboard/SQLite records only, local notifier, Discord notifier, or disabled.
+13. Human bridge mode: dashboard/SQLite records only, local notifier, Apprise notifier, or disabled.
 14. Whether freeform human requests should receive direct notifier messages when the notifier is available.
 15. Whether read-only worker agents are allowed and whether Codex CLI worker reports are expected on broad runs.
 16. Maximum write-worker count from 1-10 and guidance for using always-available write workers as bounded acceleration when work splits into reviewable lanes.

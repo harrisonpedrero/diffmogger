@@ -24,7 +24,7 @@ export function TicketFields(props: {
     <section className="ticket-fields" aria-label={props.title}>
       <div className="ticket-field-header">
         <h3>{props.title}</h3>
-        <span>{props.ticket.id || "New ticket"}</span>
+        <span title={props.ticket.id || "New ticket"}>{props.ticket.id || "New ticket"}</span>
       </div>
       <div className="brief-form-grid two">
         <label className="brief-field">

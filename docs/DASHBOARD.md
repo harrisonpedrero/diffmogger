@@ -71,11 +71,11 @@ For existing repos, Diffmogger writes sidecar state under `.diffmogger/` and onl
 
 After scaffold and required-file validation, Automation can start or stop a detached target-scoped DAG scheduler runner.
 
-- **Start** launches `.diffmogger/scripts/run_conveyor_automation.sh` in a detached local process. The script keeps its historical filename, but the runtime model is the execution DAG.
+- **Start** launches `.diffmogger/scripts/run_temporal_worker.sh` in a detached local process. The runtime model is Temporal plus the execution DAG read model.
 - **Stop** terminates the recorded runner process group.
 - **Run Safety Check** runs `scripts/check_integration_safety.py` and records target safety evidence.
 
-Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Execution DAG state is canonical in `.diffmogger/runtime/orchestration.sqlite3`. The dashboard derives state from scheduler-selected action, tickets, DAG nodes, validation receipts, next actions, and ticket completion, not from raw validation failure counts alone.
+Automation writes runner logs under `.diffmogger/runtime/automation_logs/`. Execution DAG state is canonical in `.diffmogger/runtime/orchestration.sqlite3`. The dashboard derives state from scheduler-selected action, tickets, DAG nodes, execution groups, conflict telemetry, validation receipts, integration queue state, repair/unblocker work, next actions, and ticket completion, not from raw validation failure counts alone.
 
 Human input records are planning inputs in the current model. They should not hide independent work, setup, repair, mock, fixture, defer, split, reframe, documentation, review, or alternate-ticket work that can continue.
 

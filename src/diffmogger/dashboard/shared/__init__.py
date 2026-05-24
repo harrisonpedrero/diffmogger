@@ -410,12 +410,10 @@ def fetch_notifier_health(timeout: float = 0.6) -> tuple[bool, str]:
             body = response.read().decode("utf-8", errors="replace")
         payload = json.loads(body)
         configured = payload.get("target_repo_configured")
-        discord = payload.get("discord_configured")
-        local = payload.get("local_notifications_enabled")
+        apprise = payload.get("apprise_configured")
         return True, (
             "agentic-notifier is reachable; "
-            f"target_repo_configured={configured}; discord_configured={discord}; "
-            f"local_notifications_enabled={local}."
+            f"target_repo_configured={configured}; apprise_configured={apprise}."
         )
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
         return False, f"agentic-notifier is not reachable on 127.0.0.1:8765 ({exc})."
@@ -556,7 +554,7 @@ def check_prerequisites(target: Path, human_bridge_mode: str, optional_mcp_serve
             )
         )
 
-    if human_bridge_mode in {"local_notifier", "discord_notifier"}:
+    if human_bridge_mode in {"local_notifier", "apprise_notifier"}:
         notifier_ok, notifier_detail = fetch_notifier_health()
         items.append(
             PrerequisiteItem(

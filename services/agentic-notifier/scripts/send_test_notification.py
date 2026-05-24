@@ -10,7 +10,7 @@ from agentic_notifier.config import load_settings
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Send a test agentic-notifier payload.")
-    parser.add_argument("--progress", action="store_true", help="Send to the progress channel instead of the messaging channel.")
+    parser.add_argument("--progress", action="store_true", help="Send a progress event instead of a human-message event.")
     parser.add_argument("--real-send", action="store_true", help="Do not force dry_run on the request payload.")
     parser.add_argument(
         "--url",
@@ -28,16 +28,15 @@ def main() -> int:
         "summary": "Agentic notifier test",
         "event_kind": "progress" if args.progress else "message",
         "message_body": (
-            "Progress test: Diffmogger can post to the progress channel."
+            "Progress test: Diffmogger can route through Apprise."
             if args.progress
-            else "Message test: Diffmogger can post to the messaging channel and local notifications."
+            else "Message test: Diffmogger can record typed human-message state and route through Apprise."
         ),
         "minimum_user_action": "None.",
         "reply_format": "Optional follow-up request.",
         "unblocked_work_remaining": ["Continue current automation sprint"],
         "dedupe_key": "agentic-notifier-test:progress" if args.progress else "agentic-notifier-test:message",
         "expects_reply": False,
-        "local_notify": not args.progress,
         "dry_run": not args.real_send,
     }
     data = json.dumps(payload).encode("utf-8")

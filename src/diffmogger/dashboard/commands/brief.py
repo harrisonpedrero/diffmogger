@@ -42,7 +42,6 @@ LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "human_bridge_enabled": True,
     "human_bridge_mode": "file_only",
     "human_requested_text_responses": True,
-    "local_notifications_enabled": True,
     "worker_agents_allowed": True,
     "codex_cli_workers_expected_on_broad_runs": True,
     "write_worker_agents_allowed": True,
@@ -235,7 +234,6 @@ def _normalize_low_cortisol_intake(
     payload["human_bridge_enabled"] = True
     payload["human_bridge_mode"] = "file_only"
     payload["human_requested_text_responses"] = _bool_value(payload.get("human_requested_text_responses"), True)
-    payload["local_notifications_enabled"] = _bool_value(payload.get("local_notifications_enabled"), True)
     payload["worker_agents_allowed"] = _bool_value(payload.get("worker_agents_allowed"), True)
     payload["codex_cli_workers_expected_on_broad_runs"] = _bool_value(payload.get("codex_cli_workers_expected_on_broad_runs"), True)
     payload["write_worker_agents_allowed"] = True
@@ -867,7 +865,6 @@ def run_required_file_check_for_intake(target: Path, intake: dict[str, Any]) -> 
         "--human-bridge-mode",
         str(intake.get("human_bridge_mode") or "file_only"),
     ]
-    command.append("--write-workers-enabled")
     command.append("--multi-role-enabled")
     campaign = str(intake.get("campaign_mode") or intake.get("automation_run_mode") or "").strip().lower()
     campaign = campaign.replace("-", "_").replace(" ", "_")

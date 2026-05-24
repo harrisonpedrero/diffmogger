@@ -34,16 +34,17 @@ def _notify(summary: str = "Add Service X read-only API key") -> NotifyRequest:
     )
 
 
-def test_append_discord_inbound_message_creates_markdown_entry(tmp_path) -> None:
+def test_append_inbound_message_creates_markdown_entry(tmp_path) -> None:
     files = TargetFiles.from_settings(_settings(tmp_path))
     received_at = datetime(2026, 4, 29, 1, 23, 45, tzinfo=timezone.utc)
 
-    inbox_id = files.append_discord_inbound_message(
+    inbox_id = files.append_inbound_message(
         author_name="Harrison",
         author_id="123",
-        channel_id="456",
+        channel="manual",
+        route="dashboard",
         message_id="789",
-        body="<@999> HR-001 DONE. Key added locally.",
+        body="HR-001 DONE. Key added locally.",
         request_id="HR-001",
         capture_reason="mention",
         received_at=received_at,
@@ -52,9 +53,9 @@ def test_append_discord_inbound_message_creates_markdown_entry(tmp_path) -> None
     assert inbox_id == "INBOX-2026-04-29-001"
     inbox = files.paths.inbox.read_text(encoding="utf-8")
     assert "## INBOX-2026-04-29-001" in inbox
-    assert "- channel: discord" in inbox
-    assert "- discord_author: Harrison" in inbox
-    assert "- discord_message_id: 789" in inbox
+    assert "- channel: manual" in inbox
+    assert "- author: Harrison" in inbox
+    assert "- message_id: 789" in inbox
     assert "- capture_reason: mention" in inbox
     assert "HR-001 DONE. Key added locally." in inbox
 
@@ -81,14 +82,14 @@ def test_append_outbound_request_records_delivery_results(tmp_path) -> None:
         dry_run=True,
         dedupe_key="HR-2026-04-29-001:v1",
         status="dry_run",
-        delivery_results={"discord": {"status": "dry_run"}},
+        delivery_results={"apprise": {"status": "dry_run"}},
     )
 
     outbox = files.paths.outbox.read_text(encoding="utf-8")
     assert "- dry_run: true" in outbox
     assert "- sent: false" in outbox
     assert "- event_kind: message" in outbox
-    assert '"discord"' in outbox
+    assert '"apprise"' in outbox
     assert "Need input: HR-001" in outbox
 
 
@@ -103,10 +104,11 @@ def test_optional_jsonl_queues_are_written(tmp_path) -> None:
         dry_run=True,
         dedupe_key="HR:v1",
     )
-    files.append_discord_inbound_message(
+    files.append_inbound_message(
         author_name="Harrison",
         author_id="123",
-        channel_id="456",
+        channel="manual",
+        route="dashboard",
         message_id="789",
         body="DONE HR-001",
         request_id="HR-001",
@@ -118,4 +120,4 @@ def test_optional_jsonl_queues_are_written(tmp_path) -> None:
     responses = (files.paths.queue_dir / "human_responses.jsonl").read_text(
         encoding="utf-8"
     )
-    assert '"discord_message_id": "789"' in responses
+    assert '"message_id": "789"' in responses

@@ -4,6 +4,7 @@ from ..errors import *
 from ..jsonio import *
 from ..target import *
 from diffmogger.runtime.state_store import load_ticket_run_state
+from diffmogger.state.db import connect as typed_state_connect
 
 from .brief import command_brief_load
 from .run_control import (
@@ -37,9 +38,65 @@ def _ticket_status_counts(tickets: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _dashboard_ticket_status_from_typed(value: Any) -> str:
+    status = str(value or "").strip().lower().replace("-", "_")
+    if status == "running":
+        return "running"
+    if status == "done":
+        return "done"
+    if status == "blocked":
+        return "blocked"
+    if status in {"ready", "waiting"}:
+        return status
+    if status == "deferred":
+        return "waiting"
+    return status if status in {"pending", "in_progress", "candidate_done", "done", "blocked"} else "pending"
+
+
+def _typed_ticket_overrides(target: Path) -> dict[str, dict[str, Any]]:
+    try:
+        conn_context = typed_state_connect(target)
+        with conn_context as conn:
+            rows = conn.execute("SELECT ticket_id, status, payload_json FROM tickets").fetchall()
+    except Exception:
+        return {}
+    overrides: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        ticket_id = str(row["ticket_id"] or "").strip()
+        if not ticket_id or ticket_id == "default-local-cycle":
+            continue
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        payload = payload if isinstance(payload, dict) else {}
+        overrides[ticket_id] = {
+            "status": _dashboard_ticket_status_from_typed(row["status"]),
+            "runtime_status": str(row["status"] or ""),
+            "runtime_payload": payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
+            "runtime_evidence": payload.get("evidence") if isinstance(payload.get("evidence"), list) else [],
+        }
+    return overrides
+
+
 def _ticket_run_with_items(target: Path, projected_ticket_run: dict[str, Any]) -> dict[str, Any]:
     ticket_run = dict(projected_ticket_run)
+    typed_overrides = _typed_ticket_overrides(target)
     if _records(ticket_run.get("tickets")):
+        if typed_overrides:
+            tickets = []
+            for item in _records(ticket_run.get("tickets")):
+                ticket = dict(item)
+                override = typed_overrides.get(str(ticket.get("id") or ticket.get("ticket_id") or ""))
+                if override:
+                    ticket["status"] = override["status"]
+                    ticket["runtime_status"] = override["runtime_status"]
+                    ticket["runtime_payload"] = override["runtime_payload"]
+                    if override["runtime_evidence"]:
+                        ticket["evidence"] = override["runtime_evidence"]
+                tickets.append(ticket)
+            ticket_run["tickets"] = tickets
+            ticket_run["counts"] = _ticket_status_counts(tickets)
         return ticket_run
 
     try:
@@ -53,8 +110,21 @@ def _ticket_run_with_items(target: Path, projected_ticket_run: dict[str, Any]) -
 
     merged = {**runtime_ticket_run, **ticket_run}
     merged["tickets"] = runtime_tickets
-    if not _record(merged.get("counts")):
-        merged["counts"] = _ticket_status_counts(runtime_tickets)
+    if typed_overrides:
+        merged_tickets = []
+        for item in runtime_tickets:
+            ticket = dict(item)
+            override = typed_overrides.get(str(ticket.get("id") or ticket.get("ticket_id") or ""))
+            if override:
+                ticket["status"] = override["status"]
+                ticket["runtime_status"] = override["runtime_status"]
+                ticket["runtime_payload"] = override["runtime_payload"]
+                if override["runtime_evidence"]:
+                    ticket["evidence"] = override["runtime_evidence"]
+            merged_tickets.append(ticket)
+        merged["tickets"] = merged_tickets
+    if typed_overrides or not _record(merged.get("counts")):
+        merged["counts"] = _ticket_status_counts(_records(merged.get("tickets")))
     return merged
 
 
@@ -126,6 +196,18 @@ def command_project_load_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     active_validation_jobs = _records(state.get("active_validation_jobs"))
     validation_receipts = _records(state.get("validation_receipts"))
     strategy = _record(raw_snapshot.get("worker_strategy"))
+    parallelization_summary = _record(state.get("parallelization_summary"))
+    scheduler_mode = (
+        parallelization_summary.get("display_mode_label")
+        or parallelization_summary.get("display_mode")
+        or _record(state.get("scheduler_parallel_dry_run")).get("display_mode_label")
+        or _record(state.get("scheduler_parallel_dry_run")).get("display_mode")
+        or "Planning preview"
+    )
+    last_event = _record(state.get("last_event"))
+    human_messages = _record(state.get("human_messages"))
+    human_counts = _record(human_messages.get("counts"))
+    bridge_mode = human_bridge_mode_from_state(target)
     automation = automation_status_snapshot(target, dashboard_app)
     controls = run_controls_snapshot(target, dashboard_app, raw_snapshot)
     prerequisites = automation_prerequisites(target, dashboard_app)
@@ -165,9 +247,20 @@ def command_project_load_snapshot(args: argparse.Namespace) -> dict[str, Any]:
         },
         "scheduler": {
             "selected_action": _record(state.get("selected_candidate") or state.get("selected_scheduler_candidate")),
+            "candidates": _records(state.get("scheduling_candidates")),
             "next_actions": next_actions,
             "decision_queue": _records(conveyor.get("decision_queue")),
             "active_role_run": _record(conveyor.get("active_role_run") or state.get("active_role_run")),
+            "last_cycle": {
+                "event_id": last_event.get("event_id"),
+                "occurred_at": last_event.get("occurred_at") or conveyor.get("updated_at") or raw_snapshot.get("generated_at"),
+                "event_type": last_event.get("event_type") or "state.snapshot",
+                "actor_role": last_event.get("actor_role") or "scheduler",
+                "status": last_event.get("status") or state.get("status") or "",
+            },
+            "mode": scheduler_mode,
+            "parallelization_summary": parallelization_summary,
+            "scheduler_fallback_used": bool(state.get("scheduler_fallback_used")),
             "why_not_parallel": _record(state.get("why_not_parallel")),
             "scheduler_parallel_dry_run": _record(state.get("scheduler_parallel_dry_run")),
             "blocked_candidates": _records(state.get("blocked_parallel_candidates")),
@@ -185,6 +278,9 @@ def command_project_load_snapshot(args: argparse.Namespace) -> dict[str, Any]:
             "completed_worker_reports": _records(state.get("completed_worker_reports")),
             "queued_worker_patches": _records(state.get("queued_worker_patches")),
             "write_worker_conflicts": _records(state.get("write_worker_conflicts")),
+            "active_leases": _records(state.get("active_leases")),
+            "conflicting_leases": _records(state.get("conflicting_leases")),
+            "stale_graph_warnings": _records(state.get("stale_graph_warnings")),
             "integration_backlog_from_parallel_workers": _records(state.get("integration_backlog_from_parallel_workers")),
             "worker_patch_integration_preflight": _record(state.get("worker_patch_integration_preflight")),
             "recent_outcomes": _records(state.get("recent_outcomes") or state.get("recent_events")),
@@ -203,6 +299,13 @@ def command_project_load_snapshot(args: argparse.Namespace) -> dict[str, Any]:
             "unhandled_inbox": int(human.get("unhandled_inbox", 0) or 0),
             "outbound_records": int(human.get("outbound_records", 0) or 0),
             "summary": human.get("summary") or "",
+            "notification_mode": bridge_mode,
+            "notifier_status": {
+                "mode": bridge_mode,
+                "status": "file_only" if bridge_mode == "file_only" else "enabled" if bridge_mode in {"local_notifier", "apprise_notifier"} else "disabled",
+                "detail": "File-only handoff is active." if bridge_mode == "file_only" else "Notifier delivery is configured without exposing credentials." if bridge_mode in {"local_notifier", "apprise_notifier"} else "Human bridge is disabled.",
+            },
+            "message_counts": human_counts,
         },
         "validation_repair": {
             "validation": _record(task.get("validation")),

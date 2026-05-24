@@ -16,6 +16,7 @@ const RECENT_CONFIG_FILE: &str = "recent-targets.json";
 const MAX_RECENT_TARGETS: usize = 12;
 const ALLOWED_EDITOR_COMMANDS: &[&str] = &["code", "cursor", "zed", "subl"];
 const DEFAULT_AUTOMATION_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+const BACKEND_REQUIRED_PYTHON_MODULES: &[&str] = &["alembic", "pydantic"];
 static RUNTIME_STATE_WATCHES: OnceLock<Mutex<HashMap<String, Child>>> = OnceLock::new();
 
 const READ_ONLY_BACKEND_COMMANDS: &[&str] = &[
@@ -320,23 +321,167 @@ fn executable_on_path(binary: &str, path: &str) -> Option<PathBuf> {
     None
 }
 
-fn backend_python_executable(path: &str) -> String {
-    executable_on_path("python3", path)
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "python3".to_string())
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackendPythonProbe {
+    candidate: String,
+    source: String,
+    ok: bool,
+    reason: String,
+    missing: Vec<String>,
+    path: String,
 }
 
-fn prepare_backend_process(args: &[String]) -> ProcessCommand {
+fn source_venv_python(root: &Path) -> Option<PathBuf> {
+    let candidate = root.join(".venv").join("bin").join("python");
+    if candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn resolve_python_candidate(raw: &str, path: &str) -> Option<PathBuf> {
+    let candidate = PathBuf::from(raw);
+    if candidate.components().count() > 1 || candidate.is_absolute() {
+        return candidate.is_file().then_some(candidate);
+    }
+    executable_on_path(raw, path)
+}
+
+fn backend_python_candidates_for(
+    root: &Path,
+    path: &str,
+    configured_python: Option<&str>,
+) -> Vec<(String, PathBuf)> {
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+    if let Some(raw) = configured_python {
+        if !raw.trim().is_empty() {
+            let trimmed = raw.trim();
+            if let Some(candidate) = resolve_python_candidate(trimmed, path) {
+                candidates.push(("DIFFMOGGER_BACKEND_PYTHON".to_string(), candidate));
+            } else {
+                candidates.push(("DIFFMOGGER_BACKEND_PYTHON".to_string(), PathBuf::from(trimmed)));
+            }
+        }
+    }
+    if let Some(candidate) = source_venv_python(root) {
+        candidates.push(("source .venv".to_string(), candidate));
+    }
+    if let Some(candidate) = executable_on_path("python3", path) {
+        candidates.push(("PATH python3".to_string(), candidate));
+    }
+
+    let mut seen = BTreeSet::new();
+    candidates
+        .into_iter()
+        .filter(|(_, candidate)| seen.insert(candidate.display().to_string()))
+        .collect()
+}
+
+fn backend_python_candidates(root: &Path, path: &str) -> Vec<(String, PathBuf)> {
+    let configured_python = env::var("DIFFMOGGER_BACKEND_PYTHON").ok();
+    backend_python_candidates_for(root, path, configured_python.as_deref())
+}
+
+fn probe_backend_python(candidate: &Path, source: &str) -> BackendPythonProbe {
+    let candidate_text = candidate.display().to_string();
+    if !candidate.is_file() {
+        return BackendPythonProbe {
+            candidate: candidate_text,
+            source: source.to_string(),
+            ok: false,
+            reason: "not_executable".to_string(),
+            missing: BACKEND_REQUIRED_PYTHON_MODULES.iter().map(|item| item.to_string()).collect(),
+            path: String::new(),
+        };
+    }
+    let probe = format!(
+        "import importlib, json, sys\nmissing=[]\nfor name in {modules:?}:\n    try:\n        importlib.import_module(name)\n    except Exception as exc:\n        missing.append(f'{{name}}:{{exc.__class__.__name__}}:{{exc}}')\nprint(json.dumps({{'missing': missing, 'executable': sys.executable}}))\nsys.exit(1 if missing else 0)\n",
+        modules = BACKEND_REQUIRED_PYTHON_MODULES
+    );
+    let output = ProcessCommand::new(candidate)
+        .arg("-c")
+        .arg(probe)
+        .output();
+    let Ok(output) = output else {
+        return BackendPythonProbe {
+            candidate: candidate_text,
+            source: source.to_string(),
+            ok: false,
+            reason: "probe_failed".to_string(),
+            missing: BACKEND_REQUIRED_PYTHON_MODULES.iter().map(|item| item.to_string()).collect(),
+            path: String::new(),
+        };
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| json!({}));
+    let missing: Vec<String> = payload
+        .get("missing")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let executable = payload
+        .get("executable")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    BackendPythonProbe {
+        candidate: candidate_text,
+        source: source.to_string(),
+        ok: output.status.success() && missing.is_empty(),
+        reason: if output.status.success() && missing.is_empty() {
+            "imports_available".to_string()
+        } else if !missing.is_empty() {
+            "missing_imports".to_string()
+        } else {
+            "probe_failed".to_string()
+        },
+        missing,
+        path: executable,
+    }
+}
+
+fn backend_python_executable(root: &Path, path: &str) -> Result<(String, Vec<BackendPythonProbe>), CommandError> {
+    let mut probes = Vec::new();
+    for (source, candidate) in backend_python_candidates(root, path) {
+        let probe = probe_backend_python(&candidate, &source);
+        if probe.ok {
+            return Ok((probe.candidate.clone(), {
+                probes.push(probe);
+                probes
+            }));
+        }
+        probes.push(probe);
+    }
+    Err(CommandError::new(
+        "backend_python_unavailable",
+        "No Python interpreter could load the Diffmogger dashboard backend dependencies.",
+        json!({ "requiredModules": BACKEND_REQUIRED_PYTHON_MODULES, "probes": probes }),
+    ))
+}
+
+fn prepare_backend_process(root: &Path, args: &[String]) -> Result<ProcessCommand, CommandError> {
     let (native_path, backend_path) = path_with_native_toolchain();
-    let python = backend_python_executable(&backend_path);
+    let (python, probes) = backend_python_executable(root, &backend_path)?;
     let mut command = ProcessCommand::new(python);
     command
         .args(args)
         .env("PATH", &backend_path)
         .env("PYTHONUNBUFFERED", "1")
         .env("DIFFMOGGER_NATIVE_APP_PATH", native_path)
-        .env("DIFFMOGGER_BACKEND_PATH", backend_path);
-    command
+        .env("DIFFMOGGER_BACKEND_PATH", backend_path)
+        .env(
+            "DIFFMOGGER_BACKEND_PYTHON_PROBES",
+            serde_json::to_string(&probes).unwrap_or_else(|_| "[]".to_string()),
+        );
+    Ok(command)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -680,7 +825,7 @@ fn run_python_backend(command: &str, options: BackendArgs<'_>) -> Result<Value, 
         false,
     )?;
 
-    let output = prepare_backend_process(&args)
+    let output = prepare_backend_process(&root, &args)?
         .current_dir(&root)
         .output()
         .map_err(|error| {
@@ -943,7 +1088,7 @@ async fn run_backend_command_streamed(
             true,
         )?;
 
-        let mut child = prepare_backend_process(&args)
+        let mut child = prepare_backend_process(&root, &args)?
             .current_dir(&root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1093,7 +1238,7 @@ async fn start_runtime_state_watch(
             "--poll-interval".to_string(),
             "0.75".to_string(),
         ];
-        let mut child = prepare_backend_process(&args)
+        let mut child = prepare_backend_process(&root, &args)?
             .current_dir(&root)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1474,6 +1619,31 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!(
+            "diffmogger-native-{name}-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        fs::create_dir_all(&dir).expect("temp test dir should be created");
+        dir
+    }
+
+    #[cfg(unix)]
+    fn write_fake_executable(path: &Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("fake executable parent should be created");
+        }
+        fs::write(path, body).expect("fake executable should be written");
+        let mut permissions = fs::metadata(path)
+            .expect("fake executable metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("fake executable should be chmodded");
+    }
 
     fn test_build_backend_args(
         command: &str,
@@ -1521,6 +1691,65 @@ mod tests {
         let error = run_python_backend("shell.exec", BackendArgs::default()).unwrap_err();
 
         assert_eq!(error.kind, "command_not_allowed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backend_python_candidates_prefer_configured_then_source_venv_then_path_python() {
+        let root = temp_test_dir("python-candidates");
+        let configured = root.join("configured-python");
+        let source_venv = root.join(".venv").join("bin").join("python");
+        let path_python_dir = root.join("path-bin");
+        let path_python = path_python_dir.join("python3");
+        write_fake_executable(&configured, "#!/bin/sh\nexit 0\n");
+        write_fake_executable(&source_venv, "#!/bin/sh\nexit 0\n");
+        write_fake_executable(&path_python, "#!/bin/sh\nexit 0\n");
+
+        let candidates = backend_python_candidates_for(
+            &root,
+            &path_python_dir.display().to_string(),
+            Some(&configured.display().to_string()),
+        );
+
+        let sources: Vec<&str> = candidates.iter().map(|(source, _)| source.as_str()).collect();
+        let paths: Vec<String> = candidates
+            .iter()
+            .map(|(_, path)| path.display().to_string())
+            .collect();
+
+        assert_eq!(
+            sources,
+            vec!["DIFFMOGGER_BACKEND_PYTHON", "source .venv", "PATH python3"]
+        );
+        assert_eq!(paths[0], configured.display().to_string());
+        assert_eq!(paths[1], source_venv.display().to_string());
+        assert_eq!(paths[2], path_python.display().to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backend_python_probe_reports_missing_modules_before_fallback() {
+        let root = temp_test_dir("python-probe");
+        let missing_python = root.join("missing-python");
+        let capable_python = root.join("capable-python");
+        write_fake_executable(
+            &missing_python,
+            "#!/bin/sh\nprintf '%s\\n' '{\"missing\":[\"alembic:ModuleNotFoundError\"],\"executable\":\"fake-missing\"}'\nexit 1\n",
+        );
+        write_fake_executable(
+            &capable_python,
+            "#!/bin/sh\nprintf '%s\\n' '{\"missing\":[],\"executable\":\"fake-capable\"}'\nexit 0\n",
+        );
+
+        let missing_probe = probe_backend_python(&missing_python, "configured");
+        let capable_probe = probe_backend_python(&capable_python, "source .venv");
+
+        assert!(!missing_probe.ok);
+        assert_eq!(missing_probe.reason, "missing_imports");
+        assert_eq!(missing_probe.missing, vec!["alembic:ModuleNotFoundError"]);
+        assert!(capable_probe.ok);
+        assert_eq!(capable_probe.reason, "imports_available");
+        assert_eq!(capable_probe.path, "fake-capable");
     }
 
     #[test]

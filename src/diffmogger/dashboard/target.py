@@ -302,7 +302,6 @@ def dashboard_state_from_intake(
         "human_bridge_enabled": bool(intake.get("human_bridge_enabled", True)),
         "human_bridge_mode": str(intake.get("human_bridge_mode") or "file_only"),
         "human_requested_text_responses": bool(intake.get("human_requested_text_responses", True)),
-        "local_notifications_enabled": bool(intake.get("local_notifications_enabled", True)),
         "env_access_policy": str(intake.get("env_access_policy") or "project_commands_only"),
         "worker_agents_allowed": bool(intake.get("worker_agents_allowed", True)),
         "codex_cli_workers_expected_on_broad_runs": bool(intake.get("codex_cli_workers_expected_on_broad_runs", True)),
@@ -449,7 +448,7 @@ def human_bridge_mode_from_state(target: Path) -> str:
     for data in (load_intake(target), load_dashboard_state(target)):
         mode = str(data.get("human_bridge_mode") or "").strip()
         enabled = bool(data.get("human_bridge_enabled", mode != "disabled"))
-        if enabled and mode in {"file_only", "local_notifier", "discord_notifier"}:
+        if enabled and mode in {"file_only", "local_notifier", "apprise_notifier"}:
             return mode
         if mode == "disabled":
             return "disabled"

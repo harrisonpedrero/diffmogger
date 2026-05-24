@@ -946,7 +946,7 @@ def notify_completion(target: Path, data: dict[str, Any], summary: dict[str, Any
     if not notify_enabled:
         return {"status": "disabled", "detail": "ticket completion notify disabled"}
     mode = str(intake.get("human_bridge_mode") or "file_only").strip().lower()
-    if mode not in {"local_notifier", "discord_notifier"}:
+    if mode not in {"local_notifier", "apprise_notifier"}:
         return {"status": "disabled", "detail": f"human bridge mode {mode} does not use notifier delivery"}
     message = ticket_notification_message(target, data, summary, report_path)
     payload = {
@@ -962,7 +962,6 @@ def notify_completion(target: Path, data: dict[str, Any], summary: dict[str, Any
         "unblocked_work_remaining": [],
         "dedupe_key": f"TICKET-{summary['run_id']}:{summary['status']}",
         "expects_reply": False,
-        "local_notify": bool_value(intake.get("local_notifications_enabled"), True),
     }
     try:
         delivered = post_notifier(payload)

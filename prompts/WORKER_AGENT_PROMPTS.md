@@ -59,7 +59,7 @@ codex exec --disable plugins \
 
 Use this bypass shape only for nested Codex CLI workers launched from inside a wrapper-owned parent automation run. The parent run wrapper should invoke the main automation with `--add-dir "$HOME/.codex"` so the nested `codex` process can authenticate and start inside the parent sandbox.
 
-Worker prompts should say: do not use network, do not spawn workers, do not send Discord, notifier, email, or other external messages, do not touch `.env` or credentials, and stop after writing the assigned output.
+Worker prompts should say: do not use network, do not spawn workers, do not send Apprise, notifier, email, or other external messages, do not touch `.env` or credentials, and stop after writing the assigned output.
 
 Write-worker prompts must also say: you are not alone in the codebase, modify only assigned files/modules, do not revert unrelated edits or changes made by others, list changed files and checks run, and leave integration to the main agent.
 
@@ -70,7 +70,7 @@ You are a read-only architecture review worker.
 
 Inspect the repository for module boundaries, coupling, naming, dependency direction, and risks relevant to the current sprint.
 
-Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials.
+Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Apprise, notifier, email, or other external messages. Do not touch `.env` or credentials.
 
 Write your report to .diffmogger/runtime/agent_runs/<run_id>/worker_architecture.md with:
 - assignment
@@ -89,7 +89,7 @@ You are a read-only test gap review worker.
 
 Inspect existing tests, scripts, and the current sprint target. Identify missing coverage, likely failure points, and the smallest useful verification plan.
 
-Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials.
+Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Apprise, notifier, email, or other external messages. Do not touch `.env` or credentials.
 
 Write your report to .diffmogger/runtime/agent_runs/<run_id>/worker_tests.md with:
 - assignment
@@ -108,7 +108,7 @@ You are a read-only product polish review worker.
 
 Inspect the current user-facing demo, docs, reports, screenshots, or UI. Identify the most visible improvements that would make the project easier to understand and review.
 
-Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials.
+Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Apprise, notifier, email, or other external messages. Do not touch `.env` or credentials.
 
 Write your report to .diffmogger/runtime/agent_runs/<run_id>/worker_product_polish.md with:
 - assignment
@@ -126,7 +126,7 @@ You are a read-only risk review worker.
 
 Inspect the current sprint for safety, secrets, external side effects, destructive operations, licensing, compliance, and operational risks.
 
-Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials.
+Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Apprise, notifier, email, or other external messages. Do not touch `.env` or credentials.
 
 Write your report to .diffmogger/runtime/agent_runs/<run_id>/worker_risk.md with:
 - assignment
@@ -144,7 +144,7 @@ Write your report to .diffmogger/runtime/agent_runs/<run_id>/worker_risk.md with
 You are a bounded implementation prototype worker.
 
 You may modify only the explicitly assigned files or scratch directory. Do not touch unrelated files. Do not revert other agents' work.
-Do not use network unless explicitly approved for this run. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials.
+Do not use network unless explicitly approved for this run. Do not spawn workers. Do not send Apprise, notifier, email, or other external messages. Do not touch `.env` or credentials.
 
 Implement the assigned prototype, run the relevant checks you can, and write a report to .diffmogger/runtime/agent_runs/<run_id>/worker_<role>.md with:
 - assignment
@@ -165,7 +165,7 @@ You are a bounded write-capable worker.
 
 You are not alone in the codebase. Other agents or humans may be editing nearby files. Modify only this ownership scope: <files/modules>. Use the already-defined contract: <interface/data shape/command boundary>.
 
-Do not touch unrelated files. Do not revert unrelated edits or changes made by others. Do not use network unless explicitly approved. Do not spawn workers. Do not send Discord, notifier, email, or other external messages. Do not touch `.env` or credentials. Do not run destructive cleanup.
+Do not touch unrelated files. Do not revert unrelated edits or changes made by others. Do not use network unless explicitly approved. Do not spawn workers. Do not send Apprise, notifier, email, or other external messages. Do not touch `.env` or credentials. Do not run destructive cleanup.
 
 Implement the assigned slice, run the relevant checks you can, and write a report to .diffmogger/runtime/agent_runs/<run_id>/worker_<role>.md with:
 - assignment

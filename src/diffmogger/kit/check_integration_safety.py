@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DISCORD_BOT_TOKEN = re.compile(r"\b[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{24,}\b")
 PHONE_NUMBER = re.compile(r"(?<![\w+])\+1\d{10}(?!\w)")
 PLACEHOLDER_PHONES = {"+15555555555", "+14155238886"}
 
@@ -75,9 +74,6 @@ def scan_for_live_secrets_or_urls(root: Path, problems: list[Problem]) -> None:
         except UnicodeDecodeError:
             continue
 
-        for match in DISCORD_BOT_TOKEN.findall(text):
-            problems.append(Problem(rel, f"contains a concrete-looking Discord bot token: {match}"))
-
         for match in PHONE_NUMBER.findall(text):
             if match not in PLACEHOLDER_PHONES:
                 problems.append(Problem(rel, f"contains a non-placeholder +1 phone number: {match}"))
@@ -94,8 +90,8 @@ def check_integration_safety(root: Path) -> list[Problem]:
         ),
         (
             "services/agentic-notifier/agentic_notifier/config.py",
-            "discord_bot_token: str = \"\"",
-            "Discord token must default to empty configuration",
+            "apprise_urls: tuple[str, ...] = ()",
+            "Apprise routes must default to empty configuration",
         ),
         (
             "services/agentic-notifier/agentic_notifier/config.py",
@@ -119,8 +115,8 @@ def check_integration_safety(root: Path) -> list[Problem]:
         ),
         (
             "services/agentic-notifier/.env.example",
-            "DISCORD_BOT_TOKEN=replace-with-your-discord-bot-token",
-            "example notifier config must use a placeholder Discord token",
+            "APPRISE_URLS=macosx://",
+            "example notifier config must use a local placeholder Apprise route",
         ),
         (
             "services/agentic-notifier/agentic_notifier/api_app.py",
@@ -154,7 +150,7 @@ def check_integration_safety(root: Path) -> list[Problem]:
         ),
         (
             "docs/HUMAN_BRIDGE.md",
-            "No Discord, webhook, notifier API, or messaging credentials are used in this mode.",
+            "No Apprise, webhook, notifier API, or messaging credentials are used in this mode.",
             "current file-only bridge docs must forbid notifier and messaging side effects",
         ),
         (

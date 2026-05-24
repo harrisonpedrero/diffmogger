@@ -20,8 +20,8 @@ AGENTS.md
 .diffmogger/state/DEVELOPMENT.md
 .diffmogger/scripts/acquire_codex_lock.sh
 .diffmogger/scripts/release_codex_lock.sh
-.diffmogger/scripts/run_conveyor_automation.sh
-.diffmogger/scripts/run_conveyor_automation.py
+.diffmogger/scripts/run_temporal_worker.sh
+.diffmogger/scripts/orchestration_cli.py
 .diffmogger/scripts/run_role_automation.sh
 .diffmogger/scripts/integrate_role_outputs.py
 .diffmogger/scripts/list_deferred_patches.py
@@ -50,7 +50,7 @@ It must explicitly read and follow:
 .diffmogger/runtime/canonical_state_brief.md
 ```
 
-It must say that the task file is dynamic and rewritten at the end of every run, but is not the runtime authority. It must say canonical runtime state lives in `.diffmogger/runtime/orchestration.sqlite3`; typed automation control, execution DAG nodes/edges, repository capability manifest, validation receipts, blockers, human messages, and next actions live there; conveyor stage fields and `.diffmogger/runtime/automation_conveyor_state.json` are generated read-model projections. `.diffmogger/runtime/canonical_state_brief.md` is the generated view agents read instead of inspecting SQLite manually. It must say the guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
+It must say that the task file is dynamic and rewritten at the end of every run, but is not the runtime authority. It must say canonical runtime state lives in `.diffmogger/runtime/orchestration.sqlite3`; typed automation control, execution DAG nodes/edges, repository capability manifest, validation receipts, blockers, human messages, and next actions live there; scheduler stage fields and `.diffmogger/runtime/automation_runner.json` are generated read-model projections. `.diffmogger/runtime/canonical_state_brief.md` is the generated view agents read instead of inspecting SQLite manually. It must say the guardrails file is static and should not be rewritten unless the user explicitly asks or the current task is specifically to improve guardrails.
 
 The automation prompt must include this exact language:
 
@@ -96,12 +96,12 @@ The human bridge docs and automation prompt must support four modes:
 
 1. disabled
 2. dashboard-backed file-only mode
-3. local desktop notifier mode: `POST http://127.0.0.1:8765/api/notify`
-4. Discord notifier mode: `POST http://127.0.0.1:8765/api/notify`
+3. local notifier compatibility mode: `POST http://127.0.0.1:8765/api/notify`
+4. Apprise notifier mode: `POST http://127.0.0.1:8765/api/notify`
 
-For `file_only`, the generated docs must say the human reviews requests and replies through the Diffmogger dashboard, and summary/status requests are satisfied through the dashboard or requested local artifacts. It must not tell Codex to call Discord or notifier APIs in file-only mode.
+For `file_only`, the generated docs must say the human reviews requests and replies through the Diffmogger dashboard, and summary/status requests are satisfied through the dashboard or requested local artifacts. It must not tell Codex to call Apprise or notifier APIs in file-only mode.
 
-For `local_notifier`, the generated automation prompt must say the notifier is for local desktop notifications only. For `discord_notifier`, it must say progress uses `event_kind: "progress"`, direct human messages use `event_kind: "message"`, local automation commits trigger brief progress-channel notifications with the commit subject and work summary, and Discord credentials stay only in `services/agentic-notifier/.env`. If the notifier is unavailable in either notifier mode, Codex should record the pending outbound message in typed human-message state and continue useful work. While the current status vocabulary is active, `ACTIVE_WITH_PENDING_USER_INPUT` can annotate that state unless no useful work remains.
+For `local_notifier`, the generated automation prompt must describe it as a compatibility label for local Apprise routes. For `apprise_notifier`, it must say progress uses `event_kind: "progress"`, direct human messages use `event_kind: "message"`, local automation commits trigger brief progress notifications with the commit subject and work summary, and Apprise URLs stay only in `services/agentic-notifier/.env`. If the notifier is unavailable in either notifier mode, Codex should record the pending outbound message in typed human-message state and continue useful work. While the current status vocabulary is active, `ACTIVE_WITH_PENDING_USER_INPUT` can annotate that state unless no useful work remains.
 
 The generated automation prompt must read `.diffmogger/runtime/canonical_state_brief.md` at the start of each run, handle queued human messages from typed state, and record concise resolution notes through typed human-message APIs.
 
@@ -171,7 +171,7 @@ Support the current continuous automation architecture: the typed execution DAG 
 
 Generated docs and config must document DAG scheduler fields: `parallel_execution_mode`, `symbol_graph_languages`, `parallel_write_min_confidence`, `parallel_write_direct_confidence`, `max_parallel_write_workers`, and `max_parallel_scope_workers`.
 
-Generated targets must include `.diffmogger/scripts/run_conveyor_automation.sh`, `.diffmogger/scripts/run_conveyor_automation.py`, `.diffmogger/scripts/run_role_automation.sh`, `.diffmogger/scripts/integrate_role_outputs.py`, `.diffmogger/scripts/list_deferred_patches.py`, `.diffmogger/scripts/run_observatory.py`, `.diffmogger/scripts/repair_environment.py`, `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, `.diffmogger/agentic/roles/integrator.md`, `.diffmogger/state/DEVELOPMENT.md`, and `.diffmogger/schemas/orchestration_state.schema.json` as local automation helpers/contracts.
+Generated targets must include `.diffmogger/scripts/run_temporal_worker.sh`, `.diffmogger/scripts/orchestration_cli.py`, `.diffmogger/scripts/run_role_automation.sh`, `.diffmogger/scripts/integrate_role_outputs.py`, `.diffmogger/scripts/list_deferred_patches.py`, `.diffmogger/scripts/run_observatory.py`, `.diffmogger/scripts/repair_environment.py`, `.diffmogger/agentic/roles/planner.md`, `.diffmogger/agentic/roles/builder.md`, `.diffmogger/agentic/roles/hardener.md`, `.diffmogger/agentic/roles/integrator.md`, `.diffmogger/state/DEVELOPMENT.md`, and `.diffmogger/schemas/orchestration_state.schema.json` as local automation helpers/contracts.
 
 Generated multi-role prompts must state that:
 

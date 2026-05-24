@@ -41,6 +41,7 @@ export type RunDagPhaseId =
 export type RunDagStatusKind = "pending" | "ready" | "running" | "completed" | "blocked" | "failed" | "skipped";
 export type RunDagBadgeTone = "good" | "warn" | "critical" | "info" | "quiet";
 export type RunDagRenderMode = "normal" | "large" | "oversized";
+export type RunRuntimeDisplayStatus = "" | "scoping" | "building";
 
 export type RunDagBadge = {
   kind: "attempt" | "validation" | "patch" | "blocker" | "worktree" | "lease";
@@ -55,6 +56,10 @@ export type RunDagNode = {
   canonicalActionType: string;
   status: string;
   statusKind: RunDagStatusKind;
+  runtimeStatus: RunRuntimeDisplayStatus;
+  runtimeStatusLabel: string;
+  activeWorkerId: string;
+  activeWorkerGroupId: string;
   ownerRole: string;
   phase: RunDagPhaseId;
   attemptCount: number;
@@ -340,9 +345,11 @@ function schedulerState(snapshot: ProjectSnapshot | null): Record<string, unknow
   return {
     selected_candidate: snapshot.scheduler.selected_action,
     selected_scheduler_candidate: snapshot.scheduler.selected_action,
+    scheduling_candidates: snapshot.scheduler.candidates,
     next_actions: snapshot.scheduler.next_actions,
     why_not_parallel: snapshot.scheduler.why_not_parallel,
     scheduler_parallel_dry_run: snapshot.scheduler.scheduler_parallel_dry_run,
+    parallelization_summary: snapshot.scheduler.parallelization_summary,
     blocked_parallel_candidates: snapshot.scheduler.blocked_candidates,
     skipped_scheduler_candidates: snapshot.scheduler.skipped_candidates,
     skipped_candidates: snapshot.scheduler.skipped_candidates,
@@ -363,6 +370,9 @@ function dagState(snapshot: ProjectSnapshot | null): Record<string, unknown> {
     completed_worker_reports: snapshot.dag.completed_worker_reports,
     queued_worker_patches: snapshot.dag.queued_worker_patches,
     write_worker_conflicts: snapshot.dag.write_worker_conflicts,
+    active_leases: snapshot.dag.active_leases,
+    conflicting_leases: snapshot.dag.conflicting_leases,
+    stale_graph_warnings: snapshot.dag.stale_graph_warnings,
     integration_backlog_from_parallel_workers: snapshot.dag.integration_backlog_from_parallel_workers,
     worker_patch_integration_preflight: snapshot.dag.worker_patch_integration_preflight,
     recent_outcomes: snapshot.dag.recent_outcomes,
@@ -552,13 +562,106 @@ function compactText(value: unknown, fallback = ""): string {
   return text(value, fallback).replace(/\s+/g, " ").trim();
 }
 
+function normalizedToken(value: unknown): string {
+  return compactText(value, "").toLowerCase().replace(/[\s-]+/g, "_");
+}
+
 function confidenceLabel(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0%";
   return `${Math.round(Math.min(1, Math.max(0, value)) * 100)}%`;
 }
 
+type RuntimeNodeOverlay = {
+  status: RunRuntimeDisplayStatus;
+  workerId: string;
+  groupId: string;
+  detail: string;
+};
+
+function firstRuntimeText(values: unknown[], fallback = ""): string {
+  for (const value of values) {
+    const rendered = compactText(value, "");
+    if (rendered) return rendered;
+  }
+  return fallback;
+}
+
+function activeWorkerRuntimeStatus(worker: Record<string, unknown>): RunRuntimeDisplayStatus {
+  const payload = record(worker.payload);
+  const lease = record(payload.lease);
+  const leasePayload = record(lease.payload);
+  const explicit = normalizedToken(firstRuntimeText([worker.display_status, worker.runtime_status, payload.display_status], ""));
+  if (explicit === "scoping" || explicit === "planning") return "scoping";
+  if (explicit === "building" || explicit === "writing") return "building";
+  const mode = normalizedToken(firstRuntimeText([worker.mode, lease.mode], ""));
+  const action = normalizedToken(firstRuntimeText([worker.action_kind, payload.action_kind, lease.action_kind, leasePayload.action_kind], ""));
+  if (action === "launch_scope_work" || mode === "read" || mode === "read_only" || mode === "read_only_scope") return "scoping";
+  if (action === "launch_work" || mode === "write" || mode === "write_workers") return "building";
+  return "";
+}
+
+function activeWorkerTicketId(worker: Record<string, unknown>): string {
+  const payload = record(worker.payload);
+  const lease = record(payload.lease);
+  const leasePayload = record(lease.payload);
+  return firstRuntimeText([
+    worker.task_id,
+    worker.ticket_id,
+    payload.ticket_id,
+    lease.ticket_id,
+    lease.task_id,
+    leasePayload.ticket_id,
+  ], "");
+}
+
+function activeWorkerNodeId(worker: Record<string, unknown>): string {
+  const payload = record(worker.payload);
+  const lease = record(payload.lease);
+  return firstRuntimeText([worker.dag_node_id, worker.node_id, payload.dag_node_id, payload.node_id, lease.node_id], "");
+}
+
+function runtimeOverlayPriority(status: RunRuntimeDisplayStatus): number {
+  if (status === "building") return 2;
+  if (status === "scoping") return 1;
+  return 0;
+}
+
+function setRuntimeOverlay(map: Map<string, RuntimeNodeOverlay>, key: string, overlay: RuntimeNodeOverlay): void {
+  if (!key) return;
+  const existing = map.get(key);
+  if (!existing || runtimeOverlayPriority(overlay.status) > runtimeOverlayPriority(existing.status)) {
+    map.set(key, overlay);
+  }
+}
+
+function activeRuntimeOverlays(snapshot: ProjectSnapshot | null): {
+  byNode: Map<string, RuntimeNodeOverlay>;
+  byTicket: Map<string, RuntimeNodeOverlay>;
+} {
+  const state = dagState(snapshot);
+  const byNode = new Map<string, RuntimeNodeOverlay>();
+  const byTicket = new Map<string, RuntimeNodeOverlay>();
+  const workers = [
+    ...list(state.active_read_only_workers).map(record),
+    ...list(state.active_write_workers).map(record),
+  ];
+  for (const worker of workers) {
+    const status = activeWorkerRuntimeStatus(worker);
+    if (!status) continue;
+    const overlay: RuntimeNodeOverlay = {
+      status,
+      workerId: firstRuntimeText([worker.worker_id, worker.run_id], ""),
+      groupId: firstRuntimeText([worker.execution_group_id, worker.group_id], ""),
+      detail: firstRuntimeText([worker.status_label, worker.failure_reason, worker.context_pack_id, worker.report_artifact_id], ""),
+    };
+    setRuntimeOverlay(byNode, activeWorkerNodeId(worker), overlay);
+    setRuntimeOverlay(byTicket, activeWorkerTicketId(worker), overlay);
+  }
+  return { byNode, byTicket };
+}
+
 function statusKind(rawStatus: string, dependencyBlocked: boolean, blockerReason: string): RunDagStatusKind {
-  const status = rawStatus.toLowerCase().replace(/[\s-]+/g, "_");
+  const status = normalizedToken(rawStatus);
   if (["skipped", "superseded"].includes(status)) return "skipped";
   if (["failed", "failure", "cancelled", "canceled", "error"].includes(status)) return "failed";
   if (["blocked", "blocked_on_user", "blocked_on_environment", "critical_stop"].includes(status) || blockerReason) return "blocked";
@@ -571,7 +674,7 @@ function statusKind(rawStatus: string, dependencyBlocked: boolean, blockerReason
 }
 
 function canonicalDagAction(actionType: string): string {
-  const action = actionType.toLowerCase().replace(/[\s-]+/g, "_");
+  const action = normalizedToken(actionType);
   return DAG_ACTION_ALIASES[action] ?? action;
 }
 
@@ -579,6 +682,34 @@ function dagPhase(actionType: string): RunDagPhaseId {
   const action = canonicalDagAction(actionType);
   if (DAG_PHASES.some((phase) => phase.id === action)) return action as RunDagPhaseId;
   return "done";
+}
+
+function runtimeOverlayForNode(
+  overlays: ReturnType<typeof activeRuntimeOverlays>,
+  nodeId: string,
+  ticketId: string,
+  phase: RunDagPhaseId,
+  actionType: string,
+  canonicalActionType: string,
+): RuntimeNodeOverlay | undefined {
+  const direct = overlays.byNode.get(nodeId);
+  if (direct) return direct;
+  const ticketOverlay = overlays.byTicket.get(ticketId);
+  if (!ticketOverlay) return undefined;
+  const action = canonicalDagAction(canonicalActionType || actionType);
+  if (ticketOverlay.status === "scoping" && (phase === "scope" || ["scope", "decompose", "orchestrate"].includes(action))) {
+    return ticketOverlay;
+  }
+  if (ticketOverlay.status === "building" && (phase === "build" || ["build", "repair"].includes(action))) {
+    return ticketOverlay;
+  }
+  return undefined;
+}
+
+function isInternalSummaryNode(node: RunDagNode): boolean {
+  const action = canonicalDagAction(node.actionType || node.canonicalActionType);
+  if (action === "ticket") return true;
+  return node.statusKind === "completed" && ["blocker", "orchestrate", "decompose"].includes(action);
 }
 
 function ownershipScope(metadata: Record<string, unknown>): string {
@@ -594,6 +725,7 @@ function dagNodeDetail(node: {
   actionType: string;
   canonicalActionType: string;
   status: string;
+  runtimeStatus: RunRuntimeDisplayStatus;
   ownerRole: string;
   attemptCount: number;
   confidenceLabel: string;
@@ -608,6 +740,7 @@ function dagNodeDetail(node: {
     `${node.actionType} for ${node.ticketId || node.id}`,
     `action ${node.canonicalActionType}`,
     `status ${node.status}`,
+    node.runtimeStatus ? `runtime ${node.runtimeStatus}` : "",
     `owner ${node.ownerRole}`,
     `attempt ${node.attemptCount}`,
     `confidence ${node.confidenceLabel}`,
@@ -714,8 +847,12 @@ function dagGroups(snapshot: ProjectSnapshot | null, nodes: RunDagNode[]): RunDa
       const dagNodeId = text(item.dag_node_id || item.source_dag_node_id, "");
       if (dagNodeId) nodeIds.add(dagNodeId);
       if (taskId) {
+        const workerDisplayStatus = activeWorkerRuntimeStatus(item);
         for (const node of nodes) {
-          if (node.ticketId === taskId && ["running", "ready", "pending"].includes(node.statusKind)) nodeIds.add(node.id);
+          if (node.ticketId !== taskId || !["running", "ready", "pending"].includes(node.statusKind)) continue;
+          if (workerDisplayStatus === "scoping" && !["scope", "decompose", "orchestrate"].includes(node.phase)) continue;
+          if (workerDisplayStatus === "building" && !["build", "repair"].includes(node.phase)) continue;
+          nodeIds.add(node.id);
         }
       }
     }
@@ -892,6 +1029,7 @@ function executionDagModel(snapshot: ProjectSnapshot | null): RunModel["executio
   const rawNodes = list(dag.nodes).map(record);
   const rawEdges = list(dag.edges).map(record);
   const blockedReasons = blockedReasonByNode(dag);
+  const runtimeOverlays = activeRuntimeOverlays(snapshot);
   const nodes: RunDagNode[] = rawNodes
     .map((raw) => {
       const metadata = record(raw.metadata);
@@ -904,15 +1042,22 @@ function executionDagModel(snapshot: ProjectSnapshot | null): RunModel["executio
       const visualStatus = statusKind(text(raw.status, "pending"), Boolean(blocked?.dependencyBlocked), blockerReason);
       const actionType = text(raw.action_type, "node");
       const canonicalActionType = text(raw.canonical_action_type, canonicalDagAction(actionType));
+      const ticketId = text(raw.task_id || raw.ticket_id, "");
+      const phase = dagPhase(actionType);
+      const runtimeOverlay = runtimeOverlayForNode(runtimeOverlays, id, ticketId, phase, actionType, canonicalActionType);
       const node: Omit<RunDagNode, "detail"> = {
         id,
-        ticketId: text(raw.task_id || raw.ticket_id, ""),
+        ticketId,
         actionType,
         canonicalActionType,
         status: text(raw.status, "pending"),
         statusKind: visualStatus,
+        runtimeStatus: runtimeOverlay?.status ?? "",
+        runtimeStatusLabel: runtimeOverlay?.status ? runtimeOverlay.status.replace(/_/g, " ") : "",
+        activeWorkerId: runtimeOverlay?.workerId ?? "",
+        activeWorkerGroupId: runtimeOverlay?.groupId ?? "",
         ownerRole: text(raw.owner_role, "unassigned"),
-        phase: dagPhase(actionType),
+        phase,
         attemptCount: number(raw.attempt_count),
         confidence,
         confidenceLabel: confidenceLabel(confidence),
@@ -955,8 +1100,9 @@ function executionDagModel(snapshot: ProjectSnapshot | null): RunModel["executio
       };
     })
     .filter((edge) => edge.source && edge.target && nodeIds.has(edge.source) && nodeIds.has(edge.target));
+  const summaryNodes = nodes.filter((node) => !isInternalSummaryNode(node));
   const summary: RunDagSummary = {
-    total: nodes.length,
+    total: summaryNodes.length,
     pending: 0,
     ready: 0,
     running: 0,
@@ -965,7 +1111,7 @@ function executionDagModel(snapshot: ProjectSnapshot | null): RunModel["executio
     failed: 0,
     skipped: 0,
   };
-  for (const node of nodes) {
+  for (const node of summaryNodes) {
     summary[node.statusKind] += 1;
   }
   const groups = dagGroups(snapshot, nodes);
@@ -1041,12 +1187,14 @@ const PROGRESS_COLUMNS: RunProgressColumnId[] = ["scope", "build", "review", "va
 const PROGRESS_STATUS_PRIORITY: RunDagStatusKind[] = ["failed", "blocked", "running", "ready", "pending", "completed", "skipped"];
 
 function operationTone(status: unknown): RunTone {
-  const normalized = text(status, "").toLowerCase().replace(/[\s-]+/g, "_");
+  const normalized = normalizedToken(status);
   if (["completed", "done", "passed", "integrated", "resolved", "reconciled", "dispositioned", "accepted"].includes(normalized)) return "good";
   if (["failed", "critical", "conflict", "error"].includes(normalized)) return "critical";
   if (["blocked", "blocked_on_user", "blocked_on_environment", "warning", "warn"].includes(normalized)) return "warn";
   if ([
     "running",
+    "scoping",
+    "building",
     "active",
     "ready",
     "selected",
@@ -1134,8 +1282,8 @@ function runningNowModel(snapshot: ProjectSnapshot | null, dag: RunModel["execut
       role: node.ownerRole,
       action: node.canonicalActionType,
       taskId: node.ticketId,
-      status: node.status,
-      tone: operationTone(node.statusKind),
+      status: node.runtimeStatus || node.status,
+      tone: operationTone(node.runtimeStatus || node.statusKind),
       source: "execution_dag",
       groupId: "",
       detail: node.detail,
@@ -1174,17 +1322,18 @@ function runningNowModel(snapshot: ProjectSnapshot | null, dag: RunModel["execut
   ];
   for (const worker of workerSources) {
     const role = text(worker.role || worker.owner_role || worker.defaultRole, "worker");
+    const displayStatus = text(worker.display_status || worker.runtime_status || worker.status, "running");
     add({
       id: text(worker.worker_id || worker.run_id, `worker:${items.length + 1}`),
       label: text(worker.mode, "worker").replace(/_/g, " "),
       role,
       action: text(worker.action_kind || worker.mode, "worker"),
       taskId: text(worker.task_id || worker.ticket_id || worker.dag_node_id, ""),
-      status: text(worker.status, "running"),
-      tone: operationTone(worker.status || "running"),
+      status: displayStatus,
+      tone: operationTone(displayStatus),
       source: "worker_agent",
       groupId: text(worker.execution_group_id, ""),
-      detail: firstNonEmpty([worker.failure_reason, worker.context_pack_id, worker.report_artifact_id], "Worker is active."),
+      detail: firstNonEmpty([worker.status_label, worker.failure_reason, worker.context_pack_id, worker.report_artifact_id], "Worker is active."),
     });
   }
 

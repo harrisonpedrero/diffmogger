@@ -24,7 +24,6 @@ class NotifyRequest(BaseModel):
     unblocked_work_remaining: list[str] = Field(default_factory=list)
     dedupe_key: str | None = None
     expects_reply: bool = True
-    local_notify: bool | None = None
     dry_run: bool = False
 
 

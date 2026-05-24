@@ -49,9 +49,26 @@ function snapshot(): ProjectSnapshot {
       recent_execution_groups: [{ execution_group_id: "group:recent", mode: "write", status: "completed", reason: "Patch accepted." }],
     },
     tickets: {
-      items: [{ id: "AUTO-001", summary: "Repair validation", status: "pending" }],
-      remaining: [{ id: "AUTO-001", summary: "Repair validation", status: "pending" }],
-      counts: { pending: 1 },
+      items: [
+        {
+          id: "AUTO-001",
+          summary: "Repair validation",
+          status: "running",
+          depends_on: ["AUTO-000"],
+          acceptance_criteria: ["Validation can be repaired without user intervention."],
+          verification_commands: ["npm test"],
+          related_commits: ["abc1234"],
+          runtime_status: "worker_running",
+        },
+        {
+          id: "AUTO-002",
+          summary: "Create local harness",
+          status: "ready",
+          depends_on: ["AUTO-001"],
+        },
+      ],
+      remaining: [{ id: "AUTO-002", summary: "Create local harness", status: "ready", depends_on: ["AUTO-001"] }],
+      counts: { running: 1, ready: 1 },
     },
     human_input: { pending_requests: 1, unhandled_records: 0, outbound_records: 2 },
     validation_repair: {
@@ -69,7 +86,7 @@ function snapshot(): ProjectSnapshot {
 }
 
 describe("AutomationPage", () => {
-  it("renders an execution graph operations screen without legacy blocker/outcome panels", () => {
+  it("renders a ticket progress operations screen without legacy blocker/outcome panels", () => {
     const html = renderToStaticMarkup(
       <AutomationPage
         snapshot={snapshot()}
@@ -85,33 +102,42 @@ describe("AutomationPage", () => {
     expect(html).toContain("Stop");
     expect(html).toContain("Retry");
     expect(html).toContain("Run safety check");
-    expect(html).toContain("Execution Graph");
-    expect(html).toContain("Selected Work");
+    expect(html).toContain("Supervisor");
+    expect(html).toContain("fallback subprocess");
+    expect(html).toContain("Last scheduler cycle");
+    expect(html).toContain("Readiness");
     expect(html).toContain("Ticket Progress");
-    expect(html).toContain("Now &amp; Next");
-    expect(html).toContain("DAG Flow");
-    expect(html).toContain("Operational Feed");
-    expect(html).toContain("Input Records");
-    expect(html).toContain("1 pending");
-    expect(html).toContain("Checks &amp; Repair");
-    expect(html).toContain("Command Output");
-    expect(html).toContain("Node DAG");
-    expect(html).toContain("Plan");
+    expect(html).toContain("Ticket completion");
+    expect(html).toContain("List");
+    expect(html).toContain("Graph");
+    expect(html).toContain("Ticket Detail");
+    expect(html).toContain("Validation can be repaired without user intervention.");
+    expect(html).toContain("Related commits");
+    expect(html).toContain("Scheduler Decision");
+    expect(html).toContain("Validation &amp; Evidence");
+    expect(html).toContain("Queue &amp; Integration");
+    expect(html).toContain("Timeline");
+    expect(html).toContain("Pending");
+    expect(html).toContain("Ready");
+    expect(html).toContain("Running");
     expect(html).toContain("Build");
-    expect(html).toContain("Review");
-    expect(html).toContain("Validate");
-    expect(html).toContain("Integrate");
     expect(html).toContain("Done");
     expect(html).toContain("Continue builder work");
-    expect(html).toContain("Waiting for previous step.");
     expect(html).toContain("Set up local harness");
     expect(html).toContain("Setup or harness work has been generated.");
     expect(html).toContain("Patch accepted.");
     expect(html).toContain("npm test");
-    expect(html).not.toContain("Human Input");
     expect(html).not.toContain("Scheduler Next");
+    expect(html).not.toContain("Campaign Map");
+    expect(html).not.toContain("<h2>Human Input</h2>");
+    expect(html).not.toContain("DAG nodes");
+    expect(html).not.toContain("Node DAG");
+    expect(html).not.toContain("Clustered DAG");
     expect(html).not.toContain("Unblocker Work");
     expect(html).not.toContain("Recent Outcomes");
+    expect(html).not.toContain("custom-watchdog");
+    expect(html).not.toContain("Discord");
+    expect(html).not.toContain("conveyor");
     expect(html).not.toContain("run_serial_role");
     expect(html).not.toContain("serialized_role_path");
     expect(html).not.toContain("dag-node:");
@@ -145,7 +171,7 @@ describe("AutomationPage", () => {
     expect(html).not.toContain("No tickets are loaded.");
   });
 
-  it("renders large execution DAGs as clustered graph nodes", () => {
+  it("renders large execution DAGs as ticket-first progress tabs", () => {
     const data = snapshot();
     data.dag.execution_dag = {
       nodes: Array.from({ length: 310 }, (_, index) => ({
@@ -168,9 +194,15 @@ describe("AutomationPage", () => {
       />,
     );
 
-    expect(html).toContain("Clustered DAG");
-    expect(html).toContain("Build Running");
-    expect(html).toContain("nodes folded");
+    expect(html).toContain("Ticket Progress");
+    expect(html).toContain("List");
+    expect(html).toContain("Graph");
+    expect(html).toContain("TICKET-001");
+    expect(html).not.toContain("Campaign Map");
+    expect(html).not.toContain("DAG nodes");
+    expect(html).not.toContain("nodes folded");
+    expect(html).not.toContain("bundled edges");
+    expect(html).not.toContain("Clustered DAG");
     expect(html).not.toContain("pipeline-row");
   });
 });

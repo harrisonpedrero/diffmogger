@@ -22,7 +22,7 @@ original_args=("$@")
 runner_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 script_parent="$(cd "$runner_script_dir/.." && pwd)"
 runtime_script_dir="$script_parent/runtime"
-if [[ -f "$runtime_script_dir/run_process_watchdog.py" ]]; then
+if [[ -f "$runtime_script_dir/orchestration_cli.py" ]]; then
   helper_script_dir="$runtime_script_dir"
 else
   helper_script_dir="$runner_script_dir"
@@ -153,19 +153,19 @@ for pattern in \
   "/scripts/list_deferred_patches.py" \
   "/scripts/release_codex_lock.sh" \
   "/scripts/repair_environment.py" \
-  "/scripts/run_conveyor_automation.py" \
-  "/scripts/run_conveyor_automation.sh" \
+  "/scripts/orchestration_cli.py" \
+  "/scripts/run_temporal_worker.sh" \
   "/scripts/run_observatory.py" \
   "/scripts/run_role_automation.sh" \
-  "/scripts/run_process_watchdog.py" \
+  "/scripts/orchestration_cli.py" \
   "/scripts/spawn_worker_agent.sh" \
   "/scripts/state_brief.py" \
   "/scripts/summarize_worker_outputs.py" \
   "/scripts/ticket_run.py" \
   "/target/agent_runs/" \
   "/target/automation_runner.json" \
-  "/target/automation_conveyor.lock" \
-  "/target/automation_conveyor_state.json" \
+  "/target/codex_automation.lock" \
+  "/target/automation_runner.json" \
   "/target/baseline_verification.json" \
   "/target/canonical_state_brief.md" \
   "/target/orchestration.sqlite3" \
@@ -665,11 +665,11 @@ context_paths=(
   "scripts/list_deferred_patches.py"
   "scripts/release_codex_lock.sh"
   "scripts/repair_environment.py"
-  "scripts/run_conveyor_automation.py"
-  "scripts/run_conveyor_automation.sh"
+  "scripts/orchestration_cli.py"
+  "scripts/run_temporal_worker.sh"
   "scripts/run_observatory.py"
   "scripts/run_playwright_mcp.sh"
-  "scripts/run_process_watchdog.py"
+  "scripts/orchestration_cli.py"
   "scripts/run_role_automation.sh"
   "scripts/spawn_worker_agent.sh"
   "scripts/state_brief.py"
@@ -767,7 +767,7 @@ deny_parts = {
     "automation_venvs",
     "validation_jobs",
 }
-deny_names = {".DS_Store", "codex_automation.lock", "automation_conveyor.lock"}
+deny_names = {".DS_Store", "codex_automation.lock", "codex_automation.lock"}
 deny_suffixes = (
     ".7z",
     ".db",
@@ -1168,7 +1168,7 @@ missing_rationale = any(
 lines = [
     "## Recent Deferred Hardener Patch Context",
     "",
-    f"- current_conveyor_reason: {clean(decision_reason, limit=700) or 'not provided'}",
+    f"- current_scheduler_reason: {clean(decision_reason, limit=700) or 'not provided'}",
     f"- deferred_hardener_patches_considered: {len(records)}",
     f"- matching_current_ticket_or_files: {'yes' if matching else 'no'}",
 ]
@@ -1307,7 +1307,7 @@ Do not remove or weaken tests merely to make verification pass.
 EOF
 } >"$runtime_prompt_path"
 
-watchdog_helper="$helper_script_dir/run_process_watchdog.py"
+watchdog_helper="$helper_script_dir/orchestration_cli.py"
 
 run_with_watchdog() {
   local stdout_file="$1"

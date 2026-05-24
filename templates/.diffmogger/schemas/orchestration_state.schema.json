@@ -170,7 +170,7 @@
           "type": "array",
           "items": {"type": "string"}
         },
-        "conveyor_stages": {
+        "scheduler_stages": {
           "type": "array",
           "items": {"type": "string"}
         },
@@ -352,11 +352,11 @@
       "type": "array",
       "items": {"type": "object", "additionalProperties": true}
     },
-    "conveyor_state": {
+    "scheduler_state": {
       "type": "object",
       "additionalProperties": true
     },
-    "conveyor_machine": {
+    "scheduler_machine": {
       "type": "object",
       "required": ["schema_version", "machine_version", "authority", "work_item", "current_stage", "stage_contract", "capability_manifest"],
       "properties": {

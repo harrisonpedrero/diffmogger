@@ -3,15 +3,39 @@
 
 from __future__ import annotations
 
+import os
 import runpy
 import sys
 from pathlib import Path
 
 _HERE = Path(__file__).resolve()
+_ROOT = _HERE.parents[1]
+
+
+def _maybe_reexec_source_venv() -> None:
+    if os.environ.get("DIFFMOGGER_BACKEND_REEXECED") or os.environ.get("DIFFMOGGER_BACKEND_NO_VENV_REEXEC"):
+        return
+    candidate = _ROOT / ".venv" / "bin" / "python"
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        return
+    try:
+        current = Path(sys.executable).resolve()
+        target = candidate.resolve()
+    except OSError:
+        return
+    if current == target:
+        return
+    env = os.environ.copy()
+    env["DIFFMOGGER_BACKEND_REEXECED"] = "1"
+    os.execve(str(target), [str(target), *sys.argv], env)
+
+
+_maybe_reexec_source_venv()
+
 for _candidate in (
-    _HERE.parents[1] / "src",
+    _ROOT / "src",
     _HERE.parents[2] / "src" if len(_HERE.parents) > 2 else None,
-    _HERE.parents[1] / "lib",
+    _ROOT / "lib",
 ):
     if _candidate is not None and _candidate.exists():
         _candidate_text = str(_candidate)

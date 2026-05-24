@@ -158,9 +158,14 @@ export type ProjectSnapshot = {
   };
   scheduler: {
     selected_action?: Record<string, unknown>;
+    candidates?: Array<Record<string, unknown>>;
     next_actions?: Array<Record<string, unknown>>;
     decision_queue?: Array<Record<string, unknown>>;
     active_role_run?: Record<string, unknown>;
+    last_cycle?: Record<string, unknown>;
+    mode?: string;
+    parallelization_summary?: Record<string, unknown>;
+    scheduler_fallback_used?: boolean;
     why_not_parallel?: Record<string, unknown>;
     scheduler_parallel_dry_run?: Record<string, unknown>;
     blocked_candidates?: Array<Record<string, unknown>>;
@@ -178,6 +183,9 @@ export type ProjectSnapshot = {
     completed_worker_reports?: Array<Record<string, unknown>>;
     queued_worker_patches?: Array<Record<string, unknown>>;
     write_worker_conflicts?: Array<Record<string, unknown>>;
+    active_leases?: Array<Record<string, unknown>>;
+    conflicting_leases?: Array<Record<string, unknown>>;
+    stale_graph_warnings?: Array<Record<string, unknown>>;
     integration_backlog_from_parallel_workers?: Array<Record<string, unknown>>;
     worker_patch_integration_preflight?: Record<string, unknown>;
     recent_outcomes?: Array<Record<string, unknown>>;
@@ -196,6 +204,9 @@ export type ProjectSnapshot = {
     unhandled_inbox?: number;
     outbound_records?: number;
     summary?: string;
+    notification_mode?: string;
+    notifier_status?: Record<string, unknown>;
+    message_counts?: Record<string, unknown>;
   };
   validation_repair: {
     validation?: Record<string, unknown>;

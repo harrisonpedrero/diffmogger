@@ -279,14 +279,14 @@ def parse_current_task_state(repo: Path) -> dict[str, str]:
     return fields
 
 
-def load_conveyor_projection(repo: Path) -> dict[str, Any]:
+def load_activity_projection(repo: Path) -> dict[str, Any]:
     db_path = database_path_for_target(repo)
     if db_path.exists():
         with closing(connect(db_path)) as conn:
             projected = load_projection(conn, CONVEYOR_PROJECTION_NAME)
             if projected:
                 return projected
-    path = existing_or_target_path(repo, "target/automation_conveyor_state.json")
+    path = existing_or_target_path(repo, "target/automation_activity.json")
     if not path.exists():
         return {}
     try:
@@ -297,7 +297,7 @@ def load_conveyor_projection(repo: Path) -> dict[str, Any]:
 
 
 def load_conveyor_events(repo: Path) -> list[ReplayEvent]:
-    state = load_conveyor_projection(repo)
+    state = load_activity_projection(repo)
     if not state:
         return []
     events: list[ReplayEvent] = []
@@ -369,7 +369,7 @@ def load_conveyor_events(repo: Path) -> list[ReplayEvent]:
                 role=role,
                 status="running",
                 title=f"{role.title()} is running now",
-                detail=active.get("reason") or "active conveyor role",
+                detail=active.get("reason") or "active automation role",
                 reason=active.get("reason") or "",
                 run_id=active.get("run_id") or "",
             )
@@ -394,10 +394,8 @@ def classify_path(path: str) -> str:
 def describe_path(path: str) -> str:
     if path.endswith("run_observatory.py"):
         return "observatory/review logic"
-    if path.endswith("run_conveyor_automation.py"):
-        return "conveyor runner"
-    if path.endswith("run_process_watchdog.py"):
-        return "process watchdog"
+    if path.endswith("run_temporal_worker.sh") or path.endswith("orchestration_cli.py"):
+        return "Temporal orchestration runner"
     if path.endswith("run_role_automation.sh"):
         return "role runner"
     if path.endswith("integrate_role_outputs.py"):
@@ -440,12 +438,12 @@ def infer_commit_summary(subject: str, files: list[dict[str, Any]], symbols: lis
         return "Expanded dashboard backend controls/status around integration safety."
     if "run_role_automation.sh" in joined and "integrate_role_outputs.py" in joined:
         return "Patched runtime-state handoff so ignored automation state reaches main."
-    if "run_process_watchdog.py" in joined:
-        return "Added watchdog-based recovery for stuck automation subprocesses."
+    if "run_temporal_worker.sh" in joined or "orchestration_cli.py" in joined:
+        return "Updated Temporal runner wiring."
     if "run_observatory.py" in joined and "test_run_observatory.py" in joined:
         return "Expanded observatory self-review/reporting with matching tests."
-    if "run_conveyor_automation.py" in joined and "test_run_conveyor_automation.py" in joined:
-        return "Improved conveyor routing behavior and covered it with tests."
+    if "orchestration/" in joined and "test_new_architecture.py" in joined:
+        return "Improved orchestration behavior and covered it with architecture smoke tests."
     if paths and all(path.startswith("docs/") or path.endswith(".md") for path in paths):
         return "Updated durable operator documentation and planning state."
     if symbols:

@@ -66,9 +66,8 @@ export type IntakeDraft = {
   env_access_policy: "project_commands_only" | "direct_env_files_allowed";
   verification_commands: string[];
   human_bridge_enabled: boolean;
-  human_bridge_mode: "disabled" | "file_only" | "local_notifier" | "discord_notifier";
+  human_bridge_mode: "disabled" | "file_only" | "local_notifier" | "apprise_notifier";
   human_requested_text_responses: boolean;
-  local_notifications_enabled: boolean;
   worker_agents_allowed: boolean;
   codex_cli_workers_expected_on_broad_runs: boolean;
   write_worker_agents_allowed: boolean;
@@ -212,7 +211,6 @@ const defaultDraft: IntakeDraft = {
   human_bridge_enabled: true,
   human_bridge_mode: "file_only",
   human_requested_text_responses: true,
-  local_notifications_enabled: true,
   worker_agents_allowed: true,
   codex_cli_workers_expected_on_broad_runs: true,
   write_worker_agents_allowed: true,
@@ -334,14 +332,13 @@ function draftFromSource(source: Record<string, unknown>, targetName: string): I
     human_bridge_enabled: boolValue(source.human_bridge_enabled, defaultDraft.human_bridge_enabled),
     human_bridge_mode: enumValue(
       source.human_bridge_mode,
-      ["disabled", "file_only", "local_notifier", "discord_notifier"],
+      ["disabled", "file_only", "local_notifier", "apprise_notifier"],
       defaultDraft.human_bridge_mode,
     ),
     human_requested_text_responses: boolValue(
       source.human_requested_text_responses,
       defaultDraft.human_requested_text_responses,
     ),
-    local_notifications_enabled: boolValue(source.local_notifications_enabled, defaultDraft.local_notifications_enabled),
     worker_agents_allowed: boolValue(source.worker_agents_allowed, defaultDraft.worker_agents_allowed),
     codex_cli_workers_expected_on_broad_runs: boolValue(
       source.codex_cli_workers_expected_on_broad_runs,
@@ -1209,11 +1206,11 @@ export function BriefWizard(props: {
             </FormField>
           </div>
           <div className="target-picker-row">
-            <button className="secondary-action" disabled={props.loading} onClick={props.onChoose}>
+            <button className="secondary-action" disabled={props.loading} onClick={props.onChoose} type="button">
               <FolderOpen size={17} />
               Choose folder
             </button>
-            <button className="secondary-action" disabled={!targetPath || props.loading} onClick={props.onRefresh}>
+            <button className="secondary-action" disabled={!targetPath || props.loading} onClick={props.onRefresh} type="button">
               <RefreshCw size={17} />
               Refresh target
             </button>
@@ -1226,6 +1223,7 @@ export function BriefWizard(props: {
               className="icon-text-button"
               disabled={!targetPath}
               onClick={() => copyText(targetPath ?? "", "target")}
+              type="button"
             >
               <Clipboard size={14} />
               {copiedLabel === "target" ? "Copied" : "Copy path"}
@@ -1238,7 +1236,7 @@ export function BriefWizard(props: {
           {props.recents.length ? (
             <div className="brief-recent-list">
               {props.recents.map((recent) => (
-                <button key={recent.path} onClick={() => props.onOpenRecent(recent)}>
+                <button key={recent.path} onClick={() => props.onOpenRecent(recent)} title={recent.path} type="button">
                   <span>{recent.name}</span>
                   <small>{recent.path}</small>
                 </button>
@@ -1376,6 +1374,7 @@ export function BriefWizard(props: {
               className="icon-text-button"
               disabled={!commandLabel(detected)}
               onClick={() => copyText(commandLabel(detected), "commands")}
+              type="button"
             >
               <Clipboard size={14} />
               {copiedLabel === "commands" ? "Copied" : "Copy"}
@@ -1398,15 +1397,19 @@ export function BriefWizard(props: {
           <h2>Scope</h2>
           <div className="brief-choice-grid two-up compact">
             <button
+              aria-pressed={buildScope === "ongoing"}
               className={buildScope === "ongoing" ? "selected" : ""}
               onClick={() => setDraft((current) => applyAutomationScope(current, "ongoing"))}
+              type="button"
             >
               <strong>Ongoing campaign</strong>
               <span>Draft and enqueue safe follow-up tickets as work completes.</span>
             </button>
             <button
+              aria-pressed={ticketCampaign}
               className={ticketCampaign ? "selected" : ""}
               onClick={() => setDraft((current) => applyAutomationScope(current, "bounded"))}
+              type="button"
             >
               <strong>Bounded campaign</strong>
               <span>Run the seeded or imported ticket queue, then stop only when the bounded campaign is complete.</span>
@@ -1422,11 +1425,11 @@ export function BriefWizard(props: {
                   <p>{draft.ticket_run_seed_tickets.length} seed ticket{draft.ticket_run_seed_tickets.length === 1 ? "" : "s"} will be written into the scaffolded SQLite queue.</p>
                 </div>
                 <div className="inline-actions">
-                  <button className="icon-text-button" onClick={draftSeedTicketsFromIntake} disabled={ticketDraftBusy || !targetPath}>
+                  <button className="icon-text-button" onClick={draftSeedTicketsFromIntake} disabled={ticketDraftBusy || !targetPath} type="button">
                     <WandSparkles size={14} />
                     {ticketDraftBusy ? "Drafting" : "Draft from Intake"}
                   </button>
-                  <button className="icon-text-button" onClick={addSeedTicket}>
+                  <button className="icon-text-button" onClick={addSeedTicket} type="button">
                     <FilePlus2 size={14} />
                     Add Ticket
                   </button>
@@ -1453,21 +1456,24 @@ export function BriefWizard(props: {
               <div className="ticket-list">
                 {draft.ticket_run_seed_tickets.length ? (
                   draft.ticket_run_seed_tickets.map((ticket) => (
-                    <div className="ticket-row" key={ticket.id}>
-                      <div>
+                    <div className="ticket-row ticket-seed-row" key={ticket.id}>
+                      <div className="ticket-row-main">
                         <strong>{ticket.id || "Untitled"}</strong>
                         <span>{ticket.summary || "No summary yet."}</span>
                       </div>
-                      <em>{ticket.status}</em>
-                      <button className="icon-text-button" onClick={() => editSeedTicket(ticket)}>Edit</button>
-                      <button
-                        className="icon-button danger"
-                        aria-label={`Delete ticket ${ticket.id || "Untitled"}`}
-                        title="Delete ticket"
-                        onClick={() => deleteSeedTicket(ticket.id)}
-                      >
-                        <Trash2 size={14} />
-                      </button>
+                      <em className="ticket-row-status">{ticket.status}</em>
+                      <div className="ticket-row-actions">
+                        <button className="icon-text-button" onClick={() => editSeedTicket(ticket)} type="button">Edit</button>
+                        <button
+                          className="icon-button danger"
+                          aria-label={`Delete ticket ${ticket.id || "Untitled"}`}
+                          title="Delete ticket"
+                          onClick={() => deleteSeedTicket(ticket.id)}
+                          type="button"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     </div>
                   ))
                 ) : (
@@ -1497,13 +1503,13 @@ export function BriefWizard(props: {
                     />
                   </FormField>
                   <div className="inline-actions">
-                    <button className="secondary-action" onClick={saveSeedTicket} disabled={!ticketEditorJson.trim()}>
+                    <button className="secondary-action" onClick={saveSeedTicket} disabled={!ticketEditorJson.trim()} type="button">
                       Save Ticket
                     </button>
-                    <button className="secondary-action" onClick={() => importSeedTickets()} disabled={!ticketImportText.trim()}>
+                    <button className="secondary-action" onClick={() => importSeedTickets()} disabled={!ticketImportText.trim()} type="button">
                       Import
                     </button>
-                    <button className="secondary-action" onClick={() => importSeedTickets("replace-all")} disabled={!ticketImportText.trim()}>
+                    <button className="secondary-action" onClick={() => importSeedTickets("replace-all")} disabled={!ticketImportText.trim()} type="button">
                       Replace All
                     </button>
                   </div>
@@ -1514,7 +1520,7 @@ export function BriefWizard(props: {
                 <details className="ticket-draft-details" open>
                   <summary>Draft candidates</summary>
                   <pre className="raw-json">{JSON.stringify(ticketDraftCandidates, null, 2)}</pre>
-                  <button className="secondary-action" onClick={() => acceptDraftCandidates()}>
+                  <button className="secondary-action" onClick={() => acceptDraftCandidates()} type="button">
                     Accept Candidates
                   </button>
                 </details>
@@ -1592,8 +1598,8 @@ export function BriefWizard(props: {
               onChange={(event) => updateDraft("human_bridge_mode", event.target.value as IntakeDraft["human_bridge_mode"])}
             >
               <option value="file_only">File only</option>
-              <option value="local_notifier">Local notifier</option>
-              <option value="discord_notifier">Discord notifier</option>
+              <option value="local_notifier">Local Apprise route</option>
+              <option value="apprise_notifier">Apprise notifier</option>
               <option value="disabled">Disabled</option>
             </select>
           </FormField>
@@ -1601,11 +1607,6 @@ export function BriefWizard(props: {
             checked={draft.human_requested_text_responses}
             label="Request text responses"
             onChange={(checked) => updateDraft("human_requested_text_responses", checked)}
-          />
-          <ToggleRow
-            checked={draft.local_notifications_enabled}
-            label="Local notifications"
-            onChange={(checked) => updateDraft("local_notifications_enabled", checked)}
           />
         </section>
         <section className="brief-section">
@@ -1647,7 +1648,7 @@ export function BriefWizard(props: {
         <section className="brief-section span-3">
           <div className="section-heading-row">
             <h2>Context files</h2>
-            <button className="secondary-action" disabled={!targetPath || contextBusy} onClick={addContextFiles}>
+            <button className="secondary-action" disabled={!targetPath || contextBusy} onClick={addContextFiles} type="button">
               <FilePlus2 size={17} />
               Add context files
             </button>
@@ -1765,7 +1766,7 @@ export function BriefWizard(props: {
                 </span>
                 {scaffoldResult.native_next_state.reason && <small>{scaffoldResult.native_next_state.reason}</small>}
                 <div className="result-actions">
-                  <button className="secondary-action" onClick={() => props.onNavigate("Automation")}>Automation</button>
+                  <button className="secondary-action" onClick={() => props.onNavigate("Automation")} type="button">Automation</button>
                 </div>
               </div>
             </div>
@@ -1774,7 +1775,7 @@ export function BriefWizard(props: {
             <div className="brief-failure">
               <strong>{scaffoldFailure.errorType ?? "Scaffold failed"}</strong>
               <p>{scaffoldFailure.message}</p>
-              <button className="secondary-action" onClick={props.onRefresh}>Refresh target</button>
+              <button className="secondary-action" onClick={props.onRefresh} type="button">Refresh target</button>
             </div>
           )}
         </section>
@@ -1846,6 +1847,7 @@ export function BriefWizard(props: {
             className="primary-action low-cortisol-generate-action"
             disabled={lowCortisolBusy || !lowCortisolText.trim()}
             onClick={() => void generateLowCortisolIntake()}
+            type="button"
           >
             {lowCortisolBusy ? <Loader2 className="spin" size={22} /> : <WandSparkles size={22} />}
             <span>{lowCortisolBusy ? progressLabel : "Generate Intake"}</span>
@@ -1921,6 +1923,7 @@ export function BriefWizard(props: {
                   key={step.key}
                   onClick={() => changeStep(index)}
                   role="tab"
+                  type="button"
                 >
                   <span>{index + 1}</span>
                   <strong>{step.label}</strong>
@@ -1933,25 +1936,25 @@ export function BriefWizard(props: {
           <main className="setup-main-panel">
             {stepContent}
             <footer className="wizard-footer setup-footer">
-              <button className="secondary-action" disabled={activeStep === 0} onClick={() => changeStep(activeStep - 1)}>
+              <button className="secondary-action" disabled={activeStep === 0} onClick={() => changeStep(activeStep - 1)} type="button">
                 <ChevronLeft size={17} />
                 Previous
               </button>
-              <button className="secondary-action" disabled={!targetPath || saveState === "saving" || !draftDirty} onClick={() => void saveDraftNow()}>
+              <button className="secondary-action" disabled={!targetPath || saveState === "saving" || !draftDirty} onClick={() => void saveDraftNow()} type="button">
                 Save draft
               </button>
               {activeStep < steps.length - 1 ? (
-                <button className="secondary-action" onClick={() => changeStep(activeStep + 1)}>
+                <button className="secondary-action" onClick={() => changeStep(activeStep + 1)} type="button">
                   Next
                   <ChevronRight size={17} />
                 </button>
               ) : (
                 <div className="setup-final-actions">
-                  <button className="secondary-action" disabled={!targetPath || scaffoldBusy || saveState === "saving" || ticketIssues.length > 0} onClick={scaffoldProject}>
+                  <button className="secondary-action" disabled={!targetPath || scaffoldBusy || saveState === "saving" || ticketIssues.length > 0} onClick={scaffoldProject} type="button">
                     <Hammer size={17} />
                     {scaffoldBusy ? "Working" : "Scaffold"}
                   </button>
-                  <button className="primary-action" disabled={!runState.enabled} onClick={() => props.onNavigate("Automation")} title={runState.reason}>
+                  <button className="primary-action" disabled={!runState.enabled} onClick={() => props.onNavigate("Automation")} title={runState.reason} type="button">
                     <RefreshCw size={17} />
                     Automation
                   </button>

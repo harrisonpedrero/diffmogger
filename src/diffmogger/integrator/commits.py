@@ -285,9 +285,9 @@ def semantic_commit_scope(changed_files: list[str], role: str) -> str:
     joined = "\n".join(changed_files)
     for marker, scope in [
         ("run_observatory.py", "observatory"),
-        ("run_conveyor_automation.py", "conveyor"),
+        ("run_temporal_worker.sh", "orchestration"),
+        ("orchestration_cli.py", "orchestration"),
         ("integrate_role_outputs.py", "integrator"),
-        ("run_process_watchdog.py", "watchdog"),
         ("run_role_automation.sh", "role-runner"),
         ("check_integration_safety.py", "safety"),
         ("check_required_files.py", "scaffold"),
@@ -384,8 +384,8 @@ def semantic_commit_action(changed_files: list[str], role: str, patch_text: str 
         return "propagate ignored runtime state"
     if "run_observatory.py" in joined:
         return "surface automation progress details"
-    if "run_conveyor_automation.py" in joined:
-        return "improve conveyor routing"
+    if "run_temporal_worker.sh" in joined or "orchestration_cli.py" in joined:
+        return "improve orchestration routing"
     if "agentic-dashboard" in joined:
         return "improve dashboard automation controls"
     if "validate_starter_kit.sh" in joined:

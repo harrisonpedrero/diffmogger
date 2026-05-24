@@ -48,7 +48,7 @@ A user can create a project, add goals, generate a weekly board from seed data, 
 ## External Services
 
 - Optional calendar integration later.
-- Optional Discord/email reminders later.
+- Optional Apprise/email reminders later.
 
 ## Environment Access Policy
 

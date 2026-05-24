@@ -36,10 +36,6 @@
       "type": "boolean",
       "default": true
     },
-    "local_notify": {
-      "type": ["boolean", "null"],
-      "default": null
-    },
     "dry_run": {
       "type": "boolean",
       "default": false

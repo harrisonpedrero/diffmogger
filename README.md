@@ -2,11 +2,15 @@
   <img src="docs/assets/diffmogger-logo-cropped.png" alt="Diffmogger" width="720">
 </p>
 
-Diffmogger is a local orchestration engine for Codex, backed by a directed execution graph.
+Diffmogger is a local orchestration engine for Codex, backed by Temporal workflows and a typed SQLite read model.
 
-It scaffolds a self-contained `.diffmogger/` sidecar into a target repo, keeps live automation state in SQLite, and runs Codex work through typed graph actions such as `scope`, `build`, `review`, `validate`, `repair`, and `integrate`.
+It scaffolds a self-contained `.diffmogger/` sidecar into a target repo, keeps live automation state in Alembic-managed SQLite, and runs Codex work through typed graph actions such as `scope`, `build`, `review`, `validate`, `repair`, and `integrate`.
 
 Diffmogger is not a hosted agent platform or a product-specific app. It is reusable local infrastructure for repos where Codex work needs durable state, clear handoffs, inspectable progress, safe parallelism, and reviewable outcomes across repeated runs.
+
+<p align="center">
+  <img src="docs/assets/diffmogger-architecture-diagram.png" alt="Diffmogger-Architecture-Diagram" width="720">
+</p>
 
 ## What It Does
 
@@ -16,9 +20,9 @@ Diffmogger gives a target repo:
 - a `.diffmogger/` sidecar for automation-owned prompts, runtime state, logs, queues, worktrees, schemas, manifests, and generated projections
 - a canonical SQLite state store at `.diffmogger/runtime/orchestration.sqlite3`
 - target-local wrappers under `.diffmogger/scripts/` and a bundled runtime under `.diffmogger/lib/diffmogger/`
-- optional worker fanout, notifier integration, Context7/Playwright MCP setup, and local observatory exports
+- Temporal worker wrappers, launchd-backed macOS supervision, optional worker fanout, Apprise notifier integration, Context7/Playwright MCP setup, and local observatory exports
 
-Generated Markdown and JSON files are projections. The SQLite graph is the runtime authority.
+Generated Markdown and JSON files are projections. Temporal owns workflow lifecycle; SQLite is the local read-model/control-plane state.
 
 ## Quickstart
 
@@ -54,15 +58,15 @@ Scaffold initializes git and creates a local `chore: initial commit` automatical
 
 ## Execution Model
 
-Diffmogger materializes target automation state into a directed execution graph stored in SQLite. It is a work generator, not a blocker detector. Runtime inputs include tickets, dependencies, blockers, human messages, validation receipts, worker outputs, repository capability data, codebase graph signals, active leases, and execution budgets.
+Diffmogger materializes target automation state into a directed execution graph stored in SQLite and advances it through Temporal workflows. The goal is to continuously generate work rather than getting stuck on minor blockers. Runtime inputs include tickets, dependencies, blockers, human messages, validation receipts, worker outputs, repository capability data, Tree-sitter code facts, active leases, and execution budgets.
 
 Those inputs become typed DAG nodes and edges. Common node types include `orchestrate`, `decompose`, `scope`, `build`, `review`, `validate`, `repair`, `integrate`, `audit`, `calibrate`, `blocker`, and `completion`.
 
 Hard edges block only the downstream node they guard. Advisory edges carry context without stopping execution. Blockers are planning inputs that should create repair, setup, mock, fixture, defer, split, reframe, review, documentation, or alternate-ticket DAG work while tickets remain.
 
-On each scheduler cycle, Diffmogger refreshes the graph, computes runnable nodes, records scheduler candidates, and selects the next execution action. If tickets remain, the scheduler should produce work. Actions can launch read-only scope work, launch write work with leases, run validation groups, review queued patches, create repair/setup/harness/mock/defer nodes, reconcile worker outputs, or integrate accepted patches.
+On each scheduler cycle, Diffmogger refreshes scoped code facts, computes runnable nodes, records scheduler candidates, conflict telemetry, execution groups, validation groups, integration queue state, and repair/unblocker work, then selects the next execution action. The scheduling policy is pure/testable outside Temporal; Temporal owns retries, timers, heartbeats, crash recovery, and long-running worker execution. If tickets remain, the scheduler should produce work.
 
-Parallel write execution is gated by typed ownership. Diffmogger only launches write groups when it can derive non-overlapping resource leases from direct paths, exact symbol ownership, or accepted scope evidence. Integration remains serialized so the main checkout stays coherent.
+Parallel write execution is gated by typed ownership. Diffmogger launches bounded write groups only when ownership paths, Tree-sitter symbol/import facts, confidence, validation state, and active leases support non-overlap. Missing parser support, stale facts, stale leases, low confidence, optional validation failures, and ambiguous ownership reduce fanout, create read-only scoping, or generate setup/indexing work instead of freezing unrelated automation. Integration remains serialized whenever ownership overlaps so the main checkout stays coherent.
 
 ## Generated Targets
 
@@ -113,17 +117,22 @@ python3 .diffmogger/scripts/run_observatory.py --target . --review-dir /tmp/Diff
 ```text
 src/diffmogger/                 Canonical Python source
 src/diffmogger/kit/             Source-kit scaffold and validation tools
-src/diffmogger/runtime/         Target runtime entrypoints, state helpers, and scheduler controls
+src/diffmogger/contracts.py     Pydantic runtime contracts and JSON-ready helpers
+src/diffmogger/orchestration/   Temporal workflows, activities, worker, and scheduler policy
+src/diffmogger/state/           Alembic migrations and SQLite read-model helpers
+src/diffmogger/runtime/         Target runtime entrypoints and compatibility helpers
 src/diffmogger/integrator/      Serialized patch integration, git safety, verification, and progress logic
 src/diffmogger/observatory/     Snapshot, scoring, render, review, and local server logic
+src/diffmogger/notifications.py Apprise notification adapter
+src/diffmogger/supervision.py   launchd supervision with portable fallback
 src/diffmogger/dashboard/       Native dashboard backend CLI and command handlers
 scripts/                        Stable root command wrappers
 templates/                      Files rendered into generated target repos
 schemas/ and validation/starter_kit_manifest.json  Schemas and source inventory
 services/agentic-dashboard/     Native dashboard docs and Tauri app
-services/agentic-notifier/      Optional local/Discord notifier service
+services/agentic-notifier/      Optional local/Apprise notifier service
 docs/                           Active Diffmogger documentation
-tests/{kit,runtime,dashboard}/  Source-kit, runtime, and dashboard test groups
+tests/test_new_architecture.py  Temporal/Alembic/Pydantic/Tree-sitter/Apprise smoke tests
 ```
 
 ## Safety Defaults
@@ -152,7 +161,7 @@ Useful focused checks:
 ```bash
 python3 scripts/validate_starter_kit_manifest.py validation/starter_kit_manifest.json
 python3 scripts/check_integration_safety.py
-python3 -m unittest tests.kit.test_check_required_files tests.kit.test_check_integration_safety tests.kit.test_starter_kit_manifest
+PYTHONPATH=src python3 -m pytest tests/test_new_architecture.py -q
 ```
 
 If scaffolding behavior changes, also run the scaffold smoke:
@@ -173,7 +182,7 @@ Start with [docs/README.md](docs/README.md). Most-used docs:
 - [Worker Agents](docs/WORKER_AGENTS.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 
-Architecture notes: [Native Dashboard](docs/architecture/native-dashboard.md), [DAG Symbol Scheduler Audit](docs/architecture/dag-symbol-scheduler-audit.md), [Symbol Identity Contract](docs/architecture/symbol-identity-contract.md), and [Concurrency Readiness Audit](docs/architecture/concurrency-readiness-audit.md).
+Stale architecture notes are intentionally deleted when the kit migrates. Compatibility docs should describe migration aids, not permanent rules.
 
 ## License
 

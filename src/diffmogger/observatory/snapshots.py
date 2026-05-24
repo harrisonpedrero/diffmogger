@@ -115,8 +115,8 @@ ROLE_WORKTREE_TICKET_SOURCE_MARKERS = (
     "isolated role worktree",
 )
 BOILERPLATE_GUIDANCE_MARKERS = (
-    "continuous conveyor automation should use `scripts/run_conveyor_automation.sh`",
-    "continuous conveyor automation should use `.diffmogger/scripts/run_conveyor_automation.sh`",
+    "continuous automation should use `scripts/run_temporal_worker.sh`",
+    "continuous automation should use `.diffmogger/scripts/run_temporal_worker.sh`",
 )
 VERIFICATION_BOOTSTRAP_MARKER = "verification commands may need adjustment after the first automation run"
 

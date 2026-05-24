@@ -29,8 +29,6 @@ PATH_ALIASES: dict[str, str] = {
     "docs/context": ".diffmogger/context",
     "target/action_plan_history.json": ".diffmogger/runtime/action_plan_history.json",
     "target/agent_runs": ".diffmogger/runtime/agent_runs",
-    "target/automation_conveyor.lock": ".diffmogger/runtime/automation_conveyor.lock",
-    "target/automation_conveyor_state.json": ".diffmogger/runtime/automation_conveyor_state.json",
     "target/automation_logs": ".diffmogger/runtime/automation_logs",
     "target/automation_queue": ".diffmogger/runtime/automation_queue",
     "target/automation_runner.json": ".diffmogger/runtime/automation_runner.json",

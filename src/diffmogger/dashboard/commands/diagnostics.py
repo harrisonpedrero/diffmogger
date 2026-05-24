@@ -20,7 +20,6 @@ def required_file_flags(target: Path) -> list[str]:
     flags: list[str] = []
     bridge_mode = human_bridge_mode_from_state(target)
     flags.extend(["--human-bridge-mode", bridge_mode])
-    flags.append("--write-workers-enabled")
     flags.append("--multi-role-enabled")
     campaign = str(intake.get("campaign_mode") or intake.get("automation_run_mode") or "").strip().lower()
     campaign = campaign.replace("-", "_").replace(" ", "_")
@@ -185,7 +184,7 @@ def command_diagnostics_run_checks(args: argparse.Namespace) -> dict[str, Any]:
             "detail": "On macOS, grant file access for target folders if folder picking or automation logs fail.",
         },
         "notifier_health": {
-            "configured": bridge_mode in {"local_notifier", "discord_notifier"},
+            "configured": bridge_mode in {"local_notifier", "apprise_notifier"},
             "bridge_mode": bridge_mode,
             "status": "not_configured" if bridge_mode == "file_only" else "unknown",
             "detail": "File-only mode does not require notifier credentials."

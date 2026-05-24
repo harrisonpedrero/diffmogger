@@ -36,9 +36,10 @@ Last updated: {{CREATED_AT}}
 
 ## Scheduler Work
 
-- Scheduler: continuous DAG scheduler via `.diffmogger/scripts/run_conveyor_automation.sh`
+- Scheduler: continuous DAG scheduler via `.diffmogger/scripts/run_temporal_worker.sh`
 - Current selected action: none yet
 - Ready work: first run should select ticket/setup work from typed runtime state
+- Parallel policy: bounded non-overlap waves, scoped validation groups, conflict telemetry, and serialized integration gates
 - Running work: none
 - Done work: scaffold initialized
 - Unblocker policy: if tickets remain, build, repair, defer, split, or create unblocker work before asking the user

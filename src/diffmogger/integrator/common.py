@@ -49,7 +49,6 @@ RUNTIME_STATE_WHITELIST = {
     ".agentic/roles/hardener.md",
     ".agentic/roles/integrator.md",
     "docs/CODEX_AUTOMATION_TASKS.md",
-    "target/automation_conveyor_state.json",
     "target/automation_runner.json",
 }
 
@@ -71,7 +70,7 @@ RUNTIME_STATE_DENY_PARTS = {
     "validation_jobs",
 }
 
-RUNTIME_STATE_DENY_NAMES = {".DS_Store", "codex_automation.lock", "automation_conveyor.lock"}
+RUNTIME_STATE_DENY_NAMES = {".DS_Store", "codex_automation.lock"}
 
 RUNTIME_STATE_DENY_SUFFIXES = (
     ".7z",
@@ -97,8 +96,6 @@ RUNTIME_STATE_MAX_BYTES = 1024 * 1024
 RUNTIME_STATE_BLOCKING_STATUSES = {"blocked", "conflict", "error", "rejected"}
 
 RUNTIME_STATE_VOLATILE_PATHS = {
-    "target/automation_conveyor_state.json",
-    sidecar_rel("target/automation_conveyor_state.json"),
     "target/automation_runner.json",
     sidecar_rel("target/automation_runner.json"),
     "target/canonical_state_brief.md",
@@ -196,7 +193,7 @@ def runtime_path(target: Path, legacy_rel: str | Path) -> Path:
 
 def human_bridge_mode(target: Path) -> str:
     mode = str(project_intake(target).get("human_bridge_mode") or "file_only").strip().lower()
-    return mode if mode in {"disabled", "file_only", "local_notifier", "discord_notifier"} else "file_only"
+    return mode if mode in {"disabled", "file_only", "local_notifier", "apprise_notifier"} else "file_only"
 
 def run(
     args: list[str],
