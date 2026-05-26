@@ -371,6 +371,55 @@ def _ensure_scoped_running_ticket_followups(
     return created
 
 
+def _recover_setup_only_running_ticket_followups(
+    conn: sqlite3.Connection,
+    tickets: list[TicketRecord],
+    nodes: list[DagNode],
+    request: SchedulerCycleRequest,
+) -> list[DagNode]:
+    recovered: list[DagNode] = []
+    now = datetime.now(timezone.utc)
+    nodes_by_id = {node.node_id: node for node in nodes}
+    for ticket in tickets:
+        payload = dict(ticket.payload)
+        if ticket.status != "running" or payload.get("last_action_kind") not in {"create_setup_work", "create_repair_work"}:
+            continue
+        follow_up_node_id = str(payload.get("follow_up_node_id") or "").strip()
+        if not follow_up_node_id or payload.get("last_build_node_id") == follow_up_node_id:
+            continue
+        node = nodes_by_id.get(follow_up_node_id)
+        if node is None or node.status != "done" or node.payload.get("source") != "scope_follow_up":
+            continue
+        node_payload = dict(node.payload)
+        node_payload["recovered_from_setup_only_action"] = True
+        node_payload["recovered_at"] = now.isoformat()
+        updated_node = node.model_copy(update={"status": "ready", "payload": node_payload, "updated_at": now})
+        upsert_dag_node(conn, updated_node)
+        payload["setup_only_follow_up_reopened_at"] = now.isoformat()
+        payload["setup_only_follow_up_recovered_by"] = request.run_id
+        upsert_ticket(conn, ticket.model_copy(update={"payload": payload, "updated_at": now}))
+        conn.execute(
+            """
+            INSERT INTO runtime_events(event_type, actor, payload_json, created_at)
+            VALUES('campaign.setup_only_follow_up_reopened', 'orchestration.local', ?, ?)
+            """,
+            (
+                json.dumps(
+                    {
+                        "run_id": request.run_id,
+                        "ticket_id": ticket.ticket_id,
+                        "node_id": updated_node.node_id,
+                        "previous_action_kind": str(ticket.payload.get("last_action_kind") or ""),
+                    },
+                    sort_keys=True,
+                ),
+                now.isoformat(),
+            ),
+        )
+        recovered.append(updated_node)
+    return recovered
+
+
 def _has_active_runtime_work(
     tickets: list[TicketRecord],
     nodes: list[DagNode],
@@ -953,6 +1002,12 @@ async def run_scheduler_cycle(payload: dict[str, Any]) -> dict[str, Any]:
             follow_up_nodes = _ensure_scoped_running_ticket_followups(conn, tickets, nodes, request)
             if follow_up_nodes:
                 nodes = [*nodes, *follow_up_nodes]
+            recovered_nodes = _recover_setup_only_running_ticket_followups(conn, tickets, nodes, request)
+            if recovered_nodes:
+                nodes_by_id = {node.node_id: node for node in nodes}
+                for recovered_node in recovered_nodes:
+                    nodes_by_id[recovered_node.node_id] = recovered_node
+                nodes = list(nodes_by_id.values())
             refreshed_facts = _refresh_code_facts(conn, target, _candidate_paths(target, tickets, nodes))
             persisted_facts = _payload_models(conn, "code_facts", "file_path, fact_id", CodeFact)
             facts = persisted_facts or refreshed_facts
@@ -1063,7 +1118,8 @@ def _mark_follow_up_recorded(target: Path, cycle: dict[str, Any], follow_up: dic
                 upsert_execution_group(conn, updated_group)
                 if status in {"completed", "failed"}:
                     released_lease_ids = _release_group_leases(conn, group.group_id, now)
-            if ok and selected.node_ids:
+            terminal_node_actions = {"launch_work", "launch_scope_work", "run_validation", "integrate"}
+            if ok and selected.node_ids and selected.action_kind in terminal_node_actions:
                 for index, node_id in enumerate(selected.node_ids):
                     node_paths = [selected.paths[index]] if index < len(selected.paths) else selected.paths
                     node = nodes_by_id.get(node_id) or DagNode(

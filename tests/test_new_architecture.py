@@ -339,7 +339,7 @@ def test_scheduler_policy_tree_sitter_imports_influence_wave(tmp_path: Path) -> 
     assert any(conflict.conflict_type == "import_coupling" for conflict in record.conflicts)
 
 
-def test_scheduler_policy_parser_fallback_creates_setup_without_freezing_unrelated_work(tmp_path: Path) -> None:
+def test_scheduler_policy_parser_fallback_uses_path_safety_without_freezing_work(tmp_path: Path) -> None:
     record = choose_scheduler_record(
         target_path=tmp_path,
         run_id="parser",
@@ -363,8 +363,10 @@ def test_scheduler_policy_parser_fallback_creates_setup_without_freezing_unrelat
     )
 
     assert record.selected.action_kind == "launch_work"
-    assert record.selected.node_ids == ["py"]
-    assert any(candidate.action_kind == "create_setup_work" for candidate in record.candidates)
+    assert record.selected.node_ids == ["ts", "py"]
+    assert record.selected.telemetry["parser_unavailable_node_ids"] == ["ts"]
+    assert any(item.startswith("parser_unavailable:") for item in record.selected.scope_evidence)
+    assert not any(candidate.action_kind == "create_setup_work" for candidate in record.candidates)
     assert record.scheduler_telemetry is not None
     assert record.scheduler_telemetry.parser_fallbacks
 
@@ -1081,6 +1083,65 @@ def test_scoped_running_ticket_without_node_is_recovered(monkeypatch: pytest.Mon
         assert conn.execute("SELECT status FROM tickets WHERE ticket_id='T-scoped'").fetchone()[0] == "done"
         assert conn.execute("SELECT COUNT(*) FROM ownership_leases WHERE status='active'").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM ownership_leases WHERE status='released' AND mode='write'").fetchone()[0] == 1
+
+
+def test_setup_only_follow_up_node_is_reopened(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DIFFMOGGER_WORKER_EXECUTION", "stub-success")
+
+    with connect(tmp_path) as conn:
+        with conn:
+            upsert_ticket(
+                conn,
+                TicketRecord(
+                    ticket_id="T-parser",
+                    title="Recover parser setup ticket",
+                    status="running",
+                    ownership_paths=["src/app.ts"],
+                    payload={
+                        "source": "ticket_run_item",
+                        "last_action_kind": "create_setup_work",
+                        "last_execution_group_id": "group:parser-setup",
+                        "follow_up_node_id": "node:parser-follow-up",
+                    },
+                ),
+            )
+            upsert_dag_node(
+                conn,
+                DagNode(
+                    node_id="node:parser-follow-up",
+                    ticket_id="T-parser",
+                    action_type="build",
+                    status="done",
+                    paths=["src/app.ts"],
+                    payload={"source": "scope_follow_up"},
+                ),
+            )
+
+    result = asyncio.run(
+        run_campaign_cycle(
+            SchedulerCycleRequest(target_path=str(tmp_path), run_id="recover-parser").model_dump(mode="json")
+        )
+    )
+
+    assert result["cycle"]["decision"]["selected"]["action_kind"] == "launch_work"
+    assert result["cycle"]["decision"]["selected"]["node_ids"] == ["node:parser-follow-up"]
+    with sqlite3.connect(database_path_for_target(tmp_path)) as conn:
+        ticket_row = conn.execute(
+            "SELECT status, payload_json FROM tickets WHERE ticket_id='T-parser'"
+        ).fetchone()
+        node_row = conn.execute(
+            "SELECT status, payload_json FROM execution_dag_nodes WHERE node_id='node:parser-follow-up'"
+        ).fetchone()
+        assert ticket_row[0] == "done"
+        assert node_row[0] == "done"
+        ticket_payload = json.loads(ticket_row[1])["payload"]
+        node_payload = json.loads(node_row[1])["payload"]
+        assert ticket_payload["setup_only_follow_up_reopened_at"]
+        assert ticket_payload["last_build_node_id"] == "node:parser-follow-up"
+        assert node_payload["recovered_from_setup_only_action"] is True
+        assert conn.execute(
+            "SELECT COUNT(*) FROM runtime_events WHERE event_type='campaign.setup_only_follow_up_reopened'"
+        ).fetchone()[0] == 1
 
 
 def test_bounded_ticket_items_are_synced_into_scheduler_tickets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -222,26 +222,13 @@ def _candidate_from_node(
     parser_unavailable = any(fact.kind == "parser_unavailable" for fact in facts)
     ambiguous_scope = not paths
     low_confidence = node.confidence < min_write_confidence
-    if parser_unavailable:
-        return SchedulerCandidate(
-            candidate_id=_candidate_id(run_id, f"index-{node.node_id}"),
-            action_kind="create_setup_work",
-            execution_mode="setup",
-            owner_role="planner",
-            node_ids=[node.node_id],
-            ticket_ids=[node.ticket_id] if node.ticket_id else [],
-            paths=paths,
-            scope_evidence=_scope_evidence(node, facts),
-            code_fact_refs=[fact.fact_id for fact in facts],
-            reason="Tree-sitter parser support is unavailable for this scope; create setup/indexing work.",
-            fanout=1,
-            confidence=node.confidence,
-            telemetry={"parser_unavailable": True},
-        )
+    telemetry = {"parser_unavailable": True} if parser_unavailable else {}
     if ambiguous_scope or low_confidence:
         reason = "Ownership scope is ambiguous; run read-only scoping before write fanout."
         if low_confidence:
             reason = "Candidate confidence is below the write threshold; run read-only scoping before write fanout."
+        if parser_unavailable:
+            reason += " Parser facts are unavailable, so path ownership remains the safety boundary."
         return SchedulerCandidate(
             candidate_id=_candidate_id(run_id, f"scope-{node.node_id}"),
             action_kind="launch_scope_work",
@@ -255,10 +242,16 @@ def _candidate_from_node(
             reason=reason,
             fanout=1,
             confidence=node.confidence,
-            telemetry={"ambiguous_scope": ambiguous_scope, "low_confidence": low_confidence},
+            telemetry={**telemetry, "ambiguous_scope": ambiguous_scope, "low_confidence": low_confidence},
         )
     action_kind = _node_action_kind(node, "write")
     execution_mode = "integrate" if action_kind == "integrate" else ("validate" if action_kind == "run_validation" else "write")
+    reason = "Ready DAG node has explicit ownership scope and enough confidence for write execution."
+    if parser_unavailable:
+        reason = (
+            "Ready DAG node has explicit ownership scope; parser facts are unavailable, "
+            "so scheduling relies on path ownership."
+        )
     return SchedulerCandidate(
         candidate_id=_candidate_id(run_id, f"node-{node.node_id}"),
         action_kind=action_kind,  # type: ignore[arg-type]
@@ -270,9 +263,10 @@ def _candidate_from_node(
         scope_evidence=_scope_evidence(node, facts),
         code_fact_refs=[fact.fact_id for fact in facts],
         required_lease_ids=[_stable_id("lease", run_id, node.node_id, path) for path in paths] or [_stable_id("lease", run_id, node.node_id)],
-        reason="Ready DAG node has explicit ownership scope and enough confidence for write execution.",
+        reason=reason,
         fanout=1,
         confidence=node.confidence,
+        telemetry=telemetry,
     )
 
 
@@ -602,6 +596,12 @@ def choose_scheduler_record(
             telemetry={
                 "wave_candidate_ids": [candidate.candidate_id for candidate in selected_wave],
                 "configured_max_fanout": configured_fanout,
+                "parser_unavailable_node_ids": [
+                    node_id
+                    for candidate in selected_wave
+                    if candidate.telemetry.get("parser_unavailable")
+                    for node_id in candidate.node_ids
+                ],
             },
         )
         candidates.append(selected)
