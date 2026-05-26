@@ -6,7 +6,7 @@ Diffmogger is a local orchestration engine for Codex, backed by Temporal workflo
 
 It scaffolds a self-contained `.diffmogger/` sidecar into a target repo, keeps live automation state in Alembic-managed SQLite, and runs Codex work through typed graph actions such as `scope`, `build`, `review`, `validate`, `repair`, and `integrate`.
 
-Diffmogger is not a hosted agent platform or a product-specific app. It is reusable local infrastructure for repos where Codex work needs durable state, clear handoffs, inspectable progress, safe parallelism, and reviewable outcomes across repeated runs.
+This isn't a hosted agent platform or a product-specific app. It is reusable local infrastructure for repos where Codex work needs durable state, clear handoffs, inspectable progress, safe parallelism, and reviewable outcomes across repeated runs.
 
 <p align="center">
   <img src="docs/assets/diffmogger-architecture-diagram.png" alt="Diffmogger-Architecture-Diagram" width="720">
