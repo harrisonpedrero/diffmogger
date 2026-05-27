@@ -138,6 +138,7 @@
       "docs/WORKER_AGENTS.md"
     ],
     "docs_assets": [
+      "docs/assets/diffmogger-ticket-progress-demo.gif",
       "docs/assets/diffmogger-icon-dock.png",
       "docs/assets/diffmogger-icon.png",
       "docs/assets/diffmogger-logo-cropped.png",
@@ -267,6 +268,7 @@
       "src/diffmogger/runtime/blocker_review.py",
       "src/diffmogger/runtime/build_replay.py",
       "src/diffmogger/runtime/code_facts.py",
+      "src/diffmogger/runtime/design.py",
       "src/diffmogger/runtime/code_intelligence.py",
       "src/diffmogger/runtime/codebase_graph.py",
       "src/diffmogger/runtime/compact_agent_state.py",
@@ -292,6 +294,7 @@
       "src/diffmogger/state/migrations/versions/0003_restore_dashboard_projection_schema.py",
       "src/diffmogger/state/migrations/versions/0004_coexist_legacy_and_typed_tables.py",
       "src/diffmogger/state/migrations/versions/0005_parallel_execution_read_models.py",
+      "src/diffmogger/state/migrations/versions/0006_design_runtime_surfaces.py",
       "src/diffmogger/state/migrations/versions/__init__.py",
       "src/diffmogger/supervision.py"
     ],
@@ -325,6 +328,7 @@
     "templates": [
       "templates/.agentic/automation_prompt.md",
       "templates/.agentic/roles/builder.md",
+      "templates/.agentic/roles/designer.md",
       "templates/.agentic/roles/hardener.md",
       "templates/.agentic/roles/integrator.md",
       "templates/.agentic/roles/planner.md",

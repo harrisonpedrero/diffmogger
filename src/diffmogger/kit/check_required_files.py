@@ -14,6 +14,8 @@ from diffmogger.runtime.paths import existing_or_target_path, load_manifest, sid
 BASE_REQUIRED = [
     "AGENTS.md",
     ".agentic/automation_prompt.md",
+    ".agentic/design_contract.md",
+    ".agentic/design_contract.json",
     ".agentic/verification_commands.txt",
     ".agentic/smoke_commands.txt",
     "scripts/acquire_codex_lock.sh",
@@ -37,6 +39,7 @@ BASE_REQUIRED = [
 
 MULTI_ROLE_REQUIRED = [
     ".agentic/roles/planner.md",
+    ".agentic/roles/designer.md",
     ".agentic/roles/builder.md",
     ".agentic/roles/hardener.md",
     ".agentic/roles/integrator.md",
@@ -65,7 +68,9 @@ RUNTIME_LIBRARY_REQUIRED = [
     ".diffmogger/lib/diffmogger/state/migrations/versions/0003_restore_dashboard_projection_schema.py",
     ".diffmogger/lib/diffmogger/state/migrations/versions/0004_coexist_legacy_and_typed_tables.py",
     ".diffmogger/lib/diffmogger/state/migrations/versions/0005_parallel_execution_read_models.py",
+    ".diffmogger/lib/diffmogger/state/migrations/versions/0006_design_runtime_surfaces.py",
     ".diffmogger/lib/diffmogger/runtime/code_facts.py",
+    ".diffmogger/lib/diffmogger/runtime/design.py",
     ".diffmogger/lib/diffmogger/runtime/paths.py",
 ]
 

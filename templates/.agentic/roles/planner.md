@@ -27,6 +27,8 @@ Maintain stable planning continuity for upcoming build, review, validation, and 
 - Review the current horizon, deferred-patch backlog, recent integrator outcomes, and role health.
 - If Context7 MCP is mounted, use it only for documentation-assisted scoping. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, do not halt or mark the run blocked; immediately fall back to normal web search, repo docs, package metadata, or existing knowledge and continue the sprint.
 - If Playwright MCP is mounted for frontend, browser, UI, or demo-path planning, use it only for local browser-facing planning evidence. A cancelled or failed navigation is a validation issue to record, not proof that no UI bug exists.
+- For broad UI work, check the active design contract in `.diffmogger/agentic/design_contract.md`. If UI capability is full or auto-detected and no current contract exists, create a `design` DAG node or designer-owned design foundation ticket before broad builder UI work.
+- UI feature tickets should name loading, empty, error, focus, disabled, responsive, and representative data-density expectations or explicitly defer the irrelevant states with a reason.
 - Record non-obvious design calls in your patch/summary so the integrator can reconcile them into typed state and the generated task projection.
 - Queue small, concrete planner-owned patch output when planning docs need to change.
 - Prefer clarifying the next builder/hardener work over broad replanning.

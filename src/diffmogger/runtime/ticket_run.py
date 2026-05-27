@@ -51,7 +51,9 @@ TICKET_LIST_FIELDS = {
     "evidence",
     "related_commits",
 }
+OPTIONAL_TICKET_LIST_FIELDS = {"paths", "ownership_paths"}
 TICKET_STRING_FIELDS = {"id", "summary", "status", "blocker"}
+OPTIONAL_TICKET_STRING_FIELDS = {"owner_role", "action_kind", "execution_mode"}
 TICKET_IMPORT_FORMATS = {"markdown", "csv", "json"}
 TICKET_IMPORT_MODES = {"append", "replace-placeholder", "replace-all"}
 
@@ -385,6 +387,19 @@ def normalize_ticket(ticket: dict[str, Any], *, fallback_id: str | None = None) 
         normalized["id"] = fallback_id
     for key in TICKET_LIST_FIELDS:
         normalized[key] = split_multi_value(ticket.get(key))
+    for key in OPTIONAL_TICKET_STRING_FIELDS:
+        value = str(ticket.get(key) or "").strip()
+        if value:
+            normalized[key] = value
+    for key in OPTIONAL_TICKET_LIST_FIELDS:
+        values = split_multi_value(ticket.get(key))
+        if values:
+            normalized[key] = values
+    if bool_value(ticket.get("design_contract_required"), False):
+        normalized["design_contract_required"] = True
+    payload = ticket.get("payload")
+    if isinstance(payload, dict):
+        normalized["payload"] = payload
     normalized.setdefault("status", "pending")
     normalized.setdefault("blocker", "")
     return normalized
@@ -1061,7 +1076,7 @@ def parse_markdown_tickets(text: str) -> list[dict[str, Any]]:
                 finish()
                 current = candidate
             continue
-        field = re.match(r"^(?:[-*]\s*)?(?P<key>depends_on|depends on|acceptance|acceptance_criteria|criteria|verification|verification_commands|evidence|related_commits|commits|blocker|status)\s*:\s*(?P<value>.+)$", line, re.I)
+        field = re.match(r"^(?:[-*]\s*)?(?P<key>depends_on|depends on|acceptance|acceptance_criteria|criteria|verification|verification_commands|evidence|related_commits|commits|paths|ownership_paths|ownership paths|owner_role|owner role|action_kind|action kind|execution_mode|execution mode|design_contract_required|design contract required|blocker|status)\s*:\s*(?P<value>.+)$", line, re.I)
         if field and current is not None:
             key = field.group("key").lower().replace(" ", "_")
             key = {
@@ -1071,7 +1086,7 @@ def parse_markdown_tickets(text: str) -> list[dict[str, Any]]:
                 "commits": "related_commits",
             }.get(key, key)
             value = field.group("value").strip()
-            if key in TICKET_LIST_FIELDS:
+            if key in TICKET_LIST_FIELDS or key in OPTIONAL_TICKET_LIST_FIELDS:
                 current[key] = [*list_value(current.get(key)), *split_multi_value(value)]
             else:
                 current[key] = value
@@ -1099,6 +1114,11 @@ def parse_csv_tickets(text: str) -> list[dict[str, Any]]:
         "verification": "verification_commands",
         "checks": "verification_commands",
         "commits": "related_commits",
+        "owner role": "owner_role",
+        "action kind": "action_kind",
+        "execution mode": "execution_mode",
+        "ownership paths": "ownership_paths",
+        "design contract required": "design_contract_required",
     }
     parsed: list[dict[str, Any]] = []
     for row in reader:
@@ -1108,9 +1128,9 @@ def parse_csv_tickets(text: str) -> list[dict[str, Any]]:
                 continue
             normalized_key = raw_key.strip().lower().replace("-", "_")
             key = aliases.get(normalized_key, aliases.get(raw_key.strip().lower(), normalized_key))
-            if key in TICKET_LIST_FIELDS:
+            if key in TICKET_LIST_FIELDS or key in OPTIONAL_TICKET_LIST_FIELDS:
                 item[key] = split_multi_value(raw_value)
-            elif key in TICKET_STRING_FIELDS:
+            elif key in TICKET_STRING_FIELDS or key in OPTIONAL_TICKET_STRING_FIELDS or key == "design_contract_required":
                 item[key] = str(raw_value or "").strip()
         if item:
             parsed.append(item)
@@ -1238,7 +1258,7 @@ def command_status(args: argparse.Namespace) -> int:
     target = Path(args.target).expanduser().resolve()
     data, path, _text = load_ticket_run(target, Path(args.ticket_file).resolve() if args.ticket_file else None)
     summary = ticket_summary(data, target)
-    payload = {"ticket_file": str(path), **summary}
+    payload = {"ticket_file": str(path), **summary, "tickets": tickets(data)}
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:

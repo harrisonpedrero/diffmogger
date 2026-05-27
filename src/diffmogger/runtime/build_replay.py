@@ -571,9 +571,9 @@ def build_data(repo: Path) -> dict[str, Any]:
 
 def event_state(data: dict[str, Any], index: int) -> dict[str, Any]:
     events = data["events"][: index + 1]
-    role_runs = {role: 0 for role in ["planner", "builder", "hardener", "integrator"]}
-    accepted_by_role = {role: 0 for role in ["planner", "builder", "hardener"]}
-    deferred_by_role = {role: 0 for role in ["planner", "builder", "hardener"]}
+    role_runs = {role: 0 for role in ["planner", "designer", "builder", "hardener", "integrator"]}
+    accepted_by_role = {role: 0 for role in ["planner", "designer", "builder", "hardener"]}
+    deferred_by_role = {role: 0 for role in ["planner", "designer", "builder", "hardener"]}
     accepted_total = 0
     deferred_total = 0
     no_progress = 0
@@ -712,7 +712,7 @@ def draw_conveyor(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], sta
     rounded(draw, box)
     draw_panel_header(draw, box, "Activity Lanes")
     x1, y1, x2, y2 = box
-    roles = ["planner", "builder", "hardener", "integrator"]
+    roles = ["planner", "designer", "builder", "hardener", "integrator"]
     current = state["current"]
     active_role = current["role"]
     card_gap = 18

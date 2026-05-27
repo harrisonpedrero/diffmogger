@@ -52,9 +52,17 @@ MAX_WRITE_WORKER_COUNT = 10
 DEFAULT_WRITE_WORKER_COUNT = 3
 DEFAULT_AUTOMATION_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 MULTI_ROLE_PROFILE = "planner_builder_hardener_integrator"
-MULTI_ROLE_ROLES = ("planner", "builder", "hardener", "integrator")
+MULTI_ROLE_ROLES = ("planner", "designer", "builder", "hardener", "integrator")
 OPTIONAL_MCP_SERVERS = ("context7", "playwright")
 DEFAULT_OPTIONAL_MCP_SERVERS = list(OPTIONAL_MCP_SERVERS)
+OPTIONAL_DESIGN_SERVICES = (
+    "figma_mcp",
+    "v0",
+    "builder_visual_copilot",
+    "storybook_chromatic",
+    "percy",
+    "applitools",
+)
 ENV_ACCESS_PROJECT_COMMANDS_ONLY = "project_commands_only"
 ENV_ACCESS_DIRECT = "direct_env_files_allowed"
 ENV_ACCESS_LABELS = {
@@ -773,7 +781,7 @@ def latest_worker_result(target: Path) -> dict[str, Any]:
 
 def worker_role_from_strategy(strategy: dict[str, Any]) -> str:
     lane = compact_dashboard_text(strategy.get("action_lane") or "review", limit=40).lower()
-    if lane in {"planner", "builder", "hardener", "integrator"}:
+    if lane in {"planner", "designer", "builder", "hardener", "integrator"}:
         return f"{lane}_strategy"
     name = compact_dashboard_text(strategy.get("strategy") or "review", limit=40).lower()
     return f"{name}_strategy"

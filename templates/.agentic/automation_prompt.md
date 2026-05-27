@@ -63,6 +63,18 @@ Use `.diffmogger/scripts/spawn_worker_agent.sh` only for bounded, reviewable ass
 
 {{MULTI_ROLE_AUTOMATION_SECTION}}
 
+## Design And UI Validation
+
+{{DESIGN_CAPABILITY_SECTION}}
+
+{{UI_VALIDATION_SECTION}}
+
+Optional design services:
+
+```text
+{{OPTIONAL_DESIGN_SERVICES}}
+```
+
 ## Optional MCP Integrations
 
 Optional MCP servers are accelerators, not requirements. Missing MCP support, expired auth, startup failures, timeouts, empty results, or MCP tool errors must create fallback validation or deferred QA work instead of halting the run.

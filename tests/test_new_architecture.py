@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import asyncio
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -17,6 +19,8 @@ from diffmogger.contracts import (
     CodeFact,
     DagEdge,
     DagNode,
+    DesignContract,
+    DesignReview,
     ExecutionGroup,
     NotificationPayload,
     OwnershipLease,
@@ -35,14 +39,29 @@ from diffmogger.orchestration.activities import (
     run_scheduler_cycle,
 )
 from diffmogger.orchestration.scheduler_policy import choose_scheduler_record
+from diffmogger.dashboard.ticket_generation import ticket_generation_quality_gate
 from diffmogger.runtime import code_facts
-from diffmogger.runtime.state_store import state_snapshot
+from diffmogger.runtime.design import ensure_design_foundation_ticket, ui_detection_from_intake
+from diffmogger.integrator.cli import integrate
+from diffmogger.integrator.commits import filter_commit_paths, semantic_commit_message
+from diffmogger.integrator.runtime_state import ticket_digest
+from diffmogger.runtime.state_store import (
+    default_conveyor_state,
+    load_ticket_run_state,
+    materialize_execution_dag_conn,
+    state_snapshot,
+    ticket_run_state_summary,
+    write_ticket_run_state,
+)
 from diffmogger.state.db import (
     connect,
     database_path_for_target,
     insert_validation_receipt,
+    insert_design_review,
+    latest_design_contract,
     upsert_code_fact,
     upsert_dag_node,
+    upsert_design_contract,
     upsert_execution_group,
     upsert_ownership_lease,
     upsert_ticket,
@@ -57,6 +76,9 @@ def test_pydantic_contracts_forbid_ad_hoc_payload_fields() -> None:
         )
     schema = TicketRecord.model_json_schema()
     assert schema["properties"]["ticket_id"]["minLength"] == 1
+    design_node = DagNode(node_id="design-1", action_type="design", owner_role="designer")
+    assert design_node.action_type == "design"
+    assert design_node.owner_role == "designer"
     with pytest.raises(ValidationError):
         SchedulerCandidate.model_validate({"candidate_id": "C1", "action_kind": "launch_work", "unexpected": True})
 
@@ -74,6 +96,76 @@ def test_supervision_uses_dependency_capable_python(monkeypatch: pytest.MonkeyPa
     assert environment["DIFFMOGGER_WORKER_EXECUTION"] == "codex"
 
 
+def test_design_capability_detection_preserves_backend_only_defaults() -> None:
+    intake = {
+        "ui_capability_mode": "auto",
+        "product_goal": "Build a local CLI that processes CSV files.",
+        "ticket_generation_scope_groups": [{"name": "CLI", "surfaces": ["argument parsing", "file IO"]}],
+    }
+    tickets = [
+        {
+            "id": "TICKET-001",
+            "summary": "Implement CSV parser command",
+            "acceptance_criteria": ["Command parses local files."],
+            "verification_commands": ["python -m pytest"],
+        }
+    ]
+
+    detection = ui_detection_from_intake(intake, tickets=tickets)
+    with_design = ensure_design_foundation_ticket(tickets, intake)
+
+    assert detection["designer_enabled"] is False
+    assert with_design == tickets
+
+
+def test_design_foundation_ticket_is_gated_for_ui_heavy_scope() -> None:
+    intake = {
+        "ui_capability_mode": "auto",
+        "ui_validation_mode": "auto",
+        "product_goal": "Build a React dashboard for reviewing local work.",
+    }
+    tickets = [
+        {
+            "id": "TICKET-001",
+            "summary": "Build dashboard route and controls",
+            "acceptance_criteria": ["Dashboard renders the primary workflow."],
+            "verification_commands": ["npm test"],
+        }
+    ]
+
+    with_design = ensure_design_foundation_ticket(tickets, intake)
+    quality_gate = ticket_generation_quality_gate(with_design, intake=intake)
+
+    assert with_design[0]["owner_role"] == "designer"
+    assert with_design[0]["action_kind"] == "design"
+    assert with_design[0]["design_contract_required"] is True
+    assert with_design[1]["id"] == "TICKET-002"
+    assert quality_gate["ui_detection"]["designer_enabled"] is True
+    assert not any(item["type"] == "missing_design_foundation" for item in quality_gate["warnings"])
+    assert any(item["type"] == "missing_ui_states" for item in quality_gate["warnings"])
+
+
+def test_ui_capability_off_schedules_no_design_foundation() -> None:
+    intake = {
+        "ui_capability_mode": "off",
+        "product_goal": "Build a web app only after the user opts in later.",
+    }
+    tickets = [
+        {
+            "id": "TICKET-001",
+            "summary": "Build UI shell",
+            "acceptance_criteria": ["Route renders locally."],
+            "verification_commands": ["npm test"],
+        }
+    ]
+
+    detection = ui_detection_from_intake(intake, tickets=tickets)
+    with_design = ensure_design_foundation_ticket(tickets, intake)
+
+    assert detection["designer_enabled"] is False
+    assert with_design == tickets
+
+
 def test_alembic_migration_creates_control_plane_tables(tmp_path: Path) -> None:
     with connect(tmp_path) as conn:
         tables = {
@@ -86,6 +178,8 @@ def test_alembic_migration_creates_control_plane_tables(tmp_path: Path) -> None:
         assert "scheduler_decisions" in tables
         assert "execution_groups" in tables
         assert "code_facts" in tables
+        assert "design_contracts" in tables
+        assert "design_reviews" in tables
         upsert_dag_node(conn, DagNode(node_id="node-1", paths=["src/app.py"]))
         upsert_execution_group(
             conn,
@@ -116,6 +210,32 @@ def test_alembic_migration_creates_control_plane_tables(tmp_path: Path) -> None:
                 status="failed",
             ),
         )
+        upsert_design_contract(
+            conn,
+            DesignContract(
+                contract_id="design-contract:active",
+                version=1,
+                ui_capability_mode="full",
+                ui_validation_mode="local",
+                ui_heavy=True,
+                designer_enabled=True,
+                audience="Operators",
+                product_goal="Review local UI work.",
+                product_posture="polished and task-focused",
+            ),
+        )
+        insert_design_review(
+            conn,
+            DesignReview(
+                review_id="review-1",
+                contract_id="design-contract:active",
+                node_id="node-1",
+                status="passed",
+                severity="low",
+                findings=["Design contract followed."],
+                evidence_paths=["target/screenshots/home.png"],
+            ),
+        )
         conn.commit()
 
     db_path = database_path_for_target(tmp_path)
@@ -124,6 +244,10 @@ def test_alembic_migration_creates_control_plane_tables(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) FROM validation_receipts").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM execution_groups").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM code_facts").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM design_contracts").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM design_reviews").fetchone()[0] == 1
+    with connect(tmp_path) as conn:
+        assert latest_design_contract(conn)["contract_id"] == "design-contract:active"
 
 
 def test_alembic_migration_adopts_partially_created_initial_schema(tmp_path: Path) -> None:
@@ -163,13 +287,15 @@ def test_alembic_migration_adopts_partially_created_initial_schema(tmp_path: Pat
             row[1] for row in conn.execute("PRAGMA table_info(validation_receipts)").fetchall()
         }
 
-    assert version == "0005_parallel_execution_read_models"
+    assert version == "0006_design_runtime_surfaces"
     assert "execution_dag_nodes" in tables
     assert "legacy_execution_dag_nodes_pre_0002" in tables
     assert "scheduler_decisions" in tables
     assert "execution_groups" in tables
     assert "typed_execution_groups_pre_0005" in tables
     assert "integration_queue" in tables
+    assert "design_contracts" in tables
+    assert "design_reviews" in tables
     assert {"name", "payload_json", "payload_sha256", "event_id"}.issubset(projection_columns)
     assert {"task_id", "ticket_id", "paths_json", "payload_json"}.issubset(node_columns)
     assert {"work_item_id", "node_id", "required", "recorded_at"}.issubset(receipt_columns)
@@ -194,6 +320,44 @@ def test_scheduler_policy_converts_validation_failures_to_repair_work(tmp_path: 
     assert record.selected.action_kind == "create_repair_work"
     assert record.selected.node_ids == ["node-1"]
     assert record.repair_work[0].action_type == "repair"
+
+
+def test_scheduler_policy_routes_design_nodes_to_designer_lane(tmp_path: Path) -> None:
+    record = choose_scheduler_record(
+        target_path=tmp_path,
+        run_id="design-lane",
+        tickets=[],
+        dag_nodes=[DagNode(node_id="design-1", action_type="design", owner_role="designer", paths=[])],
+        validation_receipts=[],
+    )
+
+    assert record.selected.action_kind == "launch_work"
+    assert record.selected.owner_role == "designer"
+    assert record.selected.execution_mode == "write"
+    assert ".diffmogger/agentic/design_contract.md" in record.selected.paths
+
+
+def test_scheduler_policy_turns_missing_ui_visual_tooling_into_setup_work(tmp_path: Path) -> None:
+    record = choose_scheduler_record(
+        target_path=tmp_path,
+        run_id="ui-visual-setup",
+        tickets=[],
+        dag_nodes=[DagNode(node_id="ui-check", paths=["src/App.tsx"])],
+        validation_receipts=[
+            ValidationReceipt(
+                receipt_id="receipt-ui",
+                node_id="ui-check",
+                command="npm run browser-smoke",
+                status="failed",
+                required=True,
+                payload={"classification": "ui_visual", "error": "playwright not installed"},
+            )
+        ],
+    )
+
+    assert record.selected.action_kind == "create_setup_work"
+    assert record.selected.owner_role == "hardener"
+    assert record.repair_work[0].action_type == "setup"
 
 
 def test_scheduler_policy_groups_non_overlapping_ready_nodes(tmp_path: Path) -> None:
@@ -624,6 +788,105 @@ def test_default_stub_does_not_complete_write_without_material_changes(monkeypat
         assert conn.execute("SELECT status FROM execution_groups").fetchone()[0] == "failed"
         assert conn.execute("SELECT COUNT(*) FROM ownership_leases WHERE status='active'").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM ownership_leases WHERE status='released' AND mode='write'").fetchone()[0] == 1
+
+
+def test_design_contract_projection_changes_are_material_when_sidecar_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / ".git" / "info" / "exclude").write_text("/.diffmogger/\n", encoding="utf-8")
+    helper_path = tmp_path / "scripts" / "spawn_worker_agent.sh"
+    helper_path.parent.mkdir(parents=True)
+    helper_path.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+target=""
+report_path=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target)
+      target="$2"
+      shift 2
+      ;;
+    --report-path)
+      report_path="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+mkdir -p "$target/.diffmogger/agentic" "$target/.diffmogger/runtime" "$(dirname "$report_path")"
+printf '# Design Contract\\n\\nUpdated by test worker.\\n' > "$target/.diffmogger/agentic/design_contract.md"
+printf '{"version":1,"source":"test"}\\n' > "$target/.diffmogger/agentic/design_contract.json"
+printf '{"version":1,"source":"test"}\\n' > "$target/.diffmogger/runtime/design_contract.json"
+printf 'updated design contract\\n' > "$report_path"
+""",
+        encoding="utf-8",
+    )
+    helper_path.chmod(0o755)
+    subprocess.run(["git", "add", "scripts/spawn_worker_agent.sh"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "add worker helper"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    design_paths = [
+        ".diffmogger/agentic/design_contract.md",
+        ".diffmogger/agentic/design_contract.json",
+        ".diffmogger/runtime/design_contract.json",
+    ]
+    with connect(tmp_path) as conn:
+        with conn:
+            upsert_ticket(
+                conn,
+                TicketRecord(
+                    ticket_id="T1",
+                    title="Create UI design foundation contract",
+                    ownership_paths=design_paths,
+                ),
+            )
+            upsert_dag_node(
+                conn,
+                DagNode(
+                    node_id="N1",
+                    ticket_id="T1",
+                    owner_role="builder",
+                    paths=design_paths,
+                ),
+            )
+
+    monkeypatch.setenv("DIFFMOGGER_WORKER_EXECUTION", "codex")
+    result = asyncio.run(
+        orchestration_activities.execute_role_work(
+            {
+                "target_path": str(tmp_path),
+                "run_id": "design-material",
+                "group_id": "G1",
+                "node_id": "N1",
+                "ticket_id": "T1",
+                "paths": design_paths,
+            }
+        )
+    )
+
+    assert result["ok"] is True
+    output = result["output"]
+    expected_material_paths = sorted(design_paths)
+    assert output["status"] == "completed"
+    assert output["changed_paths"] == expected_material_paths
+    assert output["payload"]["material_changed_paths"] == expected_material_paths
+    status_lines = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert status_lines == ["?? target/orchestration.sqlite3"]
 
 
 def test_scope_ownership_paths_parser_handles_valid_invalid_and_missing_reports() -> None:
@@ -1085,7 +1348,10 @@ def test_scoped_running_ticket_without_node_is_recovered(monkeypatch: pytest.Mon
         assert conn.execute("SELECT COUNT(*) FROM ownership_leases WHERE status='released' AND mode='write'").fetchone()[0] == 1
 
 
-def test_setup_only_follow_up_node_is_reopened(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("follow_up_status", ["done", "failed"])
+def test_setup_only_follow_up_node_is_reopened(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, follow_up_status: str
+) -> None:
     monkeypatch.setenv("DIFFMOGGER_WORKER_EXECUTION", "stub-success")
 
     with connect(tmp_path) as conn:
@@ -1111,9 +1377,12 @@ def test_setup_only_follow_up_node_is_reopened(monkeypatch: pytest.MonkeyPatch, 
                     node_id="node:parser-follow-up",
                     ticket_id="T-parser",
                     action_type="build",
-                    status="done",
+                    status=follow_up_status,  # type: ignore[arg-type]
                     paths=["src/app.ts"],
-                    payload={"source": "scope_follow_up"},
+                    payload={
+                        "source": "scope_follow_up",
+                        "failure_reason": "worker helper exited with code 1" if follow_up_status == "failed" else "",
+                    },
                 ),
             )
 
@@ -1139,9 +1408,114 @@ def test_setup_only_follow_up_node_is_reopened(monkeypatch: pytest.MonkeyPatch, 
         assert ticket_payload["setup_only_follow_up_reopened_at"]
         assert ticket_payload["last_build_node_id"] == "node:parser-follow-up"
         assert node_payload["recovered_from_setup_only_action"] is True
+        if follow_up_status == "failed":
+            assert node_payload["recovered_from_failed_setup_only_action"] is True
         assert conn.execute(
             "SELECT COUNT(*) FROM runtime_events WHERE event_type='campaign.setup_only_follow_up_reopened'"
         ).fetchone()[0] == 1
+
+
+def test_campaign_runtime_write_group_creates_checkpoint_commit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def git_run(*args: str) -> str:
+        env = {
+            **dict(os.environ),
+            "GIT_AUTHOR_NAME": "Diffmogger Test",
+            "GIT_AUTHOR_EMAIL": "diffmogger-test@example.invalid",
+            "GIT_COMMITTER_NAME": "Diffmogger Test",
+            "GIT_COMMITTER_EMAIL": "diffmogger-test@example.invalid",
+        }
+        result = subprocess.run(["git", *args], cwd=tmp_path, capture_output=True, text=True, check=False, env=env)
+        assert result.returncode == 0, result.stderr or result.stdout
+        return result.stdout.strip()
+
+    git_run("init", "-q")
+    (tmp_path / "README.md").write_text("# Runtime checkpoint\n", encoding="utf-8")
+    git_run("add", "README.md")
+    git_run("commit", "-m", "chore: scaffold")
+    base_commit = git_run("rev-parse", "HEAD")
+
+    with connect(tmp_path) as conn:
+        with conn:
+            upsert_ticket(
+                conn,
+                TicketRecord(
+                    ticket_id="T-runtime",
+                    title="Build runtime commit surface",
+                    status="ready",
+                    ownership_paths=["src/app.py"],
+                ),
+            )
+            upsert_dag_node(
+                conn,
+                DagNode(
+                    node_id="node:runtime",
+                    ticket_id="T-runtime",
+                    action_type="build",
+                    status="ready",
+                    paths=["src/app.py"],
+                    summary="Build runtime commit surface",
+                ),
+            )
+
+    async def fake_execute_role_work(payload: dict[str, object]) -> dict[str, object]:
+        src = tmp_path / "src"
+        src.mkdir(exist_ok=True)
+        (src / "app.py").write_text("def app():\n    return 'ok'\n", encoding="utf-8")
+        output = WorkerOutput(
+            output_id="worker-output:runtime-checkpoint",
+            run_id=str(payload.get("run_id") or "runtime-checkpoint"),
+            group_id=str(payload.get("group_id") or ""),
+            node_id=str(payload.get("node_id") or ""),
+            worker_id="test-worker",
+            status="completed",
+            changed_paths=["src/app.py"],
+            summary="Created app runtime surface.",
+            payload={
+                "input": {
+                    "node_id": str(payload.get("node_id") or ""),
+                    "ticket_id": str(payload.get("ticket_id") or ""),
+                },
+                "ticket_id": str(payload.get("ticket_id") or ""),
+            },
+        )
+        return {"ok": True, "activity": "execute_role_work", "output": output.model_dump(mode="json")}
+
+    monkeypatch.setattr(orchestration_activities, "execute_role_work", fake_execute_role_work)
+
+    result = asyncio.run(
+        orchestration_activities.run_campaign_cycle(
+            SchedulerCycleRequest(target_path=str(tmp_path), run_id="runtime-checkpoint").model_dump(mode="json")
+        )
+    )
+
+    checkpoint = result["follow_up"]["integration"]["checkpoint"]
+    head_commit = git_run("rev-parse", "HEAD")
+    commit_body = git_run("log", "-1", "--format=%B")
+    tree_paths = set(git_run("ls-tree", "-r", "--name-only", "HEAD").splitlines())
+
+    assert checkpoint["status"] == "committed"
+    assert checkpoint["commit_hash"] == head_commit
+    assert head_commit != base_commit
+    assert "feat(builder): build runtime commit surface" in commit_body
+    assert "Diffmogger-Checkpoint: runtime-work" in commit_body
+    assert "Diffmogger-Ticket: T-runtime" in commit_body
+    assert "src/app.py" in tree_paths
+    with sqlite3.connect(database_path_for_target(tmp_path)) as conn:
+        ticket_payload = json.loads(
+            conn.execute("SELECT payload_json FROM tickets WHERE ticket_id='T-runtime'").fetchone()[0]
+        )["payload"]
+        assert ticket_payload["related_commits"] == [head_commit]
+
+
+def test_spawn_worker_prompt_escapes_env_rule_heredoc() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    for rel in ("scripts/target/spawn_worker_agent.sh", "templates/scripts/spawn_worker_agent.sh"):
+        text = (repo / rel).read_text(encoding="utf-8")
+        assert 'worker_env_access_rule_for_heredoc="$(escape_heredoc_text "$worker_env_access_rule")"' in text
+        assert "- $worker_env_access_rule\n" not in text
+        assert "- $worker_env_access_rule_for_heredoc\n" in text
 
 
 def test_bounded_ticket_items_are_synced_into_scheduler_tickets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1302,3 +1676,394 @@ def test_apprise_dry_run_delivery_is_typed() -> None:
     assert result.ok is True
     assert result.sent is False
     assert result.status == "dry_run"
+
+
+def test_integrator_commit_messages_use_intent_metadata_and_safe_paths(tmp_path: Path) -> None:
+    manifest = {
+        "role": "builder",
+        "run_id": "worker-run",
+        "task_id": "TICKET-123",
+        "changed_files": ["src/backend.py", "tests/test_backend.py"],
+        "checks_run": ["python3 -m py_compile src/backend.py"],
+        "summary": "\n".join(
+            [
+                "Commit type: feat",
+                "Commit scope: api",
+                "Commit subject: Add customer endpoint",
+                "",
+                "## Summary",
+                "Adds the endpoint.",
+            ]
+        ),
+    }
+
+    message = semantic_commit_message(manifest, tmp_path, "integrator-run")
+    allowed, skipped = filter_commit_paths(
+        [
+            "src/backend.py",
+            "tests/test_backend.py",
+            "docs/guide.md",
+            "package-lock.json",
+            ".env",
+            ".env.local",
+            ".env.example",
+            "node_modules/pkg/index.js",
+            ".diffmogger/runtime/automation_logs/raw.log",
+            "target/automation_queue/builder/run/manifest.json",
+            "dist/app.js",
+            ".DS_Store",
+        ]
+    )
+
+    assert message.splitlines()[0] == "feat(api): add customer endpoint"
+    assert "Diffmogger-Run: integrator-run" in message
+    assert "Diffmogger-Ticket: TICKET-123" in message
+    assert "Diffmogger-Role: builder" in message
+    assert "Diffmogger-Patch-Run: worker-run" in message
+    assert "Validation: python3 -m py_compile src/backend.py" in message
+    assert allowed == ["src/backend.py", "tests/test_backend.py", "docs/guide.md", "package-lock.json", ".env.example"]
+    assert {item["path"] for item in skipped} == {
+        ".env",
+        ".env.local",
+        "node_modules/pkg/index.js",
+        ".diffmogger/runtime/automation_logs/raw.log",
+        "target/automation_queue/builder/run/manifest.json",
+        "dist/app.js",
+        ".DS_Store",
+    }
+
+
+def test_ticket_run_state_overlays_typed_ticket_statuses_on_stale_projection(tmp_path: Path) -> None:
+    stale_tickets = [
+        {
+            "id": "TICKET-001",
+            "summary": "Build first slice.",
+            "status": "pending",
+            "depends_on": [],
+            "acceptance_criteria": ["First slice works."],
+            "verification_commands": ["python3 -m py_compile src/first.py"],
+            "evidence": [],
+            "related_commits": [],
+            "blocker": "",
+        },
+        {
+            "id": "TICKET-002",
+            "summary": "Build second slice.",
+            "status": "pending",
+            "depends_on": ["TICKET-001"],
+            "acceptance_criteria": ["Second slice works."],
+            "verification_commands": [],
+            "evidence": [],
+            "related_commits": [],
+            "blocker": "",
+        },
+        {
+            "id": "TICKET-003",
+            "summary": "Wait for follow-up.",
+            "status": "pending",
+            "depends_on": ["TICKET-002"],
+            "acceptance_criteria": [],
+            "verification_commands": [],
+            "evidence": [],
+            "related_commits": [],
+            "blocker": "",
+        },
+    ]
+    write_ticket_run_state(
+        tmp_path,
+        {
+            "run_id": "demo-run",
+            "halt_when_complete": True,
+            "notify_on_complete": False,
+            "tickets": stale_tickets,
+        },
+        actor_role="test",
+        event_type="ticket.test_seeded",
+    )
+
+    with connect(tmp_path) as conn:
+        with conn:
+            upsert_ticket(
+                conn,
+                TicketRecord(
+                    ticket_id="TICKET-001",
+                    title="Build first slice.",
+                    status="done",
+                    evidence=["worker_output:first-slice"],
+                    payload={"ticket_run_id": "demo-run", "position": 0, "ticket_item": stale_tickets[0]},
+                ),
+            )
+            upsert_ticket(
+                conn,
+                TicketRecord(
+                    ticket_id="TICKET-002",
+                    title="Build second slice.",
+                    status="running",
+                    depends_on=["TICKET-001"],
+                    payload={"ticket_run_id": "demo-run", "position": 1, "ticket_item": stale_tickets[1]},
+                ),
+            )
+            upsert_ticket(
+                conn,
+                TicketRecord(
+                    ticket_id="TICKET-003",
+                    title="Wait for follow-up.",
+                    status="waiting",
+                    depends_on=["TICKET-002"],
+                    payload={"ticket_run_id": "demo-run", "position": 2, "ticket_item": stale_tickets[2]},
+                ),
+            )
+
+    ticket_state = load_ticket_run_state(tmp_path)
+    assert ticket_state is not None
+    assert [ticket["status"] for ticket in ticket_state["tickets"]] == ["done", "in_progress", "pending"]
+    assert ticket_state["tickets"][0]["evidence"] == ["worker_output:first-slice"]
+    assert ticket_state["tickets"][0]["acceptance_criteria"] == ["First slice works."]
+    assert ticket_state["tickets"][1]["depends_on"] == ["TICKET-001"]
+
+    summary = ticket_run_state_summary(tmp_path)
+    assert summary["total"] == 3
+    assert summary["counts"]["done"] == 1
+    assert summary["counts"]["in_progress"] == 1
+    assert summary["counts"]["pending"] == 1
+
+    with connect(tmp_path) as conn:
+        with conn:
+            dag = materialize_execution_dag_conn(conn, tmp_path, default_conveyor_state())
+    completion_nodes = [
+        node
+        for node in dag["nodes"]
+        if node.get("task_id") == "TICKET-001" and node.get("action_type") == "completion"
+    ]
+    assert completion_nodes
+    assert completion_nodes[0]["status"] == "complete"
+    assert completion_nodes[0]["blocker_reason"] == ""
+
+
+def test_integrator_creates_checkpoint_commit_and_records_ticket_state(tmp_path: Path) -> None:
+    def git_run(*args: str, input_text: str | None = None) -> str:
+        env = {
+            **dict(os.environ),
+            "GIT_AUTHOR_NAME": "Diffmogger Test",
+            "GIT_AUTHOR_EMAIL": "diffmogger-test@example.invalid",
+            "GIT_COMMITTER_NAME": "Diffmogger Test",
+            "GIT_COMMITTER_EMAIL": "diffmogger-test@example.invalid",
+        }
+        result = subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+        return result.stdout.strip()
+
+    git_run("init", "-q")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    git_run("add", "README.md")
+    git_run("commit", "-m", "chore: scaffold")
+    base_commit = git_run("rev-parse", "HEAD")
+
+    initial_ticket = {
+        "id": "TICKET-001",
+        "summary": "Build backend core.",
+        "status": "in_progress",
+        "depends_on": [],
+        "acceptance_criteria": ["Backend module exists."],
+        "verification_commands": ["python3 -m py_compile src/backend.py"],
+        "evidence": [],
+        "related_commits": [],
+        "blocker": "",
+    }
+    write_ticket_run_state(
+        tmp_path,
+        {
+            "run_id": "demo-run",
+            "halt_when_complete": True,
+            "notify_on_complete": False,
+            "tickets": [initial_ticket],
+        },
+        actor_role="test",
+        event_type="ticket.test_seeded",
+    )
+
+    (tmp_path / "src").mkdir()
+    backend = tmp_path / "src" / "backend.py"
+    backend.write_text("def handler():\n    return 'ok'\n", encoding="utf-8")
+    git_run("add", "-N", "src/backend.py")
+    patch_text = git_run("diff", "--binary", base_commit, "--", "src/backend.py")
+    git_run("reset", "-q")
+    backend.unlink()
+    (tmp_path / "src").rmdir()
+
+    desired_ticket = {
+        **initial_ticket,
+        "status": "candidate_done",
+        "evidence": ["python3 -m py_compile src/backend.py passed."],
+    }
+    queue_dir = tmp_path / "target" / "automation_queue" / "builder" / "worker-run"
+    queue_dir.mkdir(parents=True)
+    (queue_dir / "changes.patch").write_text(patch_text + "\n", encoding="utf-8")
+    (queue_dir / "ticket_state_actions.json").write_text(
+        json.dumps(
+            {
+                "actions": [
+                    {
+                        "action": "update_ticket",
+                        "ticket_id": "TICKET-001",
+                        "ticket": desired_ticket,
+                        "start_hash": ticket_digest(initial_ticket),
+                        "end_hash": ticket_digest(desired_ticket),
+                    }
+                ]
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (queue_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "role": "builder",
+                "run_id": "worker-run",
+                "patch_id": "patch-backend-core",
+                "base_commit": base_commit,
+                "status": "queued",
+                "patch_path": "target/automation_queue/builder/worker-run/changes.patch",
+                "ticket_state_actions_path": "target/automation_queue/builder/worker-run/ticket_state_actions.json",
+                "changed_files": ["src/backend.py"],
+                "verification_commands": ["python3 -m py_compile src/backend.py"],
+                "summary": "\n".join(
+                    [
+                        "Commit type: feat",
+                        "Commit scope: backend",
+                        "Commit subject: Add backend core",
+                        "",
+                        "## Checks",
+                        "python3 -m py_compile src/backend.py",
+                    ]
+                ),
+                "created_at": "2026-05-26T00:00:00+00:00",
+                "checkpoint_commit": None,
+                "accepted_commit": None,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    (tmp_path / ".env").write_text("SECRET_VALUE=do-not-commit\n", encoding="utf-8")
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "pkg" / "index.js").write_text("module.exports = {}\n", encoding="utf-8")
+    (tmp_path / "target" / "automation_logs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "target" / "automation_logs" / "raw.log").write_text("raw agent log\n", encoding="utf-8")
+
+    assert integrate(tmp_path, "integrator-run", dry_run=False) == 0
+
+    head_commit = git_run("rev-parse", "HEAD")
+    log_subjects = git_run("log", "--format=%s").splitlines()
+    commit_body = git_run("log", "-1", "--format=%B")
+    tree_paths = set(git_run("ls-tree", "-r", "--name-only", "HEAD").splitlines())
+    manifest = json.loads((queue_dir / "manifest.json").read_text(encoding="utf-8"))
+    ticket_state = load_ticket_run_state(tmp_path)
+    status_json = subprocess.run(
+        [sys.executable, "-m", "diffmogger.runtime.ticket_run", str(tmp_path), "status", "--json"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**dict(os.environ), "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+    )
+    assert status_json.returncode == 0
+    status_payload = json.loads(status_json.stdout)
+    recorded_ticket = ticket_state["tickets"][0]
+
+    assert head_commit != base_commit
+    assert log_subjects[0] == "feat(backend): add backend core"
+    assert "Diffmogger-Run: integrator-run" in commit_body
+    assert "Diffmogger-Ticket: TICKET-001" in commit_body
+    assert "Diffmogger-Role: builder" in commit_body
+    assert "Validation: python3 -m py_compile src/backend.py" in commit_body
+    assert "src/backend.py" in tree_paths
+    assert ".env" not in tree_paths
+    assert not any(path.startswith("node_modules/") for path in tree_paths)
+    assert not any(path.startswith("target/automation_logs/") for path in tree_paths)
+    assert manifest["status"] == "applied"
+    assert manifest["accepted_commit"] == head_commit
+    assert recorded_ticket["related_commits"] == [head_commit]
+    assert recorded_ticket["status"] == "candidate_done"
+    assert status_payload["tickets"][0]["related_commits"] == [head_commit]
+
+
+def test_integrator_respects_disabled_checkpoint_commits(tmp_path: Path) -> None:
+    def git_run(*args: str) -> str:
+        env = {
+            **dict(os.environ),
+            "GIT_AUTHOR_NAME": "Diffmogger Test",
+            "GIT_AUTHOR_EMAIL": "diffmogger-test@example.invalid",
+            "GIT_COMMITTER_NAME": "Diffmogger Test",
+            "GIT_COMMITTER_EMAIL": "diffmogger-test@example.invalid",
+        }
+        result = subprocess.run(["git", *args], cwd=tmp_path, capture_output=True, text=True, check=False, env=env)
+        assert result.returncode == 0, result.stderr or result.stdout
+        return result.stdout.strip()
+
+    git_run("init", "-q")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    git_run("add", "README.md")
+    git_run("commit", "-m", "chore: scaffold")
+    base_commit = git_run("rev-parse", "HEAD")
+    (tmp_path / ".agentic").mkdir()
+    (tmp_path / ".agentic" / "project_intake.json").write_text(
+        json.dumps({"automation_checkpoint_commits": False}) + "\n",
+        encoding="utf-8",
+    )
+
+    (tmp_path / "src").mkdir()
+    app = tmp_path / "src" / "app.py"
+    app.write_text("print('demo')\n", encoding="utf-8")
+    git_run("add", "-N", "src/app.py")
+    patch_text = git_run("diff", "--binary", base_commit, "--", "src/app.py")
+    git_run("reset", "-q")
+    app.unlink()
+    (tmp_path / "src").rmdir()
+
+    queue_dir = tmp_path / "target" / "automation_queue" / "builder" / "disabled-run"
+    queue_dir.mkdir(parents=True)
+    (queue_dir / "changes.patch").write_text(patch_text + "\n", encoding="utf-8")
+    (queue_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "role": "builder",
+                "run_id": "disabled-run",
+                "patch_id": "patch-disabled-commit",
+                "base_commit": base_commit,
+                "status": "queued",
+                "patch_path": "target/automation_queue/builder/disabled-run/changes.patch",
+                "changed_files": ["src/app.py"],
+                "summary": "Commit subject: Add app shell",
+                "created_at": "2026-05-26T00:00:00+00:00",
+                "checkpoint_commit": None,
+                "accepted_commit": None,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert integrate(tmp_path, "integrator-disabled-run", dry_run=False) == 0
+
+    manifest = json.loads((queue_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert git_run("rev-parse", "HEAD") == base_commit
+    assert (tmp_path / "src" / "app.py").exists()
+    assert manifest["status"] == "applied"
+    assert manifest["accepted_commit"] is None

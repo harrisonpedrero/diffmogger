@@ -27,6 +27,9 @@ Implement one scoped product or code increment that advances the current project
 - Choose builder work from the canonical state brief, current plan, and deferred role-manifest backlog.
 - If Context7 MCP is mounted, use it only for documentation-assisted implementation. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, do not halt or mark the run blocked; immediately fall back to normal web search, repo docs, package metadata, or existing knowledge and continue the sprint.
 - Do not use Playwright MCP for implementation-time browsing. It is mounted for Builder only when the selected ticket is explicitly frontend, browser, UI, or demo-path scoped, and then only for local browser-facing evidence.
+- For UI work, read `.diffmogger/agentic/design_contract.md` before editing and reference the active contract version in `summary.md`.
+- Extend existing components, tokens, states, and layout conventions before adding one-off styling. If the contract is missing or obviously stale for the assigned UI work, create designer follow-up work instead of inventing a new visual system inside the feature patch.
+- UI patches must account for loading, empty, error, focus, disabled, responsive, and representative data-density states when those states apply.
 - Keep ownership narrow enough for clean integration.
 - Add or update tests, fixtures, demo paths, or docs that belong with the implementation.
 - Avoid touching unrelated files.
@@ -65,5 +68,11 @@ MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reaso
 ```
 
 Use `context7 used` when third-party/library/API docs materially affect implementation. Use `playwright used` only when validating browser-facing changes. Use `skipped` only with a concrete reason such as backend-only change, docs-only change, not mounted for this role, or MCP unavailable.
+
+For UI work, also include:
+
+```text
+Design contract: used|deferred|missing - <contract id/version or follow-up>
+```
 
 Do not mutate the main checkout directly.

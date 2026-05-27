@@ -12,6 +12,7 @@ from .patching import batch_apply, integrate_individually, replay_and_commit
 from .progress import deferred_manifests, triage_deferred_equivalents, update_progress, update_task_file
 from .queue import all_role_manifests, create_integrator_manifest, load_queued_manifests
 from .verification import manifest_requires_full_verification
+from diffmogger.runtime.state_store import write_canonical_state_brief
 
 def load_target_automation_env(target: Path) -> bool:
     """Load target dotenv values into this fresh CLI process without logging them."""
@@ -24,6 +25,15 @@ def load_target_automation_env(target: Path) -> bool:
     os.environ.clear()
     os.environ.update(env)
     return True
+
+
+def refresh_generated_state_views(target: Path, *, dry_run: bool) -> None:
+    if dry_run:
+        return
+    try:
+        write_canonical_state_brief(target)
+    except Exception as exc:
+        print(f"WARN: could not refresh canonical state brief: {exc}", file=sys.stderr)
 
 def integrate(
     target: Path,
@@ -91,6 +101,7 @@ def integrate(
                 dry_run=dry_run,
             )
             commit_automation_state(target, run_id, dry_run=dry_run)
+            refresh_generated_state_views(target, dry_run=dry_run)
             print(
                 f"BASELINE_RECHECK_COMPLETE run_id={run_id} status={baseline_record.get('status') or 'unknown'}"
             )
@@ -148,6 +159,7 @@ def integrate(
                 dry_run=dry_run,
             )
             commit_automation_state(target, run_id, dry_run=dry_run)
+            refresh_generated_state_views(target, dry_run=dry_run)
             print("No queued multi-role patches.")
             return 0
 
@@ -176,6 +188,7 @@ def integrate(
                 head_before=head_before,
                 checkpoint_commit=checkpoint_commit,
                 checks_run=[str(item) for item in checks],
+                integration_run_id=run_id,
                 dry_run=dry_run,
             )
             verification_status = "passed"
@@ -188,6 +201,7 @@ def integrate(
                 head_before=head_before,
                 checkpoint_commit=checkpoint_commit,
                 baseline=baseline_record,
+                integration_run_id=run_id,
                 dry_run=dry_run,
             )
             deferred_count = sum(
@@ -227,6 +241,7 @@ def integrate(
             dry_run=dry_run,
         )
         commit_automation_state(target, run_id, dry_run=dry_run)
+        refresh_generated_state_views(target, dry_run=dry_run)
         print(f"INTEGRATION_COMPLETE run_id={run_id} accepted={len(committed)} deferred={deferred_count}")
         if dry_run:
             print("DRY RUN: no files were modified.")

@@ -3894,6 +3894,15 @@ textarea {
   align-items: center;
 }
 
+.ticket-progress-tabbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
 .ticket-progress-workspace,
 .ticket-graph-workspace {
   display: grid;
@@ -4190,7 +4199,7 @@ textarea {
 
 .ticket-graph-toolbar {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(190px, 260px) repeat(4, auto);
+  grid-template-columns: minmax(180px, 1fr) minmax(190px, 260px) repeat(5, auto);
   gap: 7px;
   align-items: center;
   min-width: 0;
@@ -4402,6 +4411,55 @@ textarea {
 .ticket-graph-node.selected {
   outline: 2px solid rgba(41, 251, 15, 0.6);
   outline-offset: 3px;
+}
+
+body.ticket-graph-fullscreen-open {
+  overflow: hidden;
+}
+
+.ticket-graph-fullscreen-shell {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  visibility: hidden;
+  min-width: 0;
+  padding: 14px;
+  background: #070a09;
+  pointer-events: none;
+}
+
+.ticket-graph-fullscreen-shell.open {
+  z-index: 200;
+  display: grid;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.ticket-graph-fullscreen-shell:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  background: #070a09;
+}
+
+.ticket-graph-workspace.fullscreen {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+  min-height: 0;
+  height: 100%;
+  align-items: stretch;
+}
+
+.ticket-graph-workspace.fullscreen .ticket-graph-main {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.ticket-graph-workspace.fullscreen .ticket-graph-viewport {
+  min-height: 0;
+  height: auto;
+}
+
+.ticket-graph-workspace.fullscreen .ticket-detail-inspector {
+  align-self: stretch;
+  overflow: auto;
 }
 
 .human-compact-counts {
@@ -4985,11 +5043,19 @@ textarea {
   }
 
   .ticket-graph-toolbar {
-    grid-template-columns: minmax(0, 1fr) repeat(4, auto);
+    grid-template-columns: minmax(0, 1fr) repeat(5, auto);
   }
 
   .ticket-graph-search {
     grid-column: 1 / -1;
+  }
+
+  .ticket-graph-workspace.fullscreen {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ticket-graph-workspace.fullscreen .ticket-detail-inspector {
+    max-height: 260px;
   }
 
   .queue-buckets {

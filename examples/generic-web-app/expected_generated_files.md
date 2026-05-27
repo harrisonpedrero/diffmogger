@@ -91,6 +91,8 @@ AGENTS.md
 
 The Python files under `.diffmogger/scripts/` should be generated from the runtime entrypoint manifest and the canonical wrapper template, not copied from `templates/scripts/`.
 
+The generated sidecar should include `.diffmogger/agentic/design_contract.md`, `.diffmogger/agentic/design_contract.json`, the `designer` role prompt, and runtime design-state support. Because this is a UI-heavy web app example, ticket generation should seed design foundation and UI validation guidance before broad UI feature work.
+
 The bootstrap prompt should identify this as `fresh_project` mode and ask Codex to create a local-first web app with seed data, a weekly board, task completion, daily summary, and verification commands.
 
 The generated `.diffmogger/agentic/verification_commands.txt` should start with bootstrap-safe commands that pass before the web app package scripts exist; preferred future app checks should stay documented until bootstrap creates them.

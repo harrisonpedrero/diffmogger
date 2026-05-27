@@ -91,6 +91,8 @@ AGENTS.md
 
 The Python files under `.diffmogger/scripts/` should be generated from the runtime entrypoint manifest and the canonical wrapper template, not copied from `templates/scripts/`.
 
+The generated sidecar should include design-contract projections, the `designer` role prompt, and UI visual-validation guidance. TrendLab is UI-heavy, so early ticket planning should cover design foundation, reusable components/tokens, representative data density, and browser evidence before final UI completion.
+
 The bootstrap prompt should identify this as `fresh_project` mode and ask for fixture-first scoring, evidence display, report generation, and a one-command demo/test path.
 
 The generated `.diffmogger/agentic/verification_commands.txt` should start with bootstrap-safe commands that pass before product-specific package scripts exist; preferred future checks should stay documented until bootstrap creates them.

@@ -286,6 +286,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
     queue = queue_snapshot(target)
     baseline_verification = baseline_verification_snapshot(target)
     task = task_state_from_canonical(target, canonical_state)
+    design = canonical_state.get("design") if isinstance(canonical_state.get("design"), dict) else {}
     progress = progress_snapshot(target)
     human_messages = canonical_state.get("human_messages") if isinstance(canonical_state.get("human_messages"), dict) else {}
     human_counts = human_messages.get("counts") if isinstance(human_messages.get("counts"), dict) else {}
@@ -358,6 +359,18 @@ def build_snapshot(target: Path) -> dict[str, Any]:
             ),
         },
     )
+    contract = design.get("contract") if isinstance(design.get("contract"), dict) else {}
+    ui_validation = design.get("ui_validation") if isinstance(design.get("ui_validation"), dict) else {}
+    review_items.append(
+        {
+            "label": "Design and UI validation",
+            "body": (
+                f"Contract: {contract.get('contract_id') or 'not recorded'}; "
+                f"designer: {str(bool(contract.get('designer_enabled'))).lower()}; "
+                f"ui_visual receipts: {ui_validation.get('count') or 0}."
+            ),
+        },
+    )
     review["items"] = review_items
     return {
         "schema_version": 1,
@@ -367,6 +380,7 @@ def build_snapshot(target: Path) -> dict[str, Any]:
         "human": human,
         "git": git_snapshot(target),
         "queue": queue,
+        "design": design,
         "baseline_verification": baseline_verification,
         "runner": runner,
         "conveyor": conveyor_state,

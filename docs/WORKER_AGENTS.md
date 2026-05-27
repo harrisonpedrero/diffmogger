@@ -203,11 +203,13 @@ Multi-role automation is a project-level role mode, not the same thing as write-
 }
 ```
 
-In multi-role mode, planner, builder, and hardener run in isolated git worktrees and queue patches. The integrator owns the main checkout, applies patches FIFO, verifies, creates local commits, updates typed SQLite state and role manifests, refreshes the canonical state brief plus `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`, and manages retention.
+In multi-role mode, planner, designer when UI-heavy or opted in, builder, and hardener run in isolated git worktrees and queue patches. The integrator owns the main checkout, applies patches FIFO, verifies, creates filtered local project-change commits when `automation_checkpoint_commits` is enabled, records accepted commit hashes in typed SQLite ticket state, refreshes the canonical state brief plus `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`, and manages retention.
 
 The worker-agent rules still matter inside each role: read-only worker reports remain the default for exploration, write workers remain optional, and no role may create unbounded recursive agents. Overlapping write ownership still requires an explicit coordination protocol.
 
 Multi-role scripts are local-only. They refuse configured remotes by default, never push, and keep transient role artifacts under `.diffmogger/runtime/automation_queue/`, `.diffmogger/runtime/automation_worktrees/`, and `.diffmogger/runtime/automation_logs/`.
+
+Local checkpoint commits only stage project-owned source, tests, docs, fixtures, config, lockfiles, and intentional demo artifacts. They skip `.env`, secret/key material, dependency folders, caches, build output, Diffmogger runtime logs, raw agent logs, queues, worktrees, and generated runtime projections.
 
 ## Codex CLI Pattern
 

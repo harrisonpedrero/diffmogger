@@ -22,7 +22,7 @@ from typing import Any
 
 from diffmogger.runtime.paths import existing_or_target_path, load_manifest, manifest_list as manifest_path_list, sidecar_rel, target_path
 
-QUEUE_ROLES = ("planner", "builder", "hardener")
+QUEUE_ROLES = ("planner", "designer", "builder", "hardener")
 
 ALL_ROLES = (*QUEUE_ROLES, "integrator")
 
@@ -45,6 +45,7 @@ RUNTIME_STATE_WHITELIST = {
     ".agentic/smoke_commands.txt",
     ".agentic/verification_commands.txt",
     ".agentic/roles/planner.md",
+    ".agentic/roles/designer.md",
     ".agentic/roles/builder.md",
     ".agentic/roles/hardener.md",
     ".agentic/roles/integrator.md",

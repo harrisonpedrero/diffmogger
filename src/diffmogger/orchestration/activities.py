@@ -29,6 +29,7 @@ from diffmogger.contracts import (
     WorkerOutput,
     json_ready,
 )
+from diffmogger.integrator.commits import checkpoint_runtime_work
 from diffmogger.orchestration.scheduler_policy import choose_scheduler_record
 from diffmogger.runtime import code_facts as code_fact_extractor
 from diffmogger.runtime.paths import existing_or_target_path
@@ -388,10 +389,13 @@ def _recover_setup_only_running_ticket_followups(
         if not follow_up_node_id or payload.get("last_build_node_id") == follow_up_node_id:
             continue
         node = nodes_by_id.get(follow_up_node_id)
-        if node is None or node.status != "done" or node.payload.get("source") != "scope_follow_up":
+        if node is None or node.status not in {"done", "failed"} or node.payload.get("source") != "scope_follow_up":
             continue
         node_payload = dict(node.payload)
         node_payload["recovered_from_setup_only_action"] = True
+        if node.status == "failed":
+            node_payload["recovered_from_failed_setup_only_action"] = True
+            node_payload["previous_failure_reason"] = str(node.payload.get("failure_reason") or "")
         node_payload["recovered_at"] = now.isoformat()
         updated_node = node.model_copy(update={"status": "ready", "payload": node_payload, "updated_at": now})
         upsert_dag_node(conn, updated_node)
@@ -409,6 +413,7 @@ def _recover_setup_only_running_ticket_followups(
                         "run_id": request.run_id,
                         "ticket_id": ticket.ticket_id,
                         "node_id": updated_node.node_id,
+                        "previous_node_status": node.status,
                         "previous_action_kind": str(ticket.payload.get("last_action_kind") or ""),
                     },
                     sort_keys=True,
@@ -709,8 +714,84 @@ def _worker_identity_from_result(worker_result: dict[str, Any]) -> tuple[str, st
     return node_id, ticket_id
 
 
-def _is_material_changed_path(value: Any) -> bool:
+DESIGN_CONTRACT_MATERIAL_PATHS = frozenset(
+    {
+        ".agentic/design_contract.md",
+        ".agentic/design_contract.json",
+        ".diffmogger/agentic/design_contract.md",
+        ".diffmogger/agentic/design_contract.json",
+        ".diffmogger/runtime/design_contract.json",
+        "target/design_contract.json",
+    }
+)
+
+
+def _normalize_changed_path(value: Any) -> str:
     path = str(value or "").strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+def _payload_marks_design_work(payload: dict[str, Any]) -> bool:
+    role = str(payload.get("owner_role") or payload.get("role") or "").strip().lower()
+    kind = str(payload.get("action_kind") or payload.get("kind") or "").strip().lower()
+    return role == "designer" or kind == "design" or bool(payload.get("design_contract_required"))
+
+
+def _is_design_contract_material_path(value: Any) -> bool:
+    return _normalize_changed_path(value) in DESIGN_CONTRACT_MATERIAL_PATHS
+
+
+def _is_design_contract_work(
+    *,
+    ticket: TicketRecord | None,
+    node: DagNode | None,
+    paths: list[str],
+) -> bool:
+    ticket_payload = ticket.payload if ticket is not None else {}
+    ticket_item = ticket_payload.get("ticket_item") if isinstance(ticket_payload.get("ticket_item"), dict) else {}
+    return (
+        (node is not None and (node.action_type == "design" or node.owner_role.strip().lower() == "designer"))
+        or _payload_marks_design_work(ticket_payload)
+        or _payload_marks_design_work(ticket_item)
+        or any(_is_design_contract_material_path(path) for path in paths)
+    )
+
+
+def _design_contract_paths_for_worker(
+    *,
+    ticket: TicketRecord | None,
+    node: DagNode | None,
+    paths: list[str],
+) -> list[str]:
+    explicit_paths = {
+        _normalize_changed_path(path)
+        for path in paths
+        if _is_design_contract_material_path(path)
+    }
+    if _is_design_contract_work(ticket=ticket, node=node, paths=paths):
+        return sorted(explicit_paths | set(DESIGN_CONTRACT_MATERIAL_PATHS))
+    return sorted(explicit_paths)
+
+
+def _path_fingerprint(target: Path, rel_path: str) -> str:
+    path_value = _normalize_changed_path(rel_path)
+    if not path_value or path_value in {".", "./"}:
+        return ""
+    candidate = Path(path_value)
+    if not candidate.is_absolute():
+        candidate = target / path_value
+    try:
+        if not candidate.is_file():
+            return ""
+        return hashlib.sha256(candidate.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _is_material_changed_path(value: Any) -> bool:
+    path = _normalize_changed_path(value)
     if not path or path in {".", "./"}:
         return False
     return not (
@@ -809,6 +890,76 @@ def _load_dag_node(conn: sqlite3.Connection, node_id: str) -> DagNode | None:
         return None
 
 
+def _load_execution_group(conn: sqlite3.Connection, group_id: str) -> ExecutionGroup | None:
+    row = conn.execute("SELECT payload_json FROM execution_groups WHERE group_id = ?", (group_id,)).fetchone()
+    if row is None:
+        return None
+    try:
+        return ExecutionGroup.model_validate(json.loads(row["payload_json"] or "{}"))
+    except Exception:
+        return None
+
+
+def _runtime_checkpoint_summary(
+    conn: sqlite3.Connection,
+    *,
+    ticket_ids: list[str],
+    node_ids: list[str],
+) -> str:
+    titles: list[str] = []
+    for ticket_id in ticket_ids:
+        ticket = _load_ticket(conn, ticket_id)
+        if ticket is not None and ticket.title:
+            titles.append(ticket.title)
+    if len(titles) == 1:
+        return titles[0]
+    if len(titles) > 1:
+        return f"Complete {len(titles)} ticket work wave"
+    summaries: list[str] = []
+    for node_id in node_ids:
+        node = _load_dag_node(conn, node_id)
+        if node is not None and node.summary:
+            summaries.append(node.summary)
+    if len(summaries) == 1:
+        return summaries[0]
+    if len(summaries) > 1:
+        return f"Complete {len(summaries)} DAG node work wave"
+    return "Checkpoint completed runtime work"
+
+
+def _record_runtime_checkpoint_commit(target: Path, group_id: str, commit_hash: str, now: datetime) -> None:
+    if not group_id or not commit_hash:
+        return
+    with connect(target) as conn:
+        with conn:
+            group = _load_execution_group(conn, group_id)
+            if group is None:
+                return
+            for ticket_id in group.ticket_ids:
+                ticket = _load_ticket(conn, ticket_id)
+                if ticket is None:
+                    continue
+                payload = dict(ticket.payload)
+                related = _text_list(payload.get("related_commits"))
+                payload["related_commits"] = list(dict.fromkeys([*related, commit_hash]))
+                ticket_item = payload.get("ticket_item")
+                if isinstance(ticket_item, dict):
+                    item_related = _text_list(ticket_item.get("related_commits"))
+                    next_item = dict(ticket_item)
+                    next_item["related_commits"] = list(dict.fromkeys([*item_related, commit_hash]))
+                    payload["ticket_item"] = next_item
+                upsert_ticket(
+                    conn,
+                    ticket.model_copy(
+                        update={
+                            "evidence": list(dict.fromkeys([*ticket.evidence, f"commit:{commit_hash}"])),
+                            "payload": payload,
+                            "updated_at": now,
+                        }
+                    ),
+                )
+
+
 def _selected_ticket_and_node(
     conn: sqlite3.Connection,
     *,
@@ -860,6 +1011,7 @@ def _worker_assignment_prompt(
     ticket_item = ticket_payload.get("ticket_item") if isinstance(ticket_payload.get("ticket_item"), dict) else {}
     criteria = ticket_item.get("acceptance_criteria") if isinstance(ticket_item.get("acceptance_criteria"), list) else []
     verification = ticket_item.get("verification_commands") if isinstance(ticket_item.get("verification_commands"), list) else []
+    is_design = _is_design_contract_work(ticket=ticket, node=node, paths=paths)
     lines = [
         f"Target project: {target}",
         f"Run id: {run_id}",
@@ -879,7 +1031,17 @@ def _worker_assignment_prompt(
         lines.append("Suggested verification:")
         lines.extend(f"- {item}" for item in verification if str(item).strip())
         lines.append("")
-    if mode == "write":
+    if is_design:
+        lines.extend(
+            [
+                "Run this as designer-lane work.",
+                "Create or update the design contract, UI state matrix, reusable token/component guidance, or design review notes.",
+                "Do not modify product implementation code by default; propose builder follow-up work for implementation changes.",
+                "If the target is not UI-heavy, record why designer work is not required and create no product patch.",
+                "For UI validation gaps, create setup, harness, alternate-validation, or deferred-QA work instead of reporting a clean pass.",
+            ]
+        )
+    elif mode == "write":
         lines.extend(
             [
                 "Implement this ticket by creating or updating actual target project files.",
@@ -1537,6 +1699,7 @@ async def execute_role_work(payload: dict[str, Any]) -> dict[str, Any]:
     group_id = str(payload.get("group_id") or "")
     node_id = str(payload.get("node_id") or "")
     ticket_id = str(payload.get("ticket_id") or "").strip()
+    owner_role = str(payload.get("owner_role") or "").strip().lower()
     paths = [str(item) for item in payload.get("paths", []) if str(item).strip()]
     target = Path(str(target_value)).expanduser().resolve() if target_value else None
     mode = "write" if node_id else "read-only"
@@ -1555,9 +1718,7 @@ async def execute_role_work(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "activity": "execute_role_work", "status": "missing_target", "failure_reason": "target_path is required"}
 
     report_dir = target / ".diffmogger" / "runtime" / "agent_runs" / _slug(run_id, fallback="run")
-    role_slug = _slug(f"{'builder' if mode == 'write' else 'planner'}-{node_id or ticket_id or group_id}", fallback=mode)
-    report_path = report_dir / f"{role_slug}.md"
-    activity_log_path = report_dir / f"{role_slug}.activity.log"
+    role_base = owner_role or ("builder" if mode == "write" else "planner")
     helper_path = existing_or_target_path(target, "scripts/spawn_worker_agent.sh")
     with connect(target) as conn:
         if node_id and not ticket_id:
@@ -1570,14 +1731,31 @@ async def execute_role_work(payload: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(ticket_ids, list) and ticket_ids:
                     ticket_id = str(ticket_ids[0] or "")
         ticket, node = _selected_ticket_and_node(conn, ticket_id=ticket_id, node_id=node_id)
+    if node is not None and not owner_role:
+        owner_role = str(node.owner_role or "").strip().lower()
+    if ticket is not None and not owner_role:
+        owner_role = str(ticket.payload.get("owner_role") or ticket.payload.get("role") or "").strip().lower()
+    role_base = owner_role or role_base
+    role_slug = _slug(f"{role_base}-{node_id or ticket_id or group_id}", fallback=mode)
+    report_path = report_dir / f"{role_slug}.md"
+    activity_log_path = report_dir / f"{role_slug}.activity.log"
 
+    assignment_paths = list(paths)
+    if not assignment_paths and node is not None and node.paths:
+        assignment_paths = list(node.paths)
+    if not assignment_paths and ticket is not None and ticket.ownership_paths:
+        assignment_paths = list(ticket.ownership_paths)
+    if not assignment_paths:
+        assignment_paths = ["."]
+    design_material_paths = _design_contract_paths_for_worker(ticket=ticket, node=node, paths=assignment_paths)
+    design_before = {path: _path_fingerprint(target, path) for path in design_material_paths}
     before_paths = _git_changed_paths(target)
     assignment = _worker_assignment_prompt(
         target=target,
         run_id=run_id,
         ticket=ticket,
         node=node,
-        paths=paths or (node.paths if node is not None else ticket.ownership_paths if ticket is not None else ["."]),
+        paths=assignment_paths,
         mode=mode,
         report_path=report_path,
     )
@@ -1596,7 +1774,7 @@ async def execute_role_work(payload: dict[str, Any]) -> dict[str, Any]:
         assignment,
     ]
     if mode == "write":
-        command.extend(["--write", "--ownership", ", ".join(paths or ["."])])
+        command.extend(["--write", "--ownership", ", ".join(assignment_paths or ["."])])
     else:
         command.append("--read-only")
     timeout = int(os.environ.get("DIFFMOGGER_CODEX_WORKER_TIMEOUT_SECONDS") or "7200")
@@ -1610,7 +1788,13 @@ async def execute_role_work(payload: dict[str, Any]) -> dict[str, Any]:
     after_paths = _git_changed_paths(target)
     new_or_changed = sorted(path for path in (after_paths - before_paths) if _is_material_changed_path(path))
     current_material = sorted(path for path in after_paths if _is_material_changed_path(path))
-    material_paths = new_or_changed or current_material
+    design_after = {path: _path_fingerprint(target, path) for path in design_material_paths}
+    design_changed = sorted(
+        path
+        for path, fingerprint in design_after.items()
+        if fingerprint and fingerprint != design_before.get(path)
+    )
+    material_paths = new_or_changed or design_changed or current_material
     report_exists = report_path.exists()
     if return_code == 127:
         status = "failed"
@@ -1692,7 +1876,48 @@ async def run_validation_group(payload: dict[str, Any]) -> dict[str, Any]:
 
 @activity.defn
 async def integrate_ready_work(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"ok": True, "activity": "integrate_ready_work", "payload": dict(payload), "serialized": True}
+    target_value = payload.get("target_path") or payload.get("target")
+    run_id = str(payload.get("run_id") or "local-run")
+    group_id = str(payload.get("group_id") or "")
+    checkpoint: dict[str, Any] = {
+        "status": "skipped",
+        "commit_hash": None,
+        "paths": [],
+        "skipped_paths": [],
+        "reason": "missing target_path",
+    }
+    if target_value:
+        target = Path(str(target_value)).expanduser().resolve()
+        now = datetime.now(timezone.utc)
+        with connect(target) as conn:
+            group = _load_execution_group(conn, group_id)
+            node_ids = list(group.node_ids) if group is not None else _text_list(payload.get("node_ids"))
+            ticket_ids = list(group.ticket_ids) if group is not None else _text_list(payload.get("ticket_ids"))
+            nodes = [_load_dag_node(conn, node_id) for node_id in node_ids]
+            unfinished = [node.node_id for node in nodes if node is not None and node.status != "done"]
+            summary = _runtime_checkpoint_summary(conn, ticket_ids=ticket_ids, node_ids=node_ids)
+        if unfinished:
+            checkpoint["reason"] = f"worker nodes are not done: {', '.join(unfinished[:8])}"
+        else:
+            checkpoint = checkpoint_runtime_work(
+                target,
+                run_id,
+                group_id=group_id,
+                ticket_ids=ticket_ids,
+                node_ids=node_ids,
+                summary=summary,
+                dry_run=False,
+            )
+            commit_hash = str(checkpoint.get("commit_hash") or "")
+            if checkpoint.get("status") == "committed" and commit_hash:
+                _record_runtime_checkpoint_commit(target, group_id, commit_hash, now)
+    return {
+        "ok": True,
+        "activity": "integrate_ready_work",
+        "payload": dict(payload),
+        "serialized": True,
+        "checkpoint": checkpoint,
+    }
 
 
 @activity.defn

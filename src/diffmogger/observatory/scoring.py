@@ -429,7 +429,7 @@ def worker_strategy_snapshot(
         )
         return result("READ_ONLY_REPORTS", 1, "Use one read-only worker report to diagnose repeated pending or no-progress evidence.")
 
-    if action_lane in {"planner", "hardener"}:
+    if action_lane in {"planner", "designer", "hardener"}:
         reasons.append(f"The current action plan points at the `{action_lane}` lane, where review coverage is usually higher value than parallel edits.")
         next_steps.extend(
             [

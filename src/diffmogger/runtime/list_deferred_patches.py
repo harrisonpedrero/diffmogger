@@ -20,7 +20,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 from diffmogger.runtime.paths import target_path
 
 
-ROLES = ("planner", "builder", "hardener")
+ROLES = ("planner", "designer", "builder", "hardener")
 DEFERRAL_REASON_FIELD = "deferral_reason"
 DEFERRAL_REASON_ACTIONS = {
     "staleness": "Refresh or recreate the patch from current HEAD, then retry only if the change still matters.",

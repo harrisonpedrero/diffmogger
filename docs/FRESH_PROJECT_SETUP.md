@@ -74,6 +74,8 @@ Diffmogger always scaffolds the `planner_builder_hardener_integrator` role profi
 
 Scaffold creates a local git repo and initial `chore: initial commit` automatically when the selected target does not already have `HEAD`. Continuous automation still checks this before the runner starts.
 
+With `automation_checkpoint_commits` enabled, accepted automation patches create local-only project-change commits after integration and scoped validation. Commit bodies include Diffmogger run/ticket/role metadata, and accepted hashes are recorded back into SQLite ticket state as `related_commits`. Diffmogger never pushes or touches remotes; generated runtime state, logs, queues, worktrees, `.env` files, secrets, dependency folders, caches, and build output are left out of checkpoint commits.
+
 For bounded ticket work, choose **Bounded campaign** in the dashboard run config or set these intake fields:
 
 ```json
@@ -106,7 +108,7 @@ Use an explicit empty array to opt out:
 }
 ```
 
-Diffmogger generates project-scoped `.diffmogger/agentic/codex_config.toml`, but never runs `codex mcp add`, `codex mcp login`, or edits user/global Codex config. Context7 uses stdio `npx -y @upstash/context7-mcp` by default and inherits `CONTEXT7_API_KEY` when that environment variable is present; dashboard-launched backend processes also load optional runtime variables from the Diffmogger starter repo's root `.env`. The key itself is never stored in generated files. Remote OAuth setup is manual/optional. Planner/Builder wrappers mount Context7. Playwright MCP mounts for Hardener/Integrator validation lanes, and for Planner/Builder only when the target or selected ticket is frontend, browser, UI, or demo-path scoped. Context7 auth failures, startup failures, timeouts, empty results, and tool errors create setup, alternate-validation, or deferred QA work; they are not blocker-first stop states. Playwright UI failure screenshots belong under `.diffmogger/runtime/validation_jobs/<run_id>/ui_artifacts/<issue-slug>.png`.
+Diffmogger generates project-scoped `.diffmogger/agentic/codex_config.toml`, but never runs `codex mcp add`, `codex mcp login`, or edits user/global Codex config. Context7 uses stdio `npx -y @upstash/context7-mcp` by default and inherits `CONTEXT7_API_KEY` when that environment variable is present; dashboard-launched backend processes also load optional runtime variables from the Diffmogger starter repo's root `.env`. The key itself is never stored in generated files. Remote OAuth setup is manual/optional. Planner/Designer/Builder wrappers mount Context7. Playwright MCP mounts for Hardener/Integrator validation lanes, and for Planner/Designer/Builder only when the target or selected ticket is frontend, browser, UI, or demo-path scoped. Context7 auth failures, startup failures, timeouts, empty results, and tool errors create setup, alternate-validation, or deferred QA work; they are not blocker-first stop states. Playwright UI failure screenshots belong under `.diffmogger/runtime/validation_jobs/<run_id>/ui_artifacts/<issue-slug>.png`.
 
 ## 2. Validate The Scaffold
 

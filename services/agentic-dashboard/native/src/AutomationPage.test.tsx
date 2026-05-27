@@ -110,6 +110,7 @@ describe("AutomationPage", () => {
     expect(html).toContain("Ticket completion");
     expect(html).toContain("List");
     expect(html).toContain("Graph");
+    expect(html).toContain("Fullscreen graph");
     expect(html).toContain("Ticket Detail");
     expect(html).toContain("Validation can be repaired without user intervention.");
     expect(html).toContain("Related commits");

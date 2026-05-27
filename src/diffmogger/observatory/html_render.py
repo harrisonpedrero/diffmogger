@@ -393,7 +393,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   <script>
     const INITIAL_STATE = __INITIAL_STATE__;
     const STATE_URL = __STATE_URL__;
-    const ROLES = ["planner", "builder", "hardener", "integrator"];
+    const ROLES = ["planner", "designer", "builder", "hardener", "integrator"];
 
     function el(tag, className, text) {
       const node = document.createElement(tag);
@@ -422,6 +422,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         return total ? "accepted " + total : "integrated";
       }
       if (role === "planner") return "planned";
+      if (role === "designer") return "designed";
       if (role === "builder") return "built";
       if (role === "hardener") return "hardened";
       return "progress";
@@ -1072,7 +1073,7 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
   <script>
     const INITIAL_STATE = __INITIAL_STATE__;
     const STATE_URL = __STATE_URL__;
-    const ROLES = ["planner", "builder", "hardener", "integrator"];
+    const ROLES = ["planner", "designer", "builder", "hardener", "integrator"];
     let selectedEventIndex = null;
     let currentData = null;
 
@@ -1108,6 +1109,7 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
       }
       if (event.exit_code !== 0 && event.exit_code !== undefined && event.exit_code !== null) return "retry";
       if (event.role === "planner") return "planned";
+      if (event.role === "designer") return "designed";
       if (event.role === "builder") return "built";
       if (event.role === "hardener") return "accepted";
       return event.progress_success ? "accepted" : "no-progress";
@@ -1123,6 +1125,7 @@ REPLAY_HTML_TEMPLATE = r"""<!doctype html>
         return "Integrator checked the queue";
       }
       if (role === "planner") return "Planner refreshed the plan";
+      if (role === "designer") return "Designer updated the design contract";
       if (role === "builder") return "Builder produced a patch";
       if (role === "hardener") return "Hardener verified the lane";
       return role + " completed";

@@ -5,15 +5,213 @@ from .git_safety import dirty_status, git, head
 from .notifier import notify_commit_progress
 from .queue import resolve_patch_path
 
+COMMIT_DENY_EXACT_PATHS = {
+    ".diffmogger/state/CODEX_AUTOMATION_TASKS.md",
+    ".diffmogger/runtime/canonical_state_brief.md",
+    ".diffmogger/runtime/automation_runner.json",
+    "docs/CODEX_AUTOMATION_TASKS.md",
+    "target/automation_runner.json",
+    "target/baseline_verification.json",
+    "target/canonical_state_brief.md",
+    "target/codex_automation.lock",
+    "target/orchestration.sqlite3",
+    "target/orchestration.sqlite3-shm",
+    "target/orchestration.sqlite3-wal",
+    "target/ticket_run_completion.json",
+}
+
+COMMIT_DENY_PREFIXES = (
+    ".agentic/",
+    ".diffmogger/agentic/",
+    ".diffmogger/context/",
+    ".diffmogger/lib/",
+    ".diffmogger/runtime/",
+    ".diffmogger/state/",
+    ".git/",
+    ".hg/",
+    ".svn/",
+    ".pnpm-store/",
+    ".yarn/cache/",
+    "coverage/",
+    "dist/",
+    "build/",
+    "out/",
+    "target/",
+)
+
+COMMIT_DENY_PARTS = {
+    ".cache",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".next",
+    ".nuxt",
+    ".parcel-cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".turbo",
+    ".venv",
+    "__pycache__",
+    "automation_logs",
+    "automation_queue",
+    "automation_venvs",
+    "automation_worktrees",
+    "node_modules",
+    "secrets",
+    "tmp",
+    "venv",
+}
+
+COMMIT_DENY_NAMES = {
+    ".DS_Store",
+    ".env",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
+}
+
+COMMIT_DENY_SUFFIXES = (
+    ".7z",
+    ".db",
+    ".gz",
+    ".key",
+    ".log",
+    ".p12",
+    ".pem",
+    ".pfx",
+    ".pyc",
+    ".pyo",
+    ".sqlite",
+    ".sqlite3",
+    ".tar",
+    ".tgz",
+    ".zip",
+)
+
+ENV_PLACEHOLDER_NAMES = {
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+}
+
+
+def bool_setting(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+
+def automation_checkpoint_commits_enabled(target: Path) -> bool:
+    for name in ("DIFFMOGGER_AUTOMATION_CHECKPOINT_COMMITS", "AUTOMATION_CHECKPOINT_COMMITS"):
+        raw = os.environ.get(name)
+        if raw is not None and raw.strip():
+            return bool_setting(raw, True)
+    return bool_setting(project_intake(target).get("automation_checkpoint_commits"), True)
+
+
+def normalize_commit_path(path: str) -> str:
+    rel = str(path or "").replace("\\", "/").strip()
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.lstrip("/")
+
+
+def commit_path_is_safe(path: str) -> tuple[bool, str]:
+    rel = normalize_commit_path(path)
+    if not rel:
+        return False, "empty path"
+    rel_path = Path(rel)
+    if rel_path.is_absolute() or any(part in {"", ".", ".."} for part in rel_path.parts):
+        return False, "path escapes target checkout"
+    if rel in COMMIT_DENY_EXACT_PATHS:
+        return False, "generated Diffmogger projection or runtime state"
+    if any(rel == prefix.rstrip("/") or rel.startswith(prefix) for prefix in COMMIT_DENY_PREFIXES):
+        return False, "runtime, cache, or build output path"
+    parts = set(rel_path.parts)
+    if parts & COMMIT_DENY_PARTS:
+        return False, "runtime, dependency, cache, or secret-bearing directory"
+    name = rel_path.name
+    if name in COMMIT_DENY_NAMES:
+        return False, "local secret or noisy system file"
+    if name.startswith(".env.") and name not in ENV_PLACEHOLDER_NAMES:
+        return False, "local environment file"
+    lowered = name.lower()
+    if lowered.endswith(COMMIT_DENY_SUFFIXES):
+        return False, "local database, log, archive, bytecode, or key material"
+    return True, ""
+
+
+def filter_commit_paths(paths: list[str]) -> tuple[list[str], list[dict[str, str]]]:
+    allowed: list[str] = []
+    skipped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for path in paths:
+        rel = normalize_commit_path(path)
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        ok, reason = commit_path_is_safe(rel)
+        if ok:
+            allowed.append(rel)
+        else:
+            skipped.append({"path": rel, "reason": reason})
+    return allowed, skipped
+
+
+def git_changed_paths(target: Path) -> list[str]:
+    tracked = git(target, "diff", "--name-only", "-z", "HEAD", "--")
+    untracked = git(target, "ls-files", "--others", "--exclude-standard", "-z", "--")
+    paths: list[str] = []
+    for output in (tracked.stdout, untracked.stdout):
+        paths.extend(path for path in output.split("\0") if path)
+    return paths
+
+
+def committable_changed_paths(target: Path) -> tuple[list[str], list[dict[str, str]]]:
+    return filter_commit_paths(git_changed_paths(target))
+
+
+def stage_filtered_changes(target: Path, paths: list[str]) -> bool:
+    git(target, "reset", "-q", check=True)
+    if not paths:
+        return False
+    add = git(target, "add", "-A", "--", *paths)
+    if add.returncode != 0:
+        sys.stderr.write(add.stderr)
+        raise SystemExit(1)
+    diff = git(target, "diff", "--cached", "--quiet", "--exit-code")
+    if diff.returncode == 0:
+        return False
+    if diff.returncode != 1:
+        sys.stderr.write(diff.stderr)
+        raise SystemExit(1)
+    return True
+
+
 def checkpoint_dirty_main(target: Path, run_id: str, *, dry_run: bool) -> tuple[str | None, list[str]]:
     status = dirty_status(target)
     if not status:
         return None, []
-    dirty_files = [line[3:] if len(line) > 3 else line for line in status.splitlines()]
+    if not automation_checkpoint_commits_enabled(target):
+        return None, []
+    safe_paths, skipped_paths = committable_changed_paths(target)
+    if not safe_paths:
+        return None, []
     if dry_run:
-        return "DRY-RUN-CHECKPOINT", dirty_files
+        return "DRY-RUN-CHECKPOINT", safe_paths
 
-    git(target, "add", "-A", check=True)
+    if not stage_filtered_changes(target, safe_paths):
+        return None, []
     env = os.environ.copy()
     env.update(
         {
@@ -25,36 +223,158 @@ def checkpoint_dirty_main(target: Path, run_id: str, *, dry_run: bool) -> tuple[
     )
     message = (
         "chore(integrator): checkpoint preexisting local changes\n\n"
-        f"Run: {run_id}"
+        "Diffmogger-Checkpoint: preexisting-local-changes\n"
+        f"Diffmogger-Run: {run_id}"
     )
     result = git(target, "commit", "-m", message, env=env)
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         raise SystemExit(1)
     checkpoint = git(target, "rev-parse", "HEAD", check=True).stdout.strip()
+    skipped_note = f"; skipped unsafe/noisy paths: {len(skipped_paths)}" if skipped_paths else ""
     notify_commit_progress(
         target,
         commit_hash=checkpoint,
         commit_message=message,
-        description=f"Checkpointed dirty main changes before integrator run {run_id}: {', '.join(dirty_files[:8]) or 'tracked local state'}.",
+        description=(
+            f"Checkpointed dirty main changes before integrator run {run_id}: "
+            f"{', '.join(safe_paths[:8]) or 'tracked local state'}{skipped_note}."
+        ),
         run_id=run_id,
         dry_run=dry_run,
     )
-    return checkpoint, dirty_files
+    return checkpoint, safe_paths
+
+
+def git_checkout_available(target: Path) -> bool:
+    return git(target, "rev-parse", "--is-inside-work-tree").returncode == 0
+
+
+def stage_filtered_changes_nonfatal(target: Path, paths: list[str]) -> tuple[bool, str]:
+    reset = git(target, "reset", "-q")
+    if reset.returncode != 0:
+        return False, reset.stderr.strip() or reset.stdout.strip() or "git reset failed"
+    if not paths:
+        return False, "no safe paths to stage"
+    add = git(target, "add", "-A", "--", *paths)
+    if add.returncode != 0:
+        return False, add.stderr.strip() or add.stdout.strip() or "git add failed"
+    diff = git(target, "diff", "--cached", "--quiet", "--exit-code")
+    if diff.returncode == 0:
+        return False, "no staged changes after filtering"
+    if diff.returncode != 1:
+        return False, diff.stderr.strip() or diff.stdout.strip() or "git diff --cached failed"
+    return True, ""
+
+
+def checkpoint_runtime_work(
+    target: Path,
+    run_id: str,
+    *,
+    group_id: str = "",
+    ticket_ids: list[str] | None = None,
+    node_ids: list[str] | None = None,
+    summary: str = "",
+    dry_run: bool,
+) -> dict[str, Any]:
+    ticket_ids = [item for item in (ticket_ids or []) if item]
+    node_ids = [item for item in (node_ids or []) if item]
+    result: dict[str, Any] = {
+        "status": "skipped",
+        "commit_hash": None,
+        "paths": [],
+        "skipped_paths": [],
+        "reason": "",
+    }
+    if not git_checkout_available(target):
+        result["reason"] = "target is not a git checkout"
+        return result
+    if not automation_checkpoint_commits_enabled(target):
+        result["reason"] = "automation checkpoint commits are disabled"
+        return result
+
+    safe_paths, skipped_paths = committable_changed_paths(target)
+    result["paths"] = safe_paths
+    result["skipped_paths"] = skipped_paths
+    if not safe_paths:
+        result["reason"] = "no safe project changes to commit"
+        return result
+    if dry_run:
+        result["status"] = "dry_run"
+        result["commit_hash"] = "DRY-RUN-RUNTIME-CHECKPOINT"
+        return result
+
+    staged, reason = stage_filtered_changes_nonfatal(target, safe_paths)
+    if not staged:
+        result["reason"] = reason
+        return result
+
+    commit_type = semantic_commit_type(safe_paths)
+    scope = semantic_commit_scope(safe_paths, "builder")
+    action = trim_commit_action(summary) or semantic_commit_action(safe_paths, "builder", "", scope)
+    body = [
+        "Diffmogger-Checkpoint: runtime-work",
+        f"Diffmogger-Run: {run_id or 'unknown'}",
+    ]
+    if group_id:
+        body.append(f"Diffmogger-Group: {group_id}")
+    if len(ticket_ids) == 1:
+        body.append(f"Diffmogger-Ticket: {ticket_ids[0]}")
+    elif ticket_ids:
+        body.append(f"Diffmogger-Tickets: {', '.join(ticket_ids)}")
+    if node_ids:
+        body.append(f"Diffmogger-Nodes: {', '.join(node_ids[:8])}")
+    body.append(f"Changed-Paths: {', '.join(safe_paths[:12])}")
+    if len(safe_paths) > 12:
+        body.append(f"Changed-Paths-Truncated: {len(safe_paths) - 12}")
+
+    message = f"{commit_type}({scope}): {action}\n\n" + "\n".join(body)
+    env = os.environ.copy()
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "Diffmogger Integrator",
+            "GIT_AUTHOR_EMAIL": "diffmogger-integrator@example.invalid",
+            "GIT_COMMITTER_NAME": "Diffmogger Integrator",
+            "GIT_COMMITTER_EMAIL": "diffmogger-integrator@example.invalid",
+        }
+    )
+    commit = git(target, "commit", "-m", message, env=env)
+    if commit.returncode != 0:
+        result["reason"] = commit.stderr.strip() or commit.stdout.strip() or "git commit failed"
+        return result
+
+    commit_hash = head(target)
+    result["status"] = "committed"
+    result["commit_hash"] = commit_hash
+    notify_commit_progress(
+        target,
+        commit_hash=commit_hash,
+        commit_message=message,
+        description=f"Checkpointed completed runtime work for {', '.join(ticket_ids) or group_id or run_id}.",
+        run_id=run_id,
+        dry_run=dry_run,
+    )
+    return result
+
 
 def staged_or_worktree_changes(target: Path) -> bool:
     return bool(git(target, "status", "--porcelain").stdout.strip())
 
+
 def commit_current_patch(target: Path, manifest: dict[str, Any], run_id: str, *, dry_run: bool) -> str | None:
     if dry_run:
         return "DRY-RUN-COMMIT"
-    if not staged_or_worktree_changes(target):
+    if not automation_checkpoint_commits_enabled(target):
         return None
-    git(target, "add", "-A", check=True)
+    safe_paths, _skipped_paths = committable_changed_paths(target)
+    if not safe_paths:
+        return None
+    if not stage_filtered_changes(target, safe_paths):
+        return None
     role = str(manifest.get("role") or "role")
     patch_run_id = str(manifest.get("run_id") or "unknown")
     summary = first_summary_line(str(manifest.get("summary") or ""))
-    message = semantic_commit_message(manifest, target, patch_run_id)
+    message = semantic_commit_message(manifest, target, run_id or patch_run_id)
     if summary:
         message += f"\n\n{summary}"
     env = os.environ.copy()
@@ -81,13 +401,28 @@ def commit_current_patch(target: Path, manifest: dict[str, Any], run_id: str, *,
     )
     return commit_hash
 
+
+def existing_safe_automation_state_paths(target: Path, paths: list[str]) -> list[str]:
+    existing: list[str] = []
+    for path in paths:
+        destination = dpath(target, path)
+        if not destination.exists():
+            continue
+        rel = destination.relative_to(target).as_posix()
+        if commit_path_is_safe(rel)[0]:
+            existing.append(rel)
+    return existing
+
+
 def commit_automation_state(target: Path, run_id: str, *, dry_run: bool) -> str | None:
+    if not automation_checkpoint_commits_enabled(target):
+        return None
     if dry_run:
         return "DRY-RUN-STATE-COMMIT"
     paths = [
         "docs/CODEX_AUTOMATION_TASKS.md",
     ]
-    existing = [dpath(target, path).relative_to(target).as_posix() for path in paths if dpath(target, path).exists()]
+    existing = existing_safe_automation_state_paths(target, paths)
     if not existing:
         return None
     result = git(target, "add", *existing)
@@ -142,6 +477,7 @@ def is_generic_commit_action(action: str) -> bool:
         "integrate builder work",
         "integrate hardener work",
         "integrate planner work",
+        "integrate designer work",
         "integrate role work",
         "misc",
         "no summary",
@@ -150,7 +486,7 @@ def is_generic_commit_action(action: str) -> bool:
         "work",
     }:
         return True
-    return bool(re.fullmatch(r"(integrate|update|improve|change|modify) (builder|hardener|planner|role|automation)? ?work", lower))
+    return bool(re.fullmatch(r"(integrate|update|improve|change|modify) (builder|designer|hardener|planner|role|automation)? ?work", lower))
 
 def first_summary_line(text: str) -> str:
     skipped_prefixes = (
@@ -233,14 +569,79 @@ def parse_commit_intent(summary: str, changed_files: list[str]) -> dict[str, str
         intent.pop("scope", None)
     return {key: value for key, value in intent.items() if value}
 
-def semantic_commit_message(manifest: dict[str, Any], target: Path, patch_run_id: str) -> str:
+def manifest_ticket_id(manifest: dict[str, Any]) -> str:
+    for key in ("ticket_id", "task_id"):
+        value = str(manifest.get(key) or "").strip()
+        if value:
+            return value
+    for key in ("ticket_ids", "tickets", "ticket_cluster"):
+        value = manifest.get(key)
+        if isinstance(value, list):
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    return text
+        elif isinstance(value, str) and value.strip():
+            return value.strip()
+    for result in manifest.get("runtime_state_results") or []:
+        if not isinstance(result, dict):
+            continue
+        value = str(result.get("ticket_id") or "").strip()
+        if value:
+            return value
+    haystack = "\n".join(
+        [
+            str(manifest.get("run_id") or ""),
+            str(manifest.get("worker_id") or ""),
+            str(manifest.get("execution_group_id") or ""),
+            str(manifest.get("patch_id") or ""),
+            str(manifest.get("summary") or ""),
+            "\n".join(str(item) for item in manifest.get("changed_files") or []),
+        ]
+    )
+    match = re.search(r"\b[A-Z][A-Z0-9]+-\d+\b", haystack, flags=re.IGNORECASE)
+    return match.group(0).upper() if match else ""
+
+
+def validation_summary_line(manifest: dict[str, Any]) -> str:
+    checks = [str(item).strip() for item in manifest.get("checks_run") or [] if str(item).strip()]
+    if checks:
+        text = "; ".join(checks[:4])
+        return text[:240]
+    evidence = manifest.get("validation_evidence")
+    if isinstance(evidence, list):
+        summaries: list[str] = []
+        for item in evidence:
+            if isinstance(item, dict):
+                command = str(item.get("command") or item.get("detail") or item.get("status") or "").strip()
+                if command:
+                    summaries.append(command)
+            elif str(item).strip():
+                summaries.append(str(item).strip())
+        if summaries:
+            return "; ".join(summaries[:4])[:240]
+    return "not recorded"
+
+
+def semantic_commit_message(manifest: dict[str, Any], target: Path, run_id: str) -> str:
     role = str(manifest.get("role") or "role").strip().lower() or "role"
+    patch_run_id = str(manifest.get("run_id") or "").strip()
     changed_files = semantic_changed_files([str(path) for path in manifest.get("changed_files") or [] if isinstance(path, str)])
     intent = parse_commit_intent(str(manifest.get("summary") or ""), changed_files)
     commit_type = intent.get("type") or semantic_commit_type(changed_files)
     scope = intent.get("scope") or semantic_commit_scope(changed_files, role)
     action = intent.get("action") or semantic_commit_action(changed_files, role, semantic_patch_text(manifest, target), scope)
-    return f"{commit_type}({scope}): {action}\n\nRole: {role}\nPatch-run: {patch_run_id}"
+    body = [
+        f"Diffmogger-Run: {run_id or patch_run_id or 'unknown'}",
+    ]
+    ticket_id = manifest_ticket_id(manifest)
+    if ticket_id:
+        body.append(f"Diffmogger-Ticket: {ticket_id}")
+    body.append(f"Diffmogger-Role: {role}")
+    if patch_run_id and patch_run_id != run_id:
+        body.append(f"Diffmogger-Patch-Run: {patch_run_id}")
+    body.append(f"Validation: {validation_summary_line(manifest)}")
+    return f"{commit_type}({scope}): {action}\n\n" + "\n".join(body)
 
 def semantic_changed_files(changed_files: list[str]) -> list[str]:
     meaningful = [

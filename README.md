@@ -2,9 +2,13 @@
   <img src="docs/assets/diffmogger-logo-cropped.png" alt="Diffmogger" width="720">
 </p>
 
+<p align="center">
+  <img src="docs/assets/diffmogger-ticket-progress-demo.gif" alt="Diffmogger ticket dependency graph progressing through completion" width="920">
+</p>
+
 Diffmogger is a local orchestration engine for Codex, backed by Temporal workflows and a typed SQLite read model.
 
-It scaffolds a self-contained `.diffmogger/` sidecar into a target repo, keeps live automation state in Alembic-managed SQLite, and runs Codex work through typed graph actions such as `scope`, `build`, `review`, `validate`, `repair`, and `integrate`.
+It scaffolds a self-contained `.diffmogger/` sidecar into a target repo, keeps live automation state in Alembic-managed SQLite, and runs Codex work through typed graph actions such as `scope`, `design`, `build`, `review`, `validate`, `repair`, and `integrate`.
 
 This isn't a hosted agent platform or a product-specific app. It is reusable local infrastructure for repos where Codex work needs durable state, clear handoffs, inspectable progress, safe parallelism, and reviewable outcomes across repeated runs.
 
@@ -19,6 +23,7 @@ Diffmogger gives a target repo:
 - a native dashboard for project setup, automation control, ticket/action queues, human input records, safety checks, and scheduler inspection
 - a `.diffmogger/` sidecar for automation-owned prompts, runtime state, logs, queues, worktrees, schemas, manifests, and generated projections
 - a canonical SQLite state store at `.diffmogger/runtime/orchestration.sqlite3`
+- local-first UI design contracts, gated designer-lane work, and UI visual-validation receipts when a target is UI-heavy or opted in
 - target-local wrappers under `.diffmogger/scripts/` and a bundled runtime under `.diffmogger/lib/diffmogger/`
 - Temporal worker wrappers, launchd-backed macOS supervision, optional worker fanout, Apprise notifier integration, Context7/Playwright MCP setup, and local observatory exports
 

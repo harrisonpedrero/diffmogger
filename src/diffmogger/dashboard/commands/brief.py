@@ -20,6 +20,12 @@ from ..ticket_generation import (
     ticket_scope_groups_from_intake,
 )
 from diffmogger.runtime import ticket_run
+from diffmogger.runtime.design import (
+    OPTIONAL_DESIGN_SERVICES,
+    design_settings,
+    ensure_design_foundation_ticket,
+    ui_detection_from_intake,
+)
 
 DEFAULT_INTAKE_CODEX_TIMEOUT_SECONDS = 180
 DEFAULT_TICKET_CODEX_TIMEOUT_SECONDS = 420
@@ -58,6 +64,12 @@ LOW_CORTISOL_DEFAULT_INTAKE: dict[str, Any] = {
     "automation_checkpoint_commits": True,
     "multi_role_allow_remotes": False,
     "optional_mcp_servers": ["context7", "playwright"],
+    "ui_capability_mode": "auto",
+    "design_source": "generated_contract",
+    "design_reference_files": [],
+    "design_reference_urls": [],
+    "ui_validation_mode": "auto",
+    "optional_design_services": [],
     "campaign_mode": "bounded",
     "ticket_run_file": "",
     "ticket_run_seed_tickets": [],
@@ -259,6 +271,7 @@ def _normalize_low_cortisol_intake(
     payload["automation_checkpoint_commits"] = _bool_value(payload.get("automation_checkpoint_commits"), True)
     payload["multi_role_allow_remotes"] = False
     payload["optional_mcp_servers"] = load_dashboard_module().optional_mcp_servers_from_sources(payload)
+    payload.update(design_settings(payload))
     payload["campaign_mode"] = "bounded"
     payload["ticket_run_file"] = ""
     payload["ticket_completion_notify"] = _bool_value(payload.get("ticket_completion_notify"), True)
@@ -287,7 +300,7 @@ def _normalize_low_cortisol_intake(
             error_type="intake_generation_no_tickets",
             details={"project_name": payload["project_name"]},
         )
-    payload["ticket_run_seed_tickets"] = tickets
+    payload["ticket_run_seed_tickets"] = ensure_design_foundation_ticket(tickets, payload)
 
     return payload
 
@@ -400,7 +413,8 @@ def _fallback_low_cortisol_tickets(
                 ),
             }
         )
-    return ticket_run.normalized_tickets(tickets), warnings
+    normalized = ticket_run.normalized_tickets(tickets)
+    return ensure_design_foundation_ticket(normalized, intake), warnings
 
 
 def _low_cortisol_intake_prompt(target: Path, description: str) -> str:
@@ -422,6 +436,11 @@ def _low_cortisol_intake_prompt(target: Path, description: str) -> str:
             "- Add ticket_generation_scope_groups as a compact array of scope groups. Each group should have name, description, and surfaces.",
             "- Decompose the full requested project scope, not just an initial demo path.",
             "- Set automation_role_profile to planner_builder_hardener_integrator. Diffmogger uses a typed execution DAG scheduler.",
+            "- Set ui_capability_mode to auto, off, light, or full. Use off only for clearly backend/CLI/library scopes, full for UI-heavy apps, otherwise auto.",
+            "- Set design_source to generated_contract unless the request points at existing UI code or explicit non-secret design references.",
+            "- Set ui_validation_mode to auto, off, local, or external_optional. Keep external services optional and secret-free.",
+            "- Fill design_reference_files and design_reference_urls only with local paths or non-secret references provided by the human or already present in the project.",
+            f"- optional_design_services may only include: {', '.join(OPTIONAL_DESIGN_SERVICES)}.",
             "- Set parallel_execution_mode to aggressive, symbol_graph_languages to python/typescript/javascript, parallel_write_min_confidence and parallel_write_direct_confidence to 0.75, max_parallel_write_workers to 3, and max_parallel_scope_workers to 2 unless the request clearly needs stricter local limits.",
             "- Default optional_mcp_servers to [\"context7\", \"playwright\"] unless the human explicitly opts out with an empty array.",
             "- Set human_bridge_enabled true and human_bridge_mode to file_only.",
@@ -452,6 +471,7 @@ def _low_cortisol_ticket_prompt(target: Path, description: str, intake: dict[str
     complexity = normalize_ticket_complexity(intake.get("ticket_generation_complexity"))
     snapshot = build_ticket_generation_snapshot(target, include_intake=True)
     scope_groups = ticket_scope_groups_from_intake(intake)
+    ui_detection = ui_detection_from_intake(intake)
     return "\n".join(
         [
             "Generate the complete Diffmogger ticket_run_seed_tickets queue for the normalized intake.",
@@ -468,9 +488,17 @@ def _low_cortisol_ticket_prompt(target: Path, description: str, intake: dict[str
             "- Use pending status for every ticket.",
             "- Ticket ids must be TICKET-001, TICKET-002, and so on.",
             "- Each ticket must include id, summary, status, depends_on, acceptance_criteria, verification_commands, evidence, related_commits, and blocker.",
+            "- Tickets may include owner_role, action_kind, execution_mode, paths, and design_contract_required when those fields clarify scheduler intent.",
             "- Dependencies must point only to earlier seed ticket ids when a real dependency exists.",
             "- Each summary and acceptance list must identify the component, surface, workflow, or artifact being changed.",
+            "- For UI-heavy scopes, put a designer-owned design foundation ticket before broad UI build work unless ui_capability_mode is off.",
+            "- UI feature tickets must cover loading, empty, error, focus, disabled, responsive, and representative data-density states across the queue.",
+            "- UI validation or visual-polish tickets must request local browser evidence, Playwright MCP inspection, `npm run browser-smoke`, or explicit setup/deferred-QA work.",
+            "- Backend, CLI, and library-only scopes should not receive design tickets unless ui_capability_mode is full.",
             "- Keep every ticket generic and target-project agnostic; do not include secrets.",
+            "",
+            "UI capability detection JSON:",
+            json.dumps(ui_detection, indent=2, sort_keys=True, default=json_default),
             "",
             "Normalized intake JSON:",
             json.dumps(intake, indent=2, sort_keys=True, default=json_default),
@@ -497,6 +525,7 @@ def _low_cortisol_refinement_prompt(
     complexity = normalize_ticket_complexity(intake.get("ticket_generation_complexity"))
     snapshot = build_ticket_generation_snapshot(target, include_intake=True)
     scope_groups = ticket_scope_groups_from_intake(intake)
+    ui_detection = ui_detection_from_intake(intake, tickets=seed_tickets)
     return "\n".join(
         [
             "Refine a Diffmogger seed ticket queue that appears under-decomposed.",
@@ -511,7 +540,13 @@ def _low_cortisol_refinement_prompt(
             "- Add missing tickets for uncovered decomposition groups and surfaces.",
             "- Generate as many tickets as the full described scope needs; do not impose a fixed maximum.",
             "- Keep dependencies pointing only to earlier ticket ids when a real dependency exists.",
+            "- For UI-heavy scopes, preserve or add a designer-owned design foundation ticket before broad UI build work.",
+            "- For UI feature tickets, cover loading, empty, error, focus, disabled, responsive, representative data density, and local visual validation across the queue.",
+            "- If browser/visual tooling is missing, add setup, harness, alternate-validation, or deferred-QA work instead of treating validation as passed.",
             "- Keep every ticket generic and target-project agnostic; do not include secrets.",
+            "",
+            "UI capability detection JSON:",
+            json.dumps(ui_detection, indent=2, sort_keys=True, default=json_default),
             "",
             "Normalized intake JSON:",
             json.dumps(intake, indent=2, sort_keys=True, default=json_default),
@@ -733,7 +768,7 @@ def command_brief_generate_intake(args: argparse.Namespace) -> dict[str, Any]:
                 timeout_seconds=exc.details.get("timeout_seconds"),
             ),
         )
-        quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups)
+        quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups, intake=intake)
         refinement_needed = False
     else:
         if ticket_result.returncode != 0:
@@ -743,14 +778,17 @@ def command_brief_generate_intake(args: argparse.Namespace) -> dict[str, Any]:
                 details={"exit_code": ticket_result.returncode, "stdout": ticket_result.stdout[-2000:], "stderr": ticket_result.stderr[-2000:]},
             )
         raw_tickets = _extract_json_payload(ticket_result.stdout, label="ticket seed")
-        seed_tickets = ticket_run.normalized_tickets(_extract_seed_tickets_payload(raw_tickets))
+        seed_tickets = ensure_design_foundation_ticket(
+            ticket_run.normalized_tickets(_extract_seed_tickets_payload(raw_tickets)),
+            intake,
+        )
         if not seed_tickets:
             raise BackendError(
                 "Codex did not return any ticket_run_seed_tickets.",
                 error_type="intake_generation_no_tickets",
                 details={"project_name": intake["project_name"]},
             )
-        quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups)
+        quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups, intake=intake)
         refinement_needed = not bool(quality_gate.get("passed"))
         if refinement_needed:
             ticket_prompt = _low_cortisol_refinement_prompt(target, description, intake, seed_tickets, quality_gate)
@@ -777,7 +815,7 @@ def command_brief_generate_intake(args: argparse.Namespace) -> dict[str, Any]:
                         timeout_seconds=exc.details.get("timeout_seconds"),
                     ),
                 )
-                quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups)
+                quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups, intake=intake)
             else:
                 if ticket_result.returncode != 0:
                     raise BackendError(
@@ -788,11 +826,13 @@ def command_brief_generate_intake(args: argparse.Namespace) -> dict[str, Any]:
                 raw_tickets = _extract_json_payload(ticket_result.stdout, label="ticket refinement")
                 refined_tickets = ticket_run.normalized_tickets(_extract_seed_tickets_payload(raw_tickets))
                 if refined_tickets:
-                    seed_tickets = refined_tickets
-                    quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups)
+                    seed_tickets = ensure_design_foundation_ticket(refined_tickets, intake)
+                    quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups, intake=intake)
     intake["ticket_run_seed_tickets"] = seed_tickets
     intake["ticket_generation_scope_groups"] = scope_groups
-    quality_warnings = list(quality_gate.get("warnings") or ticket_quality_warnings(seed_tickets, scope_groups=scope_groups))
+    seed_tickets = ensure_design_foundation_ticket(seed_tickets, intake)
+    quality_gate = ticket_generation_quality_gate(seed_tickets, scope_groups=scope_groups, intake=intake)
+    quality_warnings = list(quality_gate.get("warnings") or ticket_quality_warnings(seed_tickets, scope_groups=scope_groups, intake=intake))
     intake["ticket_generation_quality_warnings"] = [*generation_warnings, *fallback_ticket_warnings, *quality_warnings]
     intake["ticket_generation_refinement_needed"] = refinement_needed
     intake["ticket_generation_refinement_passed"] = bool(quality_gate.get("passed"))

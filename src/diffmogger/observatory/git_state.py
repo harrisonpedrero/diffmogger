@@ -144,7 +144,7 @@ def git_commits_snapshot(target: Path, *, max_count: int = 80) -> list[dict[str,
         files = commit_numstat(target, commit_hash)
         additions = sum(int(item.get("additions") or 0) for item in files)
         deletions = sum(int(item.get("deletions") or 0) for item in files)
-        role_match = re.search(r"\((planner|builder|hardener|integrator|observatory|conveyor|dashboard|scaffold|safety|docs)\)", subject)
+        role_match = re.search(r"\((planner|designer|builder|hardener|integrator|observatory|conveyor|dashboard|scaffold|safety|docs)\)", subject)
         commits.append(
             {
                 "hash": commit_hash,

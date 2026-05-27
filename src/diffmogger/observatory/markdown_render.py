@@ -19,6 +19,7 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
     conveyor = snapshot.get("conveyor") if isinstance(snapshot.get("conveyor"), dict) else {}
     human = snapshot.get("human") if isinstance(snapshot.get("human"), dict) else {}
     progress = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {}
+    design = snapshot.get("design") if isinstance(snapshot.get("design"), dict) else {}
     follow_through = snapshot.get("follow_through") if isinstance(snapshot.get("follow_through"), dict) else {}
     first_review = snapshot.get("first_review") if isinstance(snapshot.get("first_review"), dict) else {}
     integration_safety = task.get("integration_safety") if isinstance(task.get("integration_safety"), dict) else {}
@@ -184,6 +185,32 @@ def render_review_markdown(snapshot: dict[str, Any]) -> str:
             lines.append(f"- {status}: {text}")
     else:
         lines.append("- No validation checks recorded yet.")
+
+    lines.extend(["", "## Design And UI Validation", ""])
+    contract = design.get("contract") if isinstance(design.get("contract"), dict) else {}
+    reviews = [item for item in list(design.get("latest_reviews") or []) if isinstance(item, dict)]
+    ui_validation = design.get("ui_validation") if isinstance(design.get("ui_validation"), dict) else {}
+    ui_receipts = [item for item in list(ui_validation.get("latest") or []) if isinstance(item, dict)]
+    if contract:
+        lines.append(f"- active_contract: `{clean_text(contract.get('contract_id') or 'design-contract:active', limit=120)}`")
+        lines.append(f"- version: {clean_text(contract.get('version') or '1', limit=40)}")
+        lines.append(f"- source: {clean_text(contract.get('source') or 'generated_contract', limit=80)}")
+        lines.append(f"- ui_capability_mode: {clean_text(contract.get('ui_capability_mode') or 'auto', limit=80)}")
+        lines.append(f"- ui_validation_mode: {clean_text(contract.get('ui_validation_mode') or 'auto', limit=80)}")
+        lines.append(f"- designer_enabled: {str(bool(contract.get('designer_enabled'))).lower()}")
+    else:
+        lines.append("- active_contract: not recorded")
+    lines.append(f"- latest_design_reviews: {len(reviews)}")
+    for item in reviews[:MAX_REVIEW_ITEMS]:
+        severity = clean_text(item.get("severity") or "info", limit=40)
+        node = clean_text(item.get("node_id") or item.get("ticket_id") or "unscoped", limit=120)
+        finding_count = item.get("finding_count")
+        lines.append(f"- design_review: {severity} for `{node}` ({finding_count or 0} finding(s))")
+    lines.append(f"- ui_visual_receipts: {int(ui_validation.get('count') or 0)}")
+    for item in ui_receipts[:MAX_CHECK_ITEMS]:
+        status = clean_text(item.get("status") or "info", limit=40)
+        command = clean_text(item.get("command") or item.get("kind") or "ui_visual", limit=260)
+        lines.append(f"- ui_visual: {status} - {command}")
 
     lines.extend(["", "## Integration Safety", ""])
     lines.append(f"- status: {clean_text(integration_safety.get('status') or 'pending', limit=80)}")

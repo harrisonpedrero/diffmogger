@@ -219,6 +219,24 @@ def _candidate_from_node(
     min_write_confidence: float,
 ) -> SchedulerCandidate:
     paths = _paths(target_path, node.paths)
+    if node.action_type == "design":
+        design_paths = paths or [".diffmogger/agentic/design_contract.md", ".diffmogger/agentic/design_contract.json"]
+        return SchedulerCandidate(
+            candidate_id=_candidate_id(run_id, f"design-{node.node_id}"),
+            action_kind="launch_work",
+            execution_mode="write",
+            owner_role=node.owner_role or "designer",
+            node_ids=[node.node_id],
+            ticket_ids=[node.ticket_id] if node.ticket_id else [],
+            paths=design_paths,
+            scope_evidence=_scope_evidence(node, facts),
+            code_fact_refs=[fact.fact_id for fact in facts],
+            reason="Ready UI design contract or design review work runs through the designer lane.",
+            fanout=1,
+            confidence=max(node.confidence, min_write_confidence),
+            required_lease_ids=[_stable_id("lease", run_id, node.node_id, path) for path in design_paths],
+            telemetry={"design_lane": True},
+        )
     parser_unavailable = any(fact.kind == "parser_unavailable" for fact in facts)
     ambiguous_scope = not paths
     low_confidence = node.confidence < min_write_confidence
@@ -406,6 +424,35 @@ def _repair_work_for_candidate(run_id: str, selected: SchedulerCandidate) -> lis
     ]
 
 
+def _receipt_payload_text(receipt: ValidationReceipt) -> str:
+    values = [receipt.receipt_id, receipt.command, receipt.status, receipt.evidence_path]
+    for key in ("classification", "error", "detail", "reason", "tool", "adapter"):
+        values.append(str(receipt.payload.get(key) or ""))
+    return "\n".join(values).lower()
+
+
+def _ui_visual_setup_needed(receipts: list[ValidationReceipt]) -> bool:
+    setup_terms = (
+        "browser tooling missing",
+        "browser-smoke missing",
+        "command not found",
+        "executable not found",
+        "missing tool",
+        "mcp unavailable",
+        "not installed",
+        "playwright missing",
+        "playwright not installed",
+        "setup required",
+    )
+    for receipt in receipts:
+        if str(receipt.payload.get("classification") or "").strip().lower() != "ui_visual":
+            continue
+        text = _receipt_payload_text(receipt)
+        if any(term in text for term in setup_terms):
+            return True
+    return False
+
+
 def choose_scheduler_record(
     *,
     target_path: Path,
@@ -466,16 +513,24 @@ def choose_scheduler_record(
     ]
     if failed_required:
         node_ids = sorted({receipt.node_id for receipt in failed_required if receipt.node_id})
+        setup_needed = _ui_visual_setup_needed(failed_required)
         candidates.append(
             SchedulerCandidate(
-                candidate_id=_candidate_id(run_id, "repair-validation"),
-                action_kind="create_repair_work",
-                execution_mode="repair",
-                owner_role="builder",
+                candidate_id=_candidate_id(run_id, "setup-ui-visual-validation" if setup_needed else "repair-validation"),
+                action_kind="create_setup_work" if setup_needed else "create_repair_work",
+                execution_mode="setup" if setup_needed else "repair",
+                owner_role="hardener" if setup_needed else "builder",
                 node_ids=node_ids,
-                reason="Required validation failed; create repair/setup/harness work.",
+                reason=(
+                    "UI visual validation failed because browser tooling or MCP setup is missing; create setup/harness/deferred-QA work."
+                    if setup_needed
+                    else "Required validation failed; create repair/setup/harness work."
+                ),
                 fanout=1,
-                telemetry={"failed_required_receipts": [receipt.receipt_id for receipt in failed_required]},
+                telemetry={
+                    "failed_required_receipts": [receipt.receipt_id for receipt in failed_required],
+                    "ui_visual_setup_needed": setup_needed,
+                },
             )
         )
 
@@ -702,7 +757,7 @@ def choose_scheduler_record(
         "run_validation": 1,
         "integrate": 1,
         "launch_scope_work": 2,
-        "create_setup_work": 3,
+        "create_setup_work": 0,
         "idle_complete": 9,
     }
     selected = sorted(candidates, key=lambda candidate: (priority[candidate.action_kind], -candidate.fanout, candidate.candidate_id))[0]

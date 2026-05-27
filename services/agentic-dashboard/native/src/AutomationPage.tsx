@@ -10,6 +10,7 @@ import {
   HelpCircle,
   ListFilter,
   Maximize2,
+  Minimize2,
   PlayCircle,
   RefreshCw,
   RotateCcw,
@@ -21,7 +22,8 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import type { BackendEnvelope, BackendLogEvent, ProjectSnapshot } from "./api/backend";
 import { listenBackendLogs, runBackendCommandStreamed } from "./api/backend";
 import {
@@ -228,9 +230,13 @@ function TicketDependencyGraphTab(props: {
   view: ReturnType<typeof buildAutomationViewModel>;
   selectedTicketId: string;
   selectedTicket: TicketDetailRecord | undefined;
+  fullscreen?: boolean;
+  onEnterFullscreen?: () => void;
+  onExitFullscreen?: () => void;
   onSelect: (ticketId: string) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const markerId = `ticket-graph-arrow-${useId().replace(/:/g, "")}`;
   const [zoom, setZoom] = useState(1);
   const [search, setSearch] = useState("");
   const graph = props.view.ticketGraph;
@@ -274,7 +280,7 @@ function TicketDependencyGraphTab(props: {
   }
 
   return (
-    <div className="ticket-graph-workspace">
+    <div className={`ticket-graph-workspace ${props.fullscreen ? "fullscreen" : ""}`}>
       <div className="ticket-graph-main">
         <div className="ticket-graph-toolbar">
           <div className="ticket-graph-summary">
@@ -294,6 +300,12 @@ function TicketDependencyGraphTab(props: {
             />
           </div>
           <button className="secondary-action icon-only-action" type="button" title="Fit graph" onClick={fitGraph}><Maximize2 size={15} /></button>
+          {!props.fullscreen && props.onEnterFullscreen && (
+            <button className="secondary-action icon-only-action" type="button" title="Fullscreen graph" aria-label="Fullscreen graph" onClick={props.onEnterFullscreen}><Maximize2 size={15} /></button>
+          )}
+          {props.fullscreen && props.onExitFullscreen && (
+            <button className="secondary-action icon-only-action" type="button" title="Exit fullscreen" aria-label="Exit fullscreen" onClick={props.onExitFullscreen}><Minimize2 size={15} /></button>
+          )}
           <button className="secondary-action icon-only-action" type="button" title="Zoom out" onClick={() => setBoundedZoom(zoom - 0.12)}><ZoomOut size={15} /></button>
           <button className="secondary-action icon-only-action" type="button" title="Zoom in" onClick={() => setBoundedZoom(zoom + 0.12)}><ZoomIn size={15} /></button>
           <button className="secondary-action icon-only-action" type="button" title="Reset graph" onClick={resetGraph}><RotateCcw size={15} /></button>
@@ -304,7 +316,7 @@ function TicketDependencyGraphTab(props: {
               <div className="ticket-graph-scaled" style={{ width: graph.width, height: graph.height, transform: `scale(${zoom})` }}>
                 <svg className="ticket-graph-svg" viewBox={`0 0 ${graph.width} ${graph.height}`} role="presentation">
                   <defs>
-                    <marker id="ticket-graph-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                    <marker id={markerId} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
                       <path d="M 0 0 L 8 4 L 0 8 z" />
                     </marker>
                   </defs>
@@ -318,7 +330,7 @@ function TicketDependencyGraphTab(props: {
                     <path
                       className={`ticket-graph-edge ${edge.cyclic ? "cyclic" : ""}`}
                       d={edge.path}
-                      markerEnd="url(#ticket-graph-arrow)"
+                      markerEnd={`url(#${markerId})`}
                       key={edge.id}
                     />
                   ))}
@@ -350,6 +362,8 @@ function TicketDependencyGraphTab(props: {
 function TicketProgressPanel(props: { view: ReturnType<typeof buildAutomationViewModel> }) {
   const [tab, setTab] = useState<TicketProgressTab>("list");
   const [selectedTicketId, setSelectedTicketId] = useState("");
+  const [graphFullscreen, setGraphFullscreen] = useState(false);
+  const fullscreenRef = useRef<HTMLDivElement>(null);
   const done = props.view.ticketProgress.counts.find((item) => item.id === "done")?.count ?? 0;
   const total = props.view.ticketProgress.total;
   const pct = total ? Math.round((done / total) * 100) : 0;
@@ -359,6 +373,45 @@ function TicketProgressPanel(props: { view: ReturnType<typeof buildAutomationVie
     : fallbackTicketId;
   const selectedTicket = props.view.ticketProgress.rows.find((ticket) => ticket.id === effectiveSelectedTicketId) ||
     props.view.ticketGraph.nodes.find((node) => node.id === effectiveSelectedTicketId);
+
+  function openGraphFullscreen() {
+    flushSync(() => setGraphFullscreen(true));
+    const fullscreenTarget = fullscreenRef.current;
+    if (fullscreenTarget?.requestFullscreen && document.fullscreenElement !== fullscreenTarget) {
+      void fullscreenTarget.requestFullscreen().catch(() => undefined);
+    }
+  }
+
+  function closeGraphFullscreen() {
+    const fullscreenTarget = fullscreenRef.current;
+    if (document.fullscreenElement === fullscreenTarget && document.exitFullscreen) {
+      void document.exitFullscreen().catch(() => undefined);
+    }
+    setGraphFullscreen(false);
+  }
+
+  useEffect(() => {
+    if (!graphFullscreen) return;
+    document.body.classList.add("ticket-graph-fullscreen-open");
+    function handleFullscreenChange() {
+      if (!document.fullscreenElement) setGraphFullscreen(false);
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") closeGraphFullscreen();
+    }
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      const fullscreenTarget = fullscreenRef.current;
+      document.body.classList.remove("ticket-graph-fullscreen-open");
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener("keydown", handleKeyDown);
+      if (document.fullscreenElement === fullscreenTarget && document.exitFullscreen) {
+        void document.exitFullscreen().catch(() => undefined);
+      }
+    };
+  }, [graphFullscreen]);
+
   return (
     <article className="automation-panel ticket-progress-panel">
       <div className="panel-heading-row compact">
@@ -371,9 +424,15 @@ function TicketProgressPanel(props: { view: ReturnType<typeof buildAutomationVie
       <div className="ticket-progress-meter" aria-label="Ticket completion">
         <span style={{ width: `${pct}%` }} />
       </div>
-      <div className="feed-tabs ticket-progress-tabs" role="tablist" aria-label="Ticket progress views">
-        <button type="button" role="tab" aria-selected={tab === "list"} className={tab === "list" ? "active" : ""} onClick={() => setTab("list")}>List</button>
-        <button type="button" role="tab" aria-selected={tab === "graph"} className={tab === "graph" ? "active" : ""} onClick={() => setTab("graph")}>Graph</button>
+      <div className="ticket-progress-tabbar">
+        <div className="feed-tabs ticket-progress-tabs" role="tablist" aria-label="Ticket progress views">
+          <button type="button" role="tab" aria-selected={tab === "list"} className={tab === "list" ? "active" : ""} onClick={() => setTab("list")}>List</button>
+          <button type="button" role="tab" aria-selected={tab === "graph"} className={tab === "graph" ? "active" : ""} onClick={() => setTab("graph")}>Graph</button>
+        </div>
+        <button className="secondary-action compact-copy" type="button" title="Open ticket graph fullscreen" disabled={!props.view.ticketGraph.nodes.length} onClick={openGraphFullscreen}>
+          <Maximize2 size={15} />
+          Fullscreen graph
+        </button>
       </div>
       {tab === "list" ? (
         <TicketProgressListTab
@@ -387,9 +446,22 @@ function TicketProgressPanel(props: { view: ReturnType<typeof buildAutomationVie
           view={props.view}
           selectedTicketId={effectiveSelectedTicketId}
           selectedTicket={selectedTicket}
+          onEnterFullscreen={openGraphFullscreen}
           onSelect={setSelectedTicketId}
         />
       )}
+      <div className={`ticket-graph-fullscreen-shell ${graphFullscreen ? "open" : ""}`} ref={fullscreenRef} aria-hidden={!graphFullscreen}>
+        {graphFullscreen && (
+          <TicketDependencyGraphTab
+            view={props.view}
+            selectedTicketId={effectiveSelectedTicketId}
+            selectedTicket={selectedTicket}
+            fullscreen
+            onExitFullscreen={closeGraphFullscreen}
+            onSelect={setSelectedTicketId}
+          />
+        )}
+      </div>
     </article>
   );
 }

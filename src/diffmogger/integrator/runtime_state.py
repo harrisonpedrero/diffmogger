@@ -134,6 +134,92 @@ def ticket_index_by_id(items: list[dict[str, Any]]) -> dict[str, int]:
     return {str(item.get("id") or "").strip(): index for index, item in enumerate(items) if str(item.get("id") or "").strip()}
 
 
+def append_unique_text(items: Any, values: list[str]) -> list[str]:
+    result = [str(item) for item in (items if isinstance(items, list) else []) if str(item).strip()]
+    seen = set(result)
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            result.append(text)
+            seen.add(text)
+    return result
+
+
+def manifest_ticket_ids(target: Path, manifest: dict[str, Any]) -> list[str]:
+    ticket_ids: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in ticket_ids:
+            ticket_ids.append(text)
+
+    for key in ("ticket_id", "task_id"):
+        add(manifest.get(key))
+    for key in ("ticket_ids", "tickets", "ticket_cluster"):
+        value = manifest.get(key)
+        if isinstance(value, list):
+            for item in value:
+                add(item)
+        else:
+            add(value)
+    for result in manifest.get("runtime_state_results") or []:
+        if not isinstance(result, dict):
+            continue
+        add(result.get("ticket_id"))
+
+    try:
+        raw_actions, _load_errors = load_runtime_state_actions(target, manifest)
+    except Exception:
+        raw_actions = []
+    for action in raw_actions:
+        if not isinstance(action, dict):
+            continue
+        ticket = action.get("ticket") if isinstance(action.get("ticket"), dict) else {}
+        add(action.get("ticket_id") or ticket.get("id"))
+    return ticket_ids
+
+
+def record_ticket_related_commit(target: Path, manifest: dict[str, Any], commit_hash: str | None, *, dry_run: bool) -> list[str]:
+    commit_hash = str(commit_hash or "").strip()
+    if dry_run or not commit_hash or commit_hash.startswith("DRY-RUN"):
+        return []
+    data = load_ticket_run_state(target) or {}
+    tickets = ticket_items(data)
+    if not tickets:
+        return []
+    target_ticket_ids = set(manifest_ticket_ids(target, manifest))
+    if not target_ticket_ids:
+        return []
+    updated_ids: list[str] = []
+    next_tickets: list[dict[str, Any]] = []
+    short_hash = commit_hash[:12]
+    for ticket in tickets:
+        ticket_id = str(ticket.get("id") or "").strip()
+        if ticket_id not in target_ticket_ids:
+            next_tickets.append(ticket)
+            continue
+        next_ticket = dict(ticket)
+        next_ticket["related_commits"] = append_unique_text(next_ticket.get("related_commits"), [commit_hash])
+        next_ticket["evidence"] = append_unique_text(
+            next_ticket.get("evidence"),
+            [f"Integrated local commit {short_hash}."],
+        )
+        next_tickets.append(next_ticket)
+        updated_ids.append(ticket_id)
+    if not updated_ids:
+        return []
+    next_data = dict(data)
+    next_data["tickets"] = next_tickets
+    write_ticket_run_state(
+        target,
+        next_data,
+        actor_role="integrator",
+        event_type="ticket.related_commit_recorded",
+        source_path=str(manifest.get("run_id") or ""),
+    )
+    return updated_ids
+
+
 def validate_ticket_action_common(action: dict[str, Any], result: dict[str, Any]) -> str | None:
     ticket_id = str(action.get("ticket_id") or "").strip()
     if not ticket_id:

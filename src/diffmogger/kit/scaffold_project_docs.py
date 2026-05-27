@@ -23,7 +23,22 @@ from diffmogger.runtime.paths import (
     sidecar_rel,
     sidecarize_text,
 )
-from diffmogger.runtime.state_store import write_automation_control_state, write_canonical_state_brief, write_ticket_run_state
+from diffmogger.runtime.design import (
+    OPTIONAL_DESIGN_SERVICES,
+    build_design_contract_payload,
+    design_contract_markdown,
+    design_settings,
+    ensure_design_foundation_ticket,
+    ui_detection_from_intake,
+)
+from diffmogger.runtime.state_store import (
+    connect as state_store_connect,
+    database_path_for_target,
+    stable_json,
+    write_automation_control_state,
+    write_canonical_state_brief,
+    write_ticket_run_state,
+)
 
 
 def find_kit_root() -> Path:
@@ -81,8 +96,10 @@ VALID_CAMPAIGN_MODES = {"bounded", "ongoing"}
 SUPPORTED_OPTIONAL_MCP_SERVERS = ("context7", "playwright")
 DEFAULT_OPTIONAL_MCP_SERVERS = list(SUPPORTED_OPTIONAL_MCP_SERVERS)
 VALID_OPTIONAL_MCP_SERVERS = set(SUPPORTED_OPTIONAL_MCP_SERVERS)
+SUPPORTED_OPTIONAL_DESIGN_SERVICES = OPTIONAL_DESIGN_SERVICES
 MULTI_ROLE_FILES = {
     ".agentic/roles/planner.md",
+    ".agentic/roles/designer.md",
     ".agentic/roles/builder.md",
     ".agentic/roles/hardener.md",
     ".agentic/roles/integrator.md",
@@ -208,6 +225,21 @@ HEADING_TO_KEY = {
     "mcp integrations": "optional_mcp_servers",
     "context7": "optional_mcp_servers",
     "playwright mcp": "optional_mcp_servers",
+    "ui capability mode": "ui_capability_mode",
+    "ui_capability_mode": "ui_capability_mode",
+    "design source": "design_source",
+    "design_source": "design_source",
+    "design reference files": "design_reference_files",
+    "design_reference_files": "design_reference_files",
+    "design references": "design_reference_files",
+    "design reference urls": "design_reference_urls",
+    "design_reference_urls": "design_reference_urls",
+    "design urls": "design_reference_urls",
+    "ui validation mode": "ui_validation_mode",
+    "ui_validation_mode": "ui_validation_mode",
+    "optional design services": "optional_design_services",
+    "optional_design_services": "optional_design_services",
+    "design services": "optional_design_services",
     "campaign mode": "campaign_mode",
     "automation campaign mode": "campaign_mode",
     "automation run mode": "campaign_mode",
@@ -514,6 +546,7 @@ def resolved_optional_mcp_servers(data: dict[str, Any]) -> list[str]:
 def project_intake_projection(data: dict[str, Any]) -> dict[str, Any]:
     payload = dict(data)
     payload["optional_mcp_servers"] = resolved_optional_mcp_servers(data)
+    payload.update(design_settings(data))
     return payload
 
 
@@ -571,6 +604,10 @@ def seed_ticket_items(data: dict[str, Any]) -> list[dict[str, Any]]:
         status = str(item.get("status") or "pending").strip().lower()
         if status not in {"pending", "in_progress", "candidate_done", "done", "blocked"}:
             status = "pending"
+        owner_role = str(item.get("owner_role") or item.get("role") or "").strip()
+        action_kind = str(item.get("action_kind") or item.get("kind") or "").strip()
+        execution_mode = str(item.get("execution_mode") or "").strip()
+        paths = normalize_seed_list(item.get("paths") or item.get("ownership_paths"))
         ticket = {
             "id": str(item.get("id") or f"TICKET-{index:03d}").strip(),
             "summary": str(item.get("summary") or "Untitled ticket").strip(),
@@ -585,10 +622,23 @@ def seed_ticket_items(data: dict[str, Any]) -> list[dict[str, Any]]:
             "related_commits": normalize_seed_list(item.get("related_commits")),
             "blocker": str(item.get("blocker") or "").strip(),
         }
+        if owner_role:
+            ticket["owner_role"] = owner_role
+        if action_kind:
+            ticket["action_kind"] = action_kind
+        if execution_mode:
+            ticket["execution_mode"] = execution_mode
+        if paths:
+            ticket["paths"] = paths
+        if normalize_bool(item.get("design_contract_required"), False):
+            ticket["design_contract_required"] = True
+        payload = item.get("payload")
+        if isinstance(payload, dict):
+            ticket["payload"] = payload
         normalized.append(ticket)
     if normalized:
-        return normalized
-    return [
+        return ensure_design_foundation_ticket(normalized, project_intake_projection(data))
+    placeholder = [
         {
             "id": "TICKET-001",
             "summary": "Replace this sample with the first startup ticket.",
@@ -604,6 +654,7 @@ def seed_ticket_items(data: dict[str, Any]) -> list[dict[str, Any]]:
             "blocker": "",
         }
     ]
+    return ensure_design_foundation_ticket(placeholder, project_intake_projection(data))
 
 
 def mcp_values(data: dict[str, Any]) -> dict[str, str]:
@@ -624,7 +675,7 @@ startup_timeout_sec = 20
 tool_timeout_sec = 60
 env_vars = ["CONTEXT7_API_KEY"]"""
         )
-        for profile in ("diffmogger-planner", "diffmogger-builder"):
+        for profile in ("diffmogger-planner", "diffmogger-designer", "diffmogger-builder"):
             profile_blocks.append(
                 f"""[profiles.{profile}.mcp_servers.context7]
 enabled = true"""
@@ -642,7 +693,7 @@ startup_timeout_sec = 20
 tool_timeout_sec = 60
 env_vars = ["PLAYWRIGHT_MCP_EXECUTABLE_PATH", "PLAYWRIGHT_MCP_OUTPUT_DIR"]"""
         )
-        for profile in ("diffmogger-hardener", "diffmogger-integrator"):
+        for profile in ("diffmogger-designer", "diffmogger-hardener", "diffmogger-integrator"):
             profile_blocks.append(
                 f"""[profiles.{profile}.mcp_servers.playwright]
 enabled = true"""
@@ -653,13 +704,13 @@ enabled = true"""
         if context7_enabled:
             setup_lines.extend(
                 [
-                    "- Context7 is mounted only for Planner and Builder role runs. Use it when third-party/library/API documentation materially affects planning or implementation. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, continue the sprint with normal web search, repo docs, package metadata, or existing knowledge.",
+                    "- Context7 is mounted only for Planner, Designer, and Builder role runs. Use it when third-party/library/API documentation materially affects planning, design-system choices, or implementation. If Context7 returns auth errors, startup failures, timeouts, empty results, or tool errors, continue the sprint with normal web search, repo docs, package metadata, or existing knowledge.",
                     "- Context7 uses stdio `npx -y @upstash/context7-mcp` by default. `CONTEXT7_API_KEY` is inherited when present for higher rate limits, but the key is never stored in generated files. Remote OAuth setup is manual/optional and must not be required for unattended overnight runs.",
                 ]
             )
         if playwright_enabled:
             setup_lines.append(
-                "- Playwright MCP is mounted only for Hardener and Integrator validation lanes, plus Planner or Builder when the target or selected ticket is explicitly frontend, browser, UI, or demo-path scoped. Use it when validating browser-facing changes."
+                "- Playwright MCP is mounted only for Hardener and Integrator validation lanes, plus Planner, Designer, or Builder when the target or selected ticket is explicitly frontend, browser, UI, or demo-path scoped. Use it when validating browser-facing changes."
             )
         setup_lines.extend(
             [
@@ -682,6 +733,53 @@ MCPs are disabled for this target because `optional_mcp_servers` was explicitly 
         "PLAYWRIGHT_MCP_ENABLED": "true" if playwright_enabled else "false",
         "MCP_CODEX_CONFIG": "\n\n".join([*config_blocks, *profile_blocks]).strip(),
         "MCP_SETUP_SECTION": setup.strip(),
+    }
+
+
+def design_values(data: dict[str, Any]) -> dict[str, str]:
+    intake = project_intake_projection(data)
+    tickets = seed_ticket_items(data) if campaign_mode(data) == "bounded" or data.get("ticket_run_seed_tickets") else []
+    detection = ui_detection_from_intake(intake, tickets=tickets)
+    contract = build_design_contract_payload(intake, target_name=str(data.get("project_name") or ""), tickets=tickets)
+    contract_json = json.dumps(contract, indent=2, sort_keys=True)
+    contract_md = design_contract_markdown(contract)
+    services = detection.get("optional_design_services") if isinstance(detection.get("optional_design_services"), list) else []
+    service_lines = "\n".join(f"- {name}" for name in services) if services else "None."
+    if detection["designer_enabled"]:
+        capability = """Design capability: enabled
+
+- Designer lane is scheduled for full or auto-detected UI-heavy scope.
+- Active contract projections live at `.diffmogger/agentic/design_contract.md` and `.diffmogger/agentic/design_contract.json`.
+- Builder and hardener lanes should reference the contract for UI work.
+- UI validation receipts use `payload.classification = "ui_visual"` in the existing validation receipt table."""
+    elif detection["ui_capability_mode"] == "light":
+        capability = """Design capability: light
+
+- Design guidance is generated and available, but the dedicated designer lane is not scheduled by default.
+- UI validation guidance still applies when UI work is present."""
+    elif detection["ui_capability_mode"] == "off":
+        capability = "Design capability: off. No designer lane or UI validation gate is scheduled unless the intake changes."
+    else:
+        capability = "Design capability: auto, currently not UI-heavy. Non-UI work keeps the lightweight flow."
+    validation = """UI validation:
+
+- Prefer project-local deterministic checks such as `npm run browser-smoke`, Playwright Test, Storybook/Chromatic, Percy, or Applitools only when the target already defines scripts and credentials.
+- Use Playwright MCP as inspection evidence when mounted; it is optional and non-required.
+- Record UI visual evidence in validation receipts with `payload.classification = "ui_visual"`, routes, viewports, screenshots, console status, focus/interaction notes, overflow/overlap notes, and tooling used.
+- If browser tooling is missing or fails to start, create setup, harness, alternate-validation, or deferred-QA DAG work."""
+    return {
+        "UI_CAPABILITY_MODE": str(detection["ui_capability_mode"]),
+        "DESIGN_SOURCE": str(detection["design_source"]),
+        "UI_VALIDATION_MODE": str(detection["ui_validation_mode"]),
+        "DESIGNER_ENABLED": "true" if detection["designer_enabled"] else "false",
+        "UI_HEAVY_DETECTED": "true" if detection["ui_heavy"] else "false",
+        "UI_DETECTION_REASONS": "\n".join(f"- {reason}" for reason in detection.get("reasons", [])),
+        "OPTIONAL_DESIGN_SERVICES": service_lines,
+        "SUPPORTED_DESIGN_SERVICE_LIST": ",".join(SUPPORTED_OPTIONAL_DESIGN_SERVICES),
+        "DESIGN_CONTRACT_JSON": contract_json,
+        "DESIGN_CONTRACT_MARKDOWN": contract_md,
+        "DESIGN_CAPABILITY_SECTION": capability.strip(),
+        "UI_VALIDATION_SECTION": validation.strip(),
     }
 
 
@@ -1271,20 +1369,20 @@ The dashboard Start button asks launchd to supervise the Temporal scheduler runn
 
 Multi-role mode is local-only. Roles must never push, fetch, pull, configure remotes, set upstream tracking, or run remote-touching git commands. Any remote-touching attempt is a `CRITICAL_STOP`.
 
-Planner, builder, and hardener use isolated worktrees. The integrator owns main checkout mutation, applies queued patches FIFO, verifies, creates local checkpoint commits, updates typed state, and refreshes `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`."""
+Planner, designer, builder, and hardener use isolated worktrees. The integrator owns main checkout mutation, applies queued patches FIFO, verifies, creates filtered local project-change checkpoint commits when enabled, records accepted hashes in typed ticket state, and refreshes generated projections."""
     guardrails = """- Multi-role automation is enabled by default and runs through the continuous execution DAG scheduler.
 - Multi-role role runs require an initialized local git repo.
 - Multi-role mode is local-only: never push, fetch, pull, clone with remote tracking, configure remotes, set upstream tracking, or run git commands that touch a remote.
 - Role scripts must refuse to run when `git remote -v` is non-empty unless `MULTI_ROLE_ALLOW_REMOTES=1`.
-- Integrator owns main-checkout mutation, local checkpoint commits, FIFO patch application, verification, typed state updates, and generated task/progress projections.
-- Planner, builder, and hardener must use isolated worktrees and queue patches instead of mutating the main checkout.
-- Integrator must checkpoint dirty main changes as-is before applying queued patches; do not revert or discard human changes.
+- Integrator owns main-checkout mutation, filtered local project-change checkpoint commits, FIFO patch application, verification, typed state updates, and generated task/progress projections.
+- Planner, designer, builder, and hardener must use isolated worktrees and queue patches instead of mutating the main checkout.
+- Integrator must checkpoint safe dirty main project files before applying queued patches; do not revert or discard human changes, and never commit `.env`, secrets, dependencies, caches, runtime logs, queues, or worktrees.
 - Integrator must defer conflicting, stale, guardrail-violating, or verification-failing patches with machine-readable deferral reasons."""
     task_notes = f"""- Role profile: `{profile}`
 - Continuous DAG scheduler: `scripts/run_temporal_worker.sh`.
 - The scheduler prioritizes required validation repair, compatible bounded waves, read-only scoping for weak ownership, parser/index setup when facts are unavailable, validation groups, and serialized integration gates.
 - DAG scheduler config: `parallel_execution_mode={dag_scheduler_values(data)["PARALLEL_EXECUTION_MODE"]}`, `symbol_graph_languages={dag_scheduler_values(data)["SYMBOL_GRAPH_LANGUAGES_INLINE"]}`, `parallel_write_min_confidence={dag_scheduler_values(data)["PARALLEL_WRITE_MIN_CONFIDENCE"]}`, `parallel_write_direct_confidence={dag_scheduler_values(data)["PARALLEL_WRITE_DIRECT_CONFIDENCE"]}`, `max_parallel_write_workers={dag_scheduler_values(data)["MAX_PARALLEL_WRITE_WORKERS"]}`, `max_parallel_scope_workers={dag_scheduler_values(data)["MAX_PARALLEL_SCOPE_WORKERS"]}`.
-- Integrator refreshes `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` as the generated projection and creates local checkpoint commits.
+- Integrator refreshes `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` as the generated projection, creates filtered local checkpoint commits when enabled, and records accepted commit hashes in typed ticket state.
 - Deferred patches remain visible through `scripts/list_deferred_patches.py`; use `python3 scripts/list_deferred_patches.py . --markdown` for grouped local triage or add `--decision-template` for a per-manifest cleanup worksheet.
 - Local-only safety: no pushes, fetches, pulls, remote configuration, upstream tracking, or remote-touching git commands."""
     development = f"""Role profile: `{profile}`
@@ -1305,7 +1403,7 @@ python3 scripts/list_deferred_patches.py . --decision-template
 
 {scheduler_config}
 
-The target must have a local git repo with an initial commit. Diffmogger scaffold creates both automatically when `HEAD` is missing. Multi-role mode creates local worktrees, queue artifacts, and local commits only. It never pushes."""
+The target must have a local git repo with an initial commit. Diffmogger scaffold creates both automatically when `HEAD` is missing. Multi-role mode creates local worktrees, queue artifacts, and filtered local project-change commits only. It records accepted commit hashes in typed ticket state and never pushes."""
     bootstrap = f"""Role profile: `{profile}`
 
 {scheduler_config}
@@ -1628,6 +1726,7 @@ def placeholders(data: dict[str, Any]) -> dict[str, str]:
     values.update(dag_scheduler_values(data))
     values.update(env_values)
     values.update(mcp_values(data))
+    values.update(design_values(data))
     values.update(multi_role_values(data))
     values.update(ticket_run_values(data))
     values.update(bridge_values(bridge_mode, text_responses))
@@ -1756,6 +1855,8 @@ def generated_scaffold_destinations(values: dict[str, str]) -> list[str]:
                 *generated_template_destinations(values),
                 *generated_runtime_wrapper_destinations(values),
                 sidecar_rel(".agentic/project_intake.json"),
+                sidecar_rel(".agentic/design_contract.json"),
+                sidecar_rel(".agentic/design_contract.md"),
             ]
         )
     )
@@ -1812,6 +1913,8 @@ def diffmogger_runtime_paths(values: dict[str, str]) -> list[str]:
         sidecar_rel("target/validation_jobs"),
         sidecar_rel("target/canonical_state_brief.md"),
         sidecar_rel("target/codex_automation.lock"),
+        sidecar_rel("target/design_contract.json"),
+        sidecar_rel("target/design_reviews"),
         sidecar_rel("target/first-review"),
         sidecar_rel("target/integration_safety_check.json"),
         sidecar_rel("target/orchestration.sqlite3"),
@@ -1830,6 +1933,25 @@ def diffmogger_runtime_paths(values: dict[str, str]) -> list[str]:
 
 def diffmogger_human_state_paths(values: dict[str, str]) -> list[str]:
     return []
+
+
+def write_design_projections(target: Path, values: dict[str, str], *, force: bool) -> list[Path]:
+    written: list[Path] = []
+    files = {
+        sidecar_rel(".agentic/design_contract.json"): values.get("DESIGN_CONTRACT_JSON", "{}").rstrip() + "\n",
+        sidecar_rel(".agentic/design_contract.md"): values.get("DESIGN_CONTRACT_MARKDOWN", "# Design Contract\n").rstrip() + "\n",
+        sidecar_rel("target/design_contract.json"): values.get("DESIGN_CONTRACT_JSON", "{}").rstrip() + "\n",
+    }
+    for rel, body in files.items():
+        path = target / rel
+        if path.exists() and not force:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        written.append(path)
+    reviews_dir = target / sidecar_rel("target/design_reviews")
+    reviews_dir.mkdir(parents=True, exist_ok=True)
+    return written
 
 
 def seed_runtime_state(target: Path, values: dict[str, str]) -> None:
@@ -1904,6 +2026,44 @@ def seed_runtime_state(target: Path, values: dict[str, str]) -> None:
         actor_role="scaffold",
         event_type="ticket.run_seeded",
     )
+    try:
+        design_contract = json.loads(values.get("DESIGN_CONTRACT_JSON") or "{}")
+    except json.JSONDecodeError:
+        design_contract = {}
+    if isinstance(design_contract, dict) and design_contract.get("contract_id"):
+        db_path = database_path_for_target(target)
+        with state_store_connect(db_path) as conn:
+            with conn:
+                references = design_contract.get("references") if isinstance(design_contract.get("references"), dict) else {}
+                conn.execute(
+                    """
+                    INSERT INTO design_contracts(
+                        contract_id, version, status, source, ui_capability_mode,
+                        ui_validation_mode, designer_enabled, payload_json, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(contract_id) DO UPDATE SET
+                        version=excluded.version,
+                        status=excluded.status,
+                        source=excluded.source,
+                        ui_capability_mode=excluded.ui_capability_mode,
+                        ui_validation_mode=excluded.ui_validation_mode,
+                        designer_enabled=excluded.designer_enabled,
+                        payload_json=excluded.payload_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        str(design_contract.get("contract_id") or "design-contract:active"),
+                        int(design_contract.get("version") or 1),
+                        str(design_contract.get("status") or "active"),
+                        str(design_contract.get("source") or "generated_contract"),
+                        str(design_contract.get("ui_capability_mode") or "auto"),
+                        str(design_contract.get("ui_validation_mode") or "auto"),
+                        1 if bool(design_contract.get("designer_enabled")) else 0,
+                        stable_json({**design_contract, "references": references}),
+                        str(design_contract.get("updated_at") or values.get("CREATED_AT") or ""),
+                    ),
+                )
     write_canonical_state_brief(target)
 
 
@@ -1915,6 +2075,12 @@ def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -
         for item in (values.get("OPTIONAL_MCP_SERVER_LIST") or "").split(",")
         if item
     ]
+    optional_design_services = [
+        item.strip().removeprefix("-").strip()
+        for item in (values.get("OPTIONAL_DESIGN_SERVICES") or "").splitlines()
+        if item.strip() and item.strip() != "None."
+    ]
+    optional_design_services = [item for item in optional_design_services if item]
     owned_paths = sorted(set([MANIFEST_REL, *generated_paths, *runtime_paths, *context_paths]))
     worktree_seed_paths = [
         path
@@ -1947,6 +2113,14 @@ def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -
                 if language
             ],
             "multi_role": True,
+            "design": True,
+            "ui_capability_mode": values.get("UI_CAPABILITY_MODE", "auto"),
+            "ui_heavy_detected": values.get("UI_HEAVY_DETECTED") == "true",
+            "designer_enabled": values.get("DESIGNER_ENABLED") == "true",
+            "design_source": values.get("DESIGN_SOURCE", "generated_contract"),
+            "ui_validation_mode": values.get("UI_VALIDATION_MODE", "auto"),
+            "optional_design_services": optional_design_services,
+            "supported_design_services": list(SUPPORTED_OPTIONAL_DESIGN_SERVICES),
             "optional_mcp": values.get("MCP_ENABLED") == "true",
             "optional_mcp_servers": optional_mcp_servers,
             "supported_mcp_servers": list(SUPPORTED_OPTIONAL_MCP_SERVERS),
@@ -1961,6 +2135,21 @@ def build_sidecar_manifest(values: dict[str, str], generated_paths: list[str]) -
         "resolved_from": "project_intake",
         "requested_by_default": optional_mcp_servers,
         "supported_servers": list(SUPPORTED_OPTIONAL_MCP_SERVERS),
+    }
+    manifest["design"] = {
+        "required": False,
+        "resolved_from": "project_intake",
+        "ui_capability_mode": values.get("UI_CAPABILITY_MODE", "auto"),
+        "design_source": values.get("DESIGN_SOURCE", "generated_contract"),
+        "ui_validation_mode": values.get("UI_VALIDATION_MODE", "auto"),
+        "designer_enabled": values.get("DESIGNER_ENABLED") == "true",
+        "ui_heavy_detected": values.get("UI_HEAVY_DETECTED") == "true",
+        "requested_services": optional_design_services,
+        "supported_services": list(SUPPORTED_OPTIONAL_DESIGN_SERVICES),
+        "contract_projection_paths": [
+            sidecar_rel(".agentic/design_contract.md"),
+            sidecar_rel(".agentic/design_contract.json"),
+        ],
     }
     return manifest
 
@@ -2270,6 +2459,7 @@ def scaffold(target: Path, values: dict[str, str], force: bool) -> list[Path]:
         dest.write_text(render_wrapper(entry["module"]), encoding="utf-8")
         dest.chmod(0o755)
         written.append(dest)
+    written.extend(write_design_projections(target, values, force=force))
     written.extend(copy_diffmogger_runtime_library(target, force=force))
     manifest = build_sidecar_manifest(values, generated_paths)
     manifest_dest = target / MANIFEST_REL

@@ -184,6 +184,11 @@ escape_heredoc_text() {
 
 prompt_text_for_heredoc="$(escape_heredoc_text "$prompt_text")"
 truncated_notice_for_heredoc="$(escape_heredoc_text "$truncated_notice")"
+worker_env_access_rule=$(cat <<'DIFFMOGGER_WORKER_ENV_RULE'
+{{WORKER_ENV_ACCESS_RULE}}
+DIFFMOGGER_WORKER_ENV_RULE
+)
+worker_env_access_rule_for_heredoc="$(escape_heredoc_text "$worker_env_access_rule")"
 
 if [[ "$mode" == "write" ]]; then
   worker_prompt=$(cat <<EOF
@@ -202,7 +207,7 @@ Rules:
 - Do not touch unrelated files.
 - Do not revert unrelated edits or changes made by other agents or humans.
 - Adjust your implementation to documented contracts and outputs from other workers when visible.
-- {{WORKER_ENV_ACCESS_RULE}}
+- $worker_env_access_rule_for_heredoc
 - Do not use network.
 - Do not send Apprise, notifier, email, or other external messages.
 - Do not spawn subagents, do not call codex exec, and do not call spawn_worker_agent.sh.
@@ -237,7 +242,7 @@ Output report: $output_path
 Rules:
 - Read the target project and produce the assigned report.
 - Do not modify source files or docs except for the output report path above.
-- {{WORKER_ENV_ACCESS_RULE}}
+- $worker_env_access_rule_for_heredoc
 - Do not use network.
 - Do not send Apprise, notifier, email, or other external messages.
 - Do not spawn subagents, do not call codex exec, and do not call spawn_worker_agent.sh.

@@ -75,6 +75,7 @@ class CampaignWorkflow:
             "group_id": group.get("group_id", ""),
             "paths": selected.get("paths", []),
             "validation_group_id": validation_group.get("validation_group_id", ""),
+            "owner_role": selected.get("owner_role", ""),
         }
         if action_kind in {"launch_work", "launch_scope_work"}:
             node_ids = selected.get("node_ids") if isinstance(selected.get("node_ids"), list) else []

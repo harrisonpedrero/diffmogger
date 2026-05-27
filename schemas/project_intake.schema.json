@@ -210,11 +210,18 @@
           "summary": { "type": "string" },
           "depends_on": { "type": "array", "items": { "type": "string" }, "default": [] },
           "status": { "type": "string", "enum": ["pending", "in_progress", "candidate_done", "done", "blocked"], "default": "pending" },
+          "owner_role": { "type": "string", "default": "" },
+          "action_kind": { "type": "string", "default": "" },
+          "execution_mode": { "type": "string", "default": "" },
+          "paths": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "ownership_paths": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "design_contract_required": { "type": "boolean", "default": false },
           "acceptance_criteria": { "type": "array", "items": { "type": "string" }, "default": [] },
           "verification_commands": { "type": "array", "items": { "type": "string" }, "default": [] },
           "evidence": { "type": "array", "items": { "type": "string" }, "default": [] },
           "related_commits": { "type": "array", "items": { "type": "string" }, "default": [] },
-          "blocker": { "type": "string", "default": "" }
+          "blocker": { "type": "string", "default": "" },
+          "payload": { "type": "object", "additionalProperties": true, "default": {} }
         }
       },
       "default": []
@@ -285,6 +292,46 @@
       },
       "uniqueItems": true,
       "default": ["context7", "playwright"]
+    },
+    "ui_capability_mode": {
+      "type": "string",
+      "description": "Controls design/UI capability. auto enables the designer lane only when UI-heavy scope is detected; off disables UI design scheduling; light generates guidance without a dedicated lane; full opts in.",
+      "enum": ["auto", "off", "light", "full"],
+      "default": "auto"
+    },
+    "design_source": {
+      "type": "string",
+      "description": "Default source for the active design contract. External sources are optional adapters; generated_contract is local-first.",
+      "enum": ["generated_contract", "figma", "existing_code"],
+      "default": "generated_contract"
+    },
+    "design_reference_files": {
+      "type": "array",
+      "description": "Optional local paths or target-relative docs/screenshots used as non-secret design references.",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "design_reference_urls": {
+      "type": "array",
+      "description": "Optional non-secret design reference URLs such as Figma links. Credentials are never stored here.",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "ui_validation_mode": {
+      "type": "string",
+      "description": "Controls UI validation guidance and gates. external_optional uses already-configured external visual tools only when the target supplies scripts/credentials.",
+      "enum": ["auto", "off", "local", "external_optional"],
+      "default": "auto"
+    },
+    "optional_design_services": {
+      "type": "array",
+      "description": "Optional design-source or visual-validation adapters. These are advisory unless the target already configures them; Diffmogger must not invent or store secrets.",
+      "items": {
+        "type": "string",
+        "enum": ["figma_mcp", "v0", "builder_visual_copilot", "storybook_chromatic", "percy", "applitools"]
+      },
+      "uniqueItems": true,
+      "default": []
     },
     "meaningful_deliverable": {
       "type": "string",

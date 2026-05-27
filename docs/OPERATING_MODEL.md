@@ -28,6 +28,12 @@ Diffmogger is a work generator, not a blocker detector. Required check failures 
 
 The compatibility status names `ACTIVE`, `ACTIVE_WITH_PENDING_USER_INPUT`, `BLOCKED_ON_USER`, `BLOCKED_ON_ENVIRONMENT`, and `CRITICAL_STOP` may still appear in migrated targets. Treat them as annotations for current dashboards and prompts, not as scheduler doctrine.
 
+## Design And UI Validation
+
+UI-heavy targets can opt into, or be auto-detected for, a gated `designer` lane. The designer creates or updates the local design contract and review evidence, while builders keep product-code changes aligned to that contract. Backend, CLI, and library targets skip this lane unless `ui_capability_mode` is `full`.
+
+The canonical design surfaces live in SQLite as design contracts, design reviews, and `validation_receipts` whose payload classification is `ui_visual`. Markdown and JSON files under `.diffmogger/agentic/design_contract.*` are handoff projections. Playwright MCP, Figma MCP, v0, Builder.io, Chromatic, Percy, and Applitools are optional adapters only; unattended runs must remain useful without secrets or paid services.
+
 ## Swarm Readiness
 
 Temporal workflows are designed for bounded fanout, scoped work waves, validation gates, and serialized integration when ownership overlaps. The current scheduler prefers non-overlapping scopes backed by paths, Tree-sitter symbol/import facts, validation state, active leases, confidence, or explicit scope evidence. Low confidence, stale facts, stale leases, optional validation failures, missing parser support, and ambiguous ownership reduce fanout or generate scope/setup work; they are not terminal blocker states.

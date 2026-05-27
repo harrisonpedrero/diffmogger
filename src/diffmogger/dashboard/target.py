@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from diffmogger.dashboard import shared as dashboard_shared
+from diffmogger.runtime.design import design_settings
 from diffmogger.runtime.paths import existing_or_target_path, preferred_target_path, sidecar_rel, target_path
 
 from .errors import BackendError
@@ -273,8 +274,10 @@ def dashboard_state_from_intake(
     automation_role_profile = normalize_automation_role_profile(intake)
     multi_role_enabled = True
     campaign_mode = normalize_campaign_mode(intake)
+    design_config = design_settings(intake)
     normalized_intake = {
         **intake,
+        **design_config,
         "automation_role_profile": automation_role_profile,
         "multi_role_automations_allowed": multi_role_enabled,
         "write_worker_agents_allowed": True,
@@ -306,6 +309,7 @@ def dashboard_state_from_intake(
         "worker_agents_allowed": bool(intake.get("worker_agents_allowed", True)),
         "codex_cli_workers_expected_on_broad_runs": bool(intake.get("codex_cli_workers_expected_on_broad_runs", True)),
         "optional_mcp_servers": optional_mcp,
+        **design_config,
         "write_worker_agents_allowed": True,
         "max_write_worker_count": dashboard_app.write_worker_count_from_text(
             intake.get("max_write_worker_count"),
@@ -345,6 +349,7 @@ def project_intake_payload(intake: dict[str, Any], target: Path | None = None) -
     )
     existing = load_dashboard_state(target) if target is not None else {}
     payload["optional_mcp_servers"] = resolved_optional_mcp_servers(dashboard_app, payload, existing)
+    payload.update(design_settings(payload))
     payload.pop("overwrite_existing_scaffold_files", None)
     return payload
 

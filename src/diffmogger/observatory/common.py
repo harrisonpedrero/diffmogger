@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 from diffmogger.runtime.paths import existing_or_target_path, target_path, target_rel
 
-ROLES = ("planner", "builder", "hardener", "integrator")
+ROLES = ("planner", "designer", "builder", "hardener", "integrator")
 
 QUEUE_STATUSES = ("queued", "deferred", "applied", "failed", "skipped", "superseded")
 
@@ -84,7 +84,7 @@ EMPTY_DEFERRED_BACKLOG_MARKERS = {
 
 EMPTY_STATES = {
     "next_up": "No activity decision yet. After the first automation cycle, the next local role lane and reason will appear here.",
-    "patch_queue": "No queued or deferred patches yet. First role patch manifests will appear here after builder, hardener, or planner lanes write local queue outputs.",
+    "patch_queue": "No queued or deferred patches yet. First role patch manifests will appear here after planner, designer, builder, or hardener lanes write local queue outputs.",
     "recent_outcomes": "No integration outcomes yet. Applied, failed, skipped, and deferred role outputs appear here after integrator review.",
     "timeline": "No activity timeline yet. Completed role runs will appear here with exit status, progress result, and integration notes.",
 }

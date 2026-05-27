@@ -57,7 +57,7 @@ project_commands_only
 
 ## Automation Mode
 
-Continuous execution DAG scheduler with planner/builder/hardener/integrator roles until every ticket is done with evidence. Blocked tickets become unblocker DAG work.
+Continuous execution DAG scheduler with planner/builder/hardener/integrator roles until every ticket is done with evidence. The designer lane is off for this non-UI campaign. Blocked tickets become unblocker DAG work.
 
 ## DAG Scheduler Config
 
@@ -75,6 +75,18 @@ Disabled.
 ## Campaign Mode
 
 bounded
+
+## UI Capability Mode
+
+off
+
+## Design Source
+
+generated_contract
+
+## UI Validation Mode
+
+off
 
 ## Ticket Completion Notify
 

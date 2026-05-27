@@ -78,6 +78,7 @@ EXECUTION_DAG_CANONICAL_ACTION_TYPES = (
     "scope",
     "build",
     "review",
+    "design",
     "validate",
     "repair",
     "setup",
@@ -97,6 +98,7 @@ EXECUTION_DAG_LEGACY_ACTION_ALIASES = {
     "scoping": "scope",
     "building": "build",
     "reviewing": "review",
+    "designing": "design",
     "validation": "validate",
     "integration": "integrate",
 }
@@ -170,6 +172,20 @@ EXECUTION_DAG_ACTION_CAPABILITIES = {
         "required_by_default": False,
         "optional_by_default": True,
         "required_when": ["low_confidence", "shared_ownership", "validation_failed", "integration_risk"],
+        "parallelizable": True,
+        "serialized": False,
+    },
+    "design": {
+        "role_family": "designer",
+        "prompt_base": "designer",
+        "permissions": ["read_intake", "read_ui_context", "write_design_contract", "write_design_review"],
+        "required_inputs": ["project_intake", "repo_capability_manifest", "ui_ticket_context"],
+        "outputs": ["design_contract", "design_review", "design_foundation_work"],
+        "lease_behavior": "read_only",
+        "execution_mode": "read_only",
+        "required_by_default": False,
+        "optional_by_default": True,
+        "required_when": ["ui_capability_mode_full", "auto_detected_ui_heavy_scope", "ui_work_missing_design_contract"],
         "parallelizable": True,
         "serialized": False,
     },
@@ -771,6 +787,8 @@ ORCHESTRATION_TABLES = (
     "runtime_phase_timings",
     "candidate_lanes",
     "validation_receipts",
+    "design_contracts",
+    "design_reviews",
     "escalations",
     "task_edges",
     "schema_migrations",
@@ -935,7 +953,7 @@ TICKET_CAMPAIGN_HORIZONS = (
     "T3 Verification and hardening",
     "T4 Completion report and stop",
 )
-ROLE_MANIFEST_QUEUE_ROLES = ("planner", "builder", "hardener")
+ROLE_MANIFEST_QUEUE_ROLES = ("planner", "designer", "builder", "hardener")
 
 
 def utc_now() -> str:
@@ -2683,6 +2701,36 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             payload_json TEXT NOT NULL DEFAULT '{}'
         );
         CREATE INDEX IF NOT EXISTS idx_validation_receipts_work ON validation_receipts(work_item_id, status, finished_at);
+
+        CREATE TABLE IF NOT EXISTS design_contracts (
+            contract_id TEXT PRIMARY KEY,
+            version INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'active',
+            source TEXT NOT NULL DEFAULT 'generated_contract',
+            ui_capability_mode TEXT NOT NULL DEFAULT 'auto',
+            ui_validation_mode TEXT NOT NULL DEFAULT 'auto',
+            designer_enabled INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_design_contracts_status ON design_contracts(status, updated_at);
+
+        CREATE TABLE IF NOT EXISTS design_reviews (
+            review_id TEXT PRIMARY KEY,
+            contract_id TEXT NOT NULL DEFAULT '',
+            contract_version INTEGER NOT NULL DEFAULT 1,
+            node_id TEXT NOT NULL DEFAULT '',
+            ticket_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'not_required',
+            severity TEXT NOT NULL DEFAULT 'info',
+            findings_json TEXT NOT NULL DEFAULT '[]',
+            evidence_paths_json TEXT NOT NULL DEFAULT '[]',
+            required_follow_up_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_design_reviews_ticket ON design_reviews(ticket_id, status, recorded_at);
+        CREATE INDEX IF NOT EXISTS idx_design_reviews_node ON design_reviews(node_id, status, recorded_at);
 
         CREATE TABLE IF NOT EXISTS escalations (
             escalation_id TEXT PRIMARY KEY,
@@ -6777,7 +6825,7 @@ def _ticket_action_status(ticket_status: str, action: str) -> str:
     if status == "done":
         return "done" if action != "completion" else "complete"
     if status == "candidate_done":
-        if canonical in {"orchestrate", "decompose", "scope", "build"}:
+        if canonical in {"orchestrate", "decompose", "scope", "build", "design"}:
             return "done"
         if canonical in {"review", "validate"}:
             return "ready"
@@ -6785,11 +6833,11 @@ def _ticket_action_status(ticket_status: str, action: str) -> str:
     if status == "in_progress":
         if canonical in {"orchestrate", "decompose", "scope"}:
             return "done"
-        return "running" if canonical == "build" else "waiting"
+        return "running" if canonical in {"build", "design"} else "waiting"
     if status == "blocked":
         if canonical == "repair":
             return "ready"
-        return "blocked" if canonical in {"build", "review", "validate", "integrate"} or action == "completion" else "done"
+        return "blocked" if canonical in {"build", "design", "review", "validate", "integrate"} or action == "completion" else "done"
     if status == "waiting":
         return "waiting"
     if canonical in {"orchestrate", "decompose"}:
@@ -6797,6 +6845,8 @@ def _ticket_action_status(ticket_status: str, action: str) -> str:
     if canonical == "scope":
         return "ready"
     if canonical == "build":
+        return "ready"
+    if canonical == "design":
         return "ready"
     return "waiting"
 
@@ -7043,6 +7093,8 @@ def _ticket_dag_signal_policy(ticket: Mapping[str, Any]) -> dict[str, Any]:
 
 def _ticket_dag_action_plan(ticket_status: str, policy: Mapping[str, Any]) -> list[str]:
     status = _execution_dag_status(ticket_status, "pending")
+    if bool(policy.get("design_action")):
+        return ["decompose", "design", "review", "validate", "integrate", "completion"]
     if status == "blocked":
         actions = ["decompose", "repair", "build"]
         if bool(policy.get("requires_review")):
@@ -7158,24 +7210,22 @@ def materialize_execution_dag_conn(
         keep_edge(_dag_edge(conn, previous_node_id, str(node["node_id"]), "depends_on", f"{action} follows prior DAG action"))
         previous_node_id = str(node["node_id"])
 
-    run = conn.execute("SELECT * FROM ticket_runs ORDER BY updated_at DESC LIMIT 1").fetchone()
-    if run is not None:
-        run_id = str(run["run_id"] or "ticket-run")
+    ticket_run_state = _ticket_run_state_from_tables_conn(conn)
+    if ticket_run_state is not None:
+        run_id = str(ticket_run_state.get("run_id") or "ticket-run")
         typed_ticket_statuses = _typed_ticket_statuses_conn(conn)
-        rows = conn.execute(
-            "SELECT * FROM ticket_items WHERE run_id = ? ORDER BY position ASC, ticket_id ASC",
-            (run_id,),
-        ).fetchall()
+        tickets_for_dag = [dict(item) for item in ticket_run_state.get("tickets", []) if isinstance(item, Mapping)]
         previous_ticket_completion = ""
         ticket_node_ids: dict[str, str] = {}
         ticket_action_nodes: dict[str, dict[str, str]] = {}
         ticket_completion_nodes: dict[str, str] = {}
         ticket_dependencies: list[tuple[str, str]] = []
-        for row in rows:
-            ticket = _ticket_payload_from_row(row)
+        for index, ticket in enumerate(tickets_for_dag):
             ticket_id = str(ticket.get("id") or "").strip()
             if not ticket_id:
                 continue
+            ticket.setdefault("position", index)
+            ticket.setdefault("run_id", run_id)
             ticket_status = _execution_dag_status(
                 _legacy_ticket_status_from_typed(typed_ticket_statuses.get(ticket_id))
                 if ticket_id in typed_ticket_statuses
@@ -7209,6 +7259,22 @@ def materialize_execution_dag_conn(
                     ticket_dependencies.append((ticket_id, dependency_id))
             previous = str(ticket_node["node_id"])
             policy = _ticket_dag_signal_policy(ticket)
+            ticket_owner_role = str(ticket.get("owner_role") or ticket.get("role") or "").strip().lower()
+            ticket_action_kind = str(ticket.get("action_kind") or ticket.get("kind") or "").strip().lower()
+            if (
+                ticket_owner_role == "designer"
+                or ticket_action_kind == "design"
+                or bool(ticket.get("design_contract_required"))
+            ):
+                policy = {
+                    **dict(policy),
+                    "design_action": True,
+                    "read_only": True,
+                    "requires_scope": False,
+                    "requires_review": True,
+                    "confidence": max(float(policy.get("confidence") or 0), 0.9),
+                    "fast_path_reason": "design foundation or design review ticket uses designer lane",
+                }
             scope_evidence_policy = _scope_evidence_policy_for_ticket_conn(conn, ticket_id)
             scope_dag_node_id = _execution_dag_node_id(ticket_id, "scope")
             scope_fanout_outcome = _scope_fanout_outcome_for_ticket_conn(conn, ticket_id, dag_node_id=scope_dag_node_id)
@@ -12239,7 +12305,7 @@ def default_parallelism_budgets_from_control(control: Mapping[str, Any]) -> list
             "global",
             enabled=True,
             max_concurrent=PARALLELISM_BUDGET_GLOBAL_CONCURRENT,
-            max_per_role={"planner": 2, "builder": 2, "hardener": 2, "integrator": 1, "dashboard": 1},
+            max_per_role={"planner": 2, "designer": 2, "builder": 2, "hardener": 2, "integrator": 1, "dashboard": 1},
             max_runtime_seconds=7200,
             source="derived_from_automation_control",
             payload={"resource_pool": "local_codex_sessions"},
@@ -12248,7 +12314,7 @@ def default_parallelism_budgets_from_control(control: Mapping[str, Any]) -> list
             "read_only_workers",
             enabled=agents_allowed,
             max_concurrent=read_only_max,
-            max_per_role={"planner": 2, "builder": 2, "hardener": 2, "integrator": 1, "dashboard": 1},
+            max_per_role={"planner": 2, "designer": 2, "builder": 2, "hardener": 2, "integrator": 1, "dashboard": 1},
             max_runtime_seconds=3600,
             source="derived_from_automation_control",
             payload={
@@ -12260,7 +12326,7 @@ def default_parallelism_budgets_from_control(control: Mapping[str, Any]) -> list
             "write_workers",
             enabled=write_allowed and max_write > 0,
             max_concurrent=max_write,
-            max_per_role={"builder": max_write, "hardener": min(max_write, 1), "integrator": 0, "dashboard": max_write},
+            max_per_role={"designer": 1, "builder": max_write, "hardener": min(max_write, 1), "integrator": 0, "dashboard": max_write},
             max_runtime_seconds=7200,
             source="derived_from_automation_control",
             payload={
@@ -20875,7 +20941,7 @@ def _append_unique_text(items: Any, values: list[str]) -> list[str]:
 def _ticket_run_state_from_tables_conn(conn: sqlite3.Connection) -> dict[str, Any] | None:
     run = conn.execute("SELECT * FROM ticket_runs ORDER BY updated_at DESC LIMIT 1").fetchone()
     if run is None:
-        return None
+        return _ticket_run_state_with_typed_ticket_overlay_conn(conn, None)
     items = conn.execute(
         "SELECT * FROM ticket_items WHERE run_id = ? ORDER BY position ASC, ticket_id ASC",
         (run["run_id"],),
@@ -20905,7 +20971,7 @@ def _ticket_run_state_from_tables_conn(conn: sqlite3.Connection) -> dict[str, An
     )
     if str(run["report_path"] or ""):
         data["report_path"] = str(run["report_path"])
-    return normalize_ticket_run_data(data)
+    return _ticket_run_state_with_typed_ticket_overlay_conn(conn, data)
 
 
 def reconcile_integrated_worker_patch_ticket_state_conn(
@@ -20976,7 +21042,9 @@ def reconcile_integrated_worker_patch_ticket_state_conn(
                     ),
                 )
                 continue
-            accepted_commit = _manifest_accepted_commit(target, str(patch.get("manifest_path") or ""))
+            accepted_commit = _manifest_accepted_commit(target, str(patch.get("manifest_path") or "")) or str(
+                patch_payload.get("accepted_commit") or ""
+            )
             evidence = [
                 f"Integrated validated worker patch {patch_id} for {task_id}.",
             ]
@@ -27769,6 +27837,144 @@ def normalize_ticket_run_data(data: Mapping[str, Any] | None) -> dict[str, Any]:
     return normalized
 
 
+def _ticket_run_status_from_typed_ticket_status(status: Any) -> str:
+    normalized = _execution_dag_status(status, "")
+    if normalized == "running":
+        return "in_progress"
+    if normalized in {"done", "blocked", "candidate_done"}:
+        return normalized
+    return "pending"
+
+
+def _typed_ticket_rows_conn(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    try:
+        exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tickets'").fetchone()
+    except sqlite3.Error:
+        return []
+    if exists is None:
+        return []
+    try:
+        return conn.execute(
+            """
+            SELECT ticket_id, title, status, depends_on_json, ownership_paths_json, payload_json, updated_at
+            FROM tickets
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+
+
+def _mapping_from_value(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _typed_ticket_runtime_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    nested = payload.get("payload")
+    return nested if isinstance(nested, Mapping) else {}
+
+
+def _typed_ticket_position(row: sqlite3.Row, base_order: Mapping[str, int]) -> int:
+    ticket_id = str(row["ticket_id"] or "")
+    payload = _mapping_from_value(_json_cell(row["payload_json"], {}))
+    runtime_payload = _typed_ticket_runtime_payload(payload)
+    ticket_item = _mapping_from_value(runtime_payload.get("ticket_item"))
+    for value in (runtime_payload.get("position"), payload.get("position"), ticket_item.get("position")):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return int(base_order.get(ticket_id, len(base_order) + 100000))
+
+
+def _merge_non_empty_ticket_values(ticket: dict[str, Any], source: Mapping[str, Any]) -> None:
+    for key, value in source.items():
+        if value not in (None, "", []):
+            ticket[key] = value
+        else:
+            ticket.setdefault(key, value)
+
+
+def _ticket_run_state_with_typed_ticket_overlay_conn(
+    conn: sqlite3.Connection,
+    data: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    rows = _typed_ticket_rows_conn(conn)
+    if not rows:
+        return normalize_ticket_run_data(data) if data is not None else None
+
+    source_run_id = str((data or {}).get("run_id") or "").strip() if isinstance(data, Mapping) else ""
+    normalized = normalize_ticket_run_data(data or {})
+    base_tickets = [item for item in normalized.get("tickets", []) if isinstance(item, dict)]
+    base_by_id = {str(item.get("id") or ""): dict(item) for item in base_tickets if str(item.get("id") or "")}
+    base_order = {str(item.get("id") or ""): index for index, item in enumerate(base_tickets) if str(item.get("id") or "")}
+    overlaid: list[dict[str, Any]] = []
+    typed_ids: set[str] = set()
+    first_runtime_payload: Mapping[str, Any] = {}
+
+    for row in sorted(rows, key=lambda item: (_typed_ticket_position(item, base_order), str(item["ticket_id"] or ""))):
+        ticket_id = str(row["ticket_id"] or "").strip()
+        if not ticket_id:
+            continue
+        payload = _mapping_from_value(_json_cell(row["payload_json"], {}))
+        runtime_payload = _typed_ticket_runtime_payload(payload)
+        if not first_runtime_payload:
+            first_runtime_payload = runtime_payload
+        ticket_item = _mapping_from_value(runtime_payload.get("ticket_item"))
+        ticket = dict(base_by_id.get(ticket_id, {}))
+        _merge_non_empty_ticket_values(ticket, ticket_item)
+
+        ticket["id"] = ticket_id
+        ticket["summary"] = str(row["title"] or ticket.get("summary") or ticket_id)
+        ticket["status"] = _ticket_run_status_from_typed_ticket_status(row["status"] or payload.get("status"))
+        ticket["blocker"] = str(runtime_payload.get("blocker") or payload.get("blocker") or ticket.get("blocker") or "")
+
+        depends_on = (
+            _task_text_values(_json_cell(row["depends_on_json"], []))
+            or _task_text_values(payload.get("depends_on"))
+            or _task_text_values(ticket.get("depends_on"))
+        )
+        ticket["depends_on"] = depends_on
+
+        ownership_paths = (
+            _task_text_values(_json_cell(row["ownership_paths_json"], []))
+            or _task_text_values(payload.get("ownership_paths"))
+            or _task_text_values(ticket.get("ownership_paths"))
+        )
+        if ownership_paths:
+            ticket["ownership_paths"] = ownership_paths
+
+        evidence = (
+            _task_text_values(payload.get("evidence"))
+            or _task_text_values(runtime_payload.get("evidence"))
+            or _task_text_values(ticket.get("evidence"))
+        )
+        ticket["evidence"] = evidence
+
+        related_commits = _task_text_values(ticket.get("related_commits"))
+        accepted_commit = str(runtime_payload.get("accepted_commit") or payload.get("accepted_commit") or "").strip()
+        if accepted_commit and accepted_commit not in related_commits:
+            related_commits.append(accepted_commit)
+        if related_commits:
+            ticket["related_commits"] = related_commits
+
+        ticket["position"] = _typed_ticket_position(row, base_order)
+        ticket["run_id"] = str(runtime_payload.get("ticket_run_id") or normalized.get("run_id") or "ticket-run")
+
+        overlaid.append(ticket)
+        typed_ids.add(ticket_id)
+
+    for ticket in base_tickets:
+        ticket_id = str(ticket.get("id") or "").strip()
+        if ticket_id and ticket_id not in typed_ids:
+            overlaid.append(dict(ticket))
+
+    if overlaid:
+        normalized["tickets"] = overlaid
+    if not source_run_id:
+        normalized["run_id"] = str(first_runtime_payload.get("ticket_run_id") or "ticket-run")
+    return normalized
+
+
 def load_ticket_run_state(target: Path, *, read_only: bool = False) -> dict[str, Any] | None:
     target = target.expanduser().resolve()
     db_path = database_path_for_target(target)
@@ -27778,46 +27984,8 @@ def load_ticket_run_state(target: Path, *, read_only: bool = False) -> dict[str,
     with closing(connector(db_path)) as conn:
         projected = load_projection(conn, TICKET_RUN_PROJECTION_NAME)
         if projected:
-            return normalize_ticket_run_data(projected)
-        run = conn.execute("SELECT * FROM ticket_runs ORDER BY updated_at DESC LIMIT 1").fetchone()
-        if run is None:
-            return None
-        items = conn.execute(
-            "SELECT * FROM ticket_items WHERE run_id = ? ORDER BY position ASC, ticket_id ASC",
-            (run["run_id"],),
-        ).fetchall()
-    tickets: list[dict[str, Any]] = []
-    for item in items:
-        try:
-            payload = json.loads(str(item["payload_json"] or "{}"))
-        except json.JSONDecodeError:
-            payload = {}
-        ticket = dict(payload)
-        ticket.update(
-            {
-                "id": str(item["ticket_id"]),
-                "summary": str(item["summary"] or ""),
-                "status": str(item["status"] or "pending"),
-                "blocker": str(item["blocker"] or ""),
-            }
-        )
-        tickets.append(ticket)
-    try:
-        run_payload = json.loads(str(run["payload_json"] or "{}"))
-    except json.JSONDecodeError:
-        run_payload = {}
-    data = dict(run_payload)
-    data.update(
-        {
-            "run_id": str(run["run_id"]),
-            "halt_when_complete": bool(run["halt_when_complete"]),
-            "notify_on_complete": bool(run["notify_on_complete"]),
-            "tickets": tickets,
-        }
-    )
-    if str(run["report_path"] or ""):
-        data["report_path"] = str(run["report_path"])
-    return normalize_ticket_run_data(data)
+            return _ticket_run_state_with_typed_ticket_overlay_conn(conn, projected)
+        return _ticket_run_state_from_tables_conn(conn)
 
 
 def write_ticket_run_state(
@@ -28536,6 +28704,101 @@ def validation_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def design_state_summary(conn: sqlite3.Connection) -> dict[str, Any]:
+    contract_row = conn.execute(
+        """
+        SELECT contract_id, version, status, source, ui_capability_mode,
+               ui_validation_mode, designer_enabled, payload_json, updated_at
+        FROM design_contracts
+        WHERE status = 'active'
+        ORDER BY version DESC, updated_at DESC, contract_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if contract_row is None:
+        contract_row = conn.execute(
+            """
+            SELECT contract_id, version, status, source, ui_capability_mode,
+                   ui_validation_mode, designer_enabled, payload_json, updated_at
+            FROM design_contracts
+            ORDER BY updated_at DESC, contract_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    review_rows = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM design_reviews GROUP BY status ORDER BY status"
+    ).fetchall()
+    latest_reviews = conn.execute(
+        """
+        SELECT review_id, contract_id, contract_version, node_id, ticket_id,
+               status, severity, recorded_at, payload_json
+        FROM design_reviews
+        ORDER BY recorded_at DESC, review_id DESC
+        LIMIT 8
+        """
+    ).fetchall()
+    ui_receipts = conn.execute(
+        """
+        SELECT receipt_id, work_item_id, run_id, kind, command, status,
+               log_artifact_id, finished_at, payload_json
+        FROM validation_receipts
+        WHERE payload_json LIKE '%"classification":"ui_visual"%'
+           OR payload_json LIKE '%"classification": "ui_visual"%'
+           OR kind = 'ui_visual'
+        ORDER BY COALESCE(NULLIF(finished_at, ''), started_at) DESC, receipt_id DESC
+        LIMIT 8
+        """
+    ).fetchall()
+    contract: dict[str, Any] = {}
+    if contract_row is not None:
+        try:
+            payload = json.loads(contract_row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        contract = payload if isinstance(payload, dict) else {}
+        contract.setdefault("contract_id", str(contract_row["contract_id"]))
+        contract.setdefault("version", int(contract_row["version"] or 1))
+        contract.setdefault("status", str(contract_row["status"] or "active"))
+        contract.setdefault("source", str(contract_row["source"] or "generated_contract"))
+        contract.setdefault("ui_capability_mode", str(contract_row["ui_capability_mode"] or "auto"))
+        contract.setdefault("ui_validation_mode", str(contract_row["ui_validation_mode"] or "auto"))
+        contract.setdefault("designer_enabled", bool(contract_row["designer_enabled"]))
+        contract.setdefault("updated_at", str(contract_row["updated_at"] or ""))
+    ui_receipt_items: list[dict[str, Any]] = []
+    for row in ui_receipts:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        ui_receipt_items.append({**dict(row), "payload": payload})
+    review_items: list[dict[str, Any]] = []
+    for row in latest_reviews:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        review_items.append({**dict(row), "payload": payload})
+    return {
+        "schema_version": 1,
+        "contract": contract,
+        "contract_active": bool(contract),
+        "contract_id": str(contract.get("contract_id") or ""),
+        "contract_version": int(contract.get("version") or 0),
+        "ui_capability_mode": str(contract.get("ui_capability_mode") or "auto"),
+        "ui_validation_mode": str(contract.get("ui_validation_mode") or "auto"),
+        "designer_enabled": bool(contract.get("designer_enabled")),
+        "review_counts": {str(row["status"]): int(row["count"]) for row in review_rows},
+        "latest_reviews": review_items,
+        "ui_validation_receipts": ui_receipt_items,
+        "ui_validation_receipt_count": len(ui_receipt_items),
+        "source": "design_contracts+design_reviews+validation_receipts",
+    }
+
+
 def sqlite_integrity(conn: sqlite3.Connection) -> str:
     try:
         row = conn.execute("PRAGMA integrity_check").fetchone()
@@ -28631,6 +28894,7 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
         patch_lineage = patch_lineage_summary_conn(conn)
         candidate_lanes = candidate_lane_read_model_conn(conn)
         validation_jobs = validation_job_read_model_conn(conn)
+        design_state = design_state_summary(conn)
         active_execution_groups = [
             *execution_groups_by_status_conn(conn, {"running"}, limit=16),
             *execution_groups_for_active_ownership_leases_conn(conn, limit=16),
@@ -28844,6 +29108,7 @@ def state_snapshot(target: Path, *, event_limit: int = DEFAULT_EVENT_LIMIT) -> d
             "open_blockers": open_blockers(conn),
             "next_actions": pending_next_actions(conn),
             "validations": validation_summary(conn),
+            "design": design_state,
             "automation_activity": automation_activity,
             "execution_dag": execution_dag,
             "ready_dag_nodes": execution_dag.get("ready_nodes", []),
@@ -29192,6 +29457,14 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
     validations = snapshot.get("validations") if isinstance(snapshot.get("validations"), dict) else {}
     validation_counts = validations.get("counts") if isinstance(validations.get("counts"), dict) else {}
     validation_latest = validations.get("latest") if isinstance(validations.get("latest"), list) else []
+    design_state = snapshot.get("design") if isinstance(snapshot.get("design"), dict) else {}
+    design_contract = design_state.get("contract") if isinstance(design_state.get("contract"), dict) else {}
+    design_reviews = design_state.get("latest_reviews") if isinstance(design_state.get("latest_reviews"), list) else []
+    ui_visual_receipts = (
+        design_state.get("ui_validation_receipts")
+        if isinstance(design_state.get("ui_validation_receipts"), list)
+        else []
+    )
     active_role = activity_focus.get("runner") if isinstance(activity_focus.get("runner"), dict) else {}
     selected_activity_candidate = (
         activity_focus.get("selected_scheduler_candidate")
@@ -29302,6 +29575,7 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
         f"- runner: {_format_key_values({'state': runner_state.get('state'), 'pid': runner_state.get('pid'), 'run_id': runner_state.get('run_id'), 'started_at': runner_state.get('started_at'), 'updated_at': runner_state.get('updated_at')})}",
         f"- human_messages: {_format_key_values({'pending_requests': human_counts.get('pending_requests'), 'queued_notes': human_counts.get('queued_notes'), 'failed_notes': human_counts.get('failed_notes'), 'outbound_records': human_counts.get('outbound_records')})}",
         f"- ticket_run: {_format_key_values({'status': ticket_state.get('status'), 'run_id': ticket_state.get('run_id'), 'total': ticket_state.get('total'), 'counts': stable_json(ticket_state.get('counts')) if isinstance(ticket_state.get('counts'), dict) else ''})}",
+        f"- design_state: {_format_key_values({'mode': design_state.get('ui_capability_mode'), 'validation': design_state.get('ui_validation_mode'), 'contract': design_state.get('contract_id'), 'version': design_state.get('contract_version'), 'designer': _brief_bool(design_state.get('designer_enabled')), 'ui_receipts': design_state.get('ui_validation_receipt_count')})}",
         "",
         "## Graph Context For Next Action",
         "",
@@ -29580,6 +29854,38 @@ def render_canonical_state_brief(snapshot: Mapping[str, Any], *, target: Path) -
             )
     else:
         lines.append("- latest: none")
+
+    lines.extend(["", "## Design And UI Validation", ""])
+    if design_contract:
+        lines.append(
+            f"- active_contract: {_format_key_values({'id': design_contract.get('contract_id'), 'version': design_contract.get('version'), 'source': design_contract.get('source'), 'mode': design_contract.get('ui_capability_mode'), 'designer': _brief_bool(design_contract.get('designer_enabled')), 'updated': design_contract.get('updated_at')})}"
+        )
+        lines.append(
+            f"- posture: {_brief_text(design_contract.get('product_posture') or 'No product posture recorded.', limit=220)}"
+        )
+    else:
+        lines.append("- active_contract: none")
+    if design_reviews:
+        for review in design_reviews[:5]:
+            if not isinstance(review, dict):
+                continue
+            lines.append(
+                f"- design_review: {_format_key_values({'id': review.get('review_id'), 'status': review.get('status'), 'severity': review.get('severity'), 'ticket': review.get('ticket_id'), 'node': review.get('node_id'), 'at': review.get('recorded_at')})}"
+            )
+    else:
+        lines.append("- design_review: none")
+    if ui_visual_receipts:
+        for receipt in ui_visual_receipts[:5]:
+            if not isinstance(receipt, dict):
+                continue
+            payload = receipt.get("payload") if isinstance(receipt.get("payload"), dict) else {}
+            routes = payload.get("routes") if isinstance(payload.get("routes"), list) else []
+            screenshots = payload.get("screenshots") if isinstance(payload.get("screenshots"), list) else []
+            lines.append(
+                f"- ui_visual_receipt: {_format_key_values({'id': receipt.get('receipt_id'), 'status': receipt.get('status'), 'routes': len(routes), 'screenshots': len(screenshots), 'command': receipt.get('command')})}"
+            )
+    else:
+        lines.append("- ui_visual_receipt: none")
 
     lines.extend(["", "## Projection Freshness", ""])
     for name, projection in projection_items:

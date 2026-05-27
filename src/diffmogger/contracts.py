@@ -54,6 +54,7 @@ class DagNode(StrictModel):
         "scope",
         "build",
         "review",
+        "design",
         "validate",
         "integrate",
         "repair",
@@ -90,6 +91,59 @@ class ValidationReceipt(StrictModel):
     required: bool = True
     exit_code: int | None = None
     evidence_path: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+    recorded_at: datetime = Field(default_factory=utc_now)
+
+
+class DesignContract(StrictModel):
+    contract_id: str = Field(..., min_length=1)
+    version: int = Field(1, ge=1)
+    status: Literal["active", "draft", "superseded"] = "active"
+    source: Literal["generated_contract", "figma", "existing_code"] = "generated_contract"
+    ui_capability_mode: Literal["auto", "off", "light", "full"] = "auto"
+    ui_validation_mode: Literal["auto", "off", "local", "external_optional"] = "auto"
+    ui_heavy: bool = False
+    designer_enabled: bool = False
+    audience: str = ""
+    product_goal: str = ""
+    product_posture: str = ""
+    workflows: list[str] = Field(default_factory=list)
+    information_architecture: list[str] = Field(default_factory=list)
+    layout_principles: list[str] = Field(default_factory=list)
+    tokens: dict[str, Any] = Field(default_factory=dict)
+    component_inventory: list[str] = Field(default_factory=list)
+    state_matrix: list[str] = Field(default_factory=list)
+    accessibility_expectations: list[str] = Field(default_factory=list)
+    visual_do: list[str] = Field(default_factory=list)
+    visual_dont: list[str] = Field(default_factory=list)
+    reference_files: list[str] = Field(default_factory=list)
+    reference_urls: list[str] = Field(default_factory=list)
+    optional_design_services: list[str] = Field(default_factory=list)
+    validation_expectations: list[str] = Field(default_factory=list)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("reference_files", "reference_urls", "optional_design_services", mode="before")
+    @classmethod
+    def _normalize_references(cls, value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [item.strip() for item in value.splitlines() if item.strip()]
+        return []
+
+
+class DesignReview(StrictModel):
+    review_id: str = Field(..., min_length=1)
+    contract_id: str = ""
+    contract_version: int = Field(1, ge=1)
+    node_id: str = ""
+    ticket_id: str = ""
+    status: Literal["passed", "failed", "deferred", "not_required"] = "not_required"
+    severity: Literal["info", "low", "medium", "high"] = "info"
+    findings: list[str] = Field(default_factory=list)
+    evidence_paths: list[str] = Field(default_factory=list)
+    required_follow_up: list[str] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
     recorded_at: datetime = Field(default_factory=utc_now)
 

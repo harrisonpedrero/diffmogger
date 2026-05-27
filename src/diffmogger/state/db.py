@@ -16,6 +16,8 @@ from diffmogger.contracts import (
     ConflictTelemetry,
     DagEdge,
     DagNode,
+    DesignContract,
+    DesignReview,
     ExecutionGroup,
     IntegrationDecision,
     OwnershipLease,
@@ -268,6 +270,107 @@ def insert_validation_receipt(conn: sqlite3.Connection, receipt: ValidationRecei
             receipt.evidence_path,
             stable_json(json_ready(receipt)),
             receipt.recorded_at.isoformat(),
+        ),
+    )
+
+
+def upsert_design_contract(conn: sqlite3.Connection, contract: DesignContract) -> None:
+    payload = json_ready(contract)
+    references = {
+        "files": contract.reference_files,
+        "urls": contract.reference_urls,
+        "optional_services": contract.optional_design_services,
+    }
+    conn.execute(
+        """
+        INSERT INTO design_contracts(
+          contract_id, version, status, source, ui_capability_mode,
+          ui_validation_mode, designer_enabled, payload_json, updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(contract_id) DO UPDATE SET
+          version=excluded.version,
+          status=excluded.status,
+          source=excluded.source,
+          ui_capability_mode=excluded.ui_capability_mode,
+          ui_validation_mode=excluded.ui_validation_mode,
+          designer_enabled=excluded.designer_enabled,
+          payload_json=excluded.payload_json,
+          updated_at=excluded.updated_at
+        """,
+        (
+            contract.contract_id,
+            contract.version,
+            contract.status,
+            contract.source,
+            contract.ui_capability_mode,
+            contract.ui_validation_mode,
+            int(contract.designer_enabled),
+            stable_json({**payload, "references": references}),
+            contract.updated_at.isoformat(),
+        ),
+    )
+
+
+def latest_design_contract(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT payload_json
+        FROM design_contracts
+        WHERE status = 'active'
+        ORDER BY version DESC, updated_at DESC, contract_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT payload_json FROM design_contracts ORDER BY updated_at DESC, contract_id DESC LIMIT 1"
+        ).fetchone()
+    if row is None:
+        return {}
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def insert_design_review(conn: sqlite3.Connection, review: DesignReview) -> None:
+    payload = json_ready(review)
+    conn.execute(
+        """
+        INSERT INTO design_reviews(
+          review_id, contract_id, contract_version, node_id, ticket_id, status,
+          severity, findings_json, evidence_paths_json, required_follow_up_json,
+          payload_json, recorded_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(review_id) DO UPDATE SET
+          contract_id=excluded.contract_id,
+          contract_version=excluded.contract_version,
+          node_id=excluded.node_id,
+          ticket_id=excluded.ticket_id,
+          status=excluded.status,
+          severity=excluded.severity,
+          findings_json=excluded.findings_json,
+          evidence_paths_json=excluded.evidence_paths_json,
+          required_follow_up_json=excluded.required_follow_up_json,
+          payload_json=excluded.payload_json,
+          recorded_at=excluded.recorded_at
+        """,
+        (
+            review.review_id,
+            review.contract_id,
+            review.contract_version,
+            review.node_id,
+            review.ticket_id,
+            review.status,
+            review.severity,
+            stable_json(review.findings),
+            stable_json(review.evidence_paths),
+            stable_json(review.required_follow_up),
+            stable_json(payload),
+            review.recorded_at.isoformat(),
         ),
     )
 
@@ -572,6 +675,8 @@ def read_control_plane_snapshot(target: Path) -> dict[str, Any]:
                 "integration_queue",
                 "repair_unblocker_work",
                 "scheduler_telemetry",
+                "design_contracts",
+                "design_reviews",
                 "human_inputs",
                 "notification_messages",
             ]

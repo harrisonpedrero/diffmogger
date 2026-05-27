@@ -78,9 +78,12 @@ for required in [
     "src/diffmogger/state/migrations/versions/0003_restore_dashboard_projection_schema.py",
     "src/diffmogger/state/migrations/versions/0004_coexist_legacy_and_typed_tables.py",
     "src/diffmogger/state/migrations/versions/0005_parallel_execution_read_models.py",
+    "src/diffmogger/state/migrations/versions/0006_design_runtime_surfaces.py",
     "src/diffmogger/runtime/code_facts.py",
+    "src/diffmogger/runtime/design.py",
     "src/diffmogger/supervision.py",
     "src/diffmogger/notifications.py",
+    "templates/.agentic/roles/designer.md",
     "templates/scripts/run_temporal_worker.sh",
 ]:
     if not Path(required).exists():

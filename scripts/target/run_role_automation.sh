@@ -5,10 +5,10 @@ export PATH="${CODEX_AUTOMATION_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:
 
 usage() {
   cat <<'EOF'
-Usage: .diffmogger/scripts/run_role_automation.sh --role planner|builder|hardener|integrator [--target PATH]
+Usage: .diffmogger/scripts/run_role_automation.sh --role planner|designer|builder|hardener|integrator [--target PATH]
 
-Run one optional multi-role automation role. Planner, builder, and hardener run
-inside isolated git worktrees and queue patches. Integrator applies queued
+Run one optional multi-role automation role. Planner, designer, builder, and
+hardener run inside isolated git worktrees and queue patches. Integrator applies queued
 patches in the main checkout.
 
 Environment:
@@ -65,7 +65,7 @@ if [[ -z "$role" ]]; then
 fi
 
 case "$role" in
-  planner|builder|hardener|integrator)
+  planner|designer|builder|hardener|integrator)
     ;;
   *)
     echo "Invalid role: $role" >&2
@@ -525,16 +525,16 @@ ticket_context7 = contains_context7_term(context7_ticket_text)
 
 requested: list[str] = []
 scope_reasons: list[str] = []
-if "context7" in enabled_servers and role in {"planner", "builder"} and (target_context7 or ticket_context7):
+if "context7" in enabled_servers and role in {"planner", "designer", "builder"} and (target_context7 or ticket_context7):
     requested.append("context7")
     scope_reasons.append("context7 package/API/framework documentation scope")
 if "playwright" in enabled_servers:
     if role in {"hardener", "integrator"} and (target_frontend or ticket_frontend):
         requested.append("playwright")
         scope_reasons.append("playwright frontend/browser validation lane")
-    elif role == "planner" and (target_frontend or ticket_frontend):
+    elif role in {"planner", "designer"} and (target_frontend or ticket_frontend):
         requested.append("playwright")
-        scope_reasons.append("planner frontend/browser/UI/demo scope")
+        scope_reasons.append(f"{role} frontend/browser/UI/demo scope")
     elif role == "builder" and ticket_frontend:
         requested.append("playwright")
         scope_reasons.append("builder selected ticket is frontend/browser/UI/demo scoped")
@@ -742,6 +742,7 @@ else:
         ".agentic/smoke_commands.txt",
         ".agentic/verification_commands.txt",
       ".agentic/roles/planner.md",
+      ".agentic/roles/designer.md",
       ".agentic/roles/builder.md",
       ".agentic/roles/hardener.md",
       ".agentic/roles/integrator.md",
@@ -1798,9 +1799,37 @@ def has_deferred_validation_work() -> bool:
     return (
         "deferred validation work" in lower
         or "validation follow-up" in lower
+        or "deferred qa" in lower
+        or "deferred-qa" in lower
+        or "setup/harness" in lower
+        or "alternate-validation" in lower
         or "blocked_on_environment" in lower
         or "blocked on environment" in lower
     )
+
+def has_ui_design_evidence() -> bool:
+    lower = summary.lower()
+    if has_deferred_validation_work():
+        return True
+    evidence_markers = (
+        "design review: passed",
+        "design review: recorded",
+        "design review: complete",
+        "design review: not_required",
+        "design review: not required",
+        "ui visual receipt: recorded",
+        "ui visual receipt: passed",
+        "ui visual receipt: not_required",
+        "ui visual receipt: not required",
+        "ui_visual",
+        "ui visual validation",
+    )
+    return any(marker in lower for marker in evidence_markers)
+
+def ui_design_validation_issue() -> str:
+    if role in {"hardener", "integrator"} and frontend_touching() and not has_ui_design_evidence():
+        return "Frontend-touching hardener/integrator work requires a design review, ui_visual receipt, or explicit deferred UI validation/setup work."
+    return ""
 
 def playwright_validation_issue() -> str:
     lower = summary.lower()
@@ -1836,7 +1865,8 @@ patch_empty = not patch_path.exists() or patch_path.stat().st_size == 0
 runtime_state_empty = not runtime_state_changed_files and runtime_state_action_count == 0
 status = "failed" if exit_code != 0 else ("skipped" if patch_empty and runtime_state_empty else "queued")
 playwright_issue = playwright_validation_issue()
-if status == "queued" and playwright_issue:
+ui_design_issue = ui_design_validation_issue()
+if status == "queued" and (playwright_issue or ui_design_issue):
     status = "failed"
 if playwright_issue:
     mcp_telemetry["playwright_validation_status"] = "failed"
@@ -1845,6 +1875,13 @@ elif role in {"hardener", "integrator"} and frontend_touching():
     mcp_telemetry["playwright_validation_status"] = "passed_or_blocker_recorded"
 else:
     mcp_telemetry["playwright_validation_status"] = "not_required"
+if ui_design_issue:
+    mcp_telemetry["ui_design_validation_status"] = "failed"
+    mcp_telemetry["ui_design_validation_detail"] = ui_design_issue
+elif role in {"hardener", "integrator"} and frontend_touching():
+    mcp_telemetry["ui_design_validation_status"] = "passed_or_deferred"
+else:
+    mcp_telemetry["ui_design_validation_status"] = "not_required"
 mcp_telemetry["usage_outcome"] = {
     "context7": mcp_usage_outcome("context7"),
     "playwright": mcp_usage_outcome("playwright"),
@@ -1876,6 +1913,8 @@ manifest = {
     "mcp_telemetry_path": str(mcp_telemetry_path),
     "playwright_validation_status": mcp_telemetry.get("playwright_validation_status"),
     "playwright_validation_detail": mcp_telemetry.get("playwright_validation_detail", ""),
+    "ui_design_validation_status": mcp_telemetry.get("ui_design_validation_status"),
+    "ui_design_validation_detail": mcp_telemetry.get("ui_design_validation_detail", ""),
     "watchdog_status_path": str(watchdog_status_path),
     "watchdog_timed_out": bool(watchdog_status.get("timed_out")),
     "watchdog_idle_timed_out": bool(watchdog_status.get("idle_timed_out")),
@@ -1895,6 +1934,9 @@ manifest = {
 if playwright_issue:
     manifest["deferral_reason"] = "playwright_validation_issue"
     manifest["deferral_detail"] = playwright_issue
+if ui_design_issue:
+    manifest["deferral_reason"] = "ui_design_validation_issue"
+    manifest["deferral_detail"] = ui_design_issue
 mcp_telemetry_path.write_text(json.dumps(mcp_telemetry, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY

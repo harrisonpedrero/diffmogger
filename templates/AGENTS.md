@@ -28,7 +28,8 @@ Project mode: {{PROJECT_MODE_LABEL}}
 - Treat `.diffmogger/runtime/orchestration.sqlite3` as canonical runtime state. Markdown and JSON files are handoffs, authored inputs, or generated projections.
 - Read `.diffmogger/runtime/canonical_state_brief.md` instead of inspecting SQLite manually.
 - Refresh `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` only after typed state changes.
-- Use `.diffmogger/scripts/ticket_run.py` for ticket state. Planner, builder, and hardener worktrees stage typed ticket actions for integrator reconciliation.
+- Use `.diffmogger/scripts/ticket_run.py` for ticket state. Planner, designer, builder, and hardener worktrees stage typed ticket actions for integrator reconciliation.
+- For UI work, read `.diffmogger/agentic/design_contract.md`. Builder and hardener must use the active design contract, design review evidence, UI visual validation receipts, or explicit deferred validation/setup work before claiming clean UI completion.
 - Parallel scheduler waves are bounded and ownership-driven. If non-overlap is unclear, reduce fanout, run read-only scoping, or create setup/repair/indexing work.
 - {{ENV_ACCESS_AGENTS_RULE}}
 - Use safe local defaults, fixtures, mocks, or seed data unless the task explicitly enables external integration.
@@ -45,3 +46,9 @@ Preferred commands:
 ```text
 {{VERIFICATION_COMMANDS}}
 ```
+
+## Design And UI Validation
+
+{{DESIGN_CAPABILITY_SECTION}}
+
+{{UI_VALIDATION_SECTION}}

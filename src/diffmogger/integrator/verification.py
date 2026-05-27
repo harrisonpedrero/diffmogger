@@ -119,7 +119,7 @@ def command_selector_matches(selector: str, role: str, changed_files: list[str])
     lowered = selector.lower()
     if lowered in {"all", "*"}:
         return True
-    if lowered in {"planner", "builder", "hardener"}:
+    if lowered in {"planner", "designer", "builder", "hardener"}:
         return lowered == role
     if lowered.startswith(("role:", "role=")):
         return lowered.split(":", 1)[-1].split("=", 1)[-1].strip() == role

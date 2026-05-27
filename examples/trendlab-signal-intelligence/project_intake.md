@@ -65,7 +65,7 @@ project_commands_only
 
 ## Automation Mode
 
-Continuous execution DAG scheduler with planner/builder/hardener/integrator roles.
+Continuous execution DAG scheduler with planner/designer/builder/hardener/integrator roles when UI-heavy scope is detected.
 
 ## DAG Scheduler Config
 
@@ -75,6 +75,22 @@ parallel_write_min_confidence: 0.75
 parallel_write_direct_confidence: 0.75
 max_parallel_write_workers: 3
 max_parallel_scope_workers: 2
+
+## UI Capability Mode
+
+auto
+
+## Design Source
+
+generated_contract
+
+## UI Validation Mode
+
+local
+
+## Optional Design Services
+
+None required.
 
 ## Human Bridge
 

@@ -36,7 +36,7 @@ STATE_FILES = [
     "docs/CODEX_AUTOMATION_TASKS.md",
 ]
 
-MULTI_ROLE_ROLES = ("planner", "builder", "hardener")
+MULTI_ROLE_ROLES = ("planner", "designer", "builder", "hardener")
 @dataclass(frozen=True)
 class Entry:
     heading: str

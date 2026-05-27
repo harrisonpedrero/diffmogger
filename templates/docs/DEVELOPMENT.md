@@ -40,6 +40,7 @@ If validation fails, create work instead of stopping automation. Failed validati
 
 Canonical state lives in `.diffmogger/runtime/orchestration.sqlite3`.
 Read `.diffmogger/runtime/canonical_state_brief.md`; use `.diffmogger/state/CODEX_AUTOMATION_TASKS.md` as the generated handoff projection.
+When `automation_checkpoint_commits` is enabled, accepted patches become local-only project-change commits after integration and validation. Diffmogger records accepted commit hashes in typed ticket state and never pushes or touches remotes.
 
 Run the scheduler:
 
@@ -61,6 +62,19 @@ Browser-backed checks should prefer the managed browser helper:
 
 ```bash
 python3 .diffmogger/scripts/diffmogger_browser.py doctor --launch
+```
+
+## Design And UI Validation
+
+{{DESIGN_CAPABILITY_SECTION}}
+
+{{UI_VALIDATION_SECTION}}
+
+Active design contract projections:
+
+```text
+.diffmogger/agentic/design_contract.md
+.diffmogger/agentic/design_contract.json
 ```
 
 Wrappers load target env files into process environment when allowed. Never print, summarize, commit, or copy secret values.

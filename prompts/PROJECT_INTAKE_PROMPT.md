@@ -30,10 +30,14 @@ Capture:
 18. DAG scheduler config: `parallel_execution_mode`, `symbol_graph_languages`, `parallel_write_min_confidence`, `parallel_write_direct_confidence`, `max_parallel_write_workers`, and `max_parallel_scope_workers`.
 19. Campaign mode: `bounded` for a seeded/imported ticket queue that stops only when all tickets are done with evidence, or `ongoing` for automatic generic ticket drafting and continued DAG-scheduled work.
 20. Optional MCP servers: Context7 and/or Playwright, only when useful.
-21. Seed tickets for a bounded ticket campaign, if any.
-22. What counts as a meaningful integrated deliverable.
-23. Long-run direction after the initial scope, unless the work is a bounded ticket campaign.
-24. What the automation must never do.
+21. UI/design capability mode: `auto`, `off`, `light`, or `full`.
+22. Design source: generated contract, existing code, or optional non-secret Figma/reference material.
+23. UI validation mode: `auto`, `off`, `local`, or `external_optional`.
+24. Optional design services, if already available: Figma MCP, v0, Builder.io, Chromatic, Percy, or Applitools. Do not include secrets.
+25. Seed tickets for a bounded ticket campaign, if any.
+26. What counts as a meaningful integrated deliverable.
+27. Long-run direction after the initial scope, unless the work is a bounded ticket campaign.
+28. What the automation must never do.
 
 For existing project integration, explicitly capture what already exists, which stack and commands should be respected, and what the first integrated change should prove.
 
@@ -87,6 +91,8 @@ Output in this structure:
 ## Automation Run Mode
 
 ## Optional MCP Servers
+
+## Design And UI Validation
 
 ## Ticket Campaign Seed Tickets
 

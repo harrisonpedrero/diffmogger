@@ -10,6 +10,7 @@ from typing import Any
 from .jsonio import json_default, read_json_file, read_text_file
 from .target import detect_target_context, load_dashboard_state, load_intake
 from diffmogger.runtime.paths import existing_or_target_path, normalize_rel
+from diffmogger.runtime.design import ui_detection_from_intake, ui_ticket_quality_warnings
 
 
 TICKET_COMPLEXITY_TIERS = ("tiny", "small", "medium", "large")
@@ -256,6 +257,7 @@ def ticket_quality_warnings(
     tickets: list[dict[str, Any]],
     *,
     scope_groups: list[dict[str, Any]] | None = None,
+    intake: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     warnings: list[dict[str, Any]] = []
     for index, ticket in enumerate(tickets):
@@ -353,6 +355,7 @@ def ticket_quality_warnings(
                     ),
                 }
             )
+    warnings.extend(ui_ticket_quality_warnings(tickets, intake))
     return warnings
 
 
@@ -360,11 +363,14 @@ def ticket_generation_quality_gate(
     tickets: list[dict[str, Any]],
     *,
     scope_groups: list[dict[str, Any]] | None = None,
+    intake: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    warnings = ticket_quality_warnings(tickets, scope_groups=scope_groups)
+    warnings = ticket_quality_warnings(tickets, scope_groups=scope_groups, intake=intake)
     blocking_types = {
         "acceptance_spans_multiple_surfaces",
         "broad_conjunction_summary",
+        "missing_design_foundation",
+        "missing_ui_validation",
         "missing_scope_group",
         "multiple_components",
         "too_many_acceptance_criteria",
@@ -378,6 +384,7 @@ def ticket_generation_quality_gate(
         "blocking_warnings": blocking,
         "scope_group_count": len(normalize_scope_groups(scope_groups)),
         "scope_surface_floor": _scope_group_ticket_floor(normalize_scope_groups(scope_groups)),
+        "ui_detection": ui_detection_from_intake(intake, tickets=tickets),
     }
 
 

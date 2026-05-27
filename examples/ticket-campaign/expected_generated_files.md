@@ -91,6 +91,8 @@ AGENTS.md
 
 The Python files under `.diffmogger/scripts/` should be generated from the runtime entrypoint manifest and the canonical wrapper template, not copied from `templates/scripts/`.
 
+The generated sidecar should still include reusable design-contract projections and runtime support, but this backend/maintenance-style ticket campaign opts `ui_capability_mode` off and should not schedule designer tickets or UI validation gates.
+
 The generated bootstrap prompt should keep ticket-campaign bootstrap readiness-only: it may confirm setup, ticket parsing, and verification state, but must not implement ticket acceptance criteria or mark tickets done.
 
 The generated `.diffmogger/agentic/verification_commands.txt` should contain bootstrap-safe commands that pass before any ticket implementation work starts. Desired future project checks may remain in the ticket source or sidecar state until the project surfaces that run them exist.

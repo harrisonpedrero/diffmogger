@@ -23,6 +23,7 @@ from .progress import progress_inline, scrub_local_references
 from .queue import resolve_patch_path, write_manifest
 from .runtime_state import (
     apply_runtime_state_actions,
+    record_ticket_related_commit,
     runtime_state_deferral_detail,
     runtime_state_deferral_reason,
     runtime_state_has_blocking_results,
@@ -78,6 +79,7 @@ def mark_applied(
     dry_run: bool,
     accepted_commit_source: str | None = None,
 ) -> None:
+    final_accepted_commit = accepted_commit or str(manifest.get("accepted_commit") or "").strip() or None
     update = {
         "status": "applied",
         "deferral_reason": None,
@@ -85,7 +87,7 @@ def mark_applied(
         "head_before_integration": head_before_integration,
         "integrated_at": utc_now().isoformat(timespec="seconds"),
         "checkpoint_commit": checkpoint_commit,
-        "accepted_commit": accepted_commit,
+        "accepted_commit": final_accepted_commit,
         "checks_run": checks_run,
     }
     if accepted_commit_source:
@@ -249,6 +251,7 @@ def replay_and_commit(
     head_before: str,
     checkpoint_commit: str | None,
     checks_run: list[str],
+    integration_run_id: str = "",
     dry_run: bool,
 ) -> list[tuple[Path, dict[str, Any], str | None]]:
     committed: list[tuple[Path, dict[str, Any], str | None]] = []
@@ -286,6 +289,7 @@ def replay_and_commit(
                 checks_run=checks_run or already_applied_checks(current_head),
                 dry_run=dry_run,
             )
+            record_ticket_related_commit(target, manifest, current_head, dry_run=dry_run)
             committed.append((path, manifest, current_head))
             continue
         if not patch_is_empty(patch):
@@ -329,7 +333,8 @@ def replay_and_commit(
                 dry_run=dry_run,
             )
             continue
-        commit_hash = commit_current_patch(target, manifest, str(manifest.get("run_id") or ""), dry_run=dry_run)
+        commit_hash = commit_current_patch(target, manifest, integration_run_id or str(manifest.get("run_id") or ""), dry_run=dry_run)
+        record_ticket_related_commit(target, manifest, commit_hash or str(manifest.get("accepted_commit") or ""), dry_run=dry_run)
         mark_applied(
             path,
             manifest,
@@ -349,6 +354,7 @@ def integrate_individually(
     head_before: str,
     checkpoint_commit: str | None,
     baseline: dict[str, Any] | None,
+    integration_run_id: str = "",
     dry_run: bool,
 ) -> list[tuple[Path, dict[str, Any], str | None]]:
     committed: list[tuple[Path, dict[str, Any], str | None]] = []
@@ -442,6 +448,7 @@ def integrate_individually(
                 checks_run=already_applied_checks(current_head),
                 dry_run=dry_run,
             )
+            record_ticket_related_commit(target, manifest, current_head, dry_run=dry_run)
             committed.append((path, manifest, current_head))
             continue
         if not classification.can_apply:
@@ -507,7 +514,8 @@ def integrate_individually(
                 dry_run=dry_run,
             )
             continue
-        commit_hash = commit_current_patch(target, manifest, str(manifest.get("run_id") or ""), dry_run=dry_run)
+        commit_hash = commit_current_patch(target, manifest, integration_run_id or str(manifest.get("run_id") or ""), dry_run=dry_run)
+        record_ticket_related_commit(target, manifest, commit_hash or str(manifest.get("accepted_commit") or ""), dry_run=dry_run)
         if manifest_is_baseline_repair(manifest):
             post_head = head(target) if not dry_run else current_head
             record = baseline_record_from_result(target, verification, head_value=post_head, previous=baseline)

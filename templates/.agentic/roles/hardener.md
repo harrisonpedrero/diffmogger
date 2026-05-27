@@ -27,6 +27,8 @@ Improve reliability, tests, validation, docs, safety, or automation clarity with
 - Prefer tests, validation, bug fixes, docs, fixtures, smoke checks, or small reliability improvements.
 - If Playwright MCP is mounted, use it for local browser validation only. On any UI or browser-backed failure that you defer for Builder follow-up, capture concise local evidence when available and link it from `summary.md` and `.diffmogger/state/CODEX_AUTOMATION_TASKS.md`.
 - For frontend-touching hardener work, a cancelled or failed Playwright navigation is a validation issue. Report success only after successful Playwright snapshot/console validation, or create explicit deferred validation work explaining why browser validation could not run.
+- For UI-touching work, review against `.diffmogger/agentic/design_contract.md` and record design review evidence or explicit deferred design-review work. Check layout consistency, reusable tokens/components, accessibility expectations, state coverage, and responsive behavior.
+- UI visual validation should produce or reference a `ui_visual` validation receipt payload with routes, viewports, screenshots when available, console status, interaction/focus notes, overflow/overlap notes, and whether Playwright MCP or a project-local browser smoke command was used.
 - You may add tests, rewrite brittle or stale tests, broaden meaningful coverage, update fixtures/mocks, and remove tests for obsolete behavior when that improves verification quality.
 - Do not remove or weaken tests merely to make checks pass; removed or substantially rewritten tests must maintain or improve meaningful coverage.
 - When adding, removing, substantially rewriting, broadening, or otherwise touching tests, include `Test change rationale: <one concise reason this maintains or improves meaningful coverage>` in `summary.md`. This is cheap, harmless, and required for guardrail-compliant hardener patches.
@@ -74,5 +76,12 @@ MCP decision: context7 used|skipped - <reason>; playwright used|skipped - <reaso
 ```
 
 Use `playwright used` when validating browser-facing changes. Use `skipped` only with a concrete reason such as backend-only change, docs-only change, not mounted for this role, MCP unavailable, or explicit deferred validation work.
+
+For UI work, also include:
+
+```text
+Design review: passed|failed|deferred|not_required - <contract id/version and evidence/deferred work>
+UI visual receipt: recorded|deferred|not_required - <route/screenshot/deferred work>
+```
 
 Do not mutate the main checkout directly.
