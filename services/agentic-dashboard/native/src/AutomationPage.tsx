@@ -8,6 +8,7 @@ import {
   GitBranch,
   GitPullRequest,
   HelpCircle,
+  LocateFixed,
   ListFilter,
   Maximize2,
   Minimize2,
@@ -18,11 +19,12 @@ import {
   Search,
   Server,
   ShieldCheck,
+  Shrink,
   Square,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { BackendEnvelope, BackendLogEvent, ProjectSnapshot } from "./api/backend";
 import { listenBackendLogs, runBackendCommandStreamed } from "./api/backend";
@@ -87,6 +89,57 @@ function retryFailedAction(model: ReturnType<typeof buildRunModel>): AutomationC
 
 type TicketProgressTab = "list" | "graph";
 type TicketDetailRecord = AutomationTicketProgressRow | AutomationTicketGraphNode;
+const TICKET_GRAPH_MIN_ZOOM = 0.01;
+const TICKET_GRAPH_MAX_ZOOM = 1.8;
+const TICKET_GRAPH_FIT_MAX_ZOOM = 1.15;
+const TICKET_GRAPH_FIT_PADDING = 36;
+
+const CURRENT_PROGRESS_STATUS_GROUPS: AutomationTicketGraphNode["status"][][] = [
+  ["building", "scoping", "running", "in_progress", "candidate_done"],
+  ["ready"],
+  ["waiting", "pending"],
+  ["done"],
+];
+
+function clampNumber(value: number, min: number, max: number): number {
+  if (max < min) return min;
+  return Math.max(min, Math.min(max, value));
+}
+
+function percentileNumber(values: number[], percentile: number): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((first, second) => first - second);
+  if (sorted.length === 1) return sorted[0];
+  const rawIndex = clampNumber(percentile, 0, 1) * (sorted.length - 1);
+  const lower = Math.floor(rawIndex);
+  const upper = Math.ceil(rawIndex);
+  if (lower === upper) return sorted[lower];
+  const weight = rawIndex - lower;
+  return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+}
+
+function currentProgressNodes(nodes: AutomationTicketGraphNode[]): AutomationTicketGraphNode[] {
+  for (const statuses of CURRENT_PROGRESS_STATUS_GROUPS) {
+    const statusSet = new Set(statuses);
+    const matches = nodes.filter((node) => !node.placeholder && statusSet.has(node.status));
+    if (matches.length) return matches;
+  }
+  return [];
+}
+
+function ticketGraphFitZoom(
+  graph: ReturnType<typeof buildAutomationViewModel>["ticketGraph"],
+  viewport: HTMLDivElement,
+): number {
+  if (!graph.width || !graph.height) return 1;
+  const widthZoom = Math.max(1, viewport.clientWidth - TICKET_GRAPH_FIT_PADDING) / graph.width;
+  const heightZoom = Math.max(1, viewport.clientHeight - TICKET_GRAPH_FIT_PADDING) / graph.height;
+  return clampNumber(
+    Number(Math.min(widthZoom, heightZoom, TICKET_GRAPH_FIT_MAX_ZOOM).toFixed(2)),
+    TICKET_GRAPH_MIN_ZOOM,
+    TICKET_GRAPH_MAX_ZOOM,
+  );
+}
 
 function defaultTicketId(view: ReturnType<typeof buildAutomationViewModel>): string {
   return view.ticketProgress.rows.find((ticket) => ticket.status === "building")?.id ||
@@ -237,35 +290,71 @@ function TicketDependencyGraphTab(props: {
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const markerId = `ticket-graph-arrow-${useId().replace(/:/g, "")}`;
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState(TICKET_GRAPH_MIN_ZOOM);
   const [search, setSearch] = useState("");
+  const [trackCurrentProgress, setTrackCurrentProgress] = useState(false);
+  const programmaticScrollUntilRef = useRef(0);
+  const programmaticScrollTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const graph = props.view.ticketGraph;
+  const focusNodes = useMemo(() => currentProgressNodes(graph.nodes), [graph.nodes]);
+  const focusKey = focusNodes.map((node) => `${node.id}:${node.status}:${node.x}:${node.y}`).join("|");
+  const focusPoint = useMemo(() => {
+    if (!focusNodes.length) return null;
+    return {
+      x: percentileNumber(focusNodes.map((node) => node.x), 0.72) ?? focusNodes[0].x,
+      y: percentileNumber(focusNodes.map((node) => node.y), 0.5) ?? focusNodes[0].y,
+    };
+  }, [focusKey, focusNodes]);
 
   function setBoundedZoom(value: number) {
-    setZoom(Math.max(0.45, Math.min(1.8, Number(value.toFixed(2)))));
+    setZoom(clampNumber(Number(value.toFixed(2)), TICKET_GRAPH_MIN_ZOOM, TICKET_GRAPH_MAX_ZOOM));
   }
+
+  const runProgrammaticScroll = useCallback((left: number, top: number, behavior: ScrollBehavior = "smooth") => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    programmaticScrollUntilRef.current = Date.now() + 1500;
+    if (programmaticScrollTimerRef.current) window.clearTimeout(programmaticScrollTimerRef.current);
+    programmaticScrollTimerRef.current = window.setTimeout(() => {
+      programmaticScrollUntilRef.current = 0;
+      programmaticScrollTimerRef.current = null;
+    }, 1550);
+    viewport.scrollTo({ left, top, behavior });
+  }, []);
 
   function scrollToNode(node: AutomationTicketGraphNode, nextZoom = zoom) {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    viewport.scrollTo({
-      left: Math.max(0, node.x * nextZoom - 120),
-      top: Math.max(0, node.y * nextZoom - 80),
-      behavior: "smooth",
-    });
+    const left = clampNumber(node.x * nextZoom - 120, 0, viewport.scrollWidth - viewport.clientWidth);
+    const top = clampNumber(node.y * nextZoom - 80, 0, viewport.scrollHeight - viewport.clientHeight);
+    runProgrammaticScroll(left, top);
   }
+
+  const centerCurrentProgress = useCallback((behavior: ScrollBehavior = "smooth") => {
+    const viewport = viewportRef.current;
+    if (!viewport || !focusPoint) return;
+    const left = clampNumber(focusPoint.x * zoom - viewport.clientWidth * 0.32, 0, viewport.scrollWidth - viewport.clientWidth);
+    const top = clampNumber(focusPoint.y * zoom - viewport.clientHeight * 0.45, 0, viewport.scrollHeight - viewport.clientHeight);
+    runProgrammaticScroll(left, top, behavior);
+  }, [focusPoint, runProgrammaticScroll, zoom]);
 
   function fitGraph() {
     const viewport = viewportRef.current;
     if (!viewport || !graph.width) return;
-    const nextZoom = Math.max(0.45, Math.min(1.15, (viewport.clientWidth - 36) / graph.width));
-    setBoundedZoom(nextZoom);
-    viewport.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+    setTrackCurrentProgress(false);
+    setZoom(ticketGraphFitZoom(graph, viewport));
+    runProgrammaticScroll(0, 0);
   }
 
   function resetGraph() {
+    setTrackCurrentProgress(false);
     setBoundedZoom(1);
-    viewportRef.current?.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+    runProgrammaticScroll(0, 0);
+  }
+
+  function recenterCurrentProgress() {
+    setTrackCurrentProgress(true);
+    centerCurrentProgress();
   }
 
   function selectSearchMatch() {
@@ -275,9 +364,36 @@ function TicketDependencyGraphTab(props: {
       node.id.toLowerCase().includes(query) || node.summary.toLowerCase().includes(query)
     );
     if (!match) return;
+    setTrackCurrentProgress(false);
     props.onSelect(match.id);
     scrollToNode(match);
   }
+
+  function handleViewportScroll() {
+    if (Date.now() <= programmaticScrollUntilRef.current) return;
+    setTrackCurrentProgress(false);
+  }
+
+  useEffect(() => {
+    if (!trackCurrentProgress) return;
+    centerCurrentProgress("smooth");
+  }, [centerCurrentProgress, focusKey, props.fullscreen, trackCurrentProgress, zoom]);
+
+  useEffect(() => {
+    if (!graph.nodes.length || !graph.width || !graph.height) return;
+    const frame = window.requestAnimationFrame(() => {
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+      setTrackCurrentProgress(false);
+      setZoom(ticketGraphFitZoom(graph, viewport));
+      runProgrammaticScroll(0, 0, "auto");
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [graph.height, graph.nodes.length, graph.width, props.fullscreen, runProgrammaticScroll]);
+
+  useEffect(() => () => {
+    if (programmaticScrollTimerRef.current) window.clearTimeout(programmaticScrollTimerRef.current);
+  }, []);
 
   return (
     <div className={`ticket-graph-workspace ${props.fullscreen ? "fullscreen" : ""}`}>
@@ -299,7 +415,17 @@ function TicketDependencyGraphTab(props: {
               }}
             />
           </div>
-          <button className="secondary-action icon-only-action" type="button" title="Fit graph" onClick={fitGraph}><Maximize2 size={15} /></button>
+          <button
+            className={`secondary-action icon-only-action ${trackCurrentProgress ? "active" : ""}`}
+            type="button"
+            title={trackCurrentProgress ? "Following current progress" : "Re-center current progress"}
+            aria-label="Re-center current progress"
+            disabled={!focusNodes.length}
+            onClick={recenterCurrentProgress}
+          >
+            <LocateFixed size={15} />
+          </button>
+          <button className="secondary-action icon-only-action" type="button" title="Fit full graph" onClick={fitGraph}><Shrink size={15} /></button>
           {!props.fullscreen && props.onEnterFullscreen && (
             <button className="secondary-action icon-only-action" type="button" title="Fullscreen graph" aria-label="Fullscreen graph" onClick={props.onEnterFullscreen}><Maximize2 size={15} /></button>
           )}
@@ -310,7 +436,7 @@ function TicketDependencyGraphTab(props: {
           <button className="secondary-action icon-only-action" type="button" title="Zoom in" onClick={() => setBoundedZoom(zoom + 0.12)}><ZoomIn size={15} /></button>
           <button className="secondary-action icon-only-action" type="button" title="Reset graph" onClick={resetGraph}><RotateCcw size={15} /></button>
         </div>
-        <div className="ticket-graph-viewport" ref={viewportRef} aria-label="Ticket dependency graph">
+        <div className="ticket-graph-viewport" ref={viewportRef} aria-label="Ticket dependency graph" onScroll={handleViewportScroll}>
           {graph.nodes.length ? (
             <div className="ticket-graph-canvas" style={{ width: graph.width * zoom, height: graph.height * zoom }}>
               <div className="ticket-graph-scaled" style={{ width: graph.width, height: graph.height, transform: `scale(${zoom})` }}>
