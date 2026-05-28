@@ -18,7 +18,7 @@ Capture:
 6. Tech preferences.
 7. Hard constraints.
 8. Safety constraints.
-9. External services or integrations.
+9. External services, integrations, and data-source expectations: real/live/public/official/third-party versus fixture/synthetic/local-only, plus required provenance or freshness.
 10. Verification commands or expected checks.
 11. Environment access policy: project commands only, or direct local `.env*` reads allowed.
 12. Whether a human bridge is enabled.
@@ -65,6 +65,8 @@ Output in this structure:
 ## Automation Must Never Do
 
 ## External Services
+
+## Data Source Expectations
 
 ## Verification
 

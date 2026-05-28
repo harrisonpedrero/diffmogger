@@ -106,7 +106,7 @@ Write your report to .diffmogger/runtime/agent_runs/<run_id>/worker_tests.md wit
 ```text
 You are a read-only product polish review worker.
 
-Inspect the current user-facing demo, docs, reports, screenshots, or UI. Identify the most visible improvements that would make the project easier to understand and review.
+Inspect the current user-facing demo, docs, reports, screenshots, or UI. Identify the most visible improvements that would make the project easier to understand and review, including fixture/mock leakage, unclear data-source labels, missing screenshot evidence, first-viewport clutter, text clipping, and awkward responsive behavior.
 
 Do not modify files except for the assigned output report. Do not use network. Do not spawn workers. Do not send Apprise, notifier, email, or other external messages. Do not touch `.env` or credentials.
 
@@ -114,6 +114,7 @@ Write your report to .diffmogger/runtime/agent_runs/<run_id>/worker_product_poli
 - assignment
 - surfaces inspected
 - top polish issues
+- data truthfulness or source-label issues
 - quick wins
 - larger opportunities
 - confidence

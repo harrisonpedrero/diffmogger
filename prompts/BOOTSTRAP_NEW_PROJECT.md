@@ -39,7 +39,7 @@ Create or confirm the first runnable product baseline and install the automation
 
 ## Behavior
 
-Build the product, not only plans. Use reasonable defaults. Avoid secrets and real external side effects. Prefer fixtures, mocks, or local seed data for runnable local milestones. In existing projects, integrate rather than rewrite.
+Build the product, not only plans. Use reasonable defaults. Avoid secrets and real external side effects. Prefer fixtures, mocks, or local seed data for safe runnable milestones, but keep them visibly labeled as fallback data. If the requested product depends on real, live, public, official, or third-party data, seed explicit follow-up work for source-mode strategy, connector/cache wiring, provenance/freshness, unavailable-source states, and no-fiction guardrails. In existing projects, integrate rather than rewrite.
 
 ## Verification
 

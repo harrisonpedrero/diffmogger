@@ -29,6 +29,7 @@ Maintain stable planning continuity for upcoming build, review, validation, and 
 - If Playwright MCP is mounted for frontend, browser, UI, or demo-path planning, use it only for local browser-facing planning evidence. A cancelled or failed navigation is a validation issue to record, not proof that no UI bug exists.
 - For broad UI work, check the active design contract in `.diffmogger/agentic/design_contract.md`. If UI capability is full or auto-detected and no current contract exists, create a `design` DAG node or designer-owned design foundation ticket before broad builder UI work.
 - UI feature tickets should name loading, empty, error, focus, disabled, responsive, and representative data-density expectations or explicitly defer the irrelevant states with a reason.
+- When requested value depends on real, live, public, official, or third-party data, plan source-mode, connector/cache, provenance/freshness, unavailable-source, and no-fiction work. Fixtures and mocks may unblock local milestones, but they must not replace the real-data path.
 - Record non-obvious design calls in your patch/summary so the integrator can reconcile them into typed state and the generated task projection.
 - Queue small, concrete planner-owned patch output when planning docs need to change.
 - Prefer clarifying the next builder/hardener work over broad replanning.

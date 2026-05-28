@@ -6,7 +6,7 @@ Goal: {{PRODUCT_GOAL}}
 
 ## Setup
 
-Keep setup notes short and executable. Prefer project-local dependencies, fixtures, mocks, and seed data.
+Keep setup notes short and executable. Prefer project-local dependencies, fixtures, mocks, and seed data for safe local milestones. When the product depends on real or external data, document the source-mode strategy, connector/cache path, provenance/freshness expectations, and how unavailable live sources are deferred without disguising fallback data as real.
 
 ## Verification
 

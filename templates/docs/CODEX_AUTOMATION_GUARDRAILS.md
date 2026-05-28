@@ -8,7 +8,7 @@ Stay aligned with: {{TARGET_USER}}
 
 {{AUTOMATION_MUST_NEVER_DO}}
 - Do not spend money, deploy publicly, publish externally, contact real users, or trigger real-world side effects without explicit approval.
-- Prefer fixtures, mocks, local seed data, and dry-run modes.
+- Prefer fixtures, mocks, local seed data, and dry-run modes for safe local milestones, but keep them visibly labeled. If real, live, public, official, or third-party data is part of the product value, create connector/cache/provenance/defer work instead of claiming fallback data is complete.
 {{ENV_ACCESS_GUARDRAILS_POLICY}}
 - Never print, summarize, commit, or copy secret values.
 

@@ -23,6 +23,12 @@ Target user: {{TARGET_USER}}
 
 Desired first demo: {{DESIRED_FIRST_DEMO}}
 
+## Data Fidelity
+
+Local fixtures, mocks, seed data, and dry-run flows are useful for safe milestones, but they must stay visibly labeled as local fallback data. If the requested product value depends on real, live, public, official, or third-party data, create explicit work for source-mode strategy, connector or adapter wiring, local-safe cache/sample workflows, provenance and freshness receipts, no-fiction guardrails, unavailable-source states, and docs.
+
+Missing credentials, offline services, rate limits, or MCP/API failures should create setup, harness, mock, defer, or alternate-validation work. Do not present fallback data as source-backed data, and do not mark a real-data requirement complete until the adapter path, cache/provenance behavior, or explicit deferred-live state is implemented with evidence.
+
 ## Liveness Rule
 
 If tickets remain, automation must produce work. Build, repair, defer, split, or create unblocker work before asking the user. Pending human input does not stop unrelated work. Failed validation creates work. Blockers are node metadata, not a campaign-ending status. Parallel fanout is bounded by scheduler evidence; uncertainty reduces fanout or creates scoping/setup work.

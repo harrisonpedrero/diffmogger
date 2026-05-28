@@ -116,6 +116,61 @@ _VAGUE_PHRASES = {
     "polish everything",
     "various",
 }
+_REAL_DATA_SCOPE_TERMS = (
+    "authoritative data",
+    "external data",
+    "external service",
+    "external source",
+    "live data",
+    "official api",
+    "official data",
+    "production data",
+    "public api",
+    "public data",
+    "real data",
+    "source-backed",
+    "third-party api",
+)
+_REAL_DATA_PATH_TERMS = (
+    "api adapter",
+    "authoritative source",
+    "connector",
+    "data source",
+    "external adapter",
+    "external source",
+    "freshness",
+    "live connector",
+    "live import",
+    "official source",
+    "provenance",
+    "public cache",
+    "public import",
+    "real-data",
+    "real data",
+    "source receipt",
+    "source status",
+)
+_LOCAL_DATA_FALLBACK_TERMS = (
+    "fake",
+    "fictional",
+    "fixture",
+    "mock",
+    "sample data",
+    "seed data",
+    "synthetic",
+)
+_DATA_MODE_TERMS = (
+    "data mode",
+    "data source strategy",
+    "fallback state",
+    "fixture mode",
+    "local mode",
+    "no-fiction",
+    "offline mode",
+    "source mode",
+    "truth in demo",
+    "unavailable-source",
+)
 _TOKEN_STOPWORDS = {
     "and",
     "are",
@@ -179,6 +234,76 @@ def _tokens(text: str) -> set[str]:
         token
         for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", text.lower())
         if token not in _TOKEN_STOPWORDS
+    }
+
+
+def _intake_text(intake: dict[str, Any] | None) -> str:
+    if not intake:
+        return ""
+    fields = {
+        key: intake.get(key)
+        for key in (
+            "project_name",
+            "product_goal",
+            "target_user",
+            "desired_first_demo",
+            "tech_preferences",
+            "hard_constraints",
+            "safety_constraints",
+            "external_services",
+            "meaningful_deliverable",
+            "beyond_mvp",
+            "ticket_generation_decomposition_brief",
+            "ticket_generation_scope_groups",
+            "assumptions",
+        )
+    }
+    try:
+        return json.dumps(fields, sort_keys=True, default=json_default).lower()
+    except TypeError:
+        return str(fields).lower()
+
+
+def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
+
+
+def data_fidelity_detection(
+    tickets: list[dict[str, Any]],
+    intake: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Detect whether a ticket queue needs explicit real-vs-local data work."""
+
+    intake_blob = _intake_text(intake)
+    ticket_blob = "\n".join(_ticket_text(ticket) for ticket in tickets)
+    combined = f"{intake_blob}\n{ticket_blob}"
+    external_services = _text_list((intake or {}).get("external_services") if intake else [])
+    no_external_values = {
+        "",
+        "disabled",
+        "local only",
+        "none",
+        "none required",
+        "none required for local execution",
+        "no external services",
+        "no external services required",
+    }
+    external_service_scope = False
+    for item in external_services:
+        normalized = re.sub(r"[^a-z0-9]+", " ", item.strip().lower()).strip()
+        if normalized and normalized not in no_external_values:
+            external_service_scope = True
+            break
+    real_data_scope = external_service_scope or _contains_any(intake_blob, _REAL_DATA_SCOPE_TERMS)
+    fixture_or_mock_present = _contains_any(ticket_blob, _LOCAL_DATA_FALLBACK_TERMS)
+    real_data_path_present = _contains_any(ticket_blob, _REAL_DATA_PATH_TERMS)
+    data_mode_present = _contains_any(combined, _DATA_MODE_TERMS)
+    return {
+        "real_data_scope": real_data_scope,
+        "external_service_scope": external_service_scope,
+        "fixture_or_mock_present": fixture_or_mock_present,
+        "real_data_path_present": real_data_path_present,
+        "data_mode_present": data_mode_present,
     }
 
 
@@ -355,6 +480,33 @@ def ticket_quality_warnings(
                     ),
                 }
             )
+    data_detection = data_fidelity_detection(tickets, intake)
+    if data_detection["real_data_scope"] and not data_detection["data_mode_present"]:
+        warnings.append(
+            {
+                "ticket_id": "",
+                "type": "missing_data_source_strategy",
+                "detail": (
+                    "Real or external data scope should include source-mode, provenance, freshness, "
+                    "and unavailable-source behavior instead of relying on implicit fixtures."
+                ),
+            }
+        )
+    if (
+        data_detection["real_data_scope"]
+        and data_detection["fixture_or_mock_present"]
+        and not data_detection["real_data_path_present"]
+    ):
+        warnings.append(
+            {
+                "ticket_id": "",
+                "type": "fixture_only_without_real_data_path",
+                "detail": (
+                    "Queue mentions fixtures, mocks, seed data, or synthetic data but lacks an explicit "
+                    "real-data adapter/import/cache/provenance path."
+                ),
+            }
+        )
     warnings.extend(ui_ticket_quality_warnings(tickets, intake))
     return warnings
 
@@ -372,10 +524,12 @@ def ticket_generation_quality_gate(
         "missing_design_foundation",
         "missing_ui_validation",
         "missing_scope_group",
+        "missing_data_source_strategy",
         "multiple_components",
         "too_many_acceptance_criteria",
         "under_decomposed_queue",
         "vague_scope",
+        "fixture_only_without_real_data_path",
     }
     blocking = [item for item in warnings if item.get("type") in blocking_types]
     return {
@@ -384,6 +538,7 @@ def ticket_generation_quality_gate(
         "blocking_warnings": blocking,
         "scope_group_count": len(normalize_scope_groups(scope_groups)),
         "scope_surface_floor": _scope_group_ticket_floor(normalize_scope_groups(scope_groups)),
+        "data_fidelity_detection": data_fidelity_detection(tickets, intake),
         "ui_detection": ui_detection_from_intake(intake, tickets=tickets),
     }
 

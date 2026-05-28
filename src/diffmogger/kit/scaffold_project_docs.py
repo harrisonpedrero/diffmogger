@@ -174,6 +174,7 @@ HEADING_TO_KEY = {
     "automation must never do": "automation_must_never_do",
     "must never do": "automation_must_never_do",
     "external services": "external_services",
+    "data source expectations": "external_services",
     "additional context": "additional_context_files",
     "additional context files": "additional_context_files",
     "context files": "additional_context_files",
@@ -987,7 +988,7 @@ If the phase criteria are met, update the current horizon to the next ticket-run
         (
             "H2 Local-first demo",
             f"Make the desired first demo usable with local data: {first_demo}.",
-            "A human can follow a documented local path through the core demo without live external services.",
+            "A human can follow a documented local path through the core demo without live external services, and any fixture/mock/sample data is clearly labeled.",
         ),
         (
             "H3 Core workflow depth",
@@ -1002,7 +1003,7 @@ If the phase criteria are met, update the current horizon to the next ticket-run
         (
             "H5 Safe optional integrations",
             f"Prepare optional integration paths without unsafe side effects: {external_services}.",
-            "External adapters are mocked, gated, documented, and keep secrets outside the repo.",
+            "External adapters are gated, documented, keep secrets outside the repo, and distinguish fixture/mock fallback from real source-backed states.",
         ),
         (
             "H6 Review-ready quality",

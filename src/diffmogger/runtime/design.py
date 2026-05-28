@@ -320,11 +320,15 @@ def build_design_contract_payload(
             "Expose the primary workflow immediately instead of a marketing splash.",
             "Keep navigation predictable and reusable across screens.",
             "Make setup, review, and recovery paths discoverable without explanatory clutter.",
+            "Keep the primary decision surface visible in the first viewport on desktop and tablet when the product is an operational dashboard.",
+            "Move component galleries, validation catalogs, and implementation-state showcases to secondary developer/review routes rather than mixing them into the default product route.",
         ],
         "layout_principles": [
             "Prefer dense, scan-friendly layouts for operational tools and generous breathing room only where comprehension benefits.",
             "Use stable dimensions for boards, controls, lists, and panels so dynamic content does not shift the layout.",
             "Design mobile and desktop states deliberately; do not rely on viewport-scaled typography.",
+            "Prevent clipped, overlapping, or awkwardly wrapped text with explicit min-width, max-width, overflow, and responsive wrapping rules.",
+            "Avoid nested cards, beveled piles of panels, and repeated one-off borders when a simpler section, table, or rail communicates the same information.",
         ],
         "tokens": {
             "color": [
@@ -361,11 +365,15 @@ def build_design_contract_payload(
             "Reuse existing components, tokens, and interaction patterns before adding new styles.",
             "Validate UI changes with local screenshots, console checks, focus checks, and responsive viewports when tooling exists.",
             "Use representative content density rather than empty demo-only data.",
+            "Preserve clear source labels when content is fixture, mock, generated, cached, imported, or live data.",
+            "Iterate after viewing screenshots for desktop, tablet, and mobile states when UI polish is part of the ticket.",
         ],
         "visual_dont": [
             "Do not invent one-off styling for every ticket.",
             "Do not mark UI work clean without design review, UI visual receipt, or explicit deferred validation/setup work.",
             "Do not require external paid services or credentials for unattended local design validation.",
+            "Do not let debug/state-gallery surfaces crowd the primary user workflow.",
+            "Do not present fixture, mock, or synthetic content as real source-backed data.",
         ],
         "references": {
             "files": detection["design_reference_files"],
@@ -376,6 +384,7 @@ def build_design_contract_payload(
             "Prefer deterministic project scripts such as npm run browser-smoke or Playwright Test when available.",
             "Use Playwright MCP as local inspection evidence when mounted.",
             "Record ui_visual validation receipts with routes, viewports, screenshots, console status, focus/interaction notes, and overflow/overlap notes.",
+            "For dashboard-like products, assert that the primary work surface is reachable in the first viewport at representative desktop and tablet sizes, or document an intentional exception.",
             "When browser tooling is missing, create setup, harness, alternate-validation, or deferred-QA DAG work instead of passing silently.",
         ],
         "detection": detection,
@@ -536,7 +545,9 @@ def ui_ticket_quality_warnings(
 
 def design_foundation_ticket(intake: Mapping[str, Any] | None = None) -> dict[str, Any]:
     contract = build_design_contract_payload(intake)
-    validation_expectation = "Record design review notes and create ui_visual validation/deferred-QA work if browser tooling is unavailable."
+    validation_expectation = (
+        "Record design review notes and create ui_visual validation/deferred-QA work if browser tooling is unavailable."
+    )
     return {
         "id": "TICKET-001",
         "summary": "Create design foundation contract, tokens, reusable UI states, and validation guidance",
@@ -548,6 +559,7 @@ def design_foundation_ticket(intake: Mapping[str, Any] | None = None) -> dict[st
             "An active design contract projection exists for the UI scope.",
             "Reusable component, token, layout, accessibility, and visual do/don't rules are documented.",
             "Loading, empty, error, focus, disabled, responsive, and representative data-density expectations are covered.",
+            "First-viewport priority, product-route versus developer-state-gallery separation, and text overflow/overlap rules are covered.",
             validation_expectation,
         ],
         "verification_commands": [

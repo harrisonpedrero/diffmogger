@@ -30,6 +30,7 @@ Implement one scoped product or code increment that advances the current project
 - For UI work, read `.diffmogger/agentic/design_contract.md` before editing and reference the active contract version in `summary.md`.
 - Extend existing components, tokens, states, and layout conventions before adding one-off styling. If the contract is missing or obviously stale for the assigned UI work, create designer follow-up work instead of inventing a new visual system inside the feature patch.
 - UI patches must account for loading, empty, error, focus, disabled, responsive, and representative data-density states when those states apply.
+- For real-data or external-integration tickets, keep fixture/mock paths visibly labeled as local fallback and implement the assigned connector, cache, provenance, freshness, unavailable-source, or deferred-live behavior instead of broadening fallback data.
 - Keep ownership narrow enough for clean integration.
 - Add or update tests, fixtures, demo paths, or docs that belong with the implementation.
 - Avoid touching unrelated files.

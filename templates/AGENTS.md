@@ -32,7 +32,7 @@ Project mode: {{PROJECT_MODE_LABEL}}
 - For UI work, read `.diffmogger/agentic/design_contract.md`. Builder and hardener must use the active design contract, design review evidence, UI visual validation receipts, or explicit deferred validation/setup work before claiming clean UI completion.
 - Parallel scheduler waves are bounded and ownership-driven. If non-overlap is unclear, reduce fanout, run read-only scoping, or create setup/repair/indexing work.
 - {{ENV_ACCESS_AGENTS_RULE}}
-- Use safe local defaults, fixtures, mocks, or seed data unless the task explicitly enables external integration.
+- Use safe local defaults, fixtures, mocks, or seed data only as labeled local fallbacks. If the product depends on real, live, public, official, or third-party data, create explicit source-mode, connector/cache, provenance, freshness, and unavailable-source work instead of treating fallback data as complete.
 - Do not spend money, deploy publicly, print secrets, or trigger real-world side effects without explicit approval.
 - Worker agents are optional acceleration for bounded work. Max write workers: {{MAX_WRITE_WORKER_COUNT}}.
 

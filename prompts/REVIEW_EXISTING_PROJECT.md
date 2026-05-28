@@ -36,6 +36,8 @@ The initial typed automation control state and generated task projection should 
 
 If the repo has unclear setup, create setup, harness, mock, defer, split, or unblocker work before asking the owner. Pending human input should not stop unrelated work.
 
+If the project depends on real, live, public, official, or third-party data, distinguish that path from fixtures, mocks, or local seed data in the review. Recommend connector/cache/provenance/defer work when fallback data is the only implemented path.
+
 The recurring automation prompt must distinguish structured human replies from freeform commands. In `file_only` mode, summary/status requests should be satisfied through the dashboard or requested local artifacts. In `local_notifier` or `apprise_notifier` mode, if the human asks to be messaged, replied to, or sent a status update, the automation should use `POST http://127.0.0.1:8765/api/notify` with `event_kind: "message"` when available and should record `NOTIFIER_UNREACHABLE` in typed human-message state when unavailable.
 
 Run available validation commands if safe. Record validation receipts in typed state and refresh the generated task projection with results.

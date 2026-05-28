@@ -30,6 +30,7 @@ Create and maintain the UI design contract for UI-heavy or explicitly opted-in t
 - Create or update the design contract: audience, product posture, workflows, information architecture, layout principles, tokens, component inventory, state matrix, accessibility expectations, and visual do/don't rules.
 - Propose design foundation work before broad UI build work when no current contract exists.
 - Review UI tickets and patches for consistency, responsiveness, accessible focus, loading/empty/error/disabled states, representative data density, and reusable components/tokens.
+- For dashboard-like products, protect the first viewport for the primary workflow, keep implementation/state galleries on secondary review surfaces, and include rules for avoiding text clipping, overlap, nested-card clutter, and generic one-off styling.
 - Use existing UI conventions and design systems first. Do not invent one-off styling for every ticket.
 - If Playwright MCP is mounted, use it only for local inspection evidence. Missing or failed browser tooling creates setup, harness, alternate-validation, or deferred-QA work instead of a clean pass.
 - Treat Figma MCP, v0, Builder.io, Chromatic, Percy, and Applitools as optional adapters only when configured by the target. Never require or store credentials.

@@ -39,7 +39,7 @@ from diffmogger.orchestration.activities import (
     run_scheduler_cycle,
 )
 from diffmogger.orchestration.scheduler_policy import choose_scheduler_record
-from diffmogger.dashboard.ticket_generation import ticket_generation_quality_gate
+from diffmogger.dashboard.ticket_generation import data_fidelity_detection, ticket_generation_quality_gate
 from diffmogger.runtime import code_facts
 from diffmogger.runtime.design import ensure_design_foundation_ticket, ui_detection_from_intake
 from diffmogger.integrator.cli import integrate
@@ -164,6 +164,57 @@ def test_ui_capability_off_schedules_no_design_foundation() -> None:
 
     assert detection["designer_enabled"] is False
     assert with_design == tickets
+
+
+def test_ticket_quality_gate_flags_fixture_only_real_data_scope() -> None:
+    intake = {
+        "product_goal": "Build a public data dashboard with official API imports.",
+        "external_services": ["Official public API"],
+    }
+    tickets = [
+        {
+            "id": "TICKET-001",
+            "summary": "Create fixture-backed dashboard rows",
+            "acceptance_criteria": ["Dashboard renders mocked sample data."],
+            "verification_commands": ["npm test"],
+        }
+    ]
+
+    quality_gate = ticket_generation_quality_gate(tickets, intake=intake)
+    warning_types = {item["type"] for item in quality_gate["warnings"]}
+
+    assert quality_gate["passed"] is False
+    assert quality_gate["data_fidelity_detection"]["real_data_scope"] is True
+    assert "missing_data_source_strategy" in warning_types
+    assert "fixture_only_without_real_data_path" in warning_types
+
+
+def test_ticket_quality_gate_accepts_labeled_fallback_with_real_data_path() -> None:
+    intake = {
+        "product_goal": "Build a public data dashboard with official API imports.",
+        "external_services": ["Official public API"],
+    }
+    tickets = [
+        {
+            "id": "TICKET-001",
+            "summary": "Define source mode and public API adapter path",
+            "acceptance_criteria": [
+                "Source mode distinguishes fixture fallback, public cache, and live import states.",
+                "Public API adapter records provenance, freshness, unavailable-source, and source status receipts.",
+            ],
+            "verification_commands": ["npm test"],
+        }
+    ]
+
+    quality_gate = ticket_generation_quality_gate(tickets, intake=intake)
+    detection = data_fidelity_detection(tickets, intake)
+    warning_types = {item["type"] for item in quality_gate["warnings"]}
+
+    assert detection["real_data_scope"] is True
+    assert detection["data_mode_present"] is True
+    assert detection["real_data_path_present"] is True
+    assert "missing_data_source_strategy" not in warning_types
+    assert "fixture_only_without_real_data_path" not in warning_types
 
 
 def test_alembic_migration_creates_control_plane_tables(tmp_path: Path) -> None:
