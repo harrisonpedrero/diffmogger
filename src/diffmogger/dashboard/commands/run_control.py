@@ -261,6 +261,12 @@ def automation_ready(target: Path, dashboard_app: Any, *, allow_bootstrap_pendin
         ticket_state = ticket_run.ticket_source_state(target)
         if not bool(ticket_state.get("actionable")):
             return False, str(ticket_state.get("start_reason") or "Ticket campaign has no actionable ticket.")
+    remotes = target_git_remotes(target)
+    if remotes and not target_allow_remotes(target):
+        return False, (
+            "Remote opt-in is required before starting continuous automation in a repo with configured remotes. "
+            "This opt-in does not permit push, fetch, pull, or remote configuration."
+        )
     return True, "Ready."
 
 def run_once_ready(target: Path, dashboard_app: Any) -> tuple[bool, str]:

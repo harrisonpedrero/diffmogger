@@ -427,8 +427,8 @@ def test_scheduler_policy_groups_non_overlapping_ready_nodes(tmp_path: Path) -> 
     )
 
     assert record.selected.action_kind == "launch_work"
-    assert record.selected.node_ids == ["a", "b", "c"]
-    assert record.selected.fanout == 3
+    assert record.selected.node_ids == ["a", "b"]
+    assert record.selected.fanout == 2
     assert record.execution_group is not None
     assert record.execution_group.max_fanout == 2
     assert record.validation_group is not None
@@ -449,13 +449,37 @@ def test_scheduler_policy_scopes_multiple_ready_tickets(tmp_path: Path) -> None:
     )
 
     assert record.selected.action_kind == "launch_scope_work"
-    assert record.selected.fanout == 3
-    assert record.selected.ticket_ids == ["T1", "T2", "T3"]
+    assert record.selected.fanout == 2
+    assert record.selected.ticket_ids == ["T1", "T2"]
     assert record.selected.telemetry["ticket_scope_wave"] is True
     assert record.selected.telemetry["configured_max_fanout"] == 2
+    assert record.selected.telemetry["ready_scope_candidate_count"] == 3
+    assert record.selected.telemetry["deferred_ticket_scope_candidate_ids"] == ["candidate:ticket-scope:ticket-T3"]
     assert record.scheduler_telemetry is not None
     assert record.scheduler_telemetry.max_fanout == 2
-    assert record.scheduler_telemetry.selected_count == 3
+    assert record.scheduler_telemetry.selected_count == 2
+
+
+def test_scheduler_policy_caps_large_ticket_scope_wave(tmp_path: Path) -> None:
+    tickets = [
+        TicketRecord(ticket_id=f"T{i:02d}", title=f"Scope ticket {i}", ownership_paths=[f"src/{i}.py"])
+        for i in range(40)
+    ]
+
+    record = choose_scheduler_record(
+        target_path=tmp_path,
+        run_id="large-ticket-scope",
+        tickets=tickets,
+        dag_nodes=[],
+        validation_receipts=[],
+        max_fanout=32,
+    )
+
+    assert record.selected.action_kind == "launch_scope_work"
+    assert record.selected.fanout == 32
+    assert len(record.selected.ticket_ids) == 32
+    assert record.selected.telemetry["ready_scope_candidate_count"] == 40
+    assert len(record.selected.telemetry["deferred_ticket_scope_candidate_ids"]) == 8
 
 
 def test_scheduler_policy_ticket_scope_wave_group_ids_include_ticket_set(tmp_path: Path) -> None:

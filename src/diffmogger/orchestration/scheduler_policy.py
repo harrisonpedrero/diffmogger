@@ -623,6 +623,8 @@ def choose_scheduler_record(
         if blocked_by_selected:
             continue
         selected_wave.append(candidate)
+        if len(selected_wave) >= configured_fanout:
+            break
 
     if selected_wave:
         candidates.extend(
@@ -698,7 +700,7 @@ def choose_scheduler_record(
                 )
             )
         if ready_scope_candidates:
-            selected_ticket_scopes = ready_scope_candidates
+            selected_ticket_scopes = ready_scope_candidates[:configured_fanout]
             candidates.extend(ready_scope_candidates)
             candidates.append(
                 SchedulerCandidate(
@@ -716,6 +718,10 @@ def choose_scheduler_record(
                         "ticket_scope_wave": True,
                         "wave_candidate_ids": [candidate.candidate_id for candidate in selected_ticket_scopes],
                         "configured_max_fanout": configured_fanout,
+                        "ready_scope_candidate_count": len(ready_scope_candidates),
+                        "deferred_ticket_scope_candidate_ids": [
+                            candidate.candidate_id for candidate in ready_scope_candidates[configured_fanout:]
+                        ],
                     },
                 )
             )
